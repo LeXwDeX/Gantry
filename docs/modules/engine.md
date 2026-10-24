@@ -67,7 +67,7 @@ Issue / PR / 评论 / CI 日志的**原文**（准备 `materials` 需要，worke
 
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
-| 命令：创建交付单元、调档、放弃、补规格、问答、自愈、暂停 / 继续 / 重试 | `conversation`、`api`、`guardian` | §6 `EngineApi` | 调用方已鉴权；`Actor` 带设备角色与档案。用户文字可信，模型产出的字段（`intent` 的 `delivery_id` 等）不可信 |
+| 命令：创建交付单元、调档、放弃、补规格、问答、自愈 / 分类、暂停 / 继续 / 重试 | `conversation`（`EngineApi`）、`api`（`DeliveryControl`）、`guardian`（`HealRunner` / `ClassifyRunner`） | §6 | 调用方已鉴权；`WriteCtx` / `ActorRef` 带发起设备。用户文字可信，模型产出的字段（`intent` 的 `delivery_id` 等）不可信 |
 | ForgeEvent（`forge.<kind>`）与 `forge.synced` | `store` 订阅 | [forge-actions §6](../interfaces/forge-actions.md) | 结构字段可信（`forge` 已回读对账）；文本字段（标题、正文、评论、check 输出）是 `UntrustedText` |
 | Outbox 结果（`outbox.succeeded` / `failed` / `cancelled`） | `store` 订阅 | [forge-actions §2.3、§2.6](../interfaces/forge-actions.md) | 可信（`forge` 写入） |
 | 审批事件（`approval.granted` / `consumed` / `invalidated` / `expired` / `denied`） | `store` 订阅 | [api.md §6](../interfaces/api.md) | 可信（`policy` 验签后写入） |
@@ -83,7 +83,7 @@ Issue / PR / 评论 / CI 日志的**原文**（准备 `materials` 需要，worke
 
 | 输出 | 去向 | 格式 / 契约 |
 | --- | --- | --- |
-| 事件：`delivery.created` / `stage_changed` / `level_changed` / `abandoned`，`workflow.created` / `revised` / `finished`，`node.queued` / `started` / `finished` / `superseded`，`attempt.started` / `finished` / `progress`，`budget.charged`（沙盒尝试、`rounds`、`nodes`、`wall_time`、`forge_writes`）/ `budget.exhausted` | `store` | [data-model §5](../data-model.md)；`actor = {kind: "engine", id: "engine"}`，用户触发的写入沿用调用方 `Actor`；`data` 字段以 `schemas/events/<type>.json` 为准，§11 列出引擎需要的最小字段 |
+| 事件：`delivery.created` / `stage_changed` / `level_changed` / `abandoned`，`workflow.created` / `revised` / `finished`，`node.queued` / `started` / `finished` / `superseded`，`attempt.started` / `finished` / `progress`，`budget.charged`（沙盒尝试、`rounds`、`nodes`、`wall_time`、`forge_writes`）/ `budget.exhausted` | `store` | [data-model §5](../data-model.md)；`actor = {kind: "engine", id: "engine"}`，用户触发的写入沿用调用方 `ActorRef`；`data` 字段以 `schemas/events/<type>.json` 为准，§11 列出引擎需要的最小字段 |
 | Outbox 动作（`push_branch`、`create_pr`、`update_issue`、`close_issue`、`merge_pr`、`update_pr`、`create_comment` / `upsert_status_comment`） | `Forge::enqueue` → `outbox` 表，由 `forge` 执行 | [forge-actions §2–§3](../interfaces/forge-actions.md)；幂等键（idempotency key）由 `core` 派生，引擎只给 `intent` 字段与 `epoch` |
 | `SandboxSpec`（JobSpec 可信部分、原始材料、上游产物引用、`ExecSpec`、限额、Egress 请求） | `SandboxService::submit` | [sandbox.md §6.1](sandbox.md)、[worker-protocol §3.2、§4](../interfaces/worker-protocol.md) |
 | 直接调用请求 | `models` | `DirectCall`（[models.md](models.md)） |
@@ -224,7 +224,7 @@ pub trait ReservationPolicy: Send + Sync {
 引擎的状态只有事件日志（architecture §6）。`DeliveryState` 是从 `store` 投影折叠出的读视图，随时可丢弃重建。
 
 ```
-store 事件 ──► EventRouter（durable 游标 "engine"）──► DeliveryActor[delivery_id]（串行执行体，邮箱）
+store 事件 ──► EventRouter（持久游标 "engine"）──► DeliveryActor[delivery_id]（串行执行体，邮箱）
 命令（EngineApi / DeliveryControl / HealRunner）──────────────►          │
 AttemptRunner 报告（尝试进展 / 终结）─────────────────────────►          ▼
                               ┌─ 打开 WriteTx ──────────────────────────────────────┐
@@ -641,7 +641,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 补充要求：
 
-- **模型产出不是权限**：`intent` 等字段不能决定对哪个交付单元做修改；引擎的命令都带显式 ID 与 `Actor`，由调用方（`api` / `conversation`）保证鉴权与档案限制（手机档案不可升档，P-35）。
+- **模型产出不是权限**：`intent` 等字段不能决定对哪个交付单元做修改；引擎的命令都带显式 ID 与 `ActorRef`，由调用方（`api` / `conversation`）保证鉴权与档案限制（手机档案不可升档，P-35）。
 - **失败闭合**：不认识的 verdict / role / `structured_output.kind`、与 `role_binding` 不符的 `tier` / `exec`、`result.json` 与 JobSpec 不一致，一律按失败处理，不"尽力而为"（W8）。
 - **日志脱敏**：日志与事件里不出现 token、模型 key；不可信文本只记长度与哈希，需要时截断并转义。
 

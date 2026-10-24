@@ -64,7 +64,7 @@ architecture §4 把 `egress` 的依赖写成 "—"，但依赖图里有 `secret
 | `models` 数据面请求 | `gantryd` 内的 `models`，经 Unix socket | HTTP over UDS；`x-gantry-caller` 等头（§6.3） | 调用方可信（对端凭据校验），载荷里可含不可信文本 |
 | 控制面调用 | `gantryd`（`sandbox`、`engine`、`api`、`models`） | §6.2；Unix socket，校验对端凭据 | 可信 |
 | 配置视图 | `gantryd` 经 `apply_config` | `egress.*` + `models.providers`（只含 `secret_ref`，无值） | 可信；仍做防御性复核（V10、V11、V13） |
-| 密钥值 | `api` 转交（`stage_secret`） | 一次性写入，之后不再出现在任何接口 | 可信，高敏 |
+| 密钥值 | `api` 经 `SecretForwarder` 转交（`stage_secret`，[api.md §6.3](api.md)） | 一次性写入，之后不再出现在任何接口 | 可信，高敏 |
 | 上游响应（模型 API、包仓库） | 外部服务 | HTTP | **不可信数据**（响应头 / 体可能被篡改或含恶意内容）；只提取用量字段，其余原样透传 |
 | DNS 解析结果 | 本进程解析器 | A / AAAA | 不可信：每次连接前校验落点 |
 
@@ -85,13 +85,12 @@ architecture §4 把 `egress` 的依赖写成 "—"，但依赖图里有 `secret
 
 | 监听器 | 面向 | 协议 | 作用 | 身份判定 |
 | --- | --- | --- | --- | --- |
-| `sandbox_model` | 沙盒 | HTTP/1.1（明文，到 Egress；Egress 再以 TLS 连上游，E3） | 模型 API 反向代理，路径 `/model/<provider_id>/…` | 连接的网络身份 → 登记表 |
-| `sandbox_connect` | 沙盒 | HTTP/1.1 `CONNECT` | 公共包仓库白名单隧道（`HTTPS_PROXY` 指向它） | 同上 |
-| `sandbox_registry`（M2） | 沙盒 | HTTP/1.1 | 私有包仓库反向代理，路径 `/registry/<injection_id>/…` | 同上 |
-| `models_uds` | `models` | HTTP/1.1 over Unix socket | 服务端直接调用的模型 API 反向代理，路径同 `sandbox_model` | 套接字对端凭据（`SO_PEERCRED` 的 uid 属于 `gantry`）+ 必填头 |
-| `control_uds` | `gantryd` | 请求 / 响应（JSON over UDS）[提议] | 控制面（§6.2） | 同上 |
+| `sandbox_model` | 沙盒 | HTTP/1.1（明文，到 Egress；Egress 再以 TLS 连上游，E3） | 模型 API 反向代理，路径 `/model/<provider_id>/…`；默认 `<EGRESS_ADDR>:8081`（deploy.md §7.8） | 连接的网络身份 → 登记表（机制待定，OQ-E1） |
+| `sandbox_connect` | 沙盒 | HTTP/1.1 `CONNECT` | 公共包仓库白名单隧道（`HTTPS_PROXY` 指向它）；默认 `<EGRESS_ADDR>:3128` | 同上 |
+| `sandbox_registry`（M2） | 沙盒 | HTTP/1.1 | 私有包仓库反向代理，路径 `/registry/<injection_id>/…`；端口 deploy.md 尚未分配（OQ-E7） | 同上 |
+| `egress.sock`（逻辑名：`models_uds` 与 `control_uds`，models.md 用前者） | `gantryd` | HTTP/1.1 over Unix socket；两族路由：`/model/<provider_id>/…`（`models` 的直接调用）与 `/control/…`（控制面，JSON 请求 / 响应 [提议]） | `/run/gantry-egress/egress.sock`（deploy.md §6.3：目录 `gantry-egress:gantry-link 0750`，套接字 `0660`） | 套接字对端凭据（`SO_PEERCRED` 的 uid 必须是 `gantry`）+ 路由族各自的必填头 |
 
-沙盒侧三个监听器的地址与"如何让沙盒到达它们"取决于沙盒网络方案（OQ-E1）；监听地址是引导配置（§10）。控制面 / `models` 的 socket 目录权限 `0750`，属主 `gantry-egress`，属组 `gantry`，**不会**被挂进任何沙盒（I1，P-15）。
+沙盒侧三个监听器的地址与"如何让沙盒到达它们"取决于沙盒网络方案（OQ-E1）；监听地址是引导配置（§10）。`egress.sock` 是 deploy.md 为 `gantryd` ↔ `egress` 定下的唯一套接字（OPS-10），`models` 与控制面共用它、按路由族区分；它**不会**被挂进任何沙盒（I1，P-15），也不监听在沙盒网络可达的地址上。
 
 ### 6.2 控制面（`gantryd` → `egress`）
 
@@ -112,10 +111,14 @@ pub trait EgressControl: Send + Sync {
     /// 配置视图（带 config rev）。非法视图被拒绝并保留旧配置。
     async fn apply_config(&self, view: EgressConfigView) -> Result<AppliedConfig, EgressError>;
 
-    /// api 转交设置里的 secret value。两段式，以满足 config §2.4 的"secret 写入与 settings.updated 原子"。
-    async fn stage_secret(&self, req: StageSecret) -> Result<StagedSecret, EgressError>;   // {secret_ref, value}
-    async fn commit_secret(&self, staged: &StagedSecret) -> Result<SecretVersion, EgressError>;
+    /// api 转交设置里的 secret value；与 api.md 的 `SecretForwarder { exists, stage, activate, discard }` 一一对应，
+    /// 两段式以满足 config §2.4 的"secret 写入与 settings.updated 原子"。底层是 secrets.md 的本地 stage / commit / abort。
+    async fn secret_exists(&self, refs: &[SecretRefName]) -> Result<BTreeMap<SecretRefName, bool>, EgressError>; // `present`
+    async fn stage_secret(&self, req: StageSecret) -> Result<StagedSecret, EgressError>;   // {secret_ref, value}；待生效版本，对数据面不可见
+    async fn activate_secret(&self, staged: &StagedSecret) -> Result<SecretVersion, EgressError>;  // 在 settings.updated 提交之后
     async fn discard_secret(&self, staged: &StagedSecret) -> Result<(), EgressError>;
+    /// 启动对账用：列出暂存项及其年龄（api.md §7.8：超过 10 分钟仍无事件引用的暂存项被丢弃）。
+    async fn staged_secrets(&self) -> Result<Vec<StagedInfo>, EgressError>;
 
     /// models 的直接调用计量（按 x-gantry-call-id）与对账游标。
     async fn call_usage(&self, call_id: &CallId) -> Result<CallUsage, EgressError>;
@@ -157,7 +160,7 @@ pub struct EgressStatus { pub applied_seq: Seq, pub health: Health /* ok | degra
 
 ### 6.3 `models` 的直接调用约定 **[提议，OQ-E2]**
 
-`models` 经 `models_uds` 发普通的 Anthropic 风格 HTTP 请求，路径 `/model/<provider_id>/v1/messages` 等，并带：
+`models` 经 `egress.sock` 的 `/model/…` 路由族发普通的 Anthropic 风格 HTTP 请求，路径 `/model/<provider_id>/v1/messages` 等，并带：
 
 | 头 | 含义 |
 | --- | --- |
@@ -166,7 +169,7 @@ pub struct EgressStatus { pub applied_seq: Seq, pub health: Health /* ok | degra
 | `x-gantry-call-id: <ULID>` | 调用 ID（必填）；`call_usage` 与 `usage_since` 以它为键 |
 | `x-gantry-delivery: dlv_…` | 归属的交付单元（可选，仅用于归集与审计） |
 
-这些头在转发给上游之前**全部剥离**。沙盒侧监听器收到的任何 `x-gantry-*` 头一律忽略并剥离，沙盒的身份只来自网络身份（P-16）。Egress 在响应里回显 `x-gantry-call-id`。计量交接：`models` 在调用结束后用 `call_usage(call_id)` 取权威用量（或周期性 `usage_since(cursor)` 对账），再记账 `budget.charged`——用量的事实源只有 Egress（P-22）。
+这与 models.md OQ-2 的提议（`call_id` 以请求头传递、`EgressRoute` / `UsageMeter` 抽象）一致，也让 `models` 不必持有任何 provider key（models.md §3）。这些头在转发给上游之前**全部剥离**。沙盒侧监听器收到的任何 `x-gantry-*` 头一律忽略并剥离，沙盒的身份只来自网络身份（P-16）。Egress 在响应里回显 `x-gantry-call-id`。计量交接：`models` 在调用结束后用 `call_usage(call_id)` 取权威用量（或周期性 `usage_since(cursor)` 对账），再记账 `budget.charged`——用量的事实源只有 Egress（P-22）。
 
 ### 6.4 沙盒侧可见的约定
 
@@ -221,7 +224,7 @@ struct JobState {
 
 ```
 1  识别调用方   sandbox_model：网络身份 → JobState（Active），否则 403 identity_unregistered（审计，rule=identity.unregistered）
-              models_uds：对端凭据校验 + 必填头齐全，否则 403
+              egress.sock 的 /model 路由族：对端凭据校验 + 必填头齐全，否则 403
 2  路由         路径前缀 /model/<provider_id>/；provider 必须存在、凭据可解析（否则 503 credential_missing）；
               沙盒调用方：provider 必须等于登记的 provider，且其 base_url 主机属于有效分组 model_api（V11 的运行时再检）
 3  方法 / 路径   按 provider kind 的白名单：Anthropic 为 POST /v1/messages、POST /v1/messages/count_tokens、GET /v1/models [提议，需核实当前端点]；
@@ -301,7 +304,7 @@ struct JobState {
 ### 7.10 密钥处理
 
 - 值只存在于 `secrets` 的本进程实例（加密落盘，仅 `gantry-egress` 用户可读）与进程内存；用 `zeroize` 包装类型，`Debug` / `Display` 不输出值；从不经环境变量、命令行或配置文件传入。
-- 写入路径：`api` 在 `PUT /v1/settings/{resource}` 里把 `SecretRef.value` 经 `stage_secret` 转交（得到 `StagedSecret`，对读者不可见）→ `api` 追加 `settings.updated` → `commit_secret`（失败则 `discard_secret`）。未提交的暂存值由超时回收。`api` 不留存值。
+- 写入路径：`api` 在 `PUT /v1/settings/{resource}` 里把 `SecretRef.value` 经 `stage_secret` 转交（得到 `StagedSecret`，对读者不可见）→ `api` 追加 `settings.updated` → `activate_secret`（失败则 `discard_secret`）。未激活的暂存值由超时回收，`api` 启动时用 `staged_secrets()` 对账。`api` 不留存值。这条通道就是 secrets.md OQ-1 与 api.md OQ-A6 在问的"跨进程转交"，本文给出的是 `egress.sock` 上的 `/control/secrets/*` 路由。
 - 轮换（M3）：同名 ref 写入新值，`version` 递增；新请求用新版本，在途请求用旧版本完成；旧版本短暂保留后删除。
 - 注入只发往：`models.providers` 的上游主机（模型 key）与 `injection.<id>.hosts`（私有仓库凭据）；凭据**从不**出现在发往沙盒 / `models` 的任何响应（含错误体）、审计、日志、指标、崩溃转储中。
 
@@ -367,8 +370,8 @@ struct JobState {
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
 | `egress.data_dir` | `/var/lib/gantry-egress` | `egress.db`、`audit/`、`secrets/` |
-| `egress.run_dir` | `/run/gantry-egress` | `models.sock`、`control.sock` |
-| `egress.listen.sandbox_model` / `sandbox_connect` / `sandbox_registry` | 无 | 沙盒侧监听地址，取决于 OQ-E1 |
+| `egress.run_dir` | `/run/gantry-egress` | `egress.sock`（deploy.md §6.3：目录 `0750`，套接字 `0660`，组 `gantry-link`） |
+| `egress.listen.sandbox_model` / `sandbox_connect` / `sandbox_registry` | `<EGRESS_ADDR>:8081` / `<EGRESS_ADDR>:3128` / 无 | 沙盒侧监听地址（前两项取自 deploy.md §7.8 的 `nft` 规则），`<EGRESS_ADDR>` 取决于 OQ-E1 |
 | `egress.limits.max_connections` / `per_source_connections` | 1024 / 64 | [建议值，待调优] |
 | `egress.limits.request_body_bytes` / `request_header_bytes` | 32 MiB / 16 KiB | [建议值，待调优] |
 | `egress.limits.job_inflight` / `job_requests_per_min` | 8 / 120 | [建议值，待调优] |
@@ -422,7 +425,7 @@ struct JobState {
 - [ ] 封顶：累计恰为 `tokens_total - 1` 时下一个请求放行，达到 `tokens_total` 后的**后续**请求 403 `budget_exhausted`、`capped = true`，在途请求完成；带非 1 权重时按加权值封顶。
 - [ ] 用量不可解析 / 流被截断 → 按保守估计计入并 `incomplete = true`（不会因此绕过封顶）。
 - [ ] 沙盒伪造 `x-gantry-usage` 之类的头或 stdout 事件，不影响计量（计量只来自上游响应）。
-- [ ] `models_uds`：缺 `x-gantry-caller` / `tier` / `call-id` → 拒绝；对端不是 `gantry` 组 → 拒绝；`call_usage(call_id)` 与 mock 数字一致；`usage_since(cursor)` 翻页无遗漏、无重复；同一 `call_id` 重复调用不重复计量（幂等）。
+- [ ] `egress.sock` 的 `/model` 路由族：缺 `x-gantry-caller` / `tier` / `call-id` → 拒绝；对端 uid 不是 `gantry` → 拒绝；`call_usage(call_id)` 与 mock 数字一致；`usage_since(cursor)` 翻页无遗漏、无重复；同一 `call_id` 重复调用不重复计量（幂等）。
 - [ ] 崩溃一致：在"响应完成"与"用量提交"之间 `kill -9`，重启后该请求要么已计入、要么使 job `incomplete`，**绝不静默丢失**。
 
 ### D. `CONNECT` 白名单与硬性拒绝（M1）
@@ -453,7 +456,7 @@ struct JobState {
 
 ### G. 密钥（M1；轮换 M3）
 
-- [ ] `stage_secret` → `commit_secret` 之前新值不可见；`discard_secret` 后无残留；超时未提交的暂存值被回收。
+- [ ] `stage_secret` → `activate_secret` 之前新值不可见；`discard_secret` 后无残留；`secret_exists` 与 `staged_secrets` 的结果与实际一致；超时未激活的暂存值被回收。
 - [ ] 密钥库目录与文件权限：仅 `gantry-egress` 可读；`gantry` 用户读取失败（文件模式断言）。
 - [ ] panic / 错误路径 / 调试输出不含密钥（注入故障后扫描日志）；核心转储被禁用。
 - [ ] （M3）轮换：新版本对新请求生效，在途请求用旧版本完成，旧版本随后被清除；`secret_changes` 对应的 `version` 递增。
@@ -467,7 +470,7 @@ struct JobState {
 ### I. 进程与加固（M1）
 
 - [ ] 以非特权用户运行，无任何 capability；`deploy` 的 systemd 单元包含 §7.11 列出的加固项（单元文件测试）。
-- [ ] 沙盒侧监听器不可从宿主以外的网络访问；控制面与 `models` 的 socket 权限 `0750`、不在任何沙盒挂载内。
+- [ ] 沙盒侧监听器不可从沙盒网络以外的地址访问（按 OQ-E1 方案落地后补全）；`/run/gantry-egress` 目录 `0750`、`egress.sock` 为 `0660`、组 `gantry-link`，`gantry-sbx` 用户无法连接；套接字不在任何沙盒挂载内（`sandbox` 的 `validate_invariants` 也断言）。
 - [ ] 无法读取 `gantryd` 的状态目录与 `secrets/`。
 
 ### J. 与退出标准的对应
@@ -481,9 +484,9 @@ struct JobState {
 
 | # | 问题 | 影响 | 本文暂用 |
 | --- | --- | --- | --- |
-| OQ-E1 | **沙盒网络身份**：契约要求按"登记时绑定的源地址"映射 job（E4），但 rootless Podman 下 `egress` 未必能看到每个沙盒的唯一源地址；候选方案见 sandbox.md §7.4（特权辅助建网 / `egress` 入驻 rootless netns / 每 job 端口 / 每 job Unix socket——最后一个与 P-15 字面冲突）。M1 退出标准的前置依赖 | `egress`、`sandbox`、`deploy` | `IdentityResolver` 可插拔，默认按源地址；测试用环回别名 |
-| OQ-E2 | **控制面与 `models` 通道缺契约**：interfaces/ 里没有 `gantryd` ↔ `egress` 的任何契约（传输、认证、消息形状、错误），也没有 `models` 如何经 Egress 调用、如何取权威用量；`egress` 是独立进程，不能写事件日志。需要一份契约（建议 `interfaces/egress-control.md` + `schemas/egress/`） | `egress`、`sandbox`、`models`、`api`、M0 冻结 | §6.2–§6.3 的 **[提议]**：UDS + 对端凭据、JSON 请求 / 响应、`x-gantry-*` 头、`call_usage` / `usage_since` |
-| OQ-E3 | `egress` 如何拿到设置视图并回报 `applied_seq`：由 `gantryd` 推送（本文）还是 `egress` 自己读事件日志；architecture §4 的依赖列为 "—" 而依赖图有 `secrets → egress`；api.md §4.9 的 `status` 示例用 `applied_rev` / `healthy`，config §2.8 用 `applied_seq` / `health` | 依赖与可部署性 | 推送；字段名以 config 为准 |
+| OQ-E1 | **沙盒网络身份**：契约要求按"登记时绑定的源地址"映射 job（E4），但 rootless Podman 下 `egress` 未必能看到每个沙盒的唯一源地址；deploy.md §7.8 的主机防火墙按发起**用户**过滤，只能保证"沙盒只能到 `8081` / `3128`"，区分不了沙盒（它自己也标"需核实"，OPS-11）。候选方案见 sandbox.md §7.4（特权辅助建网 / `egress` 入驻 rootless netns / 每 job 端口 / 每 job Unix socket / 每 job 能力令牌 / 按发起进程识别）；其中"能力令牌"放在占位 key 与代理凭据里，对本模块最省事，但偏离 P-16 / E4 的"网络身份"字面，需用户确认。M1 退出标准的前置依赖 | `egress`、`sandbox`、`deploy` | `IdentityResolver` 可插拔，默认按源地址；测试用环回别名 |
+| OQ-E2 | **控制面与 `models` 通道仍缺契约**：interfaces/ 里没有 `gantryd` ↔ `egress` 的契约。几份同批规格各自留了缺口——deploy.md OPS-10（套接字 `egress.sock`、settings 视图怎么给 Egress）、models.md OQ-2（`models` 的身份与 `call_id`、`UsageMeter`）、secrets.md OQ-1 与 api.md OQ-A6（跨进程转交与两阶段激活）。本文 §6.1–§6.3 给出一个把三者收拢到 `egress.sock` 的提议；需要一份契约（建议 `interfaces/egress-control.md` + `schemas/egress/`）。`egress` 是独立进程，不写事件日志 | `egress`、`sandbox`、`models`、`api`、`secrets`、M0 冻结 | §6.2–§6.3 的 **[提议]** |
+| OQ-E3 | `egress` 如何拿到设置视图并回报 `applied_seq`：由 `gantryd` 推送（本文，对应 deploy.md OPS-10 的第二问）还是 `egress` 自己读事件日志；architecture §4 的依赖列为 "—" 而依赖图有 `secrets → egress`；`egress.db` 不在 deploy.md §6.3 的目录表里（需补，并决定是否备份——登记与用量对运行中的 job 有意义，对已结束的可重建） | 依赖与可部署性 | 推送；`/var/lib/gantry-egress/egress.db`；字段名以 config §2.8 为准（api.md OQ-A4 已采用） |
 | OQ-E4 | **计量口径**：① P-44 说预算按加权 token、权重是配置项，config.md 无该键且 OQ-7 仍写"不加权"，权重怎么来；② `requests` 的口径；③ 用量不可解析时的保守估计；④ "切断后续请求"（E4）与 "硬切断"（worker-protocol OQ-14）是否包括在途流；⑤ 封顶后返回 403 还是 429 对 agent CLI 重试行为的影响（**需核实**）；⑥ 在途时崩溃的 `incomplete` 如何影响 `engine` 的记账 | `egress`、`engine`、`models` | §7.4 的 **[提议]** |
 | OQ-E5 | `exec.model_api`（"持续上游错误超阈值"）的阈值与定义；每 job 的限速参数 | 失败分类、重试风暴 | `egress` 只报告 `upstream_errors` 摘要，阈值由 `engine` 定；限速用内部常量 |
 | OQ-E6 | GitHub 域名族硬编码清单是否完整、是否还要覆盖其他 GitHub 托管的内容分发域；Q-08（git 依赖的服务端缓存）；worker-protocol OQ-15（包仓库白名单作为外泄通道，是否改成只读缓存代理）；`CONNECT` 的每 job 字节上限取值 | I1 的实际强度 | §7.7 清单为 **[提议]**；字节上限为内部常量 |

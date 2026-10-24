@@ -50,21 +50,21 @@
 
 本文中不带路径的 `api.md`、`config.md`、`forge-actions`、`worker-protocol` 均指 `docs/interfaces/` 下的契约；模块规格写作 `modules/<id>.md`，本规格自身称"本文"。
 
-`api` 依赖"全部服务端模块 + `pki`"（architecture §4）。下表只列用到什么；各模块的 trait 以其自己的规格书为准，**尚未存在的规格书**（`store`、`engine`、`conversation`、`notify`、`repo`、`forge`、`secrets`）对应的门面（facade）在 §6.3 列为本模块的需求，需与之对齐。
+`api` 依赖"全部服务端模块 + `pki`"（architecture §4）。下表只列用到什么；各模块的 trait 以其自己的规格书为准。`engine` / `conversation` / `notify` / `repo` / `forge` 的规格书已经成稿，其中 `engine.md`、`forge.md` 直接采用了 §6.3 的 `DeliveryControl`、`PrRefresher`、`WriteCtx`；`conversation.md` 用 `ActorCtx`，`notify.md` 用 `DeviceActor`，与 `WriteCtx` 的对齐见 OQ-A7。
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
 | `pki` | `TlsMaterial`（客户端证书校验器、服务端证书解析器、根证书）；`DeviceDirectory`（`by_cert_serial`、`get`、`list`、`verifying_key`、`touch_last_seen`）；`DeviceAdmin`（`rename`、`set_role`、`revoke`）；`PairingService`（`window`、`redeem`）；`RevocationNotifier`（M3） | [modules/pki.md §6](pki.md)；api.md §1.3、§2、§4.10 |
 | `policy` | `ApprovalService`（`get`、`list`、`create_internal`、`challenge`、`grant`、`deny`、`consume_internal`）与 `signing::request_digest` | [modules/policy.md §6.4、§6.7](policy.md)；api.md §6 |
-| `store` | 一致读（投影 + 最大 `seq`）；事件日志范围读 `read_range`、`head()`、实时订阅；追加 `settings.updated`；`dedup_key` 唯一索引；本模块表（`api_idempotency`）的迁移；按 rev 的 settings 历史 | data-model §5；config.md §2.3。占位类型同 [policy.md §3.1](policy.md) |
-| `core` | 领域类型、`Device`、`Role`、`Level`、`Ref`、`Card`、`UntrustedText`；settings 的 merge / clamp / 校验器；JSON 规范化（JCS） | data-model §1、§3；config.md §2.1、§11 |
-| `forge` | `PrRefresher::refresh_pr(repo, number)`：`grant` 前对 PR 强制对账一次 | api.md §6.4 第 5 步；forge-actions §7 |
-| `engine` | `DeliveryControl`：`set_level_cap`、`abandon`；预算台账读取 | api.md §4.4 |
-| `conversation` | `post_user_message`（持久化用户消息并写 `message.posted`） | api.md §4.5 |
-| `repo` | `WorktreeLocks`：`acquire_human` / `release_human` | api.md §4.6 |
-| `notify` | `InboxService`：`dismiss`、`choose` | api.md §4.8；decisions P-40 |
-| `secrets` / `egress` | `SecretForwarder`（暂存 → 激活 → 丢弃，§7.8）；各模块的 `ModuleStatus` 与 `catalog` 供给 | config.md §2.4、§2.8 |
-| 外部 crate（建议） | `tokio`、`axum` + `hyper` + `hyper-util`（HTTP/1.1 与 h2）、`tokio-rustls`、`rustls`、`serde` + `serde_json`、`jsonschema`（一致性测试）、`ulid`、`subtle`、`zeroize`、`tracing`、`arc-swap`、`dashmap` | architecture §10 |
+| `store` | `Store::snapshot()` → `ReadSnapshot`（`ProjectionRead` 全部读取、`settings_current` / `settings_at_rev` / `config_rev`、`head_seq`）；`Store::begin_write()` → `WriteTx`（`append` 返回 `Appended::{New, Duplicate}`、`module_conn("api")`）；`EventLog::{head, check_cursor, tail, scan}` 与 `EventFilter`；`ModuleSpec { module: "api" }` 注册 `api_idempotency` | [store.md §6、§7.4、§7.5、§7.10](store.md)；data-model §5；config.md §2.3 |
+| `core` | 领域类型、`Device`、`DeviceRole`、`DevicePlatform`、`Level`、`Ref`、`Card`、`UntrustedText`、`Actor`、`Clock`、`Entropy`、`Ulid`（`request_id`）；settings 的 `effective` / `merge_patch` / `diff_relaxes` / `required_authority` / `split_secret_values` / `find_secret_refs` 与校验器；`jcs` / `jcs_digest` | [core.md §6.1–§6.7](core.md)；config.md §2.1、§2.5、§11 |
+| `forge` | `PrRefresher::refresh_pr(repo, number)`：`grant` 前对 PR 强制对账一次 | [forge.md §6](forge.md)；api.md §6.4 第 5 步 |
+| `engine` | `DeliveryControl`：`set_level_cap`、`abandon` | [engine.md §6](engine.md)；api.md §4.4 |
+| `conversation` | `post_user_message`（持久化用户消息并写 `message.posted`） | [conversation.md §6](conversation.md)；api.md §4.5 |
+| `repo` | `WorktreeLocks`：`acquire_human` / `release_human` | [repo.md](repo.md)；api.md §4.6 |
+| `notify` | `InboxService`：`dismiss`、`choose` | [notify.md §6](notify.md)；api.md §4.8；decisions P-40 |
+| `secrets` / `egress` | 按 `core::Consumer` 取 `SecretSink`（`exists` / `stage` / `commit` / `abort`）；`Consumer::Egress` 的实现是跨进程适配器（secrets.md OQ-1）；各模块的 `ModuleStatus` 与 `catalog` 供给 | [secrets.md §6](secrets.md)；config.md §2.4、§2.8 |
+| 外部 crate（建议） | `tokio`、`axum` + `hyper` + `hyper-util`（HTTP/1.1 与 h2）、`tokio-rustls`、`rustls`、`serde` + `serde_json`、`jsonschema`（一致性测试）、`subtle`、`zeroize`、`tracing`、`arc-swap`、`dashmap` | architecture §10 |
 
 ## 4. 输入
 
@@ -98,7 +98,7 @@
 pub struct ApiServer { /* 内部 */ }
 
 pub struct Services {
-    pub clock: Arc<dyn Clock>, pub rng: Arc<dyn Rng>,
+    pub clock: Arc<dyn Clock>, pub entropy: Arc<dyn Entropy>,
     pub store: Arc<dyn Store>,                       // 写事务 + 一致读 + 事件日志
     pub pki: PkiHandles,                             // directory / admin / pairing / tls / revocations
     pub policy: Arc<dyn ApprovalService>,
@@ -129,7 +129,7 @@ impl ApiServer {
 pub struct RouteSpec {
     pub id: u8,                      // 契约 §4.1 序号
     pub method: Method, pub pattern: &'static str,
-    pub min_role: RoleReq,           // Fixed(Role) | SettingsDynamic（按内容判定，§7.8）
+    pub min_role: RoleReq,           // Fixed(DeviceRole) | SettingsDynamic（按内容判定，§7.8）
     pub mobile: MobileAccess,        // No | Yes | YesChooseLimited
     pub rate: RateClass,             // Read | Write | Message | Sign | PairIp
     pub idem: IdemPolicy,            // Required | Optional | NotApplicable
@@ -187,7 +187,7 @@ pub struct RouteSpec {
 
 ### 6.3 对其他模块的需求（facade，占位签名）
 
-读类端点不经 facade，直接用 `store` 的一致读（同一读事务里读投影与最大 `seq`，才能给出正确的 `X-Event-Seq`，api.md §3.6）。写类 facade 的统一约定：`WriteCtx { actor: ActorRef /* {device, dev_…} */, request_id, dedup: Option<DedupKey> }`；模块用 `dedup` 作为所追加事件的 `dedup_key`，使重放同一 `Idempotency-Key` 在 `store` 层也至多追加一次（见 §7.6）。
+读类端点不经 facade，直接用 `store` 的一致读（同一读事务里读投影与最大 `seq`，才能给出正确的 `X-Event-Seq`，api.md §3.6）。写类 facade 的统一约定：`WriteCtx { actor: Actor /* {device, dev_…} */, request_id, dedup: Option<DedupKey> }`；模块用 `dedup` 作为所追加事件的 `dedup_key`，使重放同一 `Idempotency-Key` 在 `store` 层也至多追加一次（见 §7.6）。
 
 ```rust
 #[async_trait] pub trait ConversationService { async fn post_user_message(&self, ctx: WriteCtx, conv: ConversationId, msg: NewUserMessage) -> Result<Message, ModuleError>; }
@@ -197,7 +197,7 @@ pub struct RouteSpec {
                                                async fn release_human(&self, ctx: WriteCtx, id: WorktreeId) -> Result<Worktree, LockError>; }
 #[async_trait] pub trait InboxService        { async fn dismiss(&self, ctx: WriteCtx, id: InboxId, note: Option<String>) -> Result<InboxItem, ModuleError>;
                                                async fn choose(&self, ctx: WriteCtx, id: InboxId, option_id: &str, note: Option<String>) -> Result<InboxItem, ModuleError>; }
-#[async_trait] pub trait PrRefresher         { async fn refresh_pr(&self, repo: &RepoRef, number: u64) -> Result<PrHead, ModuleError>; }  // 失败 → 退回投影快照
+#[async_trait] pub trait PrRefresher         { async fn refresh_pr(&self, repo: &RepoSlug, number: u64) -> Result<PrHead, ModuleError>; }  // 失败 → 退回投影快照
 
 /// settings 编排需要的上下文（来源见 config.md §11 开头）与聚合
 #[async_trait] pub trait SettingsContext: Send + Sync {
@@ -492,10 +492,10 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 替身 / 夹具 | 用途 |
 | --- | --- |
 | `TestCA`（M0）+ `TestDevice` | 签发有效 / 过期 / 尚未生效 / 外部 CA / 已吊销 / 未知序列号的设备证书；`TestDevice` 用 `rustls` 客户端 + `hyper` 发**真实 TLS** 请求，并能对 challenge 签名（`sign_approval`）。测试一律走真实握手，不绕过 TLS（`router_for_test` 只用于不涉及鉴权的路由级单元测试） |
-| 真实 `pki` + `policy` + `InMemoryStore` | 组件测试用真实实现（二者是本泳道产物）；需要隔离时用 `policy` 的 `ScriptedPolicy` |
+| 真实 `pki` + `policy` + `Store::open_in_memory` | 组件测试用真实实现（二者是本泳道产物）；需要隔离时用 `policy` 的 `ScriptedPolicy` |
 | `FakeForge`（M0） | 提供 PR 快照、`refresh_pr`、注入 `forge.pr_synchronized` 以触发 `stale_head` |
 | `FakeEngine`、`FakeConversation`、`FakeNotify`、`FakeRepo`（locks）、`FakeSettingsContext`、`FakeSecretForwarder` | 实现 §6.3 的 facade，可脚本化返回与注入故障（含 `activate` 失败、`stage` 后崩溃） |
-| `FakeClock`、`SeededRng` | 心跳、存活时间（TTL）、限流窗口、证书到期 |
+| `FakeClock`、`SeededEntropy` | 心跳、存活时间（TTL）、限流窗口、证书到期 |
 | **Mock API 服务**（M0，由 `openapi.yaml` 生成） | 契约一致性套件的另一个被测方：同一套测试对 Mock 与真实 `api` 各跑一遍 |
 | `schemas/openapi.yaml`、`schemas/events/*.json` | 响应与事件的 Schema 校验（`jsonschema`） |
 | api.md §6.3 测试向量 | 与 `policy` 共用，验证 grant 端到端 |

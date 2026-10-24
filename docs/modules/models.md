@@ -43,7 +43,7 @@
 | `core` | `EffectiveSettings` 与项目合并、`Usage` / `Tier` / `Level` / `Effort` / `Role` 类型、JSON Schema 校验器、`UntrustedText` | [config.md §2–§3](../interfaces/config.md)、[data-model §1.1](../data-model.md) |
 | `store` | 订阅 `settings.updated`；追加未归属用量的 `budget.charged`（OQ-3）；保存订阅游标 | architecture §4 |
 
-间接关系（不是代码依赖）：HTTP 调用 `egress` 的反向代理端点（地址来自引导配置，不是设置）；被 `engine` 与 `conversation` 调用。**硬约束：`gantry-models` 不得依赖 `gantry-secrets`，也不得持有任何 provider key**（测试强制，§12）。
+间接关系（不是代码依赖）：经 Unix socket `models_uds` 以 HTTP 调用 `egress` 的反向代理（egress.md §6.3 [提议]），并经 Egress 控制面 `call_usage(call_id)` 取权威用量（egress.md §6.2）；被 `engine` 与 `conversation` 调用；适配器能力来自 `worker` 的 `WorkerAdapter::capabilities()`（worker.md §6.3）。**硬约束：`gantry-models` 不得依赖 `gantry-secrets`，也不得持有任何 provider key**（测试强制，§12）。
 
 ## 4. 输入
 
@@ -52,9 +52,9 @@
 | `ResolveQuery` | `engine`、`conversation` | §6 | 可信 |
 | `DirectCall`：角色、可信指令、不可信材料、期望 schema、归属、期限 | `engine`（`admission`、`summarize`、`classify`）、`conversation`（`intent`、`classify`） | §6 | `instructions` 可信；`materials` 不可信（I5） |
 | 生效的 `models.*` 设置 | `core` / `store`（`settings.updated`） | config §3 | 可信 |
-| 提供方响应与 Egress 计量 | 经 Egress 的 HTTP 响应；计量接口 | 提供方响应 + `Usage` | 响应内容不可信（模型输出）；计量可信（Egress 是用量事实源，P-22） |
+| 提供方响应与 Egress 计量 | 经 Egress 的 HTTP 响应；`call_usage(call_id)` | 提供方响应 + `CallUsage` | 响应内容不可信（模型输出）；计量可信（Egress 是用量事实源，P-22） |
 | 模型能力数据 | 来源待定（config OQ-3） | `CapabilityTable` | 可信 |
-| Egress 端点与路由方式 | 引导配置（`deploy`） | 地址 / 路径约定（OQ-2） | 可信 |
+| Egress 的 `models_uds` 路径与控制面 socket | 引导配置（`deploy`） | egress.md §6.3（OQ-2） | 可信 |
 
 ## 5. 输出
 
@@ -62,7 +62,7 @@
 | --- | --- | --- |
 | `ResolvedModel`（含沙盒用途的 `sandbox` 部分） | `engine`（填 JobSpec，写入 `attempt.started`） | §6 |
 | `DirectOutcome { output, served_by, usage, ... }` | 调用方 | `output` 已通过角色 schema 校验 |
-| 未归属用量 `budget.charged` | `store` | 事件字段待 `schemas/events` 定（OQ-3） |
+| `budget.charged`（每次直接调用一条，有交付单元归属的带 `delivery_id`；无归属的 `delivery_id` 为空） | `store` | 事件字段待 `schemas/events` 定（OQ-3） |
 | `ModelsError` | 调用方 | §9 |
 | `CapabilityTable`、`catalog.models.*`、校验上下文 | `api` | config §2.8、§11 |
 | `ModuleStatus`（`applied_seq`、健康） | `api`（`settings/status`） | config §2.8 |
@@ -113,7 +113,7 @@ pub struct DirectCall {
     pub call_id: CallId,               // 调用方生成；贯穿 Egress 计量与日志
     pub project_id: ProjectId,
     pub role: Role,
-    pub attribution: Attribution,      // Attempt{delivery_id,node_id,attempt_id} | Aux{delivery_id,purpose} | Unattributed{purpose}
+    pub attribution: Attribution,      // Attempt{delivery_id,node_id,attempt_id} | Aux{delivery_id,purpose} | Unattributed{purpose}；有 delivery_id 的经 x-gantry-delivery 头给 Egress
     pub level: Option<Level>,
     pub critical: bool,
     pub instructions: TrustedText,     // 角色指令，可信，放进 system
@@ -127,7 +127,7 @@ pub struct DirectOutcome {
     pub output: serde_json::Value,     // 已通过 schema 校验；其中的文本字段仍是不可信数据
     pub served_by: ServedBy,           // 实际使用的 provider / model / effort（含降级）
     pub usage: Usage,                  // input / output / cache_read / cache_write / requests
-    pub usage_source: UsageSource,     // Metered（Egress）| ProviderReported（计量不可用时的降级口径，OQ-3）
+    pub usage_source: UsageSource,     // Metered（Egress `call_usage`）| ProviderReported（计量不可用时的降级口径，OQ-3）
     pub weighted_tokens: u64,          // P-44；权重见 OQ-4
     pub tries: u32, pub fell_back: bool,
 }
@@ -148,9 +148,9 @@ pub struct ProviderRequest {            // 没有 tools、没有采样参数字�
 pub struct ProviderResponse { pub text: String, pub stop: StopReason, pub usage_reported: Usage }
 pub enum StopReason { EndTurn, MaxTokens, Refusal { category: Option<String> }, Other(String) }
 
-/// Egress 对本次调用的计量（P-16：用量以 Egress 为准）。
+/// Egress 对本次调用的计量（P-16：用量以 Egress 为准）；对应 egress.md §6.2 的 `call_usage`。
 #[async_trait]
-pub trait UsageMeter: Send + Sync { async fn take(&self, call_id: &CallId) -> Option<Usage>; }
+pub trait UsageMeter: Send + Sync { async fn call_usage(&self, call_id: &CallId) -> Result<CallUsage, MeterError>; }
 
 pub trait CapabilityTable: Send + Sync {
     fn model(&self, provider_id: &str, model: &str) -> Option<ModelCaps>;   // tools、reasoning_efforts、context_window?
@@ -194,8 +194,8 @@ pub trait CapabilityTable: Send + Sync {
 4. 构造 prompt（§7.4）；发 `ProviderRequest`（目标 = Egress 路由，§7.5）。
 5. 按 §7.6 重试 / 降级；每次尝试用 `request_timeout_s`，整体不超过 `min(total_timeout_s, deadline)`。
 6. 响应 → `StopReason` 处理（`Refusal` → `ContentRefused`，不重试不降级；`MaxTokens` → `OutputTruncated`，不重试）→ 解析 JSON → `OutputValidator`（角色 schema + 一致性规则，如 `ACCEPT` ⇒ 无 blocker）。校验失败视为可重试错误，计入 `max_attempts`，重试时只回喂校验错误码，不回喂模型原输出。
-7. `UsageAccountant`：`UsageMeter::take(call_id)` 取计量；取不到 → 退回 `usage_reported` 并标 `ProviderReported`、记警告（OQ-3）；折算 `weighted_tokens`。降级调用的用量记入同一 tier，`served_by` 写实际使用的提供方 / 模型。
-8. `Attribution::Unattributed | Aux` 且无交付单元 → 追加未归属 `budget.charged`（OQ-3）；`Attempt` 归属的用量由 `engine` 随 `attempt.finished` 记账，本模块不重复写。
+7. `UsageAccountant`：`UsageMeter::call_usage(call_id)` 取计量；取不到 → 退回 `usage_reported` 并标 `ProviderReported`、记警告（OQ-3）；折算 `weighted_tokens`。降级调用的用量记入同一 tier，`served_by` 写实际使用的提供方 / 模型。
+8. **每次直接调用由本模块追加一条 `budget.charged`**（egress.md §11："`models` 经 `call_usage` 记自己的 `budget.charged`"）：`Attempt` / `Aux` 归属的带 `delivery_id`、`tier`、`source = {kind: "direct_call", call_id}`；`Unattributed` 的 `delivery_id` 为空（OQ-3）。`Attempt` 归属的调用另把 `usage` 返回给 `engine` 写进 `attempt.finished.usage`（仅展示），`engine` 不重复写 `budget.charged`。
 
 ### 7.4 Prompt 组装与隔离包装
 
@@ -208,9 +208,9 @@ pub trait CapabilityTable: Send + Sync {
 
 ### 7.5 经 Egress 的路由
 
-- 所有请求发往 Egress 的模型反向代理端点，而不是 `providers.<id>.base_url` 所指的主机；`base_url` 只用来让 Egress 确定上游（其主机必须属于 `egress.groups.model_api`，V11）。
-- 请求里**不带真实 key**：认证头由 Egress 丢弃或忽略并注入真实值（architecture §9、P-16）。请求带 `call_id`，供 Egress 把计量归到本次调用（OQ-2）。
-- 端点地址与路由方式（按 provider id 的路径前缀还是独立端口）、`models` 与 Egress 之间如何认证，由 `egress` 规格和引导配置决定；本模块用 `EgressRoute::for_provider(provider_id)` 抽象。
+- 所有请求发往 Egress 的 `models_uds`（Unix socket 上的 HTTP），路径 `/model/<provider_id>/v1/messages` 等；Egress 去掉前缀后拼到 `providers.<id>.base_url` 之后转发。`base_url` 的主机必须属于 `egress.groups.model_api`（V11）。
+- 必填头：`x-gantry-caller: models`、`x-gantry-tier: utility | planner`（由角色决定，直接角色不会是 `worker`）、`x-gantry-call-id`（= `DirectCall.call_id`）；可选 `x-gantry-delivery`。这些头由 Egress 在转发前全部剥离（egress.md §6.3 [提议]，该约定在 `interfaces/` 里没有契约，egress.md OQ-E2）。
+- 请求里**不带真实 key**：认证信息由 Egress 丢弃并替换（architecture §9、P-16）。对端凭据由 socket 权限与 `SO_PEERCRED` 校验，本模块无需持有任何密钥。
 - `AnthropicProvider` 的具体请求参数（推理参数的映射、结构化输出方式、是否支持关闭思考等）随所用模型而异，实现时以锁定的 SDK 与官方文档为准，并写进能力表；不使用强制工具选择来取结构化输出，不发送采样参数。
 
 ### 7.6 重试与降级
@@ -293,7 +293,7 @@ pub trait CapabilityTable: Send + Sync {
 
 | 项 | 建议默认 | 说明 |
 | --- | --- | --- |
-| Egress 模型代理端点 | 无 | 引导配置，`deploy` 提供（OQ-2） |
+| Egress 的 `models_uds` 与控制面 socket 路径 | 无 | 引导配置，`deploy` 提供（egress.md §10） |
 | `PROVIDER_MAX_INFLIGHT` | 8 | 每个 provider 的并发闸 |
 | 材料上限 | 64 KiB / 512 KiB | 沿用 `sandbox.io.materials.*` 默认 |
 | 各角色 `max_output_tokens` | 按角色 schema 的最大字段长度推算 | 内部常量 |
@@ -301,7 +301,7 @@ pub trait CapabilityTable: Send + Sync {
 
 ## 11. 可观测性
 
-- **发出的事件**：仅在无交付单元归属时追加 `budget.charged`（OQ-3）；其余记账由 `engine` 的 `attempt.finished` / `budget.charged` 承担。
+- **发出的事件**：每次直接调用一条 `budget.charged`（OQ-3）；沙盒尝试的记账由 `engine` 承担。
 - **日志**：结构化，字段含 `call_id`、`role`、`tier`、`provider`、`model`、`effort`、`tries`、`fell_back`、`usage`、`usage_source`、耗时、错误类别；不记提示词、模型输出与任何认证头。
 - **指标**（名称 [提议]）：`models_calls_total{role,tier,outcome}`、`models_call_seconds{role}`、`models_retries_total{reason}`、`models_fallbacks_total{from,to}`、`models_tokens_total{tier,kind}`、`models_usage_divergence_total`、`models_inflight{provider}`、`models_config_applied_seq`。
 - **健康**：向 `settings/status` 报告 `applied_seq`；连续失败率超阈值、配置构建失败 → `degraded`。
@@ -313,7 +313,7 @@ pub trait CapabilityTable: Send + Sync {
 | 替身 | 用法 |
 | --- | --- |
 | `FakeModelProvider` | 替代外部提供方：按规则（角色 + 模式）返回固定输出，需要支持注入 5xx / 429 / 超时 / 404 / 拒绝 / 截断 / 非法 JSON / 慢响应、并回传脚本化的 `usage_reported`（milestones 只写"按规则返回固定输出"，失败注入是本模块测试的需求，需 `contract` 泳道一并交付） |
-| 本地 Egress 桩 | 测试内起的 HTTP 服务，模拟反向代理端点：记录收到的请求（头、路径、体）、返回脚本化响应、实现 `UsageMeter`。**不是 M0 交付的替身**，由本模块测试自带（M0 替身清单没有 Egress 替身） |
+| 本地 Egress 桩 | 测试内起的 HTTP 服务（Unix socket），模拟 `models_uds`：记录收到的请求（头、路径、体）、返回脚本化响应、实现 `UsageMeter`（`call_usage`）。**不是 milestones M0 清单里的替身**，由本模块测试自带；egress.md M0 约定的 `MockUpstream` 可复用其思路 |
 | 假时钟 | 驱动退避与期限，避免真实等待 |
 | `store` | 内存事件日志，验证未归属用量事件与 `settings.updated` 订阅 |
 
@@ -350,12 +350,12 @@ pub trait CapabilityTable: Send + Sync {
 | # | 问题 | 本文暂用 | 影响 |
 | --- | --- | --- | --- |
 | OQ-1 | 模型能力数据的来源（config OQ-3）：内置表、配置声明还是 provider 探测；未知模型是拒绝还是警告。示例里的模型 id 都是占位符，无法在本文给出内置表 | trait + 可注入实现，不内置数据 | V04 / V05、catalog、`api` 校验 |
-| OQ-2 | 与 Egress 的接口：端点地址与路由方式、`models` 以什么身份被 Egress 认出（沙盒靠网络身份映射到 job，服务端进程靠什么）、`call_id` 如何传递并用于计量归属、如何取回计量（`UsageMeter`）。`egress.md` 尚不存在 | 抽象为 `EgressRoute` 与 `UsageMeter`；`call_id` 以请求头传递 [提议] | 用量记账（M1 退出标准） |
-| OQ-3 | 无交付单元归属的调用（`intent`、状态问答、通知文案）的用量记哪里：`BudgetLedger` 属于 Delivery，`budget.charged` 的 schema 未定；Egress 计量不可用时是否允许退回提供方自报（与"以 Egress 为准"的关系） | 追加 `delivery_id = null` 的 `budget.charged`（需契约 PR）；计量缺失时退回自报并标记 | 成本可见性、`schemas/events` |
+| OQ-2 | 与 Egress 的接口在 `interfaces/` 里没有契约（egress.md OQ-E2）：`models_uds` 路径、`x-gantry-*` 头、`call_usage` 的形状、对端认证都只在 egress.md §6.2–§6.3 以 [提议] 出现；`CallUsage` 的字段（是否含 `incomplete`）和用量不可解析时的保守估计（egress OQ-E4） | 按 egress.md §6.3 实现 `EgressRoute` 与 `UsageMeter` | 用量记账（M1 退出标准） |
+| OQ-3 | `budget.charged` 的 schema 未定：无交付单元归属的调用（`intent`、状态问答、通知文案）`delivery_id` 为空是否允许（`BudgetLedger` 属于 Delivery，事件目录没有别的记账事件）；`direct` 调用的 `budget.charged` 由 `models` 写、沙盒尝试由 `engine` 写，两个写入方是否可接受；Egress 计量不可用时是否允许退回提供方自报（与"以 Egress 为准"的关系） | 每次直接调用一条 `budget.charged`，`delivery_id` 可空（需契约 PR）；计量缺失时退回自报并标记 | 成本可见性、`schemas/events` |
 | OQ-4 | token 加权：P-44 说权重是配置项（默认按提供方价格比例），config.md 没有对应键且 OQ-7 称不加权 | 权重全为 1 | 预算口径 |
 | OQ-5 | 输出 schema 不合时的修复策略：重新请求并计入 `max_attempts`（本文）还是单独的修复轮（worker 的 A6 是修复 1 轮）；`max_output_tokens` 的来源 | 计入 `max_attempts`，内部常量 | 成功率、成本 |
-| OQ-6 | 不可信材料的包装实现：`sandbox.stage` 与本模块各写一份会漂移，是否放进 `core` 作为纯函数共用；直接调用的材料上限是否另设配置 | 本模块先按同一规则自实现，上限用内部常量 | 一致性 |
+| OQ-6 | 不可信材料的包装实现：core.md OQ-4 提议"规范化放 `core`、包装（nonce、标记行）留给 `sandbox`"，但 `models` 也要包装直接调用的材料，两处各写一份会漂移，是否把包装也放进 `core` 作为纯函数共用；直接调用的材料上限是否另设配置 | 规范化用 `core` 的实现；包装按同一规则在本模块自实现，上限用内部常量 | 一致性 |
 | OQ-7 | 无交付单元上下文的调用（`level = None`）如何取 `by_level` 的推理深度；planner 的 `intent` 调用是否应固定用 `high` | `by_level` 取 `low`；固定值照常 | 意图质量、成本 |
 | OQ-8 | 推理深度抽象枚举（`none`…`max`）到具体提供方参数的映射表，以及 `none` 在不能关闭思考的模型上的处理 | 能力表声明支持的取值，不支持即报错 | `AnthropicProvider` 实现 |
-| OQ-9 | 适配器标识不一致：config 的 `models.worker.adapter` 取 `claude_code`，worker-protocol 的 `execution.agent` 取 `claude-code` | 映射由 `engine` 做 | 契约一致性 |
-| OQ-10 | 沙盒内降级（config OQ-5）取决于适配器能力，第一版 `claude_code` 声明不支持；该声明由谁维护 | `AdapterCaps` 随适配器实现一同登记 | V06 |
+| OQ-9 | 适配器标识不一致：config 的 `models.worker.adapter` 取 `claude_code`，worker-protocol 的 `execution.agent` / `WorkerAdapter::agent_id()` 取 `claude-code`（worker.md §6.3） | 映射由 `engine` 做 | 契约一致性 |
+| OQ-10 | 沙盒内降级（config OQ-5）取决于适配器能力，第一版 `claude_code` 声明 `supports_fallback: false`（worker.md §6.3）；`CapabilityTable::adapter` 委托给已登记的 `WorkerAdapter::capabilities()` | 委托，不另维护 | V06 |

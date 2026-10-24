@@ -6,7 +6,7 @@
 
 ## 1. 职责
 
-1. **CA 层次**：离线根 CA（安装时生成、导出到离线介质后从服务端删除）+ 在线中间 CA（私钥只经 `secrets` 由本模块读取）；提供安装时的引导工具（`bootstrap`）供 `deploy` 调用（architecture §7.1 步骤 1）。
+1. **CA 层次**：离线根 CA（安装时生成、导出到离线介质后从服务端删除）+ 在线中间 CA（私钥只经 `secrets` 由本模块读取）；提供安装时的引导工具（`bootstrap`，命令 `gantry pki bootstrap-ca`，名称 [提议]，deploy.md §7.3）供 `deploy` 调用（architecture §7.1 步骤 1）。
 2. **服务端证书**：签发服务端叶子证书，到期前自动续签并热加载，不断开现有连接。
 3. **配对**：`gantry pair` 的令牌与配对窗口；配对端点 `POST /v1/pair` 的全部业务逻辑（令牌核验、证书签名请求（CSR）校验、签发、创建 Device、确认码）；第一台设备为 `approver`、之后默认 `operator`（P-23）。HTTP 监听器由 `api` 持有，业务由本模块实现（[api.md §1.3](../interfaces/api.md)）。
 4. **设备注册表**：Device 实体（名称、平台、角色、状态、`last_seen`）、证书表、吊销表；事件 `device.paired` / `device.updated` / `device.revoked`。
@@ -48,9 +48,9 @@
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
-| `store` | 同一写事务内追加 `device.*` 事件并更新本模块的投影表；一致读；本模块表的迁移 | [data-model §5](../data-model.md)。**`store` 规格书尚不存在**，需求同 [policy.md §3.1](policy.md) 的占位类型（`WriteTx`、`ReadSnapshot`） |
-| `secrets` | 以使用方 `pki` 的身份读写：中间 CA 私钥、服务端叶子私钥；加密存储 | architecture §4、§6；decisions P-38。`secrets` 规格书尚不存在 |
-| `core` | `Device`、`DeviceId`、`Role`、`Platform`、`DeviceStatus`、事件枚举、`Clock` | [data-model §3 Device](../data-model.md) |
+| `store` | `Store::begin_write()` → `WriteTx`（同一事务内 `append` `device.*` 事件 + `module_conn("pki")` 读写本模块表）；`snapshot()` → `ReadSnapshot`（`ProjectionRead::device`、`device_by_cert_serial`、`devices`）；`ModuleSpec { module: "pki", migrations }`。Device 的事件派生列（`name`、`platform`、`role`、`status`、`cert_serial`、`pubkey_fpr`）由 `store` 的 `devices` 投影维护（默认内置投影器，store.md §7.2、OQ-2），`last_seen` 等非事件列归本模块的表（store.md OQ-4） | [store.md §6、§7.10](store.md)；[data-model §3 Device、§5](../data-model.md) |
+| `secrets` | 以使用方 `Consumer::Pki` 取 `ScopedSecrets`（`SecretSink`：`get` / `put` / `stage` / `commit` / `abort`）：中间 CA 私钥、服务端叶子私钥；加密存储、按使用方隔离 | [secrets.md §6](secrets.md)；architecture §4、§6；decisions P-38 |
+| `core` | `Device`、`DeviceId`、`DeviceRole`（`Ord`：`approver > operator > viewer`）、`DevicePlatform`、`DeviceStatus`、`Actor`、事件枚举、`Clock`、`Entropy`、`Consumer` | [core.md §6.1、§6.3、§6.5](core.md)；[data-model §3 Device](../data-model.md) |
 | 外部 crate（建议） | `rcgen`（签发）、`rustls` + `rustls-webpki`（握手校验）、`x509-parser`（解析与断言）、`p256`、`sha2`、`zeroize`、`subtle`、`qrcode`（终端二维码）、`arc-swap` | architecture §10 |
 | 非依赖 | **不依赖** `api`、`policy`（反向被调用）；不依赖 `egress`、`forge` | architecture §4 |
 
@@ -61,7 +61,7 @@
 | `PairRequest { token, csr_pem, device{name, platform} }` | `api` 的配对监听器（单向 TLS，未认证） | [api.md §1.3](../interfaces/api.md) | **完全不可信**：令牌、CSR、名称都要严格校验（§7.4） |
 | 客户端证书链（握手） | `api` 的双向 TLS（mTLS）监听器 | X.509，TLS 1.3 | 不可信，验证后才映射为 Device |
 | `gantry pair` / `gantry device recover` 命令 | 主机管理员（终端） | §7.8；recover 需 root | 主机 root 可信；命令参数仍严格校验 |
-| 调用方事务 `tx` + 操作者 `ActorRef` | `api`（`set_role` / `revoke`，审批已在同一 tx 被 `policy` 消费） | §6 | 可信（已通过 `api` 的角色与审批校验）；本模块对"不能改自己"等不变量再做一次防御性检查 |
+| 调用方事务 `tx` + 操作者 `Actor` | `api`（`set_role` / `revoke`，审批已在同一 tx 被 `policy` 消费） | §6 | 可信（已通过 `api` 的角色与审批校验）；本模块对"不能改自己"等不变量再做一次防御性检查 |
 | 引导配置 | `deploy` 写入的配置文件 | §10 | 可信 |
 | 离线根 CA 私钥（仅 M3 轮换、仅一次性） | 管理员从离线介质提供（口令加密） | PKCS#8（加密） | 可信但高敏感：只在内存中使用，用后 `zeroize` |
 
@@ -88,17 +88,18 @@ Rust 签名草案。`Pki` 是对外的总入口，`gantryd` 装配时取各子 t
 pub struct Pki { /* 内部句柄，见 §7 */ }
 
 impl Pki {
-    /// 打开已引导的 PKI：载入根证书（公钥）、当前 / 上一个中间 CA、服务端证书；
+    /// 打开已引导的 PKI：载入根证书（公钥）、当前 / 上一个中间 CA、服务端证书（首次启动时从 `pki.ca_dir` 的 PEM
+    /// 登记进 pki_ca / pki_server_cert，deploy.md §7.3 把它们放在 /etc/gantry/ca/）；
     /// 启动自检（§8）：服务端上发现与根证书公钥匹配的私钥 → Err(RootKeyPresent)，拒绝启动。
-    pub async fn open(cfg: PkiConfig, store: Arc<dyn Store>, secrets: Arc<dyn SecretStore>,
-                      clock: Arc<dyn Clock>, rng: Arc<dyn Rng>) -> Result<Pki, PkiError>;
+    pub async fn open(cfg: PkiConfig, store: Store, secrets: ScopedSecrets,   // = secrets.scoped(Consumer::Pki)
+                      clock: Arc<dyn Clock>, entropy: Arc<dyn Entropy>) -> Result<Pki, PkiError>;
 
     pub fn directory(&self) -> Arc<dyn DeviceDirectory>;
     pub fn admin(&self) -> Arc<dyn DeviceAdmin>;
     pub fn pairing(&self) -> Arc<dyn PairingService>;
     pub fn tls(&self) -> TlsMaterial;
     pub fn revocations(&self) -> RevocationNotifier;          // M3 起被 api 使用
-    /// 后台任务：服务端证书续签、配对窗口观察（轮询 pairing_sessions）、过期令牌清理
+    /// 后台任务：服务端证书续签、配对会话到期（更新 window() 的 watch）、过期令牌清理
     pub fn spawn_background(&self, shutdown: CancellationToken) -> JoinSet<()>;
 }
 ```
@@ -108,7 +109,8 @@ impl Pki {
 ```rust
 #[async_trait]
 pub trait DeviceDirectory: Send + Sync {
-    /// 鉴权热路径（api.md §2.1 步骤 2）：按 cert_serial 直接读库，不缓存。
+    /// 鉴权热路径（api.md §2.1 步骤 2）：按 cert_serial 直接读库，不缓存
+    /// （`ReadSnapshot::device_by_cert_serial` + 本模块 `pki_device_state.last_seen`）。
     /// 序列号不在册（哪怕链有效，如从旧备份恢复）→ None。
     async fn by_cert_serial(&self, serial: &CertSerial) -> Result<Option<Device>, PkiError>;
     async fn get(&self, id: &DeviceId) -> Result<Option<Device>, PkiError>;
@@ -122,14 +124,14 @@ pub trait DeviceDirectory: Send + Sync {
 #[async_trait]
 pub trait DeviceAdmin: Send + Sync {
     /// 1–64 字符，无控制字符；自成事务；事件 device.updated（changed: {name}）。operator 起（api 判）
-    async fn rename(&self, id: &DeviceId, name: &str, actor: &ActorRef) -> Result<Device, DeviceError>;
+    async fn rename(&self, id: &DeviceId, name: &str, actor: &Actor) -> Result<Device, DeviceError>;
     /// 在调用方事务内执行。actor.id == id → Err(SelfRoleChange)（api 映射 409 conflict / self_role_change）。
     /// 事件 device.updated（changed: {role: {from, to}}）。新角色对该设备的下一个请求立即生效。
-    async fn set_role(&self, tx: &mut dyn WriteTx, id: &DeviceId, role: Role, actor: &ActorRef)
+    async fn set_role(&self, tx: &mut WriteTx, id: &DeviceId, role: DeviceRole, actor: &Actor)
         -> Result<Device, DeviceError>;
     /// 在调用方事务内执行；吊销该设备全部证书序列号。已吊销 → Ok(AlreadyRevoked)，不重复发事件。
     /// 允许吊销自己。事件 device.revoked。不可逆：恢复必须重新配对（新 Device 记录）。
-    async fn revoke(&self, tx: &mut dyn WriteTx, id: &DeviceId, actor: &ActorRef)
+    async fn revoke(&self, tx: &mut WriteTx, id: &DeviceId, actor: &Actor)
         -> Result<RevokeOutcome, DeviceError>;
 }
 pub enum RevokeOutcome { Revoked(Device), AlreadyRevoked(Device) }
@@ -163,7 +165,7 @@ pub struct PairingTicket {
     pub expires_at: Timestamp,
 }
 pub struct PairRequest { pub token: String, pub csr_pem: String, pub device: NewDevice }
-pub struct NewDevice { pub name: String, pub platform: Platform }       // windows | macos | ios
+pub struct NewDevice { pub name: String, pub platform: DevicePlatform }       // windows | macos | ios
 pub struct PairResponse {
     pub device: Device,
     pub certificate_chain: [String; 2],         // [叶子 PEM, 中间 CA PEM]
@@ -202,14 +204,17 @@ impl RevocationNotifier { pub fn subscribe(&self) -> broadcast::Receiver<DeviceI
 
 ```rust
 pub mod bootstrap {
-    /// 安装时由 deploy 调用一次。根私钥只存在于内存，加密导出到 params.root_export_path，
-    /// 绝不写入服务端数据目录或 secrets/；返回后内存 zeroize。
-    pub fn run(params: BootstrapParams, secrets: &dyn SecretStore, clock: &dyn Clock)
-        -> Result<BootstrapReport, PkiError>;
+    /// 对应 `gantry pki bootstrap-ca`（deploy.md §7.3 的步骤 3；命令名 [提议]）。
+    /// 在 params.out_dir（必须是内存盘：tmpfs / ramfs，否则拒绝）里一次产出：
+    ///   root.key.enc（口令加密 PKCS#8）、root.crt、intermediate.key、intermediate.crt、server.key、server.crt。
+    /// 根私钥只在内存里生成与加密，不写其它位置；返回前 zeroize。
+    /// 之后的导出到离线介质、清除内存盘、把 intermediate.key / server.key 交给 `secrets`、
+    /// 把三张证书放进 pki.ca_dir，由 deploy 的脚本编排（deploy.md §7.3 步骤 4–8）。
+    pub fn run(params: BootstrapParams, clock: &dyn Clock, entropy: &dyn Entropy) -> Result<BootstrapReport, PkiError>;
     pub struct BootstrapParams {
         pub server_names: Vec<String>,            // 服务端叶子证书的主体备用名（Subject Alternative Name, SAN；DNS 名 / IP）
-        pub root_export_path: PathBuf, pub root_export_passphrase: SecretString,
-        pub install_id: String, pub data_dir: PathBuf,
+        pub root_passphrase: SecretString,        // 加密 root.key.enc
+        pub install_id: String, pub out_dir: PathBuf,
     }
     pub struct BootstrapReport { pub root_fingerprint: String, pub intermediate_serial: String, pub server_cert_serial: String }
 }
@@ -220,7 +225,7 @@ pub mod rotate {        // M3
 pub mod recover {       // gantry device recover
     pub enum RecoverCmd { List, Revoke { device_id: DeviceId }, Promote { device_id: DeviceId } }
     /// env.euid 必须为 0，否则 Err(NotRoot)。执行前降权到服务用户后再打开数据库（避免留下 root 属主文件）。
-    pub async fn run(cmd: RecoverCmd, env: &HostEnv, store: &dyn Store, clock: &dyn Clock)
+    pub async fn run(cmd: RecoverCmd, env: &HostEnv, store: &Store, clock: &dyn Clock)
         -> Result<RecoverOutcome, RecoverError>;
 }
 ```
@@ -254,15 +259,17 @@ pub mod recover {       // gantry device recover
 
 ### 7.2 持久化
 
-事件是事实源，下列表是投影 / 辅助表（本模块拥有，与事件追加同事务更新）；私钥不进数据库。
+事件是事实源。Device 的事件派生列由 `store` 的 `devices` 投影维护（`UNIQUE(cert_serial)`，store.md §7.2）；本模块只拥有下列表（`ModuleSpec { module: "pki", migrations }`，表名前缀 `pki_`，与事件在同一写事务里经 `WriteTx::module_conn("pki")` 读写；私钥不进数据库）：
 
 | 表 | 列（要点） | 说明 |
 | --- | --- | --- |
 | `pki_ca` | `kind`（`root` / `intermediate`）、`serial`、`fingerprint`、`not_before`、`not_after`、`status`（`current` / `previous` / `retired`）、`cert_pem` | 根只存证书；中间 CA 私钥在 `secrets` |
 | `pki_server_cert` | `serial`、`not_before`、`not_after`、`chain_pem`、`status` | 私钥在 `secrets` |
-| `devices` | `id`、`name`、`platform`、`role`、`status`（`active` / `revoked`）、`cert_serial`（当前）、`pubkey_fpr`、`pubkey_spki`（DER，验签用）、`created_at`、`updated_at`、`last_seen` | Device 投影；`last_seen` 不进事件日志（避免洪泛；备份恢复后可能回退，无业务后果） |
-| `device_certs` | `serial`（主键）、`device_id`、`not_before`、`not_after`、`status`（`active` / `superseded` / `revoked`） | 吊销表；握手时按 `serial` 查询 |
-| `pairing_sessions` | `id`、`token_sha256`、`created_at`、`expires_at`、`failed_attempts`、`state`（`open` / `redeemed` / `voided` / `expired`）、`redeemed_device_id?`、`confirmation_code?`、`created_by_uid` | CLI 与守护进程之间的会合点（§7.8）；明文 token 永不落库 |
+| `pki_device_certs` | `serial`（主键）、`device_id`、`not_before`、`not_after`、`status`（`active` / `superseded` / `revoked`） | 吊销表；握手时按 `serial` 查询。`devices.cert_serial` 只记当前序列号，续期宽限内的旧序列号靠这张表 |
+| `pki_device_state` | `device_id`（主键）、`pubkey_spki`（DER，验签用）、`last_seen` | 非事件列：`last_seen` 不进事件日志（避免洪泛；备份恢复后可能回退，无业务后果）；`pubkey_spki` 是公开信息，随 `device.paired` 事件的同一事务写入 |
+| `pki_pairing_sessions` | `id`、`token_sha256`、`created_at`、`expires_at`、`failed_attempts`、`state`（`open` / `redeemed` / `voided` / `expired`）、`redeemed_device_id?`、`confirmation_code?`、`created_by_uid` | 配对会话；明文 token 永不落库 |
+
+`device.paired` / `device.updated` 事件的 `data` 必须带上 `store` 的 `devices` 投影需要的全部事件派生列（`name`、`platform`、`role`、`cert_serial`、`pubkey_fpr`；续期换证或换钥时 `device.updated` 带新的 `cert_serial` / `pubkey_fpr`），具体 JSON Schema 在 `schemas/events/`（M0）；若 `store` 最终让本模块接管 `devices` 投影（store.md OQ-2），则这些列迁入 `pki_*` 表，行为不变。
 
 ### 7.3 握手校验器 `ClientCertVerifier`
 
@@ -271,7 +278,7 @@ pub mod recover {       // gantry device recover
 1. **链**：用 `rustls-webpki` 以根证书为信任锚，验证 `[叶子, 中间 CA]`，时间取 rustls 的 `TimeProvider`（由注入的 `Clock` 实现，测试可控）；增强密钥用途须含 `clientAuth`；叶子 `CA:FALSE`；公钥为 P-256，签名算法在白名单内。
 2. **中间 CA 钉扎**：出示的中间 CA 的指纹必须属于 `pki_ca` 中 `current` 或 `previous` 的集合（使泄露的中间 CA 可被单独退役，M3）。
 3. **身份格式**：叶子 `CN` 形如 `dev_<ULID>`。
-4. **吊销 / 在册检查**：用叶子 `serial` 查 `device_certs`（读库，**不加带存活时间（TTL）的缓存**）：行必须存在，状态为 `active`，或为 `superseded` 且仍在宽限期内（建议 10 分钟）；所属设备 `status = active`。**序列号不在册 → 拒绝**（失败即关闭：如从旧备份恢复后，链上有效但库里没有的证书不放行）。
+4. **吊销 / 在册检查**：用叶子 `serial` 查 `pki_device_certs`（读库，**不加带存活时间（TTL）的缓存**）：行必须存在，状态为 `active`，或为 `superseded` 且仍在宽限期内（建议 10 分钟）；再经同一 `ReadSnapshot` 读所属设备（`ProjectionRead::device`），`status = active`。**序列号不在册 → 拒绝**（失败即关闭：如从旧备份恢复后，链上有效但库里没有的证书不放行）。
 5. 通过后不在 verifier 里放任何业务状态；`api` 从 `peer_certificates()` 取叶子序列号，再用 `DeviceDirectory::by_cert_serial` 实时映射到 Device（每个请求一次，api.md §2.1）。
 
 要求：`offer_client_auth = true`、`client_auth_mandatory = true`（无证书直接失败）；`root_hint_subjects` 给出中间 CA 的 subject。
@@ -280,7 +287,7 @@ pub mod recover {       // gantry device recover
 
 #### 7.4.1 会话与令牌
 
-- `gantry pair`（主机，§7.8）→ `PairingService::open_session`：创建 `pairing_sessions` 行，`state = open`；新会话**作废**此前仍 `open` 的会话（同一时刻至多一个有效令牌）。
+- `gantry pair`（主机，§7.8）→ `PairingService::open_session`：创建 `pki_pairing_sessions` 行，`state = open`；新会话**作废**此前仍 `open` 的会话（同一时刻至多一个有效令牌）。
 - 令牌：`"gp1_"` + base64url(16 字节 CSPRNG)（128 位熵）[建议；api.md 示例形态 `gp1_…`，令牌是不透明字符串]；库里只存 `SHA-256(token)`；比较用恒定时间；日志只记哈希前 8 位十六进制。
 - 有效期：10 分钟 [建议，design.md]；单次有效；**失败 5 次即作废** [建议]：持有未匹配令牌的请求使"当前 open 会话"的 `failed_attempts` +1（无法归因到具体会话时记在当前会话上），达到上限 → `voided`。这也意味着攻击者可用 5 次错误猜测烧掉合法令牌（拒绝服务）；代价只是管理员重新运行 `gantry pair`，换取"不给无限猜测"的安全，属有意取舍。
 - 配对窗口：存在 `state = open` 且未过期的会话时，`window()` 返回 `Some`，`api` 开启配对监听器；窗口外该端口关闭（api.md §1.3；是否按需开启 OQ-12 → OQ-K3）。
@@ -302,10 +309,10 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 3. **设备字段**：`name` 1–64 字符、不含控制字符与换行；`platform ∈ {windows, macos, ios}`（`ios` 在 M4 前也接受并如实记录）→ 否则 `Validation`。
 4. **CSR**：见 §7.4.4。→ 否则 `Validation`（指针 `/csr`）。令牌在 CSR 校验失败时**不**被消耗（令牌只在签发成功后失效），但失败计入第 2 步之外的限流（`api` 按源 IP，5/min）。
 5. **单一写事务**：
-   1. 角色：`NOT EXISTS (SELECT 1 FROM devices)` → `approver`，否则 `operator`（P-23）。同一事务内判定并插入，SQLite 写事务串行化，保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。
+   1. 角色：同一写事务里 `tx.read().devices(limit 1)` 为空（**含已吊销的设备也算存在**）→ `approver`，否则 `operator`（P-23）。单写者串行化保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。该口径对"唯一 approver 被吊销后重新配对"的后果见 OQ-K11。
    2. 生成 `dev_<ULID>`、序列号；用中间 CA 私钥签发设备叶子（§7.1）。
-   3. 插入 `devices`（`status = active`）与 `device_certs`；会话置 `redeemed`，写入 `redeemed_device_id` 与 `confirmation_code`。
-   4. 追加 `device.paired`：`data = {device_id, name, platform, role, cert_serial, pubkey_fpr}`；`actor = {kind: "system", id: "pki"}`；`project_id = null`。
+   3. 追加 `device.paired`：`data = {device_id, name, platform, role, cert_serial, pubkey_fpr}`（`store` 的 `devices` 投影据此落库，`status = active`）；`actor = {kind: "system", id: "pki"}`；`project_id = null`。
+   4. 同一事务经 `module_conn("pki")` 写 `pki_device_certs`（`active`）、`pki_device_state`（`pubkey_spki`）；会话置 `redeemed`，写入 `redeemed_device_id` 与 `confirmation_code`。
 6. **响应**：`201`，`certificate_chain = [叶子, 中间 CA]`，`ca_fingerprint`，`api_base_url`，`confirmation_code`。令牌消耗后不可重放；响应丢失 → 只能重新 `gantry pair`（本端点不支持 `Idempotency-Key`，api.md §1.3）。
 7. **主机侧**：`wait_outcome` 看到 `redeemed` 后，终端打印"设备名（已去除控制字符与 ANSI 转义）· 平台 · `pubkey_fpr` · 确认码"，管理员与设备屏幕上的确认码核对。
 
@@ -336,7 +343,7 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 ### 7.6 吊销与断流
 
-- `revoke` 事务内：`devices.status = revoked`；该设备全部 `device_certs.status = revoked`；追加 `device.revoked`（`data`：`device_id`、`cert_serials[]`、`remaining_approvers`、可选 `via`）。提交成功后才广播 `RevocationNotifier`。
+- `revoke` 事务内：追加 `device.revoked`（`data`：`device_id`、`cert_serials[]`、`remaining_approvers`、可选 `via`；`store` 的 `devices` 投影据此置 `status = revoked`），并把该设备全部 `pki_device_certs.status` 置 `revoked`。提交成功后才广播 `RevocationNotifier`。
 - **新握手**：下一次握手即被拒（§7.3 第 4 步，直接读库，没有缓存可过期）。**会话恢复与 0-RTT 会绕过握手时的证书检查**，所以 `api` 的 `ServerConfig` 必须关闭会话票据与会话缓存、`max_early_data_size = 0`（见 [modules/api.md §7.2](api.md)）；本模块的验收含一个"吊销后无法恢复会话"的联调测试。
 - **已建立的连接**：HTTP 请求在每个请求的步骤 2 复查 `Device.status`；事件流 M1 由 `api` 在每次心跳（15 s）读 `directory.get`，≤ 60 s 内断开（P-30）；M3 起 `api` 订阅 `RevocationNotifier` 即时断开，心跳检查保留为兜底。
 
@@ -351,17 +358,33 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 ### 7.8 主机命令与守护进程的会合
 
-`gantry pair` 与 `gantry device recover` 是**主机上的独立进程**，不开放任何网络或 socket 入口。本规格的会合方式（待 OQ-K7 确认）：命令进程用同一 `store` 库直接打开数据库（`BEGIN IMMEDIATE` 串行化写入），守护进程靠两点感知：
+`gantry pair` 与 `gantry device recover` 是**主机上的独立进程**。`store` 在数据目录上持有排他文件锁，一个数据目录只能有一个打开它的进程（store.md §7.1，第二个得到 `AlreadyRunning`），所以守护进程运行时 CLI **不能**直接打开数据库。deploy.md §6.1 假定 CLI 经本机控制通道 `/run/gantry/control.sock`（仅 root）与 `gantryd` 通信，并把 `pair` / `device recover` 的具体通道交给本规格（deploy.md OPS-07）。本规格的方案（待 OQ-K7 确认）：
 
-- 配对：守护进程每秒轮询 `pairing_sessions`（`PairingService::window()` 的实现）；CLI 轮询会话行得到结果并打印。
-- recover：守护进程不需要被通知——设备状态与角色每次请求都实时读库，事件流的心跳检查在 ≤ 15 s 内发现吊销；`store` 的订阅需能感知其他进程追加的事件（`store` 规格须保证，如轮询 `data_version`）。
+| 模式 | 条件 | 做法 |
+| --- | --- | --- |
+| 在线 | `control.sock` 可连 | CLI 把命令发给 `gantryd` 内的 `PkiControl` 服务，由守护进程用自己的 `Store` 句柄执行；`pair` 的结果（设备名 / 指纹 / 确认码）经同一连接流回 CLI 打印；配对窗口就是进程内的 `watch`（无需轮询） |
+| 离线 | 守护进程未运行（拿得到数据目录的排他锁） | `recover` 直接 `Store::open`（降权到服务用户，避免 root 属主的 WAL / SHM 文件）执行并退出；`pair` 离线无意义（没有配对监听器），报错 |
+
+```rust
+/// gantryd 注册到 control.sock 的 pki 命令集；传输与鉴权（SO_PEERCRED 要求 uid 0、文件权限 0600）归 gantryd / deploy
+#[async_trait]
+pub trait PkiControl: Send + Sync {
+    async fn pair_open(&self, opts: OpenSession, host: HostActor) -> Result<PairingTicket, PkiError>;
+    async fn pair_wait(&self, id: PairingSessionId, timeout: Duration) -> Result<PairingOutcome, PkiError>;
+    async fn pair_cancel(&self, id: PairingSessionId, host: HostActor) -> Result<(), PkiError>;
+    async fn device_list(&self) -> Result<Vec<Device>, PkiError>;
+    async fn device_recover(&self, cmd: RecoverCmd, host: HostActor) -> Result<RecoverOutcome, RecoverError>;
+}
+```
+
+两种模式的 `recover` 共用 `recover::run` 的同一份业务实现（离线时直接传 `Store`，在线时由守护进程调用）。控制套接字是主机上仅 root 可达的本地文件套接字，沙盒看不到它，不违反 I1；它与 `/v1/*` 的 mTLS API 无关。
 
 `gantry device recover`：
 
 | 项 | 规则 |
 | --- | --- |
-| 权限 | 要求 `geteuid() == 0`，否则拒绝（退出码非 0）。通过后**降权到服务用户**再打开数据库，避免 root 属主的 WAL / SHM 文件让守护进程无法写入 |
-| 子命令（形态建议，骨架只定了命令名） | `list`（列出设备 id / 名称 / 平台 / 角色 / 状态 / `last_seen` / 指纹）；`revoke <device_id>`；`promote <device_id>`（把一台 `active` 设备提升为 `approver`） |
+| 权限 | 要求 `geteuid() == 0`，否则拒绝（退出码非 0），不触碰数据库或套接字 |
+| 子命令（形态建议，骨架只定了命令名；deploy.md §7.13 写作 `--revoke <id>` / `--promote <id>`） | `list`（列出设备 id / 名称 / 平台 / 角色 / 状态 / `last_seen` / 指纹，deploy.md 写作 `gantry device list`）；`--revoke <device_id>`；`--promote <device_id>`（把一台 `active` 设备提升为 `approver`） |
 | 确认 | 交互终端上要求输入目标设备 id 才执行；`--yes` 跳过（脚本用） |
 | 事件 | `revoke` → `device.revoked`；`promote` → `device.updated`（`changed: {role: {from, to}}`）；`actor = {kind: "system", id: "host_recover"}`，`data` 带 `via: "host_recover"`、`host_uid`、`sudo_user`（来自 `SUDO_USER`，仅供审计参考，不作为授权依据）。事件类型是否需要专门的 `device.recovered`：OQ-K7 |
 | 幂等 | 已吊销再吊销 → 成功且不重复发事件；已是 approver 再提升 → 成功且不发事件 |
@@ -450,8 +473,8 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 | --- | --- |
 | 真实 `rcgen` / `rustls` / `rustls-webpki` | 本模块是被测方，**不用 `TestCA` 代替自己**；用真实 CA 材料跑真实 TLS 握手（`tokio-rustls` 的客户端 / 服务端对） |
 | `TestCA`（M0，`contract` 泳道） | 给 `api`、`fe-desktop` 用；本模块测试里用它构造"外部 CA 签发""过期""尚未生效""错误 EKU"等**反例证书**，并校验 `TestCA` 签出的叶子能通过本模块的 verifier（二者参数一致）。若 `TestCA` 缺 `issue_expired` / `issue_not_yet_valid` / `issue_from_foreign_ca` / `issue_server_auth_only` 等变体，提替身 PR |
-| `InMemoryStore`、`FakeClock`、`SeededRng` | 事务、时间、随机数可控；崩溃类测试在提交前注入失败 |
-| `InMemorySecrets` | 实现 `SecretStore`，可注入"读不到"故障 |
+| `Store::open_in_memory` / `open_temp`（store.md §6.1）、`FakeClock`、`SeededEntropy` | 事务、时间、随机数可控；崩溃类测试在提交前注入失败 |
+| `MemorySecrets` | 实现 `SecretStore`，可注入"读不到"故障 |
 | 固定 CSR 夹具 | P-256、P-384、RSA-2048、Ed25519 各一份；带 `CA:TRUE` / 通配 SAN / `serverAuth` 请求扩展的恶意 CSR；签名被破坏的 CSR；超长 / 多块 PEM |
 
 ### 12.2 验收项
@@ -459,13 +482,13 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 **引导与证书参数（M1）**
 
 - [ ] `bootstrap` 产出：根（自签、`CA:TRUE pathlen:1`、`keyCertSign|cRLSign`、10 年）、中间（`pathlen:0`、2 年）、服务端叶子（`serverAuth`、SAN = `server_names`、90 天）；全部 P-256 / `ecdsa-with-SHA256`；用 `x509-parser` 逐项断言。
-- [ ] `bootstrap` 之后服务端数据目录与 `secrets/` 中**没有**根私钥（按公钥匹配全盘扫描断言）；导出文件需口令才能解开；`Pki::open` 在目录里放入匹配根公钥的私钥时拒绝启动。
+- [ ] `bootstrap::run` 只在 `out_dir`（内存盘）产出 `root.key.enc`、`root.crt`、`intermediate.key`、`intermediate.crt`、`server.key`、`server.crt`；`out_dir` 不是 tmpfs / ramfs → 拒绝；`root.key.enc` 需口令才能解开且公钥与 `root.crt` 一致。deploy 的清除步骤之后，服务端数据目录与 `secrets/` 中**没有**根私钥（按公钥匹配全盘扫描断言，deploy.md §7.3 步骤 8）；`Pki::open` 在目录里放入匹配根公钥的私钥时拒绝启动。
 - [ ] 设备叶子：`CA:FALSE`、`EKU = clientAuth` 仅此一项、无 DNS / IP SAN、`CN = dev_…`、`notBefore` 早于签发时刻 5 分钟、`notAfter ≤ 中间 CA notAfter`、序列号为正且全库唯一；链 `[叶子, 中间]` 可验证到根。
 - [ ] `ca_fingerprint` 等于根证书 DER 的 SHA-256；`pubkey_fpr` 等于设备 SPKI DER 的 SHA-256；两者格式为 `sha256:` + 64 位小写十六进制。
 
 **配对（M1）**
 
-- [ ] 成功路径：令牌 + 合法 CSR → `201`，含 api.md §1.3 列出的全部字段；`devices`、`device_certs` 各一行；一条 `device.paired`；`confirmation_code` 为 6 位数字且与会话行一致。
+- [ ] 成功路径：令牌 + 合法 CSR → `201`，含 api.md §1.3 列出的全部字段；`store` 的 `devices` 投影与 `pki_device_certs`、`pki_device_state` 各一行；一条 `device.paired`；`confirmation_code` 为 6 位数字且与会话行一致。
 - [ ] 第一台设备 `role = approver`，第二台起 `operator`；两个并发的首次配对恰好产生一台 `approver`。
 - [ ] 令牌：单次有效（第二次兑换 `401`）；过期（`FakeClock` 推进 10 分钟）→ `401`；作废（5 次错误）→ `401`；无效 / 已用 / 过期 / 作废四种情形的 `401` 响应体与头**逐字节相同**。
 - [ ] 数据库与日志中搜不到明文令牌（扫描库文件与捕获的 `tracing` 输出）；库里只有 SHA-256。
@@ -505,10 +528,10 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 **应急命令（M1）**
 
-- [ ] 非 root 运行 `recover` → 拒绝、退出码非 0、数据库零写入。
+- [ ] 非 root 运行 `recover` → 拒绝、退出码非 0、数据库与控制套接字零触碰。
 - [ ] root：`revoke` 吊销目标设备，事件 `actor = {system, host_recover}`、`data.via = "host_recover"`；`promote` 把一台 `operator` 提升为 `approver`；`list` 输出已剥离控制字符。
-- [ ] 吊销唯一的 approver 后，新配对的设备是 `operator`（不是 approver），用 `promote` 恢复审批能力；守护进程在 ≤ 15 s 内关闭被吊销设备的事件流，无需重启。
-- [ ] `recover` 运行后数据目录的文件属主仍是服务用户（未留下 root 属主文件）；守护进程可继续读写。
+- [ ] 吊销唯一的 approver 后，新配对的设备是 `operator`（不是 approver，OQ-K11），用 `promote` 恢复审批能力；在线模式下被吊销设备的事件流在 ≤ 15 s（心跳）内关闭，无需重启。
+- [ ] 两种模式都覆盖：**在线**（守护进程运行，经 `PkiControl` 执行，不打开数据库、不触发 `AlreadyRunning`）与**离线**（守护进程停止，`recover` 直接 `Store::open`，之后数据目录的文件属主仍是服务用户，守护进程可继续读写）；守护进程运行时尝试离线模式 → 得到 `AlreadyRunning` 并提示改用在线模式。
 - [ ] 幂等：重复吊销 / 重复提升不重复发事件。
 
 **轮换（M3）**
@@ -536,7 +559,9 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 | OQ-K4 | `confirmation_code` 核对失败的处置：设备在核对前是否已 `active`、有没有 abort / confirm 路由；码是随机还是由 TLS exporter + CSR 公钥派生（SAS） | 设备在 `201` 时即 `active`；无 abort 路由；码为 CSPRNG 随机 6 位；不一致就吊销 | api.md、安全强度 |
 | OQ-K5 | 吊销（含自吊销）最后一台 approver 是否需要额外保护；`device.revoked` 是否带 `remaining_approvers` | 不加限制，事件带计数供 UI 提示；恢复靠 `recover` | `desktop-ui`、data-model 事件 Schema |
 | OQ-K6 | **设备证书续期**：证书"短期有效"（api.md §2.1）但没有续期路由（api.md OQ-12），milestones 也没有任何泳道排期。有效期 30 天意味着每月重新配对。可选：① 把续期路由放进 M1；② M1 先用较长有效期（如 365 天）；③ 保持 30 天并接受重配 | 默认 30 天 [建议值]；内部 `renew` 接口随 M1 落地，路由不做 | api.md、milestones、`desktop-shell`（"证书将过期"提示） |
-| OQ-K7 | 主机命令与守护进程的通信：直连数据库（本文）还是本机管理 socket；`recover` 写入的事件是复用 `device.revoked` / `device.updated`（actor = system）还是新增 `device.recovered`；`gantry pair` / `recover` 的完整参数形态 | 直连数据库 + 轮询；复用现有事件，`data.via = "host_recover"` | data-model §5.2、`store`（跨进程订阅）、`deploy` |
+| OQ-K7 | 主机命令与守护进程的通信（deploy.md OPS-07 把它交给本规格）：`store` 持有数据目录排他锁，守护进程运行时 CLI 不能直连数据库；`recover` 写入的事件是复用 `device.revoked` / `device.updated`（actor = system）还是新增 `device.recovered`；`gantry pair` / `recover` 的完整参数形态 | 在线走 `/run/gantry/control.sock`（`PkiControl`），离线（守护进程未运行）`recover` 直接 `Store::open`；复用现有事件，`data.via = "host_recover"` | data-model §5.2、`deploy`（OPS-07）、`gantryd` |
 | OQ-K8 | 审批签名密钥 = TLS 密钥（api.md OQ-6 的现状）还是独立的审批密钥：设计评审建议分开生成（mTLS 密钥要能无提示后台重连，审批密钥要求每次用户在场）。若分开，配对需随 CSR 登记第二把公钥，`Device` 需新增字段，签名校验用审批公钥 | 按 api.md 现状：用设备证书公钥验签；`verifying_key` 即该公钥 | data-model Device、api.md §1.3 与 §6.3、`desktop-shell` |
 | OQ-K9 | 同一公钥重复配对的处置（本文：拒绝）；已吊销设备的公钥是否允许再次配对 | 仅拒绝与 `active` 设备重复 | — |
-| OQ-K10 | 服务端叶子的私钥是否由 `secrets` 托管（本文：是，使用方 `pki`）；`secrets` 对使用方隔离与轮换的接口 | 假定 `SecretStore` 提供 `get / put / delete` 并按使用方隔离 | `secrets` 规格 |
+| OQ-K10 | 服务端叶子私钥由 `secrets` 托管（本文：是，使用方 `Consumer::Pki`，secrets.md §6）；`secrets` 的 `stage` / `commit` 是否也用于叶子私钥续签的原子切换（先 `stage` 新私钥，证书入库后 `commit`） | 续签时 `stage` → 写 `pki_server_cert` → `commit` | `secrets` 规格 |
+| OQ-K11 | "第一台设备为 approver"的口径（deploy.md OPS-16）：本文按"设备表里从未有过任何设备"判定（含已吊销者）。后果：用 `gantry device recover --revoke` 吊销唯一的 approver 后，重新配对的设备是 `operator`，必须再 `--promote`。是否应改为"当前没有 `active` 的 approver"则新设备成为 approver（更省事，但抬高了抢先配对的风险） | 按"从未有过设备"；恢复靠 `--promote` | `deploy` 运行手册、P-23 的解读 |
+| OQ-K12 | 设备续期换证 / 换钥时 `device.updated` 要带哪些字段才能让 `store` 的 `devices` 投影更新 `cert_serial` / `pubkey_fpr`；`pubkey_spki` 是否也应进事件（目前只在 `pki_device_state`，备份恢复后可由证书重建） | 事件带 `changed: {cert_serial, pubkey_fpr}`；`pubkey_spki` 不进事件 | `schemas/events/device.*`、`store` |

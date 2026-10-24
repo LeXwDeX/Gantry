@@ -55,8 +55,8 @@
 | `core` | `SandboxId` `AttemptId` `ProjectId`、`UntrustedText`、`Usage`、`Level`、`JobSpec` / `ProgressEvent` 类型与 JSON Schema 校验 | data-model；`schemas/worker/` |
 | `repo` | `prepare_workspace`（并取 `diff.patch`） | [repo.md §6.2](repo.md#62-沙盒工作区) |
 | `egress` | 控制面 `EgressControl`：`endpoints`、`register_job`、`revoke_job`、`forget_job`、`status` | [egress.md §6](egress.md#6-对外接口) |
-| `store` | 追加 `sandbox.created` / `sandbox.destroyed` / `attempt.progress`；CAS 读写（原始产物、日志尾部、`progress.jsonl`） | data-model §5；architecture §6 |
-| 宿主机 | rootless Podman（版本 **需核实**）、`runsc`（gVisor，**需核实**版本与 rootless 兼容性）、cgroup v2、`/etc/subuid` `/etc/subgid`、Linux ≥ 5.6（`openat2`） | architecture §10 |
+| `store` | 经 `WriteTx::append` 追加 `sandbox.created` / `sandbox.destroyed` / `attempt.progress`；`Cas::put` / `put_file`（`CasKind::Artifact` / `Progress`）写原始产物、日志尾部、`progress.jsonl` | [store.md §6.1、§6.4](store.md)；data-model §5；architecture §6 |
+| 宿主机（`deploy` 提供） | 系统用户 `gantry-sbx`（subuid / subgid 各 65536、`enable-linger`）、`podman system service` 的套接字 `/run/gantry-sbx/podman.sock`（属组 `gantry-sbxctl`）、rootless Podman（版本 **需核实**）、`runsc`（gVisor，**需核实**版本与 rootless 兼容性）、cgroup v2、主机防火墙（沙盒用户只能到 Egress）、Linux ≥ 5.6（`openat2`） | [deploy.md §6.2、§6.3、§7.8](deploy.md)；architecture §10 |
 
 architecture §4 的依赖列只写了 `core, repo`；实际还依赖 `egress`（登记与计量，worker-protocol §3.2）和 `store`（事件、CAS）。`worker` 依赖 `sandbox`（它在沙盒里跑），所以 `sandbox` **不**依赖 `worker` crate：启动命令、环境变量、镜像由 `engine` 从 `WorkerAdapter` 取出后放进 `SandboxSpec.exec`。
 
@@ -215,12 +215,12 @@ Accepted → Queued → Creating → Created → Staging → Staged → Starting
 ### 7.2 staging：目录、inputs 打包与 job.json
 
 ```
-<state_dir>/sandboxes/<sbx_id>/         （属主 gantry-sbx，属组 gantry；见 §7.7）
+<workspaces_dir>/<sbx_id>/              （默认 /var/lib/gantry/workspaces，deploy.md §6.3：gantry:gantry-sbx 0710；属主细节见 §7.7）
     meta.json                            相位、container_id、deadline（UTC）、terminal_reason、egress 是否已登记；不挂载
     progress.spool.jsonl                 已接受的合法进度事件，崩溃后重读去重；不挂载
     job.json                             → /gantry/job.json  只读
     inputs/                              → /gantry/inputs    只读
-        MANIFEST.json  materials/  upstream/<node_id>/  diff.patch(review/verify)  output.schema.json  [READY(预热池)]
+        MANIFEST.json  materials/  upstream/<node_id>/  diff.patch(review/verify)  output.schema.json  READY
     work/                                → /gantry/work      读写（exec=sandbox）或只读（sandbox_ro）
     out/                                 → /gantry/out       读写，有配额；启动时为空
 ```
@@ -242,7 +242,7 @@ Accepted → Queued → Creating → Created → Staging → Staged → Starting
 
 ### 7.3 Podman 驱动与隔离配置
 
-驱动通过 `podman` 命令行（M1）调用，由 `HostExec`（§7.7）以沙盒用户身份执行；改用 Podman REST API 是等价的实现选择，不影响 trait。下面的清单是**驱动里的常量**，`ContainerSpec` 无权放宽，`validate_invariants()` 在每次 `create` 前逐项断言（违反 → `DriverError::InvariantViolated`，不创建）：
+驱动经 `gantry-sbx` 运行的 `podman system service` 套接字（libpod REST API，或等价的 `podman --remote`）调用，见 §7.7——deploy.md 已排除 `sudo`（`gantryd` 单元带 `NoNewPrivileges`）。能连上该套接字就能以 `gantry-sbx` 创建任意容器，所以下面这份清单是 `gantryd` 一侧**唯一**的参数闸：它们是**驱动里的常量**，`ContainerSpec` 无权放宽，`validate_invariants()` 在每次 `create` 前逐项断言（违反 → `DriverError::InvariantViolated`，不创建）：
 
 | 项 | 取值 | 目的 | 状态 |
 | --- | --- | --- | --- |
@@ -250,7 +250,7 @@ Accepted → Queued → Creating → Created → Staging → Staged → Starting
 | 根文件系统 | `--read-only`、`--read-only-tmpfs=false`；镜像按 `@sha256:` 固定，`--pull=never` | 根只读；运行期绝不联网拉镜像 | 确定 |
 | 可写区域 | 仅 `/gantry/work`（bind，读写）、`/gantry/out`（bind，读写，配额）、`/gantry/home`、`/gantry/tmp`、`/dev/shm`（tmpfs，`rw,nosuid,nodev`，带 `size`） | 其余皆只读 | `/gantry/tmp` 是否可加 `noexec` 取决于构建工具是否需要在 tmp 执行，**需核实**；`/gantry/work` 必须允许执行（构建 / 测试） |
 | 只读挂载 | `/gantry/job.json`、`/gantry/inputs`：`ro,nosuid,nodev,noexec` | worker 与 agent 不能改输入 | 确定 |
-| 挂载源白名单 | 只允许 `<state_dir>/sandboxes/<sbx_id>/` 下的四个路径；**不挂** Podman / docker socket、`/run/secrets`、`/proc` 以外的宿主路径、镜像仓、`repo` 的 scratch | I1：没有任何回连服务端的 socket | 确定（`validate_invariants` 断言） |
+| 挂载源白名单 | 只允许 `<workspaces_dir>/<sbx_id>/` 下的四个路径；**不挂** Podman / docker socket、`/run/secrets`、上述四个路径以外的任何宿主路径、镜像仓、`repo` 的 scratch | I1：没有任何回连服务端的 socket | 确定（`validate_invariants` 断言） |
 | 用户 | `--user 1000:1000`（容器内非 root） | 减小提权面 | 确定 |
 | 用户命名空间 | rootless 默认私有 userns：容器内 uid 1000 映射到沙盒用户的 subuid；`/etc/subuid` `/etc/subgid` 给 `gantry-sbx` 独占 ≥ 65536 的区间且不与其他系统用户重叠；不用 `--userns=host`，不用 `--privileged` | 容器内即便取得 root，在宿主上也只是无权限的映射 uid | 确定；映射区间与目录属主见 §7.7 |
 | 能力 | `--cap-drop=ALL`，`--security-opt=no-new-privileges` | 无 `CAP_NET_RAW` / `NET_ADMIN` / `SYS_ADMIN` 等 | 确定 |
@@ -302,7 +302,7 @@ gVisor 的 `--runtime-flag`（如 `platform`、`network`、`file-access`、`over
 | N5 | 沙盒不能伪造别人的身份（不能自选源地址、不能欺骗二层） | 能力全丢 + 每沙盒独立 L2 / 反欺骗 |
 | N6 | 撤销登记后，该身份的所有请求被拒（E7） | — |
 
-难点：rootless Podman 的容器网络由 `pasta` / `slirp4netns`（用户态 NAT）或 `netavark` 的 rootless 网络命名空间提供，宿主上的 Egress 进程看到的源地址往往是 NAT 后的同一个地址，**未必能区分沙盒**（**需核实**）。因此本文只固定接口，不选实现：
+难点：rootless Podman 的容器网络由 `pasta` / `slirp4netns`（用户态 NAT）或 `netavark` 的 rootless 网络命名空间提供，宿主上的 Egress 进程看到的源地址往往是 NAT 后的同一个地址，**未必能区分沙盒**（**需核实**）。[deploy.md §7.8](deploy.md) 的主机防火墙正是基于这一点按**发起用户**过滤（`meta skuid "gantry-sbx" … tcp dport { 8081, 3128 }`）：它能保证"沙盒只能到 Egress 的两个端口"（N1、N2），但所有沙盒都是同一个用户，**区分不了是哪个沙盒**（N4），deploy.md 自己也标了"需核实"（OPS-11）。因此本文只固定接口，不选实现：
 
 ```rust
 pub struct NetworkAttach { /* 渲染成 --network / --ip / --add-host 等参数；字段取决于下面哪个方案落地 */ }
@@ -314,6 +314,8 @@ pub struct NetworkAttach { /* 渲染成 --network / --ip / --add-host 等参数�
 2. 让 Egress 的沙盒侧监听运行在沙盒用户的 rootless 网络命名空间内（需要同一用户或 `setns`）。
 3. 每 job 一个 Egress 监听端口，身份 = 端口；沙盒间互访靠网络隔离阻断。
 4. 每 job 一个 Unix socket + 沙盒内回环转发——与 P-15 / I1 的"没有 socket"字面冲突，需用户确认。
+5. 每 job 一个**能力令牌**（128 位随机，放在占位 key 与 `HTTPS_PROXY` 的代理凭据里，如 `http://<token>@egress:3128`）：Egress 凭令牌映射 job，不看源地址。无需任何网络特权，与 deploy.md 的按用户防火墙互补；代价是身份来自沙盒"出示"的凭据而非网络（令牌 128 位不可猜，只在本沙盒内可见，撤销即失效，但这偏离了 P-16 / E4 "沙盒网络身份"的字面），需用户确认。
+6. 由 Egress 按"发起连接的进程"识别（`sock_diag` 加 `/proc` 找到该连接属于哪个 `pasta` / `slirp4netns` 辅助进程，再映射到容器）——需要 `gantry-egress` 能读 `gantry-sbx` 的进程信息，与 deploy.md 的用户隔离相冲，**需核实**可行性。
 
 无论哪种，`sandbox` 都要提供验收（§12.C 的网络用例），且**拿不到 Egress 绑定就不启动**（失败闭合：`infra.egress`）。
 
@@ -338,36 +340,42 @@ pub struct NetworkAttach { /* 渲染成 --network / --ip / --add-host 等参数�
 
 ### 7.7 用户映射与文件属主 **[提议]**
 
-三个互相独立的系统用户（architecture §3：沙盒由与服务端进程不同的用户拉起）：
+三个互相独立的系统用户（architecture §3；名字与家目录取自 [deploy.md §6.2](deploy.md)）：
 
 | 用户 | 角色 | 说明 |
 | --- | --- | --- |
-| `gantry` | `gantryd` | 持有状态库与 `secrets/`；**不是**沙盒用户 |
-| `gantry-sbx` | rootless Podman 的属主 | 无登录 shell，`loginctl enable-linger`，独占 subuid / subgid 区间；`staging` 根目录属主 |
+| `gantry` | `gantryd` | 持有状态库、`secrets/`、CAS、镜像仓与工作树；**不是**沙盒用户；读不到 `/var/lib/gantry-sbx`、`/var/lib/gantry-egress` |
+| `gantry-sbx` | rootless Podman 的属主 | 无登录 shell，家目录 `/var/lib/gantry-sbx`，`loginctl enable-linger`，subuid / subgid 各 65536 且不与其他用户重叠；读不到 `gantryd` 与 Egress 的任何数据（deploy.md §6.3 读取矩阵） |
 | `gantry-egress` | `egress` | 见 [egress.md](egress.md)；与上两者无文件共享 |
 
-`gantryd` 通过 `HostExec` 以 `gantry-sbx` 身份执行 Podman：
+**控制通道（方向已由 deploy.md 定下）**：`gantryd` 单元带 `NoNewPrivileges`，不能靠 `sudo` 切到 `gantry-sbx`（deploy.md §7.7、OPS-11）。由 `gantry-sbx` 运行 `podman system service`，套接字 `/run/gantry-sbx/podman.sock`，属组 `gantry-sbxctl`（成员：`gantry`）；`PodmanDriver` 经它调用。该套接字永不挂进沙盒（P-15）。引导配置项 `sandbox.runtime_user` / `sandbox.runtime_socket` 已在 deploy.md §10 列出。开发 / CI 把 `sandbox.runtime_socket` 指向调用者自己的用户级 Podman 套接字（`$XDG_RUNTIME_DIR/podman/podman.sock`），其余路径相同。
 
-- **M1 方案 [提议]**：`sudo -n -u gantry-sbx /usr/local/lib/gantry/sbx-podman <子命令> …`，sudoers 只放行这个包装器；包装器只接受固定的子命令集合（`create` `start` `stop` `kill` `wait` `inspect` `logs` `rm` `ps` `image-exists` `prepare-dirs` `read-out` `purge`），并按参数形状白名单拒绝 `--privileged`、任意 `-v` 源路径、`--network=host` 等（与 `validate_invariants` 双重把关）。备选：Podman REST API over Unix socket（属组 `gantry`）。选择见 OQ-S2。
-- **开发 / CI 模式**：`dev_same_user = true` 时以当前用户直接运行 `podman`；生产配置里出现该开关则启动失败。
-- **目录属主**：`staging` 根 `gantry-sbx:gantry`、`2750`；`job.json` 与 `inputs/` 由 `gantry` 写入（组可写）后只读；`work/` 与 `out/` 必须对容器内 uid 1000 可写，需要把属主改成映射后的 subuid，该操作只能在 `gantry-sbx` 的用户命名空间内完成（包装器的 `prepare-dirs`，等价于 `podman unshare chown -R 1000:1000 work out`，**需核实**）。`repo` 不 `chown`（repo.md §7.3）。
-- **读 `out/`**：容器内创建的文件属主是映射后的 subuid，`gantry` 通常读不了；因此 `collect` 的读取由包装器的 `read-out` 以 `gantry-sbx` 身份执行 §7.8 的安全读取，并把内容经管道（长度前缀帧）交给 `gantryd`；`gantryd` 再重算 `sha256`、复核上限后落 CAS。包装器自身对沙盒产出同样不信任。
-- **销毁**：删除含 subuid 属主文件的 staging 同样经包装器 `purge`。
+**目录与属主**（deploy.md §6.3：`workspaces/` 为 `gantry:gantry-sbx 0710`，作业目录的所有权与 ACL "待定"，OPS-11）：
+
+- 作业目录 `<workspaces_dir>/<sbx_id>/` 由 `gantryd` 创建；`job.json` 与 `inputs/` 由 `gantry` 写入后设为只读，`gantry-sbx` 经组读取。
+- `repo` 与 `sandbox` 都不 `chown`，`gantryd` 也不持有 `CAP_CHOWN`。
+- 两个未决的难点（OQ-S2）：
+  - **`work/`**：`repo` 以 `gantry` 身份写入的文件，容器内 uid 1000（映射到 `gantry-sbx` 的某个 subuid）无权修改，而 `gantry` 无法把属主改成那个 subuid。候选：① `repo` 产出归档，由 `gantry-sbx` 名下的一次性**辅助容器**（固定镜像、只挂作业目录）解包，文件天然属于容器用户；② 把 `work/` 作为 `:O`（overlay）挂载，容器写入落在上层，下层保持原样；③ 作业目录交给 `gantry-sbx` 所有并用 `:U` 适配属主，同时让 `repo` 能以组权限写入。三者的行为在 rootless + gVisor 下都 **需核实**。
+  - **`out/`**：容器内创建的文件属主是映射后的 subuid，`gantry` 通常读不了；读取方式见 §7.8。
+- **销毁**：删除含 subuid 属主文件的作业目录同样要在 `gantry-sbx` 的用户命名空间内进行（辅助容器执行删除）；经同一控制通道。
 
 ### 7.8 `collect`：先停后取（intake，V2）
 
 前置：容器已 `exited` 且确认无残留进程（§7.5）；**绝不**在进程仍可能写入时读取（消除检查时与使用时间窗竞争，TOCTOU）。读取只发生在 `out/`，不读 `work/` `home/` `tmp/`。
 
-对 `out/` 的每个目录项（以 `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)` 的目录 fd 为根枚举）：
+`SandboxDriver::read_out`（§6.2）把 `out/` 的目录项作为"不可信条目流"交给上层，`sandbox` 对每个条目施加下表的规则。**规则与读取方式无关**；读取方式取决于 §7.7 的属主方案（OQ-S2）：
+
+- **方式 A，主机直读**（作业目录对 `gantry` 可读时）：以 `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)` 打开的目录 fd 为根枚举；`fstatat(AT_SYMLINK_NOFOLLOW)` 判型；`O_NOFOLLOW | O_NONBLOCK | O_RDONLY` 打开后对 fd 再 `fstat` 复核。
+- **方式 B，经运行时导出**（`out/` 属主为映射 subuid、`gantry` 读不了时）：容器已停止，经 Podman 的归档导出接口（libpod `containers/{id}/archive`，等价 `podman cp`）取 `/gantry/out` 的 tar 流（对 bind mount、FIFO、符号链接的行为 **需核实**）。tar 由 Podman 生成，但**条目的名字、类型、大小仍由沙盒决定**，所以同样按规则处理：只接受普通文件条目；符号链接、硬链接、目录、设备、FIFO、PAX / GNU 扩展头、稀疏文件一律记入 `unexpected`；tar 头里声明的大小不可信，以实际读到的字节数为准并在"上限 + 1"处中止；总字节数封顶。
 
 | 检查 | 方法 |
 | --- | --- |
-| 名字白名单 | 精确匹配 `result.json` `changes.patch` `report.md` `proposals.json`（区分大小写）；其余（含子目录、`result.json.tmp` 残留）→ 记入 `unexpected`，丢弃 |
-| 必须是普通文件 | `fstatat(AT_SYMLINK_NOFOLLOW)` 判定；符号链接、`nlink > 1` 的硬链接、FIFO、设备、socket 一律丢弃；用 `O_NOFOLLOW | O_NONBLOCK | O_RDONLY` 打开，再对已打开的 fd `fstat` 复核 |
-| 大小 | 读到"上限 + 1 字节"即判超限，不信 `stat` 的大小；上限取 `io.artifacts.*` 与 `JobSpec.constraints.patch.max_bytes` 中适用者 |
+| 名字白名单 | 精确匹配 `result.json` `changes.patch` `report.md` `proposals.json`（区分大小写，名字里不得含路径分隔）；其余（含子目录、`result.json.tmp` 残留）→ 记入 `unexpected`，丢弃 |
+| 必须是普通文件 | 符号链接、`nlink > 1` 的硬链接、FIFO、设备、socket 一律丢弃，不跟随、不阻塞（方式 A 靠 `lstat` 与 `O_NONBLOCK`，方式 B 靠条目类型） |
+| 大小 | 读到"上限 + 1 字节"即判超限，不信 `stat` / 头里声明的大小；上限取 `io.artifacts.*` 与 `JobSpec.constraints.patch.max_bytes` 中适用者 |
 | 文本 | `result.json` / `proposals.json` / `report.md` 必须是合法 UTF-8；JSON 深度 ≤ 32、禁止重复键（需要自带检测重复键的 JSON 解析，`serde_json` 默认不拒绝） |
 | 按 JobSpec 取舍 | `output.patch = forbidden` 却存在 `changes.patch` → 丢弃并记 `unexpected`，**不**使 Attempt 失败 |
-| 落地 | 复制进 CAS，之后只用 CAS 副本；`sha256` 由服务端重算 |
+| 落地 | 流式写入 CAS（`Cas::put_file`，`CasKind::Artifact`），之后只用 CAS 副本；`sha256` 由服务端重算 |
 
 同时取：运行时事实（退出码、信号、`oom_killed`、完成时间）、stdout / stderr 尾部、`progress.jsonl`、Egress 计量与标志。`collect` 的结果只取决于已停止沙盒的 `out/`，重复执行得到相同的内容寻址对象。`result.json` 的 schema、`job_id` / `job_sha256` 匹配、产物声明与实际一致等语义校验（V3、V4）归 `engine`，`sandbox` 不解释内容。
 
@@ -395,7 +403,7 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 | 容器与 staging 都不在 | `Infra{Lost}` |
 | 相位在 `Creating` / `Staging`（尚未启动） | 重新走该阶段（`create` 以 `--replace` / 先 `remove` 保证幂等）；或销毁后以新沙盒重试，由 `engine` 决定 |
 
-`sweep_orphans(live)`：列出带 `gantry.managed=1` 的容器与 `<state_dir>/sandboxes/*`，对不在 `live` 且超过宽限（默认 5 min [建议值，待调优]）的，先 `revoke_job` 再 `remove` 与 `purge`。巡检周期默认 10 min [建议值，待调优]。`gantryd` 优雅退出时**不**杀运行中的容器，留给重启后的 `recover` 接管（deadline 已持久化）。
+`sweep_orphans(live)`：列出带 `gantry.managed=1` 的容器与 `<workspaces_dir>/*`，对不在 `live` 且超过宽限（默认 5 min [建议值，待调优]）的，先 `revoke_job` 再 `remove` 与 `purge`。巡检周期默认 10 min [建议值，待调优]。`gantryd` 优雅退出时**不**杀运行中的容器，留给重启后的 `recover` 接管（deadline 已持久化）。
 
 ### 7.11 预热池（M2）**[提议]**
 
@@ -428,8 +436,8 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 附加要求：
 
 - 不得有任何代码路径让沙盒用户以外的主体（含 `gantryd`）在容器仍可写入时读取 `out/`。
-- `meta.json`、`progress.spool.jsonl`、`HostExec` 的输入输出里不得出现密钥；日志中的路径与名字按不可信文本处理。
-- 包装器 `sbx-podman` 与 `validate_invariants` 是两道独立的闸，任何一道都能单独拒绝危险参数。
+- `meta.json`、`progress.spool.jsonl`、对 Podman 套接字的请求与响应日志里不得出现密钥；日志中的路径与名字按不可信文本处理。
+- `validate_invariants()` 是 `gantryd` 一侧唯一的参数闸（没有包装器二次把关），按安全边界对待：它的输入只能来自 `ContainerSpec`（没有"透传任意 Podman 参数"的入口），并有属性测试覆盖（§12.A）。`gantry-sbx` 无特权、读不到 `gantryd` 与 Egress 的数据（deploy.md 读取矩阵）是其后的第二道防线。
 - 资源限额由 cgroup 强制，不依赖 worker 自觉；若宿主未委派所需控制器，驱动在 `capabilities()` 里如实报告，`gantryd` 启动自检对 `mem` / `pids` 缺失直接拒绝启动 **[提议]**。
 
 ## 9. 错误与恢复
@@ -474,10 +482,10 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
-| `sandbox.state_dir` | `/var/lib/gantry/sandboxes` | staging 根 |
-| `sandbox.runtime_user` | `gantry-sbx` | rootless Podman 属主 |
-| `sandbox.helper_path` | `/usr/local/lib/gantry/sbx-podman` | `HostExec` 包装器 |
-| `sandbox.dev_same_user` | `false` | 仅开发 / CI |
+| `sandbox.workspaces_dir` | `/var/lib/gantry/workspaces` | 作业目录根（deploy.md §6.3 的 `…/workspaces/`） |
+| `sandbox.runtime_user` | `gantry-sbx` | rootless Podman 属主（deploy.md §10 已列） |
+| `sandbox.runtime_socket` | `/run/gantry-sbx/podman.sock` | `podman system service` 套接字（deploy.md §10 已列）；开发 / CI 指向用户级套接字 |
+| `sandbox.helper_image` | 无 | §7.7 的辅助容器镜像（按 digest 固定），OQ-S2 方案选定后才需要 |
 | `sandbox.out_quota_bytes` | 12 MiB | `out/` 总配额（四个产物上限之和加余量）；`changes.patch` 上限随 `policies.patch.max_bytes` |
 | `sandbox.tmpfs_home_mb` / `tmpfs_tmp_mb` | 256 / 512 | tmpfs 大小 [建议值，待调优] |
 | `sandbox.log_max_bytes` | 16 MiB | 容器日志上限 |
@@ -496,7 +504,7 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 
 `Sandbox.status` 的 `running` / `stopped` / `lost` 没有对应事件（OQ-S9）；`artifact.unexpected` 在 worker-protocol 里被称为"审计"，但数据模型事件目录里没有它，本文把它放进 `JobOutcome.unexpected` → `ResultBundle.validation.unexpected_artifacts`。
 
-日志（结构化，字段 `job_id`、`sandbox_id`、`phase`）：每个相位的开始 / 结束 / 耗时、`HostExec` 命令名（不含内容）、终止原因、intake 丢弃项、进度丢弃计数；路径与名字按不可信文本。不记录材料正文与产物内容。
+日志（结构化，字段 `job_id`、`sandbox_id`、`phase`）：每个相位的开始 / 结束 / 耗时、对 Podman 套接字的调用名（不含内容）、终止原因、intake 丢弃项、进度丢弃计数；路径与名字按不可信文本。不记录材料正文与产物内容。
 
 指标：`sandbox_active{status}`、`sandbox_queue_depth`、`sandbox_phase_seconds{phase}`、`sandbox_terminal_total{cause,timer}`、`sandbox_oom_total`、`sandbox_intake_rejected_total{reason}`、`sandbox_progress_dropped_total{reason}`、`sandbox_egress_register_failures_total`、`sandbox_orphans_swept_total`、`sandbox_pool_{size,hits,misses,discarded}`（M2）。
 
@@ -509,6 +517,7 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 - [ ] `create` 后容器未启动；`start` 后运行；`stop(grace)` 先 SIGTERM，宽限后 SIGKILL，返回时已 `exited` 且无残留进程。
 - [ ] `remove` 幂等；`list` 按标签选择；`logs(since)` 可重复读且顺序稳定。
 - [ ] `validate_invariants`：`ContainerSpec` 含 host 网络、特权、设备、cap_add、可写 `inputs`、宿主任意路径挂载、socket 挂载、含 `*TOKEN*` 的环境变量名（非豁免）、未固定 digest 的镜像——每一种都被拒绝，且不产生容器。
+- [ ] 属性测试：对随机生成的 `ContainerSpec`（含恶意字段取值），`validate_invariants` 通过的规格渲染出的 Podman 请求**永远**不含 `privileged`、`host` 网络 / PID / IPC / userns、`cap_add`、设备、`seccomp=unconfined`、`apparmor=unconfined`、宿主任意路径挂载、套接字挂载，且根只读、`no-new-privileges` 与 `cap_drop=ALL` 存在（它是 `gantryd` 一侧唯一的参数闸）。
 - [ ] `FakeSandboxDriver`（M0）满足 §6.1 `SandboxService` 的语义：`submit` 幂等、`outcome` 只 resolve 一次、`cancel` 与 `release` 幂等。
 
 ### B. staging 与材料打包（M1）
@@ -529,6 +538,7 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 - [ ] 环境变量集合恰等于白名单（逐项比对）；无 `GITHUB_TOKEN`；`env` 与 `/proc/*/environ` 里搜不到测试用的模型 key 哨兵串。
 - [ ] **M1 退出标准：沙盒内读不到任何模型 key**：真实 `egress` 的密钥库里放哨兵 `sk-gantry-sentinel-…`，沙盒内 `fake-worker --probe` 遍历 `env`、所有 `/proc/<pid>/environ`、整个可读文件系统（含 `/gantry/*`、镜像层、tmpfs）搜索哨兵与 `sk-` 模式，并经反向代理完成一次真实模型调用（`MockUpstream` 在带外记录它收到的 `x-api-key`，**不**回显）；断言：沙盒侧从未出现哨兵，上游收到的是哨兵。
 - [ ] **M1 退出标准：沙盒内访问 `github.com` 与 `api.github.com` 失败**：直连（含按 IP 直连）失败；经 `HTTPS_PROXY` 的 CONNECT 被 `egress` 拒绝（403）并留下带 `job_id` 的审计记录；`git clone https://github.com/...` 失败。
+- [ ] 与主机防火墙联跑（deploy.md §7.8 的 `nft` 规则，`doctor` 的金丝雀沙盒）：沙盒只能到 Egress 的两个端口；防火墙规则被临时移除时，本模块的网络配置本身（无 DNS、无多余路由、私有网络命名空间）仍使 `github.com` 不可达（两道独立防线各自可验）。
 - [ ] 网络面：沙盒内尝试连接 `127.0.0.1:<gantryd 端口>`、宿主网关其他端口、局域网地址、`169.254.169.254`、另一个并发沙盒的地址、UDP/53 DNS，全部失败或快速超时；IPv6 不可用。
 - [ ] 两个并发沙盒的身份互不混淆：A 的请求在 `egress` 里归到 A 的 `job_id`，伪造 B 的源地址 / 头部无效（取决于 OQ-S1 的方案，用例按方案落地后补全）。
 - [ ] 资源：fork 炸弹被 `pids` 限制；内存超限被 OOM 终止且 `TerminalFacts.oom = true`（`runc`；`runsc` 的 OOM 报告 **需核实**，不能报告时用例改为断言退出信号 + cgroup 事件）；`work/` 写满时按 OQ-S3 的方案失败而不是写满宿主。
@@ -556,6 +566,7 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 
 - [ ] `out/` 里有符号链接 `result.json -> /etc/passwd`、FIFO、设备文件、硬链接、子目录、额外文件、`result.json.tmp` 残留：均被丢弃并出现在 `unexpected`，**不跟随、不阻塞**（FIFO 用例带超时断言）。
 - [ ] 大小边界：`limit` 通过、`limit + 1` 被拒；`stat` 声称很小但实际很大的文件按实际读到的字节判超限。
+- [ ] （方式 B，归档导出）构造的 tar 流：头里声明的 `size` 很小而实际数据很大、符号链接 / 硬链接 / 目录 / FIFO / 设备条目、PAX 与 GNU 扩展头、稀疏文件、重复条目、含 `/` 或 `..` 的条目名、总字节数超限——全部记入 `unexpected` 或被拒，读取在上限 + 1 处中止，不无限缓冲。
 - [ ] 非 UTF-8 的 `result.json`、含重复键的 JSON、深度 33 的 JSON → 被拒。
 - [ ] `output.patch = forbidden` 却有 `changes.patch` → 丢弃并记 `unexpected`，其余产物照常交出。
 - [ ] 先停后取：在容器仍运行时调用 `read_out` 被拒；`worker` 在被杀的瞬间仍在写，取到的内容在 `stop` 返回后稳定且重复 `collect` 的 CAS 哈希相同。
@@ -591,17 +602,17 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 
 | # | 问题 | 影响 | 本文暂用 |
 | --- | --- | --- | --- |
-| OQ-S1 | **沙盒网络身份**：契约要求 Egress 按"登记时绑定的源地址"区分沙盒（worker-protocol E4），但 rootless Podman 下宿主上的 Egress 未必能观察到每个沙盒的唯一源地址；候选方案见 §7.4（特权辅助建网 / Egress 入驻 rootless netns / 每 job 端口 / 每 job Unix socket，其中最后一个与 P-15 字面冲突）。这是 M1 退出标准的前置依赖 | `sandbox`、`egress`、`deploy` | 只固定 `NetworkAttach` 接口；拿不到绑定就不启动 |
-| OQ-S2 | `gantryd`（`gantry`）与 rootless Podman（`gantry-sbx`）之间的桥接：`sudo` 包装器 / Podman REST socket / 其他；`out/` 的读取与 staging 的清理是否都经包装器 | 部署复杂度、攻击面 | `sudo` 包装器；开发模式同用户 |
+| OQ-S1 | **沙盒网络身份**：契约要求 Egress 按"登记时绑定的源地址"区分沙盒（worker-protocol E4），但 rootless Podman 下宿主上的 Egress 未必能观察到每个沙盒的唯一源地址；deploy.md §7.8 的主机防火墙按发起**用户**过滤，只能保证"沙盒只能到 Egress 的两个端口"，区分不了沙盒（它自己也标了"需核实"，OPS-11）。候选方案见 §7.4（特权辅助建网 / Egress 入驻 rootless netns / 每 job 端口 / 每 job Unix socket / 每 job 能力令牌 / 按发起进程识别）。这是 M1 退出标准的前置依赖 | `sandbox`、`egress`、`deploy` | 只固定 `NetworkAttach` 接口；拿不到绑定就不启动 |
+| OQ-S2 | **`gantryd` 与 `gantry-sbx` 之间的文件所有权**：控制通道已由 deploy.md 定为 Podman 套接字（`sudo` 与 `NoNewPrivileges` 冲突），但 `work/` 如何对容器内 uid 可写（辅助容器解包 / `:O` overlay / `:U`）、`out/` 如何读（主机直读 / 归档导出）、作业目录的所有权与 ACL（deploy.md OPS-11 "待定"）、销毁含 subuid 文件的目录，都未决；备选的"套接字"权限面比包装器更大，`validate_invariants` 因此成为唯一的参数闸 | 部署复杂度、攻击面、`repo` 与 `sandbox` 的边界 | 控制通道用套接字；`work/` 与 `out/` 的方案留待 spike（§7.7、§7.8 给出候选与统一的 intake 规则） |
 | OQ-S3 | `work/` 与 `out/` 的磁盘配额如何强制（bind mount 无配额；候选：专用文件系统 + project quota、loop 镜像、tmpfs、容器存储配额） | 写满宿主风险、`limits.disk` 语义 | 未强制，仅由工作区预检 + `out/` 配额 + 巡检告警兜底 |
 | OQ-S4 | gVisor 在 rootless Podman 下的兼容性：网络模式（`sandbox` / `host` / `none`）与 OQ-S1 方案的关系、cgroup 限额、OOM 报告、`--file-access`、`--platform`（`systrap` / `kvm`）、与 AppArmor / seccomp 的叠加 | M2 默认开启 gVisor 的可行性 | M1 用 `runc` 先行；M2 前做兼容性 spike |
-| OQ-S5 | 镜像组成与归属：`sandbox.base_image` 只有一个，而 worker 适配层要"声明镜像"（含固定版本的 `claude` CLI 与工具链）；项目自己的语言工具链（Rust / Node / Python）怎么进沙盒（预装、devcontainer、运行期经 Egress 安装）；谁构建、谁发布、谁预拉取 | `sandbox`、`worker`、`deploy` | `SandboxSpec.exec.image_digest` 由 `engine` 从适配层取；`sandbox` 只校验 digest 并 `--pull=never` |
+| OQ-S5 | 镜像组成与归属：`sandbox.base_image` 只有一个，而 worker 适配层要"声明镜像"（含固定版本的 `claude` CLI 与工具链）；项目自己的语言工具链（Rust / Node / Python）怎么进沙盒（预装、devcontainer、运行期经 Egress 安装）；谁构建、谁发布、谁预拉取（deploy.md OPS-11 也在问：`sandbox.base_image` 无默认值而设置页未排期，M1 谁来填） | `sandbox`、`worker`、`deploy` | `SandboxSpec.exec.image_digest` 由 `engine` 从适配层取；`sandbox` 只校验 digest 并 `--pull=never` |
 | OQ-S6 | `Sandbox.trust`（trusted / untrusted）在驱动层的语义：骨架只有字段，没有区别对待的规则（design.md 的"档位 × 信任级别"表是历史记录，且已被 P-09 缩小范围） | 隔离强度是否随 trust 变化 | 记录该字段，两种取值都按最严配置处理，不放宽 |
 | OQ-S7 | `devcontainer.json` 安全子集的字段清单，以及"环境复现"在无网络沙盒里如何完成（依赖安装走哪个白名单） | M2 | 只保证加固项不可被覆盖 |
 | OQ-S8 | 预热池用 `READY` 文件标记是否接受（worker-protocol OQ-16）；本文让**所有**路径都创建 `READY`（常规路径在 `start` 前，预热池在认领后），以统一 worker 逻辑，这比契约字面（"M1 不需要"）多做了一步；池分桶策略与 TTL | M2、worker 启动逻辑 | §7.2 第 7 步、§7.11 |
 | OQ-S9 | 事件缺口：`Sandbox.status` 的 `running` / `stopped` / `lost` 没有对应事件；`artifact.unexpected` 审计不在事件目录里 | 投影与审计 | 状态保存在 `meta.json` 与标签；`unexpected` 进 `ResultBundle` |
-| OQ-S10 | 内容寻址结果库（CAS）在 architecture §6 有，但 §4 模块地图中无人拥有；`ResultBundle` 清单由谁组装并写 `Attempt.result_ref`（worker-protocol §5.2 说"服务端生成"，未指明模块）；被拒产物保留期（OQ-12）；M0 替身清单没有内存 store / CAS / `FakeEgress` | `sandbox`、`engine`、`store` | 暂依赖 `store` 的 CAS trait；`sandbox` 交原料，`engine` 组装清单 |
-| OQ-S11 | 命名层级：milestones 里的 `FakeSandboxDriver` 被说成替代 `sandbox` + `worker`、供 `engine` 使用，所以它应实现引擎面 `SandboxService`；而 architecture §11 的 `SandboxDriver` trait 是容器面。两者需要不同的名字 | M0 替身与 trait 命名 | 引擎面 `SandboxService`、容器面 `SandboxDriver`；`FakeSandboxDriver` 实现前者 |
+| OQ-S10 | CAS 归属已由 store.md 提议归 `store`（其 OQ-3）：`Cas::put` / `put_file` / `open`，`CasKind::{ResultBundle, Artifact, Progress, Quarantine}`，`sandbox` 写原始产物、`engine` 写结果包清单（store.md §4），与本文一致。仍待定：`ResultBundle` 清单的形状（worker-protocol §5.2 标 **[提议]**）；被拒产物保留期（OQ-12）；`store.cas.max_object_bytes`（默认 64 MiB）与产物上限的关系；M0 替身清单没有内存 store / `FakeEgress`（用 `Store::open_temp` 与本模块自带的 `FakeEgressControl`） | `sandbox`、`engine`、`store` | `sandbox` 交原料，`engine` 组装清单 |
+| OQ-S11 | 命名层级：milestones 里的 `FakeSandboxDriver` 被说成替代 `sandbox` + `worker`、供 `engine` 使用，所以它应实现引擎面接口；architecture §11 的 `SandboxDriver` trait 则是容器面。engine.md 把引擎面端口也叫 `SandboxDriver`，并把它写成逐步的 `create / stage / start / cancel / collect / destroy / 重新接管`、回传 `RawArtifacts`；本文把引擎面接口收敛成 `SandboxService::submit / cancel / release / recover`（生命周期由本模块内部驱动），回传 `JobOutcome`。两边需要对齐一个名字与粒度 | M0 替身与 trait 命名、`engine` 的终结管线 | 引擎面 `SandboxService`、容器面 `SandboxDriver`；`FakeSandboxDriver` 实现前者；`RawArtifacts` ≈ `JobOutcome` |
 | OQ-S12 | 材料总量分配算法（总量 512 KiB 超限时各条如何分配）与 `attempt.progress` 的采样参数骨架未定 | stage、展示 | §7.2 / §7.6 的 **[提议]** |
 | OQ-S13 | M3 逃逸检测的信号清单（意外的系统调用拒绝 / gVisor panic 日志、Egress 收到未登记身份的连接、挂载点之外的宿主文件变化……）及告警去向（InboxItem？日志？） | M3 | 暂不实现，仅预留 `capacity()` 与日志字段 |
 | OQ-S14 | `engine` / `guardian` 的失败重试策略不归本模块；但 `Infra{*}` 是否一律"新沙盒重试"、重试上限，需 `engine` 规格确认 | 错误恢复 | `sandbox` 只返回 `Infra` 与 `retryable` 提示 |

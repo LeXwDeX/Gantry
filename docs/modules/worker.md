@@ -320,7 +320,7 @@ worker 自身不重试任何事：重试是 `engine` 在新 Attempt 里的决定
 | `models.worker.max_turns`（默认 60） | `constraints.limits.max_turns` |
 | `models.worker.attempt_wall_s` ∧ `sandbox.limits.wall_time_s` ∧ 预算剩余 | `constraints.limits.wall_time_s` |
 | `sandbox.idle_timeout_s` | `constraints.limits.idle_timeout_s` |
-| `models.worker.adapter`（默认 `claude_code`） | 选择 `WorkerAdapter` 实现与 `execution.agent` |
+| `models.worker.adapter`（默认 `claude_code`） | 选择 `WorkerAdapter` 实现与 `execution.agent`；设置里是 `claude_code`，协议里是 `claude-code`，由 `engine` 做映射（models.md OQ-9，OQ-W12） |
 | `policies.*` 快照 | `constraints.paths`、`constraints.patch` |
 
 适配层内部常量（编译期 / 镜像内，非设置）**[建议值，待调优]**：
@@ -449,3 +449,4 @@ worker 自身不重试任何事：重试是 `engine` 在新 Attempt 里的决定
 | OQ-W9 | Codex 等第二个适配何时验证"接口不变"；若只支持订阅登录则不能无人值守（Q-03） | 协议的 agent 无关性是否经得起检验 | 仅保证 trait 与协议无 agent 专有字段 |
 | OQ-W10 | `upstream/` 内联进 prompt 时的包装格式：worker-protocol 说"用同一 nonce 包装"，但 `materials` 的标记行只允许 `owner/repo#N` 形式的 `source`，上游产物没有这种来源 | I5 的实现细节 | 适配层用 `kind=upstream_output`、`source` 取工作区仓库加固定占位项，标记行仍不含自由文本；待契约确认 |
 | OQ-W11 | 终止宽限：JobSpec 里没有 `kill_grace_s`，worker 不知道服务端的宽限 | 取消时能否来得及写 `cancelled` 的结果 | 保守常量 5 s |
+| OQ-W12 | 适配器标识不一致：config.md §3.2 的 `models.worker.adapter` 取 `claude_code`，worker-protocol 的 `execution.agent` 与本文 `WorkerAdapter::agent_id()` 取 `claude-code` | 映射位置、校验（V06） | 映射由 `engine` 做；`agent_id()` 取协议里的写法 |
