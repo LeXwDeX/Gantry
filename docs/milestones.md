@@ -9,8 +9,8 @@
 | 契约 | `contract` | `core`、`schemas/` |
 | 后端·引擎 | `be-engine` | `store`、`engine`、`conversation`、`models` |
 | 后端·Forge | `be-forge` | `forge`、`guardian` |
-| 执行 | `exec` | `sandbox`、`worker`、`egress` |
-| 安全 | `sec` | `pki`、`policy`、`api` 的鉴权部分 |
+| 执行 | `exec` | `repo`、`sandbox`、`worker`、`egress` |
+| 安全 | `sec` | `pki`、`policy`、`secrets`、`api` 的鉴权部分 |
 | 前端·桌面 | `fe-desktop` | `desktop-shell`、`desktop-ui` |
 | 前端·手机 | `fe-mobile` | `mobile` |
 | 部署 | `ops` | `deploy`、CI |
@@ -24,6 +24,7 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 | Mock API 服务（由 `schemas/openapi.yaml` 生成，事件流回放录制数据） | 整个服务端 | `fe-desktop`、`fe-mobile` |
 | `FakeForge`（内存中的仓库、PR、check，可注入 webhook） | `forge` | `be-engine`、`guardian` 测试 |
 | `FakeSandboxDriver`（不起容器，按脚本返回 Worker 协议结果） | `sandbox` + `worker` | `be-engine` |
+| `FakeRepo`（内存中的镜像仓与工作树，补丁按脚本判定通过 / 拒绝） | `repo` | `be-engine`、`be-forge` |
 | `FakeModelProvider`（按规则返回固定输出） | `models` 的外部调用 | `be-engine`、`conversation` |
 | `TestCA`（测试用证书与设备） | `pki` | `api`、`fe-desktop` 集成测试 |
 
@@ -49,11 +50,11 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 
 | 泳道 | 范围 |
 | --- | --- |
-| `be-engine` | `store`：事件日志、投影、SSE 游标；`engine`：Low 档模板、阶段机、Outbox 入队；`conversation`：意图解析（任务 / 查询）、创建交付单元、事件行；`models`：打杂与大脑模型调用、用量记账 |
-| `be-forge` | `forge`：App 鉴权与 token 缓存、webhook 接收（HMAC、去重、先返回 2xx 再处理）、对账巡检、Outbox 执行（幂等）、服务端 git 推送、创建 PR、快照同步 |
-| `exec` | `sandbox`：rootless Podman 驱动、从服务端镜像仓准备工作区、资源限制、补丁提取；`worker`：在沙盒内运行 Claude Code headless，执行 Worker 协议；`egress`：白名单、只对模型 API 注入 key、出网日志 |
-| `sec` | `pki`：离线根 + 在线中间 CA、配对端点、CSR 签发、确认码、吊销；`api`：mTLS、设备鉴权、路由骨架、事件流；`policy` v0：路径规则（workflow / 依赖清单 / lockfile 改动直接拒绝）、merge 需审批 |
-| `fe-desktop` | `desktop-shell`：密钥生成与存储、mTLS 客户端、配对流程；`desktop-ui`：项目 tab、左侧列表、主对话（发送、接收、事件行、气泡边框）、检视器（阶段、DAG 列表）、设置页·模型 |
+| `be-engine` | `store`：事件日志、投影、SSE 游标；`engine`：Low 档模板（`single` 节点）、阶段机（含 `forge.base_advanced` 触发的 merge 重验）、Outbox 入队；`conversation`：`intent` 意图解析（任务 / 查询）、创建交付单元、事件行；`models`：打杂与大脑模型的直接调用（经 Egress）、用量记账（以 Egress 计量为准） |
+| `be-forge` | `forge`：App 鉴权与 token 缓存、webhook 接收（HMAC 且接受当前与上一个 secret、去重、先返回 2xx 再处理）、对账巡检、拉取更新镜像仓、订阅默认分支 push 产生 `forge.base_advanced`、Outbox 执行（幂等）、推送 `repo` 生成的提交、创建 PR、快照同步 |
+| `exec` | `repo`：每项目裸镜像仓、工作树与写权锁、从镜像准备沙盒工作区、在干净检出上应用补丁并调 `policy` 校验、生成提交；`sandbox`：rootless Podman 驱动、挂载工作区、资源限制、补丁提取；`worker`：在沙盒内运行 Claude Code headless，执行 Worker 协议；`egress`：模型 API 反向代理（注入 key、按沙盒网络身份计量）、包仓库 CONNECT 白名单（不注入凭据）、出网日志 |
+| `sec` | `secrets`：加密存储、按使用方隔离读取、加密备份；`pki`：离线根 + 在线中间 CA、配对端点、CSR 签发、确认码、首台设备为 approver（之后默认 operator）、吊销、主机应急命令 `gantry device recover`；`api`：mTLS、设备鉴权、路由骨架、事件流（心跳内的吊销检查）；设备签名审批最小实现：统一签名原语（challenge、规范化、验签、`Gantry-Approval`），覆盖 `merge_pr`、`settings_update`（凭据与放宽类）、`device_role_change`、`device_revoke`；`policy` v0：workflow / 依赖清单 / lockfile 改动一律拒绝并上报（fail-closed，P-19）、merge 需审批 |
+| `fe-desktop` | `desktop-shell`：密钥生成与存储、mTLS 客户端、配对流程、按 challenge 签名（系统级确认）；`desktop-ui`：项目 tab、左侧列表、主对话（发送、接收、事件行、气泡边框）、检视器（阶段、DAG 列表）、最小审批确认界面（merge、凭据写入）、设置页·模型 |
 | `ops` | 安装脚本、systemd、GitHub App Manifest 创建引导、只转发 `/webhook` 的隧道说明、备份脚本 |
 
 **退出标准**
@@ -63,7 +64,9 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 - [ ] 沙盒内访问 `github.com` 和 `api.github.com` 失败；沙盒内读不到任何模型 key。
 - [ ] 同一个 webhook 投递两次，GitHub 上不会出现重复评论或重复 PR。
 - [ ] 服务端在"创建 PR 成功、写库之前"崩溃，重启后不会重复创建 PR。
-- [ ] 改动 `.github/workflows/` 的补丁被策略拒绝并上报。
+- [ ] 改动 `.github/workflows/`、依赖清单或 lockfile 的补丁被策略拒绝并上报。
+- [ ] 写入模型凭据需要 approver 设备签名；没有签名的写入被拒绝。
+- [ ] 吊销设备后，其已建立的事件流在心跳间隔内断开（上限 60 秒，建议值）。
 
 ## M2 PR 后台守护 + Medium / High
 
@@ -71,11 +74,11 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 
 | 泳道 | 范围 |
 | --- | --- |
-| `be-engine` | Medium / High 图模板（plan → build → verify、多角色 review + 汇总）；需求准入；预算模板与台账；上限内自动加码 |
-| `be-forge` | `guardian`：分流规则、CI 日志获取与分类、自愈循环、无进展检测、自身事件过滤；单条可编辑的状态清单评论；感知 GitHub 限流的 Outbox |
+| `be-engine` | Medium / High 图模板（plan → build → verify、多角色 review + `summarize` 汇总）；需求准入（`admission`）；`REJECT` / `BLOCKED` 的上报；预算模板与台账；上限内自动加码 |
+| `be-forge` | `guardian`：分流规则、CI 日志获取与分类（`classify`）、自愈循环（`heal`）、无进展检测、自身事件过滤；单条可编辑的状态清单评论；感知 GitHub 限流的 Outbox |
 | `exec` | gVisor 默认开启；预热池；`devcontainer.json` 安全子集（忽略 `initializeCommand`、`mounts`、`runArgs`、特权字段） |
-| `sec` | Gantry 审批：设备签名、验签、head 变化即失效；审计日志；`policy` 规则可配置 |
-| `fe-desktop` | 关系地图、工作树视图、收件箱、审批签名界面（Touch ID / Windows Hello）、档位选择器、系统通知；设置页·档位与预算、危险动作策略 |
+| `sec` | 审批的完整交互：审批因新推送失效后的重新请求；路径规则审批（workflow / 依赖清单 / lockfile 由"拒绝"改为"需要审批"，P-11）；审计日志；`policy` 规则可配置 |
+| `fe-desktop` | 关系地图、工作树视图、收件箱、完整审批签名界面（Touch ID / Windows Hello）、档位选择器、系统通知；设置页·档位与预算、危险动作策略、后台守护 |
 | `ops` | 升级与回滚流程、备份恢复演练 |
 
 **退出标准**
@@ -83,6 +86,7 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 - [ ] 本 PR 范围内的 CI 失败被自愈，全程不产生上报。
 - [ ] security 类 finding 被上报，不会被静默关闭。
 - [ ] 审批后出现新推送，审批自动失效并重新进入评审。
+- [ ] 改动 `.github/workflows/` 的补丁进入"需要审批"，签名批准后才提交推送。
 - [ ] 守护不会被自己的评论、推送触发循环。
 - [ ] 同类问题重复两次或连续两轮无进展时上报。
 
@@ -93,13 +97,12 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 | `be-engine` | reasoner 预演、对抗 review、arbiter 裁决、有界迭代、图修订 |
 | `be-forge` | arbiter 统一发出的评审摘要；review thread 回复与关闭 |
 | `exec` | 出网审计回放；沙盒逃逸检测告警 |
-| `sec` | 密钥轮换（App 私钥、中间 CA、模型 key）；吊销对已建立事件流连接生效 |
+| `sec` | 密钥轮换（App 私钥、中间 CA、模型 key）；吊销时进程内即时断开事件流（M1 的心跳检查之外的优化） |
 | `fe-desktop` | DAG 详情视图、图修订历史、预算面板 |
 
 **退出标准**
 
 - [ ] Max 档任务的每一轮评审都有 arbiter 的唯一裁决，轮次不超过预算。
-- [ ] 吊销设备后，其已建立的事件流在 1 分钟内断开。
 
 ## M4 Ultimate 与手机端
 
@@ -108,7 +111,7 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 | `be-engine` | Milestone 级拆分、子交付单元依赖、受 GitHub / Actions 配额约束的并发调度 |
 | `be-forge` | GitHub 原生任务入口（Issue label、`/gantry` 命令，待 Q-04 确认） |
 | `fe-mobile` | iOS UIKit：扫码配对、只做对话 |
-| `sec` | 手机端设备角色（默认不可审批） |
+| `sec` | 手机端客户端档案（只开放对话相关路由，默认不可审批） |
 | `ops` | 手机推送通道（`notify` 的 APNs 实现） |
 
 **退出标准**

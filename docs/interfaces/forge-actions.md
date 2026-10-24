@@ -34,7 +34,7 @@
 1. `engine` / `guardian` 只能 `outbox.enqueue(kind, payload, requires_approval?)`，不得调用任何 GitHub 写接口，不得持有 App token。
 2. `idempotency_key` 由 `(project, delivery, kind, target, intent, epoch)` 派生；重复入队返回同一行（§2.2）。
 3. 执行 = **先查后做**：`executing` 的行在崩溃重启后重放，靠"存在性检查 + 标记"避免重复创建（§2.3、§2.4）。
-4. `merge_pr` 恒需 Gantry 审批；`forge` 在执行点再核对"审批已授予、`head_sha` 三方一致（审批 / payload / GitHub 实时）"（§2.5）。
+4. `merge_pr` 恒需 Gantry 审批；`forge` 在执行点再核对"审批已授予、head 三方一致（审批的 `subject_digest` / payload / GitHub 实时）"（§2.5）。
 5. `push_branch` 只推 `gantry/` 前缀分支、不 force；越界必须带审批（§3.1）。
 6. webhook 先验 HMAC、落盘、再回 2xx，之后异步处理；GitHub **不会**自动重投失败的投递（官方），丢失由对账器补（§5、§7）。
 7. 事件来自"回读后的状态差异"，所以进入引擎的 ForgeEvent 已对账、已去重（§6.1）。
@@ -84,16 +84,16 @@ flowchart LR
 
 ### 2.1 入队信封
 
-[data-model §3 OutboxAction](../data-model.md#outboxaction) 定义了 `idempotency_key / kind / payload / requires_approval / status / attempts / github_ref`。本契约需要它再加几个字段（标 † 的是扩展，须由单独的契约 PR 回写 data-model，本文不改它）：
+[data-model §3 OutboxAction](../data-model.md#outboxaction) 定义了全部字段（含下表的执行字段，decisions P-22）。本契约对执行字段的语义：
 
 | 字段 | 说明 |
 | --- | --- |
-| `depends_on` † | 前置动作 ID 列表；任一前置终态失败 → 本动作 `cancelled` |
-| `priority` † | `high` / `normal` / `low`；限流紧张时先饿死 `low`（§10.2） |
-| `not_before` † | 最早执行时间；限流退避、定时动作用 |
-| `epoch` † | 默认 0；引擎**有意**重做一个已终态失败/已取消的动作时 +1，使键不同 |
-| `lease_until` / `last_error` † | 执行租约与最近一次失败（`code` + 脱敏消息） |
-| `github_ref` | 分两阶段写入：执行前写 `expected_effects`，成功后补真实对象 ID（§4.2） |
+| `depends_on` | 前置动作 ID 列表；任一前置终态失败 → 本动作 `cancelled` |
+| `priority` | `high` / `normal` / `low`；限流紧张时先饿死 `low`（§10.2） |
+| `not_before` | 最早执行时间；限流退避、定时动作用 |
+| `epoch` | 默认 0；引擎**有意**重做一个已终态失败/已取消的动作时 +1，使键不同 |
+| `lease_until` / `last_error` | 执行租约与最近一次失败（`code` + 脱敏消息） |
+| `expected_effects` / `github_ref` | 执行前写 `expected_effects`，成功后在 `github_ref` 补真实对象 ID（§4.2） |
 
 ```json
 {
@@ -192,21 +192,21 @@ claim(queued -> executing, lease)
 | --- | --- | --- |
 | 1 | Approval 存在且 `status = granted`、未过期 | `approval_invalid`，动作 `cancelled` |
 | 2 | `approval.action` 与本动作 `kind` 匹配，`approval.target` 与 payload 目标一致 | 同上 |
-| 3 | `merge_pr`：`approval.head_sha == payload.expected_head_sha == GitHub 实时 head`（执行前 `GET` PR） | `precondition_failed(head_changed)` |
-| 4 | `push_branch`（`force=true` 或命中 `approve` 路径）：`approval.target.branch == payload.branch`，`approval.head_sha == payload.local_head_oid`；`force` 时另要求 `target.expected_remote_oid == payload.expected_remote_oid` | `approval_invalid` |
+| 3 | `merge_pr`：`approval.subject_digest == payload.expected_head_sha == GitHub 实时 head`（执行前 `GET` PR） | `precondition_failed(head_changed)` |
+| 4 | `push_branch`：`approval.target.branch == payload.branch`；`force=true` 时 `approval.subject_digest == payload.local_head_oid` 且 `target.expected_remote_oid == payload.expected_remote_oid`；命中 `approve` 路径（M2 起）时 `approval.subject_digest == payload.validation_ref`（补丁 sha256） | `approval_invalid` |
 
-成功后 `forge` 通知 `policy` 把审批置为 `consumed`（data-model §4.4 有此状态，见 §14.1 的不一致项）。**绝不**传 `bypass_rules=true`（merge-async 的参数，官方）。
+成功后 `forge` 通知 `policy` 把审批置为 `consumed`（`approval.consumed`，data-model §4.4）。**绝不**传 `bypass_rules=true`（merge-async 的参数，官方）。
 
-**`Approval.action` 与 `target` 的取值**（[api.md §6](api.md) 把这两项的枚举交给本文）。`action` 用 [config.md §5.1](config.md) 的动作 id；`target` 沿用 api.md 的 `{kind, repo, …}` 形状；`head_sha` 是"被审批的那个提交"：
+**`Approval.action`、`target` 与 `subject_digest` 的取值**（[api.md §6](api.md) 把 Forge 动作的取值交给本文）。`action` 用 [config.md §5.1](config.md) 的动作 id；`target` 沿用 api.md 的 `{kind, repo, …}` 形状；`subject_digest` 见 decisions P-20：
 
-| `Approval.action` | 授权的 Outbox 动作 | `target` | `head_sha` |
+| `Approval.action` | 授权的 Outbox 动作 | `target` | `subject_digest` |
 | --- | --- | --- | --- |
 | `merge_pr` | `merge_pr` | `{kind:"pr", repo, number}` | PR 的 head（= `payload.expected_head_sha`） |
 | `force_push` | `push_branch`（`force=true`） | `{kind:"branch", repo, branch, expected_remote_oid}` | 将要推送的提交（`local_head_oid`） |
-| `push_branch` | `push_branch`，且 `policies.paths` 命中处置为 `approve` 的路径 | `{kind:"branch", repo, branch, path_rules:[…]}` | `local_head_oid` |
-| `delete_branch` `publish_release` `change_repo_settings` | 预留（§3.4） | 随动作定 | 无 head 的动作如何绑定 SHA，见 api.md 的 OQ-6 |
+| `push_branch` | `push_branch`，且 `policies.paths` 命中处置为 `approve` 的路径（M2 起；M1 这类补丁被拒绝，decisions P-19） | `{kind:"branch", repo, branch, path_rules:[…]}` | 补丁内容的 sha256（= `payload.validation_ref`） |
+| `delete_branch` `publish_release` `change_repo_settings` | 第一版不实现（§3.4，decisions P-27） | — | — |
 
-注意：api.md 的示例目前写 `"action": "merge"`，config.md 与本文写 `merge_pr`，三处需统一（登记于 §14.1）。命中 `deny` 路径的补丁不会走到 Outbox。
+命中 `deny` 路径的补丁不会走到 Outbox。
 
 ### 2.6 失败分类与重试
 
@@ -231,28 +231,28 @@ claim(queued -> executing, lease)
 
 - 同一安装下写请求**串行**（§10.2），出队顺序 = `(priority, enqueued_at)`，`depends_on` 是硬约束。
 - **合并（coalesce）**：同一 `(delivery, target, slot)` 的 `upsert_status_comment` 排队时，新动作入队会把旧的 `queued` 动作置 `cancelled(superseded)`——状态清单只发最新版，省限流也不吵人。
-- **速率预算**：`levels.*.budget.forge_writes_per_hour`（[config.md §4.1](config.md)）是每个交付单元的滑动 1 小时窗口，按 **Outbox 动作数**计（不按 API 调用数）。超限时动作保持 `queued` 并设 `not_before`，**延迟而不是失败**（config.md 的 [提议]）。它与安装级闸门（§10.2）是两层，取更严者。
-- **累计预算**：每次执行成功向 `BudgetLedger.forge_writes` 记一笔。ledger 的累计型 `limits.forge_writes` 与上面的速率型口径不一致，config.md 的 OQ-9 待决；`forge` 按速率型实现，累计型耗尽时的 `budget.exhausted` 由 `engine` 发出，`forge` 不再取该交付单元 `queued` 的写动作。
+- **速率限制**：`levels.*.budget.forge_writes_per_hour`（[config.md §4.1](config.md)）是配置项，由 Outbox 按交付单元的令牌桶执行（容量与每小时补充量都等于该值），按 **Outbox 动作数**计（不按 API 调用数）。桶空时动作保持 `queued` 并设 `not_before`，**延迟而不是失败**。它与安装级闸门（§10.2）是两层，取更严者。不进台账（decisions P-22）。
+- **累计预算**：每次执行成功向 `BudgetLedger.used.forge_writes` 记一笔；达到 `limits.forge_writes`（配置 `levels.*.budget.forge_writes`）时由 `engine` 发 `budget.exhausted`，`forge` 不再取该交付单元 `queued` 的写动作。两者不混用。
 
 ---
 
 ## 3. 动作目录
 
-共 14 个动作（任务要求的 13 个，加 `create_comment`：worker 的 `comment_issue` / `comment_pr` 提议需要一个普通评论动作，见 §3.5）。里程碑列按 [milestones.md](../milestones.md) 推断，标 † 的表示 milestones 未逐项点名。
+共 14 个动作（任务要求的 13 个，加 `create_comment`：`engine` / `guardian` 需要一个非状态清单的普通评论动作，例如关闭 Issue 前的说明）。里程碑列按 [milestones.md](../milestones.md) 推断，标 † 的表示 milestones 未逐项点名。
 
 ### 3.1 总表
 
 | # | `kind` | 作用 | 里程碑 | App 权限 | Gantry 审批 | 限流类 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `push_branch` | 从服务端已校验的提交推送到 `gantry/` 前缀分支 | M1 | Contents: write | 否。**是**：`force=true`（policy id `force_push`）；非 `gantry/` 前缀分支；改动命中 `policies.paths` 中处置为 `approve` 的路径（默认 `workflows`、`dependency_manifests`、`lockfiles`、`repo_meta`，P-11）。命中 `deny` 的路径根本不入队 | G（api 传输按 C） |
+| 1 | `push_branch` | 推送 `repo` 生成的已校验提交到 `gantry/` 前缀分支 | M1 | Contents: write | 否。**是**：`force=true`（policy id `force_push`）；非 `gantry/` 前缀分支（`push_outside_prefix`）；改动命中 `policies.paths` 中处置为 `approve` 的路径（默认 `workflows`、`dependency_manifests`、`lockfiles`、`repo_meta`，P-11；M1 这类补丁直接被拒绝、不入队，P-19）。命中 `deny` 的路径根本不入队 | G（api 传输按 C） |
 | 2 | `create_pr` | 创建 PR；base 为默认分支时写 `Closes #N` | M1 | Pull requests: write | 否 | C |
 | 3 | `update_pr` | 改标题 / 正文 / base / open-closed | M1 † | Pull requests: write | 否（已有 `granted` 审批时改 base，由 `policy` 要求，`forge` 只校验） | C |
 | 4 | `upsert_status_comment` | 每个目标一条可编辑的状态清单评论 | M2 | PR：Pull requests: write；Issue：Issues: write（官方：issue 评论接口接受 Issues 或 Pull requests 写权限） | 否 | C |
-| 5 | `create_comment` | 在 Issue / PR 对话区发一条普通评论（非状态清单） | M2 † | 同上 | 否（policy id `post_comment`） | C；会通知订阅者，应优先用 #4，`policy` 可限频 |
+| 5 | `create_comment` | 在 Issue / PR 对话区发一条普通评论（非状态清单） | M2 † | 同上 | 否 | C；会通知订阅者，应优先用 #4，`policy` 可限频 |
 | 6 | `reply_review_thread` | 回复 review 线程 | M3 | Pull requests: write | 否 | C |
 | 7 | `resolve_review_thread` | 标记线程已解决 | M3 | Pull requests: write（GraphQL，需核实 OQ-9） | 否；线程含人类评论时 `policy` 可要求审批（默认建议禁止，OQ-9） | M |
 | 8 | `create_issue` | 新建 Issue（子任务、后续跟进） | M2 † | Issues: write | 否 | C |
-| 9 | `update_issue` | 只更新 Issue 正文里的 Gantry 规格块 / 标题 / 标签集 | M2 † | Issues: write | 否（policy id `edit_issue`） | C |
+| 9 | `update_issue` | 只更新 Issue 正文里的 Gantry 规格块 / 标题 / 标签集 | M2 † | Issues: write | 否 | C |
 | 10 | `close_issue` | 关闭 Issue（PR 合入非默认分支时主动关闭，data-model §4.1 `closed`） | M1 | Issues: write | 否 | M |
 | 11 | `add_labels` | 追加标签 | M2 † | Issues: write 或 Pull requests: write（官方） | 否 | M |
 | 12 | `request_reviewers` | 请求人 / 团队评审（P-12：仓库要求人工 review 时用来提醒用户） | M2 † | Pull requests: write | 否 | M（会通知对方，克制使用） |
@@ -286,7 +286,7 @@ claim(queued -> executing, lease)
 
 下面各块只写 `payload`；信封见 §2.1。统一场景：仓库 `acme/shop-api`，Issue #42，分支 `gantry/42-fix-pagination`，PR #57。
 
-**1. `push_branch`** —— `local_head_oid` 是 `engine` 在补丁校验后于服务端仓库创建的提交（I8）；`validation_ref` 是 `ValidatedPatch.sha256`，`expected_tree_oid` 是 `ValidatedPatch.result_tree`（[worker-protocol §8](worker-protocol.md)），`api` 传输靠它核对。分支名 = `gantry/` + 稳定后缀，由 `engine` 生成。
+**1. `push_branch`** —— `local_head_oid` 是 `repo` 在补丁校验后于项目镜像仓创建的提交（I8）；`validation_ref` 是 `ValidatedPatch.sha256`，`expected_tree_oid` 是 `ValidatedPatch.result_tree`（[worker-protocol §8](worker-protocol.md)），`api` 传输靠它核对。分支名 = `gantry/` + 稳定后缀，由 `engine` 生成。
 
 ```json
 {
@@ -338,7 +338,7 @@ claim(queued -> executing, lease)
 
 `state` 取 `pending` / `running` / `passed` / `failed` / `skipped` / `blocked`。是否维护该评论由 `guardian.status_checklist.enabled`（config.md §6）决定，那是入队方的责任，`forge` 不看。
 
-**5. `create_comment`** —— 对应 worker 的 `comment_issue` / `comment_pr`；`body` 经 §2.4 净化。
+**5. `create_comment`** —— 由 `engine` / `guardian` 发起（不在 worker proposals 词表里）；`body` 经 §2.4 净化。
 
 ```json
 {
@@ -361,7 +361,7 @@ claim(queued -> executing, lease)
 }
 ```
 
-**7. `resolve_review_thread`** —— `reason` 仅用于审计，不入键。worker 的 `reply_review_thread{resolve: true}` 拆成"回复 + 解决"两个动作，后者 `depends_on` 前者。
+**7. `resolve_review_thread`** —— `reason` 仅用于审计，不入键。worker 的 `resolve_review_thread` 提议通常与同一线程的 `reply_review_thread` 成对出现，入队时让 `resolve_review_thread` `depends_on` 该回复动作。
 
 ```json
 {
@@ -465,31 +465,31 @@ claim(queued -> executing, lease)
 | 名称 | 状态 | 说明 |
 | --- | --- | --- |
 | `approve_pr` / 提交 `APPROVE` 的 review | **永不提供** | P-12：GitHub 审批必须由人完成。`Pull requests: write` 技术上也许能对**别人**的 PR 提交 approve，所以 `forge` 的 GitHub 客户端层不得暴露该调用（机械防线，OQ-11） |
-| `delete_branch`、`publish_release`、`change_repo_settings` | 预留 | 架构 §7.4 与 config.md §5.1 都列为危险动作，但第一版没有对应 Outbox 动作；要加时需同时新增权限（如 Administration）、审批类别和本文条目 |
+| `delete_branch`、`publish_release`、`change_repo_settings` | 预留，第一版不实现（decisions P-27） | 第一版没有对应 Outbox 动作；config.md §5.1 保留同名动作 id，默认 `deny`；要加时需同时新增权限（如 Administration）、审批类别和本文条目 |
 | `remove_labels`、`dismiss_review`、`enable_auto_merge` | 预留 | 第一版不需要；`remove_labels` 可能在状态标签场景出现（OQ-11） |
 | 提交含行内评论的 PR review | 待决 | M3 的"arbiter 汇总"先通过 `upsert_status_comment` 的一个小节呈现；是否需要 `submit_review(COMMENT)` 见 OQ-11 |
 
 ### 3.5 与相邻契约的词表对应
 
-`ForgeActionKind` 是 Outbox 的分类；`policies.actions` 的 id（config.md）和 worker 的 proposal `kind`（worker-protocol）是另外两套词表，它们之间的映射如下。**config.md 当前缺 4 个 id**，缺失的 id 会落入 `policies.unlisted_action`（默认 `approve`），使这些本不需审批的动作被迫审批，需在 config 契约 PR 中补齐（§14.1）。
+`ForgeActionKind` 是 Outbox 的分类；`policies.actions` 的 id（config.md §5.1）与之**同名**，且出厂默认值覆盖全部 14 个（decisions P-28）；另有三个条件伪动作 id（`force_push`、`push_outside_prefix`、`resolve_review_thread_human`）由 `policy` 从载荷推出。worker 的 proposal `kind`（worker-protocol §5.4）是第三套词表，对应如下：
 
 | `ForgeActionKind`（本文） | `policies.actions` id（config §5.1） | worker proposal `kind`（worker-protocol §5.4） |
 | --- | --- | --- |
-| `push_branch` | `push_branch`；`force=true` 时 `force_push` | —（由 `engine` 在补丁校验后入队） |
+| `push_branch` | `push_branch`；`force=true` 时 `force_push`；非 `gantry/` 前缀时 `push_outside_prefix` | —（由 `engine` 在补丁校验后入队） |
 | `create_pr` | `create_pr` | `open_pr` |
 | `update_pr` | `update_pr` | — |
-| `upsert_status_comment` | `post_comment` | —（由 `guardian` / `engine` 发） |
-| `create_comment` | `post_comment` | `comment_issue`、`comment_pr` |
-| `reply_review_thread` | `resolve_review_thread`（config 把"回复并关闭"合成一个 id） | `reply_review_thread`（`resolve=false`） |
-| `resolve_review_thread` | `resolve_review_thread` | `reply_review_thread`（`resolve=true`，拆成两个动作） |
-| `create_issue` | **缺失** | — |
-| `update_issue` | `edit_issue` | — |
+| `upsert_status_comment` | `upsert_status_comment` | —（由 `guardian` / `engine` 发） |
+| `create_comment` | `create_comment` | —（由 `guardian` / `engine` 发） |
+| `reply_review_thread` | `reply_review_thread` | `reply_review_thread` |
+| `resolve_review_thread` | `resolve_review_thread`；线程含人类评论时 `resolve_review_thread_human` | `resolve_review_thread` |
+| `create_issue` | `create_issue` | — |
+| `update_issue` | `update_issue` | — |
 | `close_issue` | `close_issue` | — |
-| `add_labels` | **缺失** | — |
-| `request_reviewers` | **缺失** | — |
+| `add_labels` | `add_labels` | — |
+| `request_reviewers` | `request_reviewers` | — |
 | `merge_pr` | `merge_pr` | —（危险动作不进 worker 词表） |
-| `rerun_failed_jobs` | **缺失** | — |
-| 预留 `delete_branch` `publish_release` `change_repo_settings` | 同名 | — |
+| `rerun_failed_jobs` | `rerun_failed_jobs` | — |
+| 预留 `delete_branch` `publish_release` `change_repo_settings`（不实现） | 同名，默认 `deny` | — |
 
 worker 的 `escalate` 提议不是 GitHub 写动作，不经 Outbox。
 
@@ -509,7 +509,7 @@ worker 的 `escalate` 提议不是 GitHub 写动作，不经 Outbox。
 
 ### 4.2 `github_ref` 的形状
 
-执行前写 `expected_effects`，成功后补充对象 ID（下例为 `create_pr` 成功后）：
+执行前写 `expected_effects`（OutboxAction 的独立字段，data-model），成功后写 `github_ref` 补充对象 ID。下例把 `create_pr` 成功后的两者放在一起展示：
 
 ```json
 {
@@ -527,7 +527,7 @@ worker 的 `escalate` 提议不是 GitHub 写动作，不经 Outbox。
 }
 ```
 
-`bot.github_id` 是 App 机器人账号的用户 ID（`sender.id`），在 App 创建后由 `deploy` / `forge` 初始化时取得并存入 Project（data-model 目前没有这个字段，见 §14.1；如何取得见 OQ-10）。
+`bot.github_id` 是 App 机器人账号的用户 ID（`sender.id`），在 App 创建后由 `deploy` / `forge` 初始化时取得并存入 `Project.bot_user_id`（data-model；如何取得见 OQ-10）。
 
 ### 4.3 动作 → 预期 GitHub 事件 → 匹配键
 
@@ -569,7 +569,7 @@ worker 的 `escalate` 提议不是 GitHub 写动作，不经 Outbox。
 | --- | --- | --- |
 | `guardian` | **不作为分流唤醒**；只记账。这是 [架构 §7.3](../architecture.md#73-pr-后台守护) 的"忽略自身事件" | 按 [guardian 规则](../modules/guardian.md) 分流 |
 | `engine` | 照常更新快照、推进阶段（例如自己发起的合并 `pr_merged` 仍要推进到 `closed`） | 同左 |
-| `policy` | `pr_synchronized` **无论 origin** 都使绑定旧 head 的审批失效（架构 §7.4） | 同左 |
+| `policy` | `pr_synchronized` **无论 origin** 都使 `subject_digest` 绑定旧 head 的审批失效（架构 §7.4） | 同左 |
 | `notify` | 不为 self 事件发通知 | 按规则 |
 
 ### 4.6 不属于"自身事件"的
@@ -603,7 +603,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 
 - 头为 `X-Hub-Signature-256`，值形如 `sha256=<hex>`（官方）；**不要**使用旧的 SHA-1 头 `X-Hub-Signature`（官方：仅为兼容保留）。
 - 用 webhook secret 对**未经任何解析或改写的原始 body 字节**计算 HMAC-SHA256；官方要求常量时间比较，禁止用 `==`。
-- 支持 secret 轮换：config 目前只有一个 `github.app.webhook_secret`；轮换窗口内 `forge` 需要同时校验新旧两个版本（先试当前再试上一版），secrets 存储与 config 是否支持多版本见 §14.1。webhook secret 与 App 私钥分开保存。
+- 支持 secret 轮换（decisions P-29）：同时接受当前（`github.app.webhook_secret`）与上一个（`github.app.webhook_secret_previous`，config.md §10）secret，先试当前再试上一个。webhook secret 与 App 私钥分开保存。
 - 额外校验（防串线）：`X-GitHub-Hook-Installation-Target-ID` 等于本 App 的 ID，且载荷 `installation.id` 属于某个 Project；否则丢弃并计数。
 - 可选的来源 IP 白名单：`GET /meta` 返回 webhook 出口 IP（官方，GitHub 会不定期变更，需周期刷新）。隧道场景源 IP 不可见，默认关闭。
 
@@ -671,7 +671,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 | `stale` | bool | G4 |
 | `data` | object | §6.3；其中来自 GitHub 的文本字段类型为 `UntrustedText`（标 (U)） |
 
-事件日志映射：每个 ForgeEvent 作为一条 `forge.<kind>` 事件追加（例如 `forge.pr_synchronized`），`data` 即上表信封（data-model §5.2 目前只有 `forge.synced` / `forge.drift_detected`，需回写，见 §14.1）。
+事件日志映射：每个 ForgeEvent 作为一条 `forge.<kind>` 事件追加（例如 `forge.pr_synchronized`、`forge.base_advanced`），`data` 即上表信封（data-model §5.2）。
 
 ### 6.3 目录
 
@@ -685,9 +685,9 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 | `pr_updated` | `pull_request.edited / ready_for_review / converted_to_draft / labeled / unlabeled / review_requested / review_request_removed` | `changed[]`(`title` `body` `base` `draft` `labels` `reviewers`) 及对应新值 | `pr_upd:{repo}:{n}:{updated_at}` |
 | `pr_closed` | `pull_request.closed` 且 `merged=false`（官方） | `head_sha` `closed_by` | `pr_closed:{repo}:{n}:{closed_at}` |
 | `pr_merged` | `pull_request.closed` 且 `merged=true` | `merge_commit_sha` `head_sha`(合并时) `base_ref` `merged_by` `via_merge_queue` `merge_method`(可空) | `pr_merged:{repo}:{n}:{merge_commit_sha}` |
-| `base_advanced` | `push` 到某活跃 PR 的 base 分支 | `base_ref` `before` `after` `affected_prs[]` | `base:{repo}:{ref}:{after}` |
+| `base_advanced` | `push` 到默认分支（及其他活跃 PR 的 base 分支） | `base_ref` `before` `after` `affected_prs[]` | `base:{repo}:{ref}:{after}` |
 
-`head_epoch` 由 `forge` 在每个 PR 的快照里维护，每次观测到 head 变化 +1；即使 head 回到旧 SHA（A→B→A）每次变化也是不同事件。`base_advanced` 存在的原因：GitHub 不会在 base 前移时给 PR 发事件，而状态机有"base 前移需重验"（data-model §4.1 `merge --> review`）。
+`head_epoch` 由 `forge` 在每个 PR 的快照里维护，每次观测到 head 变化 +1；即使 head 回到旧 SHA（A→B→A）每次变化也是不同事件。`base_advanced` 存在的原因：GitHub 不会在 base 前移时给 PR 发事件，而状态机有"base 前移需重验"（data-model §4.1 `merge --> review`）；引擎据 `forge.base_advanced` 让 `merge` 阶段的交付单元重验（decisions P-26）。
 
 **合并队列**
 
@@ -953,7 +953,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 | `check_suite` | Checks: read | completed | `check_suite_completed` | `requested` / `rerequested` 需要 Checks: write 才会收到（官方），本契约不需要 |
 | `check_run` | Checks: read | completed | `check_run_completed` | 量大，其余 action 直接丢弃 |
 | `merge_group` | Merge queues: read | checks_requested destroyed | `merge_group_*` | 仅启用 merge queue 的仓库 |
-| `push` | Contents: read | —— | `base_advanced` | 只保留活跃 PR 的 base 分支；其余丢弃 |
+| `push` | Contents: read | —— | `base_advanced` | 只保留默认分支与活跃 PR 的 base 分支；其余丢弃 |
 | `repository` | Metadata: read | renamed archived transferred edited | `repo_changed` | 低频 |
 | `status` | Commit statuses: read | —— | `check_run_completed`（归一为同形） | 可选 |
 | `installation`、`installation_repositories` | 无需 | 全部 | `installation_changed` | 官方：默认接收，不可手动订阅 |
@@ -1077,9 +1077,9 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 | 键 | 用途 | 本文位置 |
 | --- | --- | --- |
 | `guardian.patrol_interval_s` | 对账巡检周期（≥ 300，默认 1800） | §7.1 |
-| `levels.*.budget.forge_writes_per_hour` | 每个交付单元的 GitHub 写速率 | §2.7、§10.2 |
+| `levels.*.budget.forge_writes_per_hour` | 每个交付单元的 GitHub 写速率（Outbox 令牌桶） | §2.7、§10.2 |
 | `policies.actions.*`、`policies.paths.*` | 哪些动作 / 路径需要审批（决定 `requires_approval`） | §3.5、§2.5 |
-| `github.app.app_id` / `private_key` / `webhook_secret` | App 鉴权与 webhook 验签 | §5.2、§9.4 |
+| `github.app.app_id` / `private_key` / `webhook_secret` / `webhook_secret_previous` | App 鉴权与 webhook 验签（含轮换） | §5.2、§9.4 |
 | `guardian.status_checklist.enabled` | 是否维护状态清单评论（入队方读取） | §3.3 |
 
 **B. 引导配置（文件，重启生效，`deploy` 拥有；config.md §1.1 的"引导配置"）**
@@ -1104,7 +1104,7 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 | `forge.outbox.lease` | `120s` | §2.3 |
 | `forge.push.branch_prefix` | `gantry/` | 越界需审批 |
 | `forge.push.transport` / `signed_fallback` | `git` / `api` | §8 |
-| `forge.merge.method` | 项目设置；未设置时取仓库允许的方法，优先 `squash` > `merge` > `rebase` **[提议，OQ-14]** | 必须被仓库允许；这是否应成为设置键见 §14.1 |
+| `forge.merge.method` | 未设置时取 `Project.allowed_merge_methods` 中的方法，优先 `squash` > `merge` > `rebase` **[提议，OQ-14]** | 必须被仓库允许；这是否应成为设置键见 §14.1 |
 | `forge.rerun.max_per_run` | `2` | `rerun_failed_jobs` 上限 |
 | `forge.labels.allowed_prefix` | `gantry/` | `add_labels` / `create_issue` 的标签前缀 |
 | `forge.ratelimit.headroom` | `0.5` | §10.2 |
@@ -1170,17 +1170,17 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 
 | 文档 | 缺口或不一致 |
 | --- | --- |
-| data-model §3 OutboxAction | 扩展字段 `depends_on` `priority` `not_before` `epoch` `lease_until` `last_error`；`github_ref` 需定义 `expected_effects` 子结构（§4.2）；`failed` 要区分"可重试"与"终态" |
-| data-model §3 Approval | 状态枚举缺 `consumed`（§4.4 状态机有；api.md OQ-6 同） |
-| data-model §3 Project | 缺 `bot_user_id`、`app_slug`、是否启用 merge queue、仓库允许的合并方法、`effective_transport`（git / api） |
-| data-model §3 IssueRef / PullRequestRef | 缺 `draft`、合并状态、merge queue 状态、`head_epoch`、未解决线程数 |
-| data-model §5.2 事件目录 | 缺 `forge.<kind>`（§6.2）、`outbox.executing` / `outbox.cancelled`、`approval.consumed` / `approval.expired` |
-| config.md §5.1 `policies.actions` | 缺 `create_issue`、`add_labels`、`request_reviewers`、`rerun_failed_jobs` 四个 id（§3.5），否则落入 `unlisted_action=approve`；`resolve_review_thread` 把"回复"与"关闭"合成一个 id |
-| config.md §10 `github.*` | 只有一个 `webhook_secret`，轮换需多版本（§5.2）；`forge.merge.method` 是否应为设置键（目前是内部常量，OQ-14） |
-| config.md OQ-9 与 data-model BudgetLedger | `forge_writes_per_hour`（速率、per-交付单元）与 `limits.forge_writes`（累计）口径不一致；本文按速率型实现（§2.7） |
-| api.md §6 与 config.md | `Approval.action` 在 api.md 示例是 `merge`，在 config.md 与本文是 `merge_pr`（§2.5）；api.md 把枚举与 `target` 结构交给本文，本文已给出 |
-| worker-protocol §5.4 | proposals 词表是本文 `ForgeActionKind` 的子集，对应关系见 §3.5；其 OQ-9 可据此关闭 |
-| milestones M1 与 M2 | M1 退出标准含"用户在桌面端审批 merge"，而设备签名审批在 M2（`sec` 泳道）；M1 的 `merge_pr` 审批形态未定（config.md 的 fail-closed 会使 `approve` 在签名界面交付前按 `deny` 执行） |
+| data-model §3 OutboxAction | 已决：见 decisions.md P-22（`depends_on` `priority` `not_before` `epoch` `lease_until` `last_error` `expected_effects` 已回写）。仍待定：`failed` 要区分"可重试"与"终态" |
+| data-model §3 Approval | 已决：见 decisions.md P-20（`consumed`、`subject_digest`） |
+| data-model §3 Project | 已决：见 decisions.md P-22（`bot_user_id`、`allowed_merge_methods`、`merge_queue_enabled`）。`app_slug`、`effective_transport`（git / api）留作 `forge` 内部状态 |
+| data-model §3 IssueRef / PullRequestRef | 已决：见 decisions.md P-22（`draft`、`mergeable_state`、`in_merge_queue`、`base_sha`）。`head_epoch`、未解决线程数留在 `forge` 的快照里 |
+| data-model §5.2 事件目录 | 已决：见 decisions.md P-21 |
+| config.md §5.1 `policies.actions` | 已决：见 decisions.md P-28（动作 id 与 `kind` 同名，全部列出） |
+| config.md §10 `github.*` | webhook secret 轮换已决：见 decisions.md P-29。仍待定：`forge.merge.method` 是否应为设置键（OQ-14） |
+| config.md OQ-9 与 data-model BudgetLedger | 已决：见 decisions.md P-22（累计数与按小时限速分开，§2.7） |
+| api.md §6 与 config.md | 已决：`Approval.action` 统一用 `merge_pr` 等动作 id（decisions P-20） |
+| worker-protocol §5.4 | 已对齐：proposals 词表见 §3.5 |
+| milestones M1 与 M2 | 已决：见 decisions.md P-18（签名审批最小实现在 M1）、P-19（M1 受保护路径 fail-closed） |
 | `modules/forge.md`、`modules/guardian.md` | 尚不存在；本文引用了 guardian 的分流规则 |
 
 ### 14.2 本次核对的官方页面（2026-10-24）

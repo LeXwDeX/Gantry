@@ -29,7 +29,7 @@
 | `forge.*` 内部参数（webhook 载荷上限、对账批大小、Outbox 退避、推送传输、限流余量等） | `forge` / `deploy` | forge-actions §11 B / C：引导配置或内部常量，不是设置。例外见 §6.2、§10 |
 | 凭据的值 | 密钥存储（`secrets/`，加密） | 本文只出现引用 `secret_ref`，见 §2.4 |
 | 任务级参数：消息上的档位上限、`@` 引用 | `conversation` / `Message.level_cap` | 属于工作输入，不是配置（I7） |
-| Project 实体字段：`repo`、`installation_id`、`default_branch` | [data-model §3](../data-model.md#project) | 本文只定义 `Project.settings_override` 的内容。`default_level` 归入 `levels.default_level`（OQ-17） |
+| Project 实体字段：`repo`、`installation_id`、`bot_user_id`、`default_branch`、`allowed_merge_methods`、`merge_queue_enabled` | [data-model §3](../data-model.md#project) | 本文只定义 `Project.settings_override` 的内容。新任务的默认档位是 `levels.default_level`（项目可覆盖，decisions P-22），不是 Project 字段 |
 | 设备、证书、吊销表 | `pki` | 设置页"设备与证书"操作的是这些实体，不是 settings 文档，见 §13 |
 | 本机外观与本机密钥 | `desktop-shell` 本地存储 | 见 §13 |
 
@@ -42,7 +42,7 @@
 | `policies` | 危险动作、路径规则、自动加码、审批、补丁校验 | 仅收紧 | `policy`、`engine`、`guardian` |
 | `guardian` | 分流覆盖、无进展阈值、状态清单、对账巡检周期 | 部分，仅收紧 | `guardian`、`forge` |
 | `sandbox` | 驱动、默认资源限制、超时、worker 协议 I/O 上限、预热、devcontainer | 仅 `limits` / `devcontainer`，仅收紧 | `sandbox`、`engine` |
-| `egress` | 白名单分组、档案、凭据注入 | 仅收窄档案的分组 | `egress`、`sandbox` |
+| `egress` | 白名单分组、档案、私有包仓库的反向代理注入 | 仅收窄档案的分组 | `egress`、`sandbox` |
 | `notify` | 通知渠道与路由 | 否 | `notify` |
 | `github` | GitHub App 标识与凭据引用 | 否 | `forge` |
 
@@ -93,7 +93,7 @@ effective(R, project) = clamp( merge(builtin(R), global(R), override(R, project)
 | --- | --- | --- |
 | `models.providers`、`models.retry` | 否 | —（项目可改选已存在的 provider id；需要独立计费就在全局建一个独立 key 的 provider） |
 | `models.utility / planner / worker` 的所有字段 | **自由** | 无方向；§11 校验仍适用 |
-| `levels.default_level` | **自由** [提议，OQ-17] | 无方向（只是任务的默认上限，单个任务仍可在消息里指定） |
+| `levels.default_level` | **自由**（decisions P-22） | 无方向（只是任务的默认上限，单个任务仍可在消息里指定） |
 | `levels.*.graph_template` | 否 [提议，OQ-11] | 方向无法比较，视同敏感键 |
 | `levels.*.budget.*` | 仅收紧 | 数值变大 = 放宽 |
 | `policies.actions.*`、`policies.unlisted_action` | 仅收紧 | 严格度 `auto` < `approve` < `deny`，变小 = 放宽 |
@@ -114,14 +114,14 @@ effective(R, project) = clamp( merge(builtin(R), global(R), override(R, project)
 
 ### 2.3 存储：事件、版本、追溯
 
-设置的唯一写路径是事件日志（I7；`Project.settings_override` 是投影，不得直接写）。新增事件类型 **[提议，须回写 data-model §5.2，OQ-17]**：
+设置的唯一写路径是事件日志（I7；`Project.settings_override` 是投影，不得直接写）。事件类型（data-model §5.2）：
 
 | 事件类型 | 触发 | `subject` | `data` |
 | --- | --- | --- | --- |
-| `settings.updated` | 某 `(scope, resource)` 写入成功（全局 `PUT`、项目 `PUT` / `DELETE`） | 全局：字面量 `settings`；项目：`prj_…`（同时填 `project_id`） | `scope`（`global` / `project`）、`resource`、`schema_version`（服务端盖章，当前 `schemas/config/` 的版本）、`base_rev`、`value`（写入后的稀疏文档；项目 `DELETE` 时为 `null`；**已剥离 secret 的 `value`**）、`relaxes[]`（本次放宽的键路径，由校验器算出）、`secret_changes[]`（`{ref, op: set / rotate / delete, version}`，**无值、无哈希**） |
+| `settings.updated` | 某 `(scope, resource)` 写入成功（全局 `PUT`、项目 `PUT` / `DELETE`） | 全局：字面量 `settings`（`project_id` 为 `null`）；项目：`prj_…`（同时填 `project_id`） | `scope`（`global` / `project`）、`resource`、`schema_version`（服务端盖章，当前 `schemas/config/` 的版本）、`base_rev`、`value`（写入后的稀疏文档；项目 `DELETE` 时为 `null`；**已剥离 secret 的 `value`**）、`relaxes[]`（本次放宽的键路径，由校验器算出）、`secret_changes[]`（`{ref, op: set / rotate / delete, version}`，**无值、无哈希**） |
 
 - `actor` = `{kind: "device", id: "dev_…"}`。
-- **项目覆盖变更改发 `settings.updated`，不再用 `project.updated`**：后者在手机端可见的 `project.*` 事件族内，会把覆盖内容带给只发消息的客户端（api.md §2.3）。`settings.*` 只下发给桌面档案且角色 ≥ operator 的事件流 [提议，OQ-25]。
+- **项目覆盖变更改发 `settings.updated`，不再用 `project.updated`**：后者在手机端可见的 `project.*` 事件族内，会把覆盖内容带给只发消息的客户端（api.md §2.3）。`settings.*` 只下发给桌面档案且角色 ≥ operator 的事件流 [提议]。
 - **rev / ETag**：`(scope, resource)` 的 rev = 其最近一次 `settings.updated` 的 `seq`，从未写过为 `0`；ETag 即 `"<rev>"`（对客户端不透明）。写响应的 `X-Event-Seq` 等于新 rev。
 - **`config_rev(project)`**：该项目生效配置的版本 = 所有适用于它的 `settings.updated`（全局任意 resource + 该项目任意 resource）的最大 `seq`。消费者在做决定时记下它；按该值回放事件即可复原当时的有效配置。
 - **可追溯**：`GET …?rev=N` 返回该 `(scope, resource)` 在 rev N 时的文档（诉求 A3）；`store` 按 rev 保留文档，事件永久保留。
@@ -143,33 +143,33 @@ effective(R, project) = clamp( merge(builtin(R), global(R), override(R, project)
 | 项 | 规定 |
 | --- | --- |
 | 出现位置 | `models.providers.<id>.credential`、`egress.injection.<id>.credential`、`github.app.private_key`、`github.app.webhook_secret`、`github.app.webhook_secret_previous` |
-| 值的位置 | `secrets/`（加密，服务端用户可读，[architecture §6](../architecture.md#6-状态归属)）；不出现在设置文档、事件日志、日志、通知、备份的明文部分 |
+| 值的位置 | 模型 key 与私有包仓库凭据只在 Egress 的密钥存储（仅 Egress 进程用户可读）；App 私钥与 webhook secret 在 `secrets/`（[architecture §6](../architecture.md#6-状态归属)）。`api` 写入时只转交、不留存；值不出现在设置文档、事件日志、日志、通知、备份的明文部分 |
 | 原子性 | 同一次 `PUT` 里的 secret 写入与 `settings.updated` 要么都成功要么都不成功；不会出现"配置指向了不存在的 ref" |
 | 共用 | 多个字段可引用同一个 ref，值只写一次 |
 | 缺失 | `PUT` 结果里引用的 ref，既不在 `secrets/` 里、本次又没带 `value` → 422（`secret_ref_missing`）。启动加载时缺失 → 不崩溃，相关功能置 `unhealthy`，在 `status` 里显示 |
 | 清除 | 与 api.md §4.9 的"`null` = 清除"**不同**：值只在被引用时有意义，`null` 一律 422（`secret_clear_in_use`）。要移除凭据就移除引用它的对象；不再被任何 `(scope, resource)` 引用的 ref，服务端回收其值（`secret_changes` 里记 `op: delete`）[提议] |
 | 轮换 | 同名 ref 写入新 `value`，`version` 递增；消费者在下一次使用时取新值；`egress` 收到重载信号后换新（M3 密钥轮换） |
 | 客户端 | `desktop-shell` 不得持久化 `value`，发送后立即清除 [提议]；不写日志（api.md §4.9） |
-| 解析者 | 谁发起出站调用谁解析：`egress` 解析模型 key 与包仓库凭据；`forge` 解析 App 私钥与 webhook secret。`models` 直接调用 utility / planner 时由谁持有 key，见 OQ-2 |
+| 解析者 | `egress` 解析模型 key 与私有包仓库凭据——所有模型调用（含 `models` 的直接调用）都经 Egress 反向代理（decisions P-16）；`forge` 解析 App 私钥与 webhook secret |
 | 防误填 | 除 `value` 之外的任何字符串若形似密钥（`sk-` 前缀、`ghp_` / `github_pat_`、`-----BEGIN`、高熵长串）→ 422（`inline_secret_detected`） |
 | 登记缺口 | 架构称"密钥模块"，模块地图未登记（OQ-23） |
 
 ### 2.5 修改权限（设备角色）
 
-设备角色沿用 [data-model Device.role](../data-model.md#device--budgetledger)，语义取自 [api.md §2.2](api.md#22-角色语义层级approver--operator--viewer)（`approver ⊃ operator ⊃ viewer`；viewer **不能读** settings）。骨架没有规定谁能改设置，下表整体是 **[提议]**（OQ-1）。
+设备角色沿用 [data-model Device.role](../data-model.md#device--budgetledger)，语义取自 [api.md §2.2](api.md#22-角色语义层级approver--operator--viewer)（`approver ⊃ operator ⊃ viewer`；viewer **不能读** settings）。签名机制统一见 [api.md §6.6](api.md#66-内部动作的签名写入settings改角色吊销)（decisions P-18）。
 
-| 操作 | 最低角色 | 备注 |
+| 操作 | 最低角色 | 签名 |
 | --- | --- | --- |
-| 读 settings（任何 resource、`view=effective`、`?rev=N`、`catalog`、`status`） | operator | api.md §2.2；secret 值永不返回 |
-| 写：中性改动，或任何**收紧** | operator | api.md §4.9 目前对所有 settings 写入都是 operator 起 |
-| 写：任何**放宽**（§2.2 方向）；"仅 approver 键"；任何带 secret `value` 的写入 | approver | 路由下限仍是 operator（api.md §4.9），实际所需角色按内容判定（api.md 已采纳）；放宽类写入另需**设备签名** [提议，OQ-1] |
-| 手机档案 | 无 settings | D-11；api.md §2.3 |
+| 读 settings（任何 resource、`view=effective`、`?rev=N`、`catalog`、`status`） | operator | — |
+| 写：中性改动，或任何**收紧** | operator | 不需要 |
+| 写：任何**放宽**（§2.2 方向）；"仅 approver 键"；任何带 secret `value` 的写入 | approver | **需要**审批设备签名：`action = settings_update`，`target = {kind:"settings", scope, project_id?, resource, base_rev}`，`subject_digest` = 请求体摘要；请求带 `Gantry-Approval` 头 |
+| 手机档案 | 无 settings | — |
 
 "仅 approver 键"：`models.providers`、`levels.*.graph_template`、`policies.allow_globs`、`github.*`、`sandbox.driver / runtime / base_image / max_concurrent_sandboxes`、`egress.groups / injection / default_profile`——它们要么决定凭据去向、攻击面或放行范围，要么方向无法比较。
 
-**M1 过渡 [提议，OQ-1]**：M1 要在设置页写模型 provider 与 key，而设备签名审批属 M2。所以签名链路交付之前，放宽类与 secret 写入**只检查 approver 角色，不要求签名**；M2 起放宽类要求签名。这要求首台配对设备拿到 approver 角色（api.md OQ-1 在问）。
+签名从 M1 起就要求（M1 设置页要写模型凭据，decisions P-18），没有"只查角色不签名"的过渡期。首台配对设备是 approver（decisions P-23）。
 
-校验器对 `PUT` 的新旧值做差，算出 `relaxes[]`，据此决定 `required_role`。角色不足 → `403 forbidden_role`（附 `required_role`）。`PUT …?dry_run=true` 返回 `{valid, errors[], warnings[], relaxes[], required_role, requires_signature}` 且不落库，设置页据此在提交前提示"此改动需要 approver"（诉求 A2）。
+校验器对 `PUT` 的新旧值做差，算出 `relaxes[]`，据此决定 `required_role` 与 `requires_signature`。角色不足 → `403 forbidden_role`（附 `required_role`）；需要签名而未带 → `403 signature_required`。`PUT …?dry_run=true` 返回 `{valid, errors[], warnings[], relaxes[], required_role, requires_signature, signing?}` 且不落库，设置页据此在提交前提示"此改动需要 approver 签名"并直接用 `signing` 发起审批（诉求 A2）。
 
 ### 2.6 热加载语义
 
@@ -206,8 +206,8 @@ settings 路由归 [api.md §4.9](api.md#49-settings)（5 条：全局 `GET` / `
 | A5 | 新增只读路由 `GET /v1/settings/catalog` 与 `GET /v1/settings/status`，operator 起；响应结构见 §2.8 | 设置页表单；未生效可见 |
 | A6 | 凭据字段语义按 §2.4（`present` 只读、`value` 只写、`null` 不接受） | 与 §4.9 凭据行有差异 |
 | A7 | 事件目录加 `settings.updated`；项目覆盖不再发 `project.updated`；`settings.*` 不进 viewer 与手机档案的事件流 | api.md OQ-4 |
-| A8 | settings 写权限按 §2.5：放宽类与带 secret `value` 的写入需 approver（+ 签名）；签名流程待 `api` / `pki` 规格 | api.md OQ-5 |
-| A9 | `Project.default_level` 改为 `levels.default_level` 的只读投影 | api.md OQ-3；data-model 需同步 |
+| A8 | settings 写权限按 §2.5：放宽类与带 secret `value` 的写入需 approver + 签名；签名流程见 api.md §6.6 | 已采纳 |
+| A9 | 默认档位只在 `levels.default_level` | 已决（decisions P-22）：Project 不再有该字段 |
 
 ### 2.8 `catalog` 与 `status` 的响应结构
 
@@ -267,9 +267,11 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 | 类别 | 键 | 用途 | 调用方 | 工具 | 推理默认 |
 | --- | --- | --- | --- | --- | --- |
-| 打杂 | `utility` | 事件摘要、CI 日志分类、提交说明、状态清单、通知文案 | `models` 直接调用 | 无 | 低（`low`） |
-| 大脑 | `planner` | 意图解析、规划拆图、需求准入、reasoner 预演、arbiter 裁决 | `models` 直接调用 | 无 | 高（`high`） |
-| 干活 | `worker` | 沙盒内实现、修复、各 review 视角 | 沙盒内 agent CLI，经 Egress 注入 key | **必须支持** | 随档位（`by_level`） |
+| 打杂 | `utility` | `classify`：CI 日志分类、事件摘要、状态问答、提交说明、状态清单、通知文案 | `models` 直接调用 | 无 | 低（`low`） |
+| 大脑 | `planner` | 直接调用：`intent`、`admission`、`summarize`；沙盒只读：`plan`、`reasoner`、`arbiter` | `models` 直接调用；沙盒内 agent CLI | **必须支持**（沙盒角色要用） | 高（`high`），可设 `by_level` |
+| 干活 | `worker` | 沙盒内 `build`、`verify`、`single`、`review:<视角>`、`heal`、`answer` | 沙盒内 agent CLI | **必须支持** | 随档位（`by_level`） |
+
+角色、层级、执行位置的搭配见 [architecture §9](../architecture.md#9-三类模型)（decisions P-17）。**所有调用都经 Egress 反向代理**（decisions P-16）：`models` 与沙盒内的 agent CLI 都把 provider 的 `base_url` 换成 Egress 端点，由 Egress 注入 key 并计量。沙盒内运行的 planner 角色沿用 `models.worker` 的 `adapter`、`attempt_wall_s`、`max_turns` **[提议]**。
 
 ### 3.1 `models.providers.<id>`（仅全局）
 
@@ -285,8 +287,8 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 | --- | --- | --- | --- | --- |
 | `provider` | providers 的 id | 无 | 全部 | |
 | `model` | string | 无 | 全部 | 必须无默认；示例中的 id 是占位符 |
-| `reasoning_effort` | `none / low / medium / high / max`；worker 另可为 `by_level` | utility `low`；planner `high`；worker `by_level` | 全部 | 抽象枚举，由 `ModelProvider` 映射到具体参数；模型不支持的取值 → 422（V05） |
-| `effort_by_level` | `{low, medium, high, max}`，每项 `{default, critical?}` | 见 §3.3 | worker，且仅当 `reasoning_effort = by_level` | `critical` 由图模板标记的节点使用（OQ-6）；Ultimate 的子交付单元按 Max 解析（[architecture §8](../architecture.md#8-档位阶段与图)），所以没有 `ultimate` 项 |
+| `reasoning_effort` | `none / low / medium / high / max`；planner 与 worker 另可为 `by_level`（推理深度随档位，decisions P-17） | utility `low`；planner `high`；worker `by_level` | 全部 | 抽象枚举，由 `ModelProvider` 映射到具体参数；模型不支持的取值 → 422（V05） |
+| `effort_by_level` | `{low, medium, high, max}`，每项 `{default, critical?}` | 见 §3.3 | planner / worker，且仅当 `reasoning_effort = by_level` | `critical` 由图模板标记的节点使用（OQ-6）；Ultimate 的子交付单元按 Max 解析（[architecture §8](../architecture.md#8-档位阶段与图)），所以没有 `ultimate` 项 |
 | `fallback` | 数组，最多 3 项，每项 `{provider, model, reasoning_effort?}` | `[]` | 全部 | 见 §3.4 |
 | `adapter` | `claude_code` | `claude_code` | worker | `WorkerAdapter` 实现（P-07）；其他适配器后续追加 |
 | `request_timeout_s` | 整数，5–1800 | utility 60；planner 300；worker 600 **[建议值，待调优]** | 全部 | 单次模型请求的空闲超时（流式以"无数据"计） |
@@ -324,21 +326,22 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 ## 4. `levels`
 
-`levels.default_level`：新任务的默认档位上限，取值 `none / low / medium / high / max / ultimate`，默认 `medium` **[建议值，待调优]**。单个任务仍可在消息里指定上限（任务级参数，不是配置）。这个键把 data-model 里 `Project.default_level` 的归属落到 settings（OQ-17）。
+`levels.default_level`：新任务的默认档位上限，取值为 `Level`（`"None"` / `"Low"` / `"Medium"` / `"High"` / `"Max"` / `"Ultimate"`，data-model §1），默认 `"Medium"` **[建议值，待调优]**。项目可覆盖。单个任务仍可在消息里指定上限（任务级参数，不是配置）。
 
-档位条目的键为 `low / medium / high / max / ultimate`。**`none` 不出现**：None 档不建交付单元，没有预算模板（V07）。
+档位条目的键为 `low / medium / high / max / ultimate`（这是对象键，不是 `Level` 值）。**`none` 不出现**：None 档不建交付单元，没有预算模板（V07）。
 
 ### 4.1 字段
 
 | 键 | 类型 | 对应 | 语义 |
 | --- | --- | --- | --- |
 | `graph_template` | string | `Workflow.template` | 引用 `engine` 登记的模板族名，该族覆盖本档位各阶段的图（[architecture §8](../architecture.md#8-档位阶段与图) 表）。本文不定义模板内容；名字必须在 catalog 中存在且与档位匹配（V08） |
-| `budget.tokens_by_tier.utility / planner / worker` | 正整数 | `BudgetLedger.limits.tokens_by_tier` | 该交付单元内该类模型的累计 token 上限（计数口径见 OQ-7） |
-| `budget.nodes` | 正整数 | `limits.nodes` | 图中节点数上限（口径见 OQ-7） |
-| `budget.rounds` | 正整数 | `limits.rounds` | `REVISE` 追加的"修正 + 复审"轮数上限；超限或判定无进展即上报（§8）。守护自愈轮是否计入见 OQ-7 |
-| `budget.wall_time_s` | 正整数（秒） | `limits.wall_time` | 累计运行墙钟。口径 **[提议]**：交付单元内节点处于 `running` 的时间并集，不含等待人 / CI 的时间（OQ-7） |
-| `budget.concurrency` | 正整数 | （速率型，ledger 目前没有此项） | 同时 `running` 的节点（沙盒）数上限。Ultimate 的含义见 OQ-8 |
-| `budget.forge_writes_per_hour` | 正整数 | `limits.forge_writes`（累计型，与本键不一致，见 OQ-9） | 该交付单元的滑动 1 小时窗口内 GitHub 写动作数上限，按 Outbox 动作数计（不按 API 调用数）。超限时动作保持 `queued` 并设 `not_before`，**延迟**而不是失败 [提议；forge-actions §2.7 已按此实现]。与 `forge` 的安装级限流闸是两层，取更严者 |
+| `budget.tokens_by_tier.utility / planner / worker` | 正整数 | `BudgetLedger.limits.tokens_by_tier` | 该交付单元内该类模型的累计 token 上限，以 Egress 计量为准（输入 / 输出 / 缓存的权重见 OQ-7） |
+| `budget.nodes` | 正整数 | `limits.nodes` | 图中节点数上限（被图改写替换的节点也计；尝试另计，不占此项） |
+| `budget.rounds` | 正整数 | `limits.rounds` | 评审迭代轮（`REVISE` 追加的"修正 + 复审"）与守护自愈轮之和的上限；超限或判定无进展即上报（§8） |
+| `budget.wall_time_s` | 正整数（秒） | `limits.wall_time` | 该交付单元所有尝试运行时长之和的上限，不含等待人 / CI 的时间 |
+| `budget.concurrency` | 正整数 | `limits.concurrency` | 同时运行的节点（沙盒）数上限；Ultimate 父交付单元指同时运行的子交付单元数 |
+| `budget.forge_writes` | 正整数 | `limits.forge_writes` | 该交付单元 GitHub 写动作（Outbox 动作成功次数）的累计上限；耗尽 → `budget.exhausted` |
+| `budget.forge_writes_per_hour` | 正整数 | （不进台账） | 按小时限速，由 Outbox 按交付单元的令牌桶执行，按 Outbox 动作数计（不按 API 调用数）。桶空时动作保持 `queued` 并设 `not_before`，**延迟**而不是失败（forge-actions §2.7）。与 `forge` 的安装级限流闸是两层，取更严者；与 `budget.forge_writes` 不混用（decisions P-22） |
 
 ### 4.2 语义规则
 
@@ -346,19 +349,19 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 - **预算按 `level_cap` 记账，不按 `level_effective`**；自动加码不追加预算；预算耗尽 → `budget.exhausted` + InboxItem（§8）。
 - **降档不撤销已触发的闸门**（§8）：这是 `engine` 的行为，没有对应配置键。
 - 运行中的交付单元不随配置变化（§2.6）；能否给运行中的交付单元追加预算见 OQ-10。
-- Ultimate：父交付单元用 `levels.ultimate`，子交付单元各自按 `levels.max`（§8）；父级预算是否汇总子级用量见 OQ-8。
+- Ultimate：父交付单元用 `levels.ultimate`，子交付单元各自按 `levels.max`（§8）；父交付单元的台账汇总所有子交付单元的用量（decisions P-22）。
 
 ### 4.3 建议默认值
 
 **全部为 [建议值，待调优]**：没有真实任务数据支撑，只用于让系统能跑起来并保持档位单调递增。`wall_time_s` 的 5400 即 90 分钟。
 
-| 档位 | `graph_template`（建议名，以 engine 登记为准） | utility tokens | planner tokens | worker tokens | nodes | rounds | wall_time_s | concurrency | forge_writes_per_hour |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| low | `low.single` | 100,000 | 50,000 | 1,000,000 | 4 | 2 | 1,800 | 1 | 20 |
-| medium | `medium.plan_build_verify` | 200,000 | 150,000 | 3,000,000 | 12 | 3 | 5,400 | 2 | 40 |
-| high | `high.multi_review` | 400,000 | 300,000 | 8,000,000 | 30 | 4 | 10,800 | 3 | 60 |
-| max | `max.adversarial` | 800,000 | 800,000 | 20,000,000 | 60 | 6 | 21,600 | 4 | 80 |
-| ultimate | `ultimate.milestone` | 3,000,000 | 3,000,000 | 100,000,000 | 400 | 40 | 172,800 | 4 | 150 |
+| 档位 | `graph_template`（建议名，以 engine 登记为准） | utility tokens | planner tokens | worker tokens | nodes | rounds | wall_time_s | concurrency | forge_writes | forge_writes_per_hour |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| low | `low.single` | 100,000 | 50,000 | 1,000,000 | 4 | 2 | 1,800 | 1 | 30 | 20 |
+| medium | `medium.plan_build_verify` | 200,000 | 150,000 | 3,000,000 | 12 | 3 | 5,400 | 2 | 60 | 40 |
+| high | `high.multi_review` | 400,000 | 300,000 | 8,000,000 | 30 | 4 | 10,800 | 3 | 120 | 60 |
+| max | `max.adversarial` | 800,000 | 800,000 | 20,000,000 | 60 | 6 | 21,600 | 4 | 200 | 80 |
+| ultimate | `ultimate.milestone` | 3,000,000 | 3,000,000 | 100,000,000 | 400 | 40 | 172,800 | 4 | 1,000 | 150 |
 
 ## 5. `policies`
 
@@ -367,14 +370,14 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 | 处置 | 含义 |
 | --- | --- |
 | `auto` | 无需人，直接放行 |
-| `approve` | 需要 Gantry 审批：绑定 `(动作, 目标, head SHA)` 的设备签名（[architecture §7.4](../architecture.md#74-危险动作与两类审批)） |
+| `approve` | 需要 Gantry 审批：绑定 `(动作, 目标, subject_digest)` 的设备签名（[architecture §7.4](../architecture.md#74-危险动作与两类审批)） |
 | `deny` | 拒绝，并按需写入收件箱 |
 
-**fail-closed [提议]**：审批链路不可用时（例如 M1 签名界面尚未交付），`approve` 按 `deny` 执行并上报。这与 M1 退出标准"改动 `.github/workflows/` 的补丁被策略拒绝并上报"一致。
+**fail-closed**：审批链路不可用时，`approve` 按 `deny` 执行并上报。M1 的 `policy` v0 对 §5.2 中 `workflows`、`dependency_manifests`、`lockfiles` 的命中一律按 `deny` 处理并上报，M2 起才按 `approve`（decisions P-19）；`merge_pr` 等动作的签名审批 M1 起可用（decisions P-18），不受此影响。
 
 ### 5.1 `policies.actions`
 
-键是动作 id，值是处置。id 以 [forge-actions.md §3.1](forge-actions.md) 的 `ForgeActionKind`（14 个）为基础：多数与 `kind` 同名；`post_comment`、`edit_issue` 是两个 `kind` 合并或改名的策略 id；另有三个**条件伪动作**（同一个 `kind` 在特定条件下的更严处置，由 `policy` 从载荷推出，`forge` 不感知）和三个**预留动作**（architecture §7.4 列为危险动作，但 forge-actions §3.4 说第一版没有对应 Outbox 动作）。`Approval.action` 也使用这些 id（forge-actions §2.5）。
+键是动作 id，值是处置。**全部 14 个 `ForgeActionKind`（[forge-actions.md §3.1](forge-actions.md)）都列出，id 与 `kind` 同名**（decisions P-28）；另有三个**条件伪动作**（同一个 `kind` 在特定条件下的更严处置，由 `policy` 从载荷推出，`forge` 不感知）和三个**预留动作**（第一版不实现，forge-actions §3.4，decisions P-27）。`Approval.action` 也使用这些 id（forge-actions §2.5）。出厂默认值覆盖全部 20 个 id；`unlisted_action` 只是兜底。
 
 | 动作 id | 对应 `ForgeActionKind` / 条件 | 默认 | 允许取值 | 依据 |
 | --- | --- | --- | --- | --- |
@@ -382,25 +385,26 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 | `force_push` | `push_branch` 且 `force=true` | `approve` | approve / deny | §7.4；forge-actions §3.1 |
 | `push_outside_prefix` | `push_branch` 到不以 `gantry/`（forge 的 `push.branch_prefix`）开头的分支 | `approve` | approve / deny | forge-actions §3.1 [提议：单列此伪动作] |
 | `resolve_review_thread_human` | `resolve_review_thread` 且线程含人类评论 | `deny` | approve / deny | forge-actions §3.1 与其 OQ-9（"默认建议禁止"，待决）；取保守值 [提议] |
-| `delete_branch` | **预留**，第一版无 forge 动作 | `deny` | approve / deny | §7.4；forge-actions §3.4 |
+| `delete_branch` | **预留**，第一版不实现 | `deny` | approve / deny | forge-actions §3.4；decisions P-27 |
 | `publish_release` | **预留** | `deny` | approve / deny | 同上 |
 | `change_repo_settings` | **预留** | `deny` | approve / deny | 同上 |
 | `push_branch` | `push_branch`（`gantry/` 前缀、非强推、未触及受保护路径） | `auto` | auto / approve / deny | 推送前的补丁校验（I8）是前置条件，与本键无关 |
 | `create_pr` | `create_pr` | `auto` | auto / approve / deny | |
 | `update_pr` | `update_pr` | `auto` | auto / approve / deny | |
-| `post_comment` | `upsert_status_comment`、`create_comment` | `auto` | auto / approve / deny | 设为 `deny` 会同时停掉状态清单评论 |
-| `reply_review_thread` | `reply_review_thread` | `auto` | auto / approve / deny | 补上 forge-actions §3.5 指出的缺口：回复与关闭分成两个 id |
-| `resolve_review_thread` | `resolve_review_thread`（线程无人类评论） | `auto` | auto / approve / deny | 同上 |
-| `create_issue` | `create_issue` | `auto` | auto / approve / deny | 补上缺口 |
-| `edit_issue` | `update_issue`（规格块 / 标题 / 标签集） | `auto` | auto / approve / deny | |
+| `upsert_status_comment` | `upsert_status_comment` | `auto` | auto / approve / deny | 设为 `deny` 会停掉状态清单评论 |
+| `create_comment` | `create_comment` | `auto` | auto / approve / deny | |
+| `reply_review_thread` | `reply_review_thread` | `auto` | auto / approve / deny | |
+| `resolve_review_thread` | `resolve_review_thread`（线程无人类评论） | `auto` | auto / approve / deny | |
+| `create_issue` | `create_issue` | `auto` | auto / approve / deny | |
+| `update_issue` | `update_issue`（规格块 / 标题 / 标签集） | `auto` | auto / approve / deny | |
 | `close_issue` | `close_issue` | `auto` | auto / approve / deny | |
-| `add_labels` | `add_labels` | `auto` | auto / approve / deny | 补上缺口 |
-| `request_reviewers` | `request_reviewers` | `auto` | auto / approve / deny | 补上缺口；会通知对方，克制使用 |
-| `rerun_failed_jobs` | `rerun_failed_jobs` | `auto` | auto / approve / deny | 补上缺口；次数上限是 forge 内部常量 |
+| `add_labels` | `add_labels` | `auto` | auto / approve / deny | |
+| `request_reviewers` | `request_reviewers` | `auto` | auto / approve / deny | 会通知对方，克制使用 |
+| `rerun_failed_jobs` | `rerun_failed_jobs` | `auto` | auto / approve / deny | 次数上限是 forge 内部常量 |
 
-- 架构 §7.4 把 merge、改 workflow、force push、删分支、发 release、改仓库设置定义为"需要 Gantry 审批的危险动作"，所以**上表前七行不允许 `auto`**。design.md 曾写"由配置决定自动放行或上报"，与此冲突，按优先级取 architecture（OQ-12）。"改 workflow 文件"由 §5.2 的路径规则表达，不重复成动作 id。
+- 架构 §7.4 把 merge、force push、推送到非 `gantry/` 分支与受保护路径的改动定义为"需要 Gantry 审批的危险动作"，删分支、发 release、改仓库设置第一版不实现，所以**上表前七行不允许 `auto`**。design.md 曾写"由配置决定自动放行或上报"，与此冲突，按优先级取 architecture（OQ-12）。"改 workflow 文件"由 §5.2 的路径规则表达，不重复成动作 id。
 - forge-actions §3.4：`approve_pr`（提交 `APPROVE` review）**永不提供**，`bypass_rules` 永不传——没有对应的动作 id，也不可配置（P-12）。
-- `policies.unlisted_action`：未列出的动作类型的兜底，`approve`（默认）/ `deny`；不能设为 `auto`（对应守护"不在规则表里一律上报"）。
+- `policies.unlisted_action`：只是兜底（出厂默认已覆盖全部动作，只有将来新增、而配置尚未列出的动作才会落到这里），`approve`（默认）/ `deny`；不能设为 `auto`（对应守护"不在规则表里一律上报"）。
 - worker 的 proposal `kind`（worker-protocol §5.4）是 `ForgeActionKind` 的子集，由 `engine` 入队后才有动作 id；它们不直接出现在 `policies.actions`。
 
 ### 5.2 `policies.paths`
@@ -419,9 +423,9 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 | id | globs | 处置 | 依据 |
 | --- | --- | --- | --- |
-| `workflows` | `.github/workflows/**` | `approve` | P-11；§7.3；§7.4 |
-| `dependency_manifests` | `package.json`、`**/package.json`、`Cargo.toml`、`**/Cargo.toml`、`pyproject.toml`、`**/pyproject.toml`、`requirements*.txt`、`go.mod`、`**/go.mod`、`Gemfile`、`pom.xml`、`build.gradle*` | `approve` | P-11；"依赖清单"的权威清单未定（OQ-13），此列表是 **[建议]** |
-| `lockfiles` | `package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`Cargo.lock`、`poetry.lock`、`uv.lock`、`go.sum`、`Gemfile.lock`（各加 `**/` 前缀变体） | `approve` | P-11；同上 |
+| `workflows` | `.github/workflows/**` | `approve`（M1 按 `deny` 执行并上报，P-19） | P-11；§7.3；§7.4 |
+| `dependency_manifests`（M1 同上） | `package.json`、`**/package.json`、`Cargo.toml`、`**/Cargo.toml`、`pyproject.toml`、`**/pyproject.toml`、`requirements*.txt`、`go.mod`、`**/go.mod`、`Gemfile`、`pom.xml`、`build.gradle*` | `approve` | P-11；"依赖清单"的权威清单未定（OQ-13），此列表是 **[建议]** |
+| `lockfiles`（M1 同上） | `package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`Cargo.lock`、`poetry.lock`、`uv.lock`、`go.sum`、`Gemfile.lock`（各加 `**/` 前缀变体） | `approve` | P-11；同上 |
 | `sensitive_files` | `.env`、`.env.*`、`**/*.pem`、`**/*.key`、`**/id_rsa*`、`**/.npmrc` | `deny` | I8 的"敏感文件"校验；具体模式是 **[建议]** |
 | `repo_meta` | `.github/actions/**`、`.github/CODEOWNERS`、`CODEOWNERS`、`.github/dependabot.yml`、`.devcontainer/**` | `approve` | **[建议]**，不是骨架要求：这些文件会改变 CI 执行面、评审归属或沙盒环境 |
 
@@ -433,7 +437,7 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 | --- | --- | --- |
 | `enabled` | bool，默认 `true` | 关闭 = 放宽 |
 | `rules.<id>.when` | **恰好一种**：`{paths: [glob…]}` / `{diff: {files_gte?, lines_gte?}}` / `{labels: [string…]}` | `paths`：触及任一路径即命中。`diff`：改动文件数或增删行数任一达到阈值即命中。`labels`：关联 Issue / PR 带有任一标签（完全匹配） |
-| `rules.<id>.raise_to` | `medium / high / max` | 把 `level_effective` 抬到该档位 |
+| `rules.<id>.raise_to` | `"Medium"` / `"High"` / `"Max"`（`Level`） | 把 `level_effective` 抬到该档位 |
 
 求值规则：
 
@@ -447,9 +451,9 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 | id | `when` | `raise_to` |
 | --- | --- | --- |
-| `sensitive_paths` | `paths`：`**/auth/**`、`**/security/**`、`**/crypto/**`、`**/migrations/**` | `max` |
-| `large_diff` | `diff`：`files_gte` 30，`lines_gte` 1000 | `high` |
-| `risk_labels` | `labels`：`security`、`breaking-change`、`risk:high` | `max` |
+| `sensitive_paths` | `paths`：`**/auth/**`、`**/security/**`、`**/crypto/**`、`**/migrations/**` | `"Max"` |
+| `large_diff` | `diff`：`files_gte` 30，`lines_gte` 1000 | `"High"` |
+| `risk_labels` | `labels`：`security`、`breaking-change`、`risk:high` | `"Max"` |
 
 ### 5.4 `policies.approval` 与 `policies.patch`
 
@@ -467,9 +471,9 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 | 来源 | 固定的内容 | 配置层面的体现 |
 | --- | --- | --- |
-| I1 | 沙盒无 GitHub 网络、无长期凭据 | 任何 egress 档案不得含 GitHub 域名族（至少 `github.com`、`api.github.com` 及其子域；完整硬编码拒绝表由 `egress` 规格书维护，不是配置）→ V10。沙盒没有 env / secret 挂载类配置键；凭据只由 `egress` 在出站时注入 |
-| I2 | GitHub 写入唯一路径是 Outbox | 没有让其他模块写 GitHub 的键；`forge_writes_per_hour` 必须是有限正整数 |
-| I3 | `policy` 是唯一放行点；审批绑定 head SHA，新推送使审批失效 | 没有关闭绑定 / 失效的键；`approval.ttl_s` 有上限；审批消费时重新过 policy（§2.6）；§7.4 "守护在已审批 PR 上不得静默推送"→ 锁定类 `push_after_approval`（§6） |
+| I1 | 沙盒无 GitHub 网络、无长期凭据 | 任何 egress 档案不得含 GitHub 域名族（至少 `github.com`、`api.github.com` 及其子域；完整硬编码拒绝表由 `egress` 规格书维护，不是配置）→ V10；依赖指向 `github.com` 源默认拒绝（decisions Q-08）。沙盒没有 env / secret 挂载类配置键；凭据只由 `egress` 在反向代理出站时注入 |
+| I2 | GitHub 写入唯一路径是 Outbox | 没有让其他模块写 GitHub 的键；`forge_writes`、`forge_writes_per_hour` 必须是有限正整数 |
+| I3 | `policy` 是唯一放行点；审批绑定 `subject_digest`（PR 类为 head SHA），新推送使绑定 head 的审批失效 | 没有关闭绑定 / 失效的键；`approval.ttl_s` 有上限；审批消费时重新过 policy（§2.6）；§7.4 "守护在已审批 PR 上不得静默推送"→ 锁定类 `push_after_approval`（§6） |
 | I5 | 外部文本是数据，进 prompt 要隔离 | 没有关闭隔离的键；外部文本触发的加码 / 分流规则只能提高审视（§5.3） |
 | I6 | 客户端不执行、不持凭据 | API 永不返回 secret 值；没有向客户端下发凭据的键 |
 | I7 | 配置与工作分离 | 写设置只有 api.md §4.9 的 settings 路由；`conversation`、规划、worker 都没有写路径，**不得把自然语言解析成设置变更**；工作页面无配置控件（档位上限是任务参数，见 §1.1） |
@@ -546,19 +550,19 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 ## 8. `egress`
 
-`egress` 是独立进程，只读本节配置、`models.providers` 与它们引用的 secret。
+`egress` 是独立进程，只读本节配置、`models.providers` 与它们引用的 secret。两种模式（decisions P-16）：模型 API 与私有包仓库走**反向代理**（调用方把 base URL 指向 Egress，Egress 注入凭据并按调用方计量；沙盒调用方以沙盒网络身份映射到 job）；公共包仓库走 **HTTPS CONNECT 白名单**（不注入凭据）。
 
 ### 8.1 键
 
 | 键 | 类型 | 说明 |
 | --- | --- | --- |
-| `groups.<name>` | `{hosts: [string…]}` | 白名单分组。`hosts` 是 DNS 主机名，允许一层前缀通配 `*.example.com`；默认只放行 443 |
+| `groups.<name>` | `{hosts: [string…]}` | 白名单分组。`hosts` 是 DNS 主机名，允许一层前缀通配 `*.example.com`；默认只放行 443。未被 `injection` 或 provider 覆盖的主机走 CONNECT |
 | `profiles.<name>` | `{groups: [name…]}` | 档案 = 分组集合；沙盒创建时固化为 `Sandbox.egress_profile` |
 | `default_profile` | profile 名，默认 `default` | 所有沙盒用此档案（按节点角色区分档案见 OQ-16） |
-| `injection.<id>` | `{hosts[], kind, header?, credential}` | **按目标注入**：只对列出的 `hosts` 在出站时加头，值取自 `credential`（`SecretRef`，§2.4）。`kind` 为 `bearer`（`Authorization: Bearer …`）或 `header`（自定义头名，如 `x-api-key`） |
+| `injection.<id>` | `{hosts[], kind, header?, credential}` | **私有包仓库的反向代理路由**：沙盒内的包管理器把仓库地址指向 Egress，Egress 对列出的 `hosts` 在出站时加头，值取自 `credential`（`SecretRef`，§2.4）。`kind` 为 `bearer`（`Authorization: Bearer …`）或 `header`（自定义头名，如 `x-api-key`） |
 
-- **模型 API 的注入由 `models.providers` 自动派生**：每个 provider 的 `base_url` 主机 + `credential.secret_ref` 形成只读的注入项，显示在设置页，不在 `egress.injection` 里重复声明（避免两处 secret_ref 漂移）。`egress.injection` 只放包仓库等其他目标。
-- 注入的凭据只发往列出的主机，**从不出现在沙盒内**（I1）；注入项的 `hosts` 必须属于某个分组（V13）。具体的注入机制（TLS 终止还是 base URL 改写）见 OQ-24。
+- **模型 API 的反向代理路由由 `models.providers` 自动派生**：每个 provider 的 `base_url` 主机 + `credential.secret_ref` 形成只读的注入项，显示在设置页，不在 `egress.injection` 里重复声明（避免两处 secret_ref 漂移）。`egress.injection` 只放私有包仓库。
+- 注入的凭据只发往列出的主机，**从不出现在沙盒内**（I1）；注入项的 `hosts` 必须属于某个分组（V13）。
 
 ### 8.2 建议的内置分组
 
@@ -594,7 +598,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | `routes.<id>` | `{kinds: [InboxItem.kind…], channels: [kind…]}` | 哪些上报类型推到哪些渠道。`InboxItem.kind` 取值见 [data-model](../data-model.md#inboxitem--approval)：`approval_needed / decision_needed / spec_needed / budget_exhausted / escalation / security_finding` |
 
 - 通知文案由 `utility` 模型生成（§9）；正文不得原样透传不可信文本（I5）。
-- 按 `severity` 路由暂不支持：data-model 里 `severity` 没有枚举（OQ-15）。
+- 按 `severity`（`info` / `warn` / `blocker`，data-model）路由第一版不支持（OQ-15）。
 - 桌面端关闭时的离线通知见 Q-07。
 
 ## 10. `github`
@@ -606,9 +610,9 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | `app.app_id` | 整数 | GitHub App ID（非密） |
 | `app.private_key` | `SecretRef` | App 私钥（[architecture §6](../architecture.md#6-状态归属)：本地密钥文件） |
 | `app.webhook_secret` | `SecretRef` | webhook HMAC secret |
-| `app.webhook_secret_previous` | `SecretRef`，可选 | 轮换窗口内仍接受的旧 secret：`forge` 先试当前再试上一版（forge-actions §5.2 提出的需求）。轮换步骤 **[提议]**：① 把旧值所在的 ref 填进本键；② 为 `app.webhook_secret` 写入新值；③ 在 GitHub 上更新 webhook secret；④ 窗口结束后移除本键（旧 ref 无引用即被回收，§2.4） |
+| `app.webhook_secret_previous` | `SecretRef`，可选 | 轮换窗口内仍接受的上一个 secret：`forge` 先试当前再试上一个（decisions P-29）。轮换步骤 **[提议]**：① 把旧值所在的 ref 填进本键；② 为 `app.webhook_secret` 写入新值；③ 在 GitHub 上更新 webhook secret；④ 窗口结束后移除本键（旧 ref 无引用即被回收，§2.4） |
 
-- `installation_id`、机器人账号 ID 等是 `Project` 的字段（forge-actions §14.1 要求 data-model 补），不在这里。
+- `installation_id`、`bot_user_id` 等是 `Project` 的字段（data-model），不在这里。
 - **`forge.*` 的内部参数不是设置**（webhook 监听与载荷上限、对账批大小、Outbox 退避、推送传输、限流余量等）：forge-actions §11 把它们划为引导配置（`deploy`，重启生效）或 forge 内部常量，本文不收录。对账巡检周期是例外，按 forge-actions §7.1 放在 `guardian.patrol_interval_s`（§6.2）。`forge.merge.method` 是否做成设置键见 OQ-26。
 - 私钥与 webhook secret 的轮换见 M3，走 `SecretRef.value`（§2.4）。
 
@@ -621,19 +625,19 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | V01 | 全部 | 未知键拒绝（每层 `additionalProperties: false`）；类型 / 枚举 / 范围错误 | error | `unknown_field` / `type` / `enum` / `range`（api.md 已有） |
 | V02 | 全部 | 不得内联凭据：`SecretRef` 以外，键名含 `api_key / token / password / secret / private_key` 且值为字符串；或任何字符串形似密钥（§2.4） | error | `inline_secret_detected` |
 | V03 | 全部 | 每个 `secret_ref` 匹配命名规则；已存在于密钥存储，或本次请求带了 `value`；`value` 不得为 `null` | error | `secret_ref_missing` / `secret_clear_in_use` |
-| V04 | `models.worker` 及其 `fallback` | **模型必须支持工具调用**（来自 `models` 的能力表，来源见 OQ-3）；对 utility / planner 不要求 | error | `worker_model_no_tools` |
-| V05 | `models.*` | `reasoning_effort`、`effort_by_level` 的每个取值必须被该模型支持；`by_level` 时必须提供 `effort_by_level` 且 `low / medium / high / max` 齐全、每项有 `default`；`reasoning_effort` 为固定值时 `effort_by_level` 被忽略（可以存在，项目覆盖固定值时全局的该表仍在） | error | `effort_unsupported` / `effort_by_level_required` |
+| V04 | `models.worker`、`models.planner` 及其 `fallback` | **模型必须支持工具调用**（来自 `models` 的能力表，来源见 OQ-3；planner 也用于沙盒只读角色）；对 utility 不要求 | error | `worker_model_no_tools` |
+| V05 | `models.*` | `reasoning_effort`、`effort_by_level` 的每个取值必须被该模型支持；`by_level` 只允许 planner / worker，且必须提供 `effort_by_level` 且 `low / medium / high / max` 齐全、每项有 `default`；`reasoning_effort` 为固定值时 `effort_by_level` 被忽略（可以存在，项目覆盖固定值时全局的该表仍在） | error | `effort_unsupported` / `effort_by_level_required` |
 | V06 | `models.worker` | `adapter` 必须支持该 `provider.kind`；含 `fallback` 时 adapter 必须声明支持降级 | error | `adapter_provider_mismatch` / `fallback_unsupported` |
-| V07 | `levels` | 除 `default_level` 外，键恰为 `low / medium / high / max / ultimate`；`none` 作为条目键出现拒绝；所有预算字段必填、正整数 | error | `levels_keys` / `budget_not_finite` |
+| V07 | `levels` | `default_level` 是合法 `Level`；除它外，键恰为 `low / medium / high / max / ultimate`；`none` 作为条目键出现拒绝；所有预算字段（含 `forge_writes`、`forge_writes_per_hour`）必填、正整数 | error | `levels_keys` / `budget_not_finite` |
 | V08 | `levels.*.graph_template` | 模板名在 catalog 中存在，且与该档位匹配 | error | `template_unknown` / `template_level_mismatch` |
-| V09 | `levels` | 各预算字段随档位非递减（`tokens_by_tier.*`、`nodes`、`rounds`、`wall_time_s`）；`ultimate` 预算 ≥ `max`；`concurrency` 不超过 `sandbox.max_concurrent_sandboxes`；`forge_writes_per_hour` 不超过 GitHub 内容创建类的官方每小时上限 × 余量（forge-actions §10.1 / §10.2：500 × 0.5 = 250，余量是 forge 的内部常量） | warning（最后一项 error） | `levels_not_monotonic` / `forge_rate_over_ceiling` |
+| V09 | `levels` | 各预算字段随档位非递减（`tokens_by_tier.*`、`nodes`、`rounds`、`wall_time_s`、`forge_writes`）；`ultimate` 预算 ≥ `max`；`concurrency` 不超过 `sandbox.max_concurrent_sandboxes`；`forge_writes_per_hour` 不超过 GitHub 内容创建类的官方每小时上限 × 余量（forge-actions §10.1 / §10.2：500 × 0.5 = 250，余量是 forge 的内部常量） | warning（最后一项 error） | `levels_not_monotonic` / `forge_rate_over_ceiling` |
 | V10 | `egress` | 任何分组不得含 GitHub 域名族、IP 字面量、裸 `*`；`injection.hosts` 不得含 GitHub 域名族 | error | `egress_forbidden_host` |
 | V11 | `models` ↔ `egress` | 每个被 worker（含降级）引用的 provider，其 `base_url` 主机属于 `default_profile` 所含分组；所有 provider 主机属于 `groups.model_api` | error | `provider_host_not_allowed` |
 | V12 | `sandbox` | `base_image` 含 `@sha256:<64 位十六进制>`；`limits.*` 为正；`max_concurrent_sandboxes × limits.mem_mb` 超过宿主可用内存（来自 `status`）时提示 | error / warning | `image_not_pinned` / `sandbox_overcommit` |
 | V13 | `egress.injection` | `hosts` 必须被某个分组覆盖；同一 `(host, header)` 只能有一个注入；`header` 不得是 `Host / Content-Length / Transfer-Encoding` 等逐跳或框架头 | error | `injection_host_not_in_group` / `injection_conflict` |
-| V14 | `policies.actions` | 动作 id 属于 §5.1 的 19 个；取值在"允许取值"内（危险动作不得 `auto`） | error | `action_unknown` / `disposition_not_allowed` |
+| V14 | `policies.actions` | 动作 id 属于 §5.1 的 20 个；取值在"允许取值"内（危险动作不得 `auto`） | error | `action_unknown` / `disposition_not_allowed` |
 | V15 | `policies.paths` / `approval` / `patch` | glob 语法合法（`allow_globs` 非空）；`disposition` ∈ approve / deny；`sensitive_files` 的处置不得低于 `deny`；`approval.ttl_s`、`patch.*` 在硬上限内 | error | `glob_invalid` / `disposition_not_allowed` / `invariant_floor` |
-| V16 | `policies.escalation` | `when` 恰好一种；`raise_to` ∈ medium / high / max；`diff` 阈值为正 | error | `escalation_when_invalid` |
+| V16 | `policies.escalation` | `when` 恰好一种；`raise_to` ∈ `"Medium"` / `"High"` / `"Max"`；`diff` 阈值为正 | error | `escalation_when_invalid` |
 | V17 | `guardian` | `triage` 的类 id 已知、取值在 §6.1 的"允许取值"内；锁定类出现即拒绝；`patrol_interval_s ≥ 300`；阈值 ≥ 1 | error | `locked_key` / `triage_value_invalid` |
 | V18 | `notify` | 路由引用的渠道已启用且不是保留 kind；`kinds` 合法；`approval_needed / security_finding / budget_exhausted / escalation` 至少有一个已启用渠道可达 | error / warning | `channel_unavailable` / `urgent_unrouted` |
 | V19 | 项目覆盖 | resource 可覆盖（否则 `422 not_overridable`）；键在 §2.2 允许范围内；"仅收紧"键不得比全局有效值更宽松；`egress.profiles` 的分组是全局对应档案的子集；不得新增 provider / secret | error | `override_not_allowed` / `override_loosens_global` |
@@ -693,40 +697,40 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
     }
   },
   "levels": {
-    "default_level": "medium",
+    "default_level": "Medium",
     "low": {
       "graph_template": "low.single",
       "budget": {
         "tokens_by_tier": { "utility": 100000, "planner": 50000, "worker": 1000000 },
-        "nodes": 4, "rounds": 2, "wall_time_s": 1800, "concurrency": 1, "forge_writes_per_hour": 20
+        "nodes": 4, "rounds": 2, "wall_time_s": 1800, "concurrency": 1, "forge_writes": 30, "forge_writes_per_hour": 20
       }
     },
     "medium": {
       "graph_template": "medium.plan_build_verify",
       "budget": {
         "tokens_by_tier": { "utility": 200000, "planner": 150000, "worker": 3000000 },
-        "nodes": 12, "rounds": 3, "wall_time_s": 5400, "concurrency": 2, "forge_writes_per_hour": 40
+        "nodes": 12, "rounds": 3, "wall_time_s": 5400, "concurrency": 2, "forge_writes": 60, "forge_writes_per_hour": 40
       }
     },
     "high": {
       "graph_template": "high.multi_review",
       "budget": {
         "tokens_by_tier": { "utility": 400000, "planner": 300000, "worker": 8000000 },
-        "nodes": 30, "rounds": 4, "wall_time_s": 10800, "concurrency": 3, "forge_writes_per_hour": 60
+        "nodes": 30, "rounds": 4, "wall_time_s": 10800, "concurrency": 3, "forge_writes": 120, "forge_writes_per_hour": 60
       }
     },
     "max": {
       "graph_template": "max.adversarial",
       "budget": {
         "tokens_by_tier": { "utility": 800000, "planner": 800000, "worker": 20000000 },
-        "nodes": 60, "rounds": 6, "wall_time_s": 21600, "concurrency": 4, "forge_writes_per_hour": 80
+        "nodes": 60, "rounds": 6, "wall_time_s": 21600, "concurrency": 4, "forge_writes": 200, "forge_writes_per_hour": 80
       }
     },
     "ultimate": {
       "graph_template": "ultimate.milestone",
       "budget": {
         "tokens_by_tier": { "utility": 3000000, "planner": 3000000, "worker": 100000000 },
-        "nodes": 400, "rounds": 40, "wall_time_s": 172800, "concurrency": 4, "forge_writes_per_hour": 150
+        "nodes": 400, "rounds": 40, "wall_time_s": 172800, "concurrency": 4, "forge_writes": 1000, "forge_writes_per_hour": 150
       }
     }
   },
@@ -743,11 +747,12 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
       "push_branch": "auto",
       "create_pr": "auto",
       "update_pr": "auto",
-      "post_comment": "auto",
+      "upsert_status_comment": "auto",
+      "create_comment": "auto",
       "reply_review_thread": "auto",
       "resolve_review_thread": "auto",
       "create_issue": "auto",
-      "edit_issue": "auto",
+      "update_issue": "auto",
       "close_issue": "auto",
       "add_labels": "auto",
       "request_reviewers": "auto",
@@ -786,15 +791,15 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
       "rules": {
         "sensitive_paths": {
           "when": { "paths": ["**/auth/**", "**/security/**", "**/crypto/**", "**/migrations/**"] },
-          "raise_to": "max"
+          "raise_to": "Max"
         },
         "large_diff": {
           "when": { "diff": { "files_gte": 30, "lines_gte": 1000 } },
-          "raise_to": "high"
+          "raise_to": "High"
         },
         "risk_labels": {
           "when": { "labels": ["security", "breaking-change", "risk:high"] },
-          "raise_to": "max"
+          "raise_to": "Max"
         }
       }
     },
@@ -893,7 +898,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
     },
     "escalation": {
       "rules": {
-        "payments": { "when": { "paths": ["src/payments/**"] }, "raise_to": "max" }
+        "payments": { "when": { "paths": ["src/payments/**"] }, "raise_to": "Max" }
       }
     }
   },
@@ -923,31 +928,32 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | `models.providers.alt = {…}` | `override_not_allowed` | 提供方与凭据仅全局（V19） |
 | 项目级 `PUT /v1/projects/{id}/settings/notify` | `422 not_overridable` | `notify` resource 不可覆盖（api.md） |
 | 全局 `PUT` 含 `"credential": {"secret_ref": "x", "value": null}` | `secret_clear_in_use` | `null` 不接受（§2.4） |
-| 用 operator 设备把 `policies.actions.merge_pr` 从 `approve` 改成 `deny`，再改回 `approve` | 第二次 `403 forbidden_role`（`required_role: approver`） | 放宽需要 approver（§2.5）；注意 `deny → approve` 是放宽，`approve → deny` 是收紧 |
+| 用 operator 设备把 `policies.actions.merge_pr` 从 `approve` 改成 `deny`，再改回 `approve` | 第二次 `403 forbidden_role`（`required_role: approver`） | 放宽需要 approver + 签名（§2.5）；注意 `deny → approve` 是放宽，`approve → deny` 是收紧 |
+| approver 设备写入 `models.providers.anthropic.credential.value` 但不带 `Gantry-Approval` | `403 signature_required` | 带 secret `value` 的写入需要审批签名（§2.5，api.md §6.6） |
 | `egress.groups.x.hosts = ["api.github.com"]` | `egress_forbidden_host` | I1（V10） |
 
 ## 13. 设置页映射
 
-设置页是配置的**唯一入口**（D-09、I7）；viewer 看不到设置页（api.md §2.2），手机端没有设置（D-11）。每页顶部有"全局 / 项目 X"范围切换，项目范围下显示继承值（置灰，来自 `view=effective`）与"覆盖"开关，仅显示 §2.2 允许覆盖的键 **[提议]**。表单由 `schemas/config/` 的 JSON Schema 与 `catalog`（诉求 A5）驱动，提交前先 `dry_run`（诉求 A2），据返回显示"需要 approver / 需要签名"，并用 `status` 显示"某模块尚未应用"。凭据输入框只写不读，已设置时显示 `present`。工作页面只显示运行状态（如某次 Attempt 实际用了哪个模型），不放任何配置控件。
+设置页是配置的**唯一入口**（D-09、I7）；viewer 看不到设置页（api.md §2.2），手机端没有设置（D-11）。页面按存储位置分三组（decisions P-31）：**服务端**页编辑全局设置；**项目**组每个项目一页，只列 §2.2 允许覆盖的键，显示继承值（置灰，来自 `view=effective`）与"覆盖"开关；**本机**页只存在于本机。表单由 `schemas/config/` 的 JSON Schema 与 `catalog`（诉求 A5）驱动，提交前先 `dry_run`（诉求 A2），据返回显示"需要 approver 签名"并直接发起审批（api.md §6.6），并用 `status` 显示"某模块尚未应用"。凭据输入框只写不读，已设置时显示 `present`。工作页面只显示运行状态（如某次 Attempt 实际用了哪个模型），不放任何配置控件。
 
-原型文档 `docs/prototype.md` 尚不存在，页面名取自任务给定的设置页清单。
-
-| 设置页 | 对应键 / 内容 | 存储位置 | 里程碑 |
-| --- | --- | --- | --- |
-| 模型 | `models.*`；provider 与 secret 写入（approver） | 服务端（`settings.*` 事件） | M1（M1 `fe-desktop` 范围："设置页·模型"） |
-| 档位与预算 | `levels.*`（含 `default_level`）；`policies.escalation`（自动加码） | 服务端 | M2 |
-| GitHub App | `github.*` 展示与 secret 轮换（写 `value`）；各项目的安装状态（`Project.installation_id`）；创建引导链接 | 服务端 | 未排期（OQ-19） |
-| 沙盒与出网 | `sandbox.*`、`egress.*`（含自动派生的模型 API 注入，只读展示） | 服务端 | 未排期（OQ-19） |
-| 危险动作策略 | `policies.actions / paths / allow_globs / approval / patch`；**同页分区"后台守护"**放 `guardian.*` [提议，OQ-19] | 服务端 | M2 |
-| 设备与证书 | 见下 | 设备实体在服务端；密钥与证书在本机 | 未排期（OQ-19） |
-| 外观 | 见下 | **仅本机** | 未排期（OQ-19） |
-| （无对应页） | `notify.*` | 服务端 | 未排期；暂挂在"设备与证书"页的"通知"分区 [提议，OQ-19] |
+| 组 | 设置页 | 对应键 / 内容 | 存储位置 | 里程碑 |
+| --- | --- | --- | --- | --- |
+| 服务端 | 模型 | `models.*`；provider 与凭据写入（approver + 签名） | 服务端（`settings.updated`），凭据在 Egress | M1 |
+| 服务端 | 档位与预算 | `levels.*`（含 `default_level`）；`policies.escalation`（自动加码） | 服务端 | M2 |
+| 服务端 | GitHub App | `github.*` 展示与 secret 轮换（写 `value`）；各项目的安装状态（`Project.installation_id`）；创建引导链接 | 服务端 | 未排期（OQ-19） |
+| 服务端 | 沙盒与出网 | `sandbox.*`、`egress.*`（含自动派生的模型 API 反向代理路由，只读展示） | 服务端 | 未排期（OQ-19） |
+| 服务端 | 危险动作策略 | `policies.actions / paths / allow_globs / approval / patch` | 服务端 | M2 |
+| 服务端 | 后台守护 | `guardian.*` | 服务端 | M2 |
+| 服务端 | 通知 | `notify.*` | 服务端 | 未排期（OQ-19） |
+| 项目 | 每个项目一页 | 该项目对 `models`、`levels`、`policies`、`guardian`、`sandbox`、`egress` 中可覆盖键的覆盖（§2.2）；`notify`、`github` 不出现 | 服务端（`Project.settings_override`） | 未排期（OQ-19） |
+| 本机 | 设备与证书 | 见下 | 设备实体在服务端；密钥与证书在本机 | 未排期（OQ-19） |
+| 本机 | 外观 | 见下 | **仅本机** | 未排期（OQ-19） |
 
 ### 13.1 设备与证书
 
 | 内容 | 位置 | 说明 |
 | --- | --- | --- |
-| 设备列表、名称、平台、角色、状态、`last_seen`；吊销；改角色；配对令牌发放 | 服务端 `pki` 表 | 这些是实体与动作，不进 settings 文档，也不产生 `settings.updated`；谁能改角色 / 吊销由 `pki` 规格定 |
+| 设备列表、名称、平台、角色、状态、`last_seen`；吊销；改角色；配对令牌发放 | 服务端 `pki` 表 | 这些是实体与动作，不进 settings 文档，也不产生 `settings.updated`（产生 `device.updated` / `device.revoked`）；改角色与吊销需要 approver 签名（decisions P-23，api.md §6.6） |
 | 服务端证书与 CA 指纹（公开信息）、客户端证书序列与到期 | 服务端 | 页面展示 |
 | 设备私钥（Keychain / Secure Enclave / TPM，不可导出） | **仅本机** | I6 |
 | 本机客户端证书、已固定的 CA 指纹、服务端地址 | **仅本机**（`desktop-shell`） | 页面可触发续期 / 重新配对 |
@@ -972,29 +978,29 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 
 | # | 问题 | 本文当前处理 | 影响 |
 | --- | --- | --- | --- |
-| OQ-1 | 谁能改设置？operator / approver 如何划分？放宽类改动是否需要设备签名（防会话劫持）？签名放在哪个头 / 字段、签什么（api.md OQ-16）？首台配对设备的角色（M1 要写 key，必须是 approver）？M1 没有签名界面时怎么办 | §2.5：收紧 / 中性 operator，放宽、敏感键、带 secret `value` 的写入 approver；放宽类 M2 起要求签名，M1 过渡只查角色 | `api`、`pki`、`desktop-shell`、milestones |
-| OQ-2 | utility / planner 由 `models` 直接调用时，模型 key 由谁持有？[architecture §5](../architecture.md#5-信任边界与不变式) 信任表说 key 只在 Egress，§9 与 §6 又说 `models` 直接调用、key 在 `secrets/` | §2.4 写"谁调用谁解析"；V11 对 utility / planner 不强制经 egress | `models`、`egress` |
+| OQ-1 | ~~谁能改设置、签名放在哪、M1 过渡~~ | 已决：见 decisions.md P-18、P-23（§2.5） | — |
+| OQ-2 | ~~`models` 直接调用时谁持有 key~~ | 已决：见 decisions.md P-16（一律经 Egress） | — |
 | OQ-3 | 模型能力（是否支持工具调用、支持的 effort 取值）的来源：内置表、配置声明还是 provider 探测？ | V04 / V05 假设 `models` 提供能力表；未知模型的处理未定 | `models`、`api` 校验 |
 | OQ-4 | Worker 用 API key 还是订阅登录（Q-03） | 只建模 `api_key` | `models`、`worker`、`egress` |
 | OQ-5 | worker 的降级能否在沙盒内跨 provider 切换，取决于 `WorkerAdapter` 能力 | V06：适配器不支持则拒绝 | `worker` |
-| OQ-6 | "关键节点"的定义：data-model 的 Node 没有 `critical` 属性；worker 推理随 `level_effective` 还是 `level_cap` | `critical` 由图模板标记；取 `level_effective` | `engine`、data-model |
-| OQ-7 | 预算计数口径：token（输入 / 输出 / 缓存的权重）；`nodes`（节点还是尝试，`superseded` 是否计）；`wall_time`（运行时间 vs 日历时间，并行取和还是并集）；`rounds`（守护自愈轮是否计入）；ledger 字段的单位 | §4.1 `wall_time_s` 取运行并集 [提议]，其余未定 | `engine`、`models`、data-model |
-| OQ-8 | Ultimate 的预算作用域：父级是否汇总子级用量？`concurrency` 指父下同时活跃的子交付单元还是单个交付单元内的节点数？BudgetLedger 是 per-delivery，未规定父级 | 第一版沿用同一键，含义由 `engine` 规格书决定 | `engine` |
-| OQ-9 | `forge_writes_per_hour`（速率型）与 data-model `BudgetLedger.limits.forge_writes`（累计型）口径不一致：速率会"延迟"，累计会"耗尽"。作用域是 per-delivery 还是 per-installation（GitHub 限流按 installation 算，forge 另有安装级闸）？ | 本文与 forge-actions §2.7 同按 per-delivery 速率型实现，Outbox 延迟而非失败；累计型耗尽时的 `budget.exhausted` 由 `engine` 发 | `forge`、`engine`、data-model |
+| OQ-6 | "关键节点"的定义：data-model 的 Node 没有 `critical` 属性；推理深度随 `level_effective` 还是 `level_cap` | `critical` 由图模板标记；取 `level_effective` | `engine`、data-model |
+| OQ-7 | 预算口径（`nodes` / `attempts` / `wall_time` / `rounds` 的单位已决：见 decisions.md P-22）。仍待定：token 的输入 / 输出 / 缓存是否加权 | 不加权，按 Egress 计量的原值累计 | `engine`、`models` |
+| OQ-8 | ~~Ultimate 的预算作用域与 `concurrency` 含义~~ | 已决：见 decisions.md P-22 | — |
+| OQ-9 | ~~`forge_writes_per_hour` 与 `limits.forge_writes` 口径~~ | 已决：见 decisions.md P-22（累计数进台账，按小时限速由 Outbox 令牌桶执行） | — |
 | OQ-10 | 运行中能否给交付单元追加预算？预算耗尽上报后用户有哪些处置？是否需要"全局暂停 / 紧急止损"（属控制动作还是配置） | 本文不提供，预算创建时固化 | `engine`、`desktop-ui` |
 | OQ-11 | 项目能否放宽：提高预算、换图模板、新增 egress 分组？语言包仓库组是默认全开（项目收窄）还是项目按需选（需要"项目可选分组"标记）？ | 一律只收紧 / 只收窄；全局默认档案需覆盖各项目所需 | `egress`、`sandbox` |
-| OQ-12 | 危险动作是否允许 `auto`（architecture §7.4 与 design.md 冲突）？`force_push` / `delete_branch` 的目标范围（仅 Gantry 创建的分支？合并后删除头分支是否常规化）？动作 id 词表（本文 19 个）与 `ForgeActionKind`（14 个）、worker proposal `kind` 三套词表的对应关系是否固定为 forge-actions §3.5 的样子 | 取保守：前七个 id 不允许 `auto`；目标范围未建模；`post_comment`、`edit_issue` 保留合并 / 改名 id | `policy`、`forge`、`engine` |
-| OQ-13 | P-11（路径命中 → `approve`）与 M1（"直接拒绝"）不一致；M1 退出标准还要求"用户在桌面端审批 merge"，但设备签名审批属 M2（`sec` 泳道），fail-closed 会使 M1 的 `merge_pr` 按 `deny` 执行（forge-actions §14.1 同问）；"依赖清单"的权威清单；是否纳入 `.github/actions`、CODEOWNERS 等 | fail-closed 折中（§5）；清单为 [建议] | `policy`、`sec`、milestones |
+| OQ-12 | 危险动作是否允许 `auto`（architecture §7.4 与 design.md 冲突）？`force_push` 的目标范围（仅 Gantry 创建的分支？）。动作 id 词表已决：见 decisions.md P-28 | 取保守：前七个 id 不允许 `auto`；目标范围未建模 | `policy`、`forge`、`engine` |
+| OQ-13 | M1 与 P-11 的过渡、M1 的 merge 签名已决：见 decisions.md P-18、P-19。仍待定："依赖清单"的权威清单；是否纳入 `.github/actions`、CODEOWNERS 等 | 清单为 [建议] | `policy` |
 | OQ-14 | 守护分流类 id 以 `guardian.md` 为准；`mechanical_conflict` 与 `design_or_api_change` 的归类；design.md 的"后台档位可独立配置"和"自动升降档"（含 CI 失败次数条件、降档规则）未进入 architecture | 见 §5.3、§6.1 | `guardian`、`engine` |
-| OQ-15 | `InboxItem.severity` 无枚举，无法按严重度路由；是否需要免打扰时段 | §9 暂不支持 | `notify`、data-model |
-| OQ-16 | 沙盒出网档案与资源限制是否随节点角色 / 档位不同（review 节点不需要包仓库；design.md："资源与档位预算联动"）；依赖里的 GitHub 源（git 依赖）因 I1 无法拉取，如何供给 | 单一 `default_profile`、单一全局 `limits`；git 依赖不处理 | `egress`、`sandbox` |
-| OQ-17 | `settings.updated` 需写入 data-model §5.2；全局设置没有 ID 前缀（`subject` 用字面量 `settings`）；`project.updated` 的"设置变更"用途与之重叠；`Project.default_level` 与 `settings_override` 并存，边界不清（api.md OQ-3 同问） | §2.3 提议 `settings.updated` 覆盖两种 scope；`default_level` 并入 `levels.default_level`，Project 上只留投影 | `store`、data-model、api.md |
+| OQ-15 | 是否按 `severity` 路由通知（枚举已决：见 decisions.md P-22）；是否需要免打扰时段 | §9 暂不支持 | `notify` |
+| OQ-16 | 沙盒出网档案与资源限制是否随节点角色 / 档位不同（`sandbox_ro` 角色不需要包仓库；design.md："资源与档位预算联动"）。依赖里的 GitHub 源见 decisions.md Q-08 | 单一 `default_profile`、单一全局 `limits` | `egress`、`sandbox` |
+| OQ-17 | ~~`settings.updated` 进 data-model、`default_level` 的归属~~ | 已决：见 decisions.md P-21、P-22 | — |
 | OQ-18 | 证书有效期、配对令牌 TTL 等 `pki` 参数是否是运行期设置 | 不收录 | `pki` |
-| OQ-19 | 设置页缺口：`guardian`、`notify` 没有对应页面；GitHub App / 沙盒与出网 / 设备与证书 / 外观没有里程碑；`prototype.md` 尚不存在 | §13 提议并入现有页面 | `desktop-ui` |
+| OQ-19 | 页面分组已决：见 decisions.md P-31。仍待定：GitHub App / 沙盒与出网 / 通知 / 项目页 / 设备与证书 / 外观的里程碑 | §13 标"未排期" | `desktop-ui`、milestones |
 | OQ-20 | 稀疏存储下，升级改变内置默认值会静默改变未显式设置的键的行为；`schema_version` 只在事件上盖章、文档里没有，迁移策略未定 | §2.1 提议稀疏存储 | `core`、`deploy` |
 | OQ-21 | 出网日志、审计日志的保留期 | 不收录 | `egress`、`policy` |
 | OQ-22 | 本机偏好是否需要跨设备同步 | 否 | `desktop-shell` |
-| OQ-23 | "密钥模块"未登记在模块地图 | 文中称"密钥存储" | architecture §4 |
-| OQ-24 | Egress 注入机制：CONNECT 隧道无法改写 TLS 内的请求头，需要 TLS 终止（沙盒信任代理 CA）或 base URL 改写（worker-protocol §2.3 / 其 OQ-2 同问）；影响 `injection` 的表达能力 | 键的形状对两种机制都成立 | `egress`、`worker` |
-| OQ-25 | 本文对 api.md 的诉求 A1–A9（§2.7）已被 api.md 采纳，仍待定：(a) resource 从任务清单点名的三个扩到八个是否接受；(b) `Project.default_level` 改为 `levels.default_level` 的投影需回写 data-model；(c) 没有独立的版本列表 / 回滚路由，历史取自事件流；(d) `catalog` / `status` 结构（§2.8）是否够用 | 以 api.md 与本文当前文本一致为准 | `api`、data-model、`desktop-ui` |
-| OQ-26 | `forge.merge.method`（项目级合并方式）是否做成设置键：forge-actions §14.1 提出，目前是 forge 内部常量；`forge.*` 其余内部参数不进设置（§10）；`webhook_secret_previous` 的轮换流程是否被 secrets 存储支持 | 不收录 `forge.*`；`github.app.webhook_secret_previous` 为 [提议] | `forge`、`deploy` |
+| OQ-23 | "密钥模块"未登记在模块地图（模型 key 归 Egress 已决，App 私钥等仍在 `secrets/`） | 文中称"密钥存储" | architecture §4 |
+| OQ-24 | ~~Egress 注入机制~~ | 已决：见 decisions.md P-16（反向代理） | — |
+| OQ-25 | 本文对 api.md 的诉求 A1–A9（§2.7）已被采纳，仍待定：(a) resource 从任务清单点名的三个扩到八个是否接受；(c) 没有独立的版本列表 / 回滚路由，历史取自事件流；(d) `catalog` / `status` 结构（§2.8）是否够用。(b) 已决：见 decisions.md P-22 | 以 api.md 与本文当前文本一致为准 | `api`、`desktop-ui` |
+| OQ-26 | `forge.merge.method`（项目级合并方式）是否做成设置键：目前是 forge 内部常量（`webhook_secret_previous` 已决：见 decisions.md P-29） | 不收录 `forge.*` | `forge`、`deploy` |
