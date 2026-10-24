@@ -674,4 +674,4 @@ LIMIT 1;
 | OQ-9 | (a) **已决：见裁决 C7 / P-53**（临时错误留在 `queued` 以 `not_before` 退避；`failed` 为终态，只在终态发 `outbox.failed`；人工重试 = 新 `epoch` 的新动作）。(b) 未决。原问题：Outbox：(a) `failed` 是终态还是可重试的中间态（data-model §4.3 写 `executing → failed（可重试）→ queued`，forge-actions §2.2 写 `failed`（终态）要 `epoch + 1`）；`outbox.failed` 是逐次失败都发（forge-actions §2.6 把可重试码也列在该事件的 `data.code` 下）还是仅终态（forge.md 写"仅终态"）；(b) 将来 `forge` 拆成独立进程时认领与通知如何做 | (a) 已按 P-53 落实到 §6.3、§7.6；(b) 现为单进程 + flock | `forge`、`core` |
 | OQ-10 | 事件 `data` 体积：forge 事件含评论正文、`diff_hunk`、check 输出，可能很大；超限时由谁截断 | `store` 只拒绝超限事件；`forge` 须在发出前截断并置 `truncated` | `forge`、`store` |
 | OQ-11 | `forge.<kind>`、`policy.denied`、`budget.*` 事件的 `subject` 取值未定，而 `by_subject` 与索引依赖它 | 暂不对这几类做 `by_subject` 保证，只保证 `by_type` / `audit` | `core`、`api` |
-| OQ-12 | 事件 `ts` 与 forge 事件里 `occurred_at` 的精度：data-model §1 要求毫秒，forge-actions §6.4 示例的 `occurred_at` 只到秒 | `Timestamp` 宽松解析兜住；`store` 不处理 `data` 内的时间 | `core`、`forge` |
+| OQ-12 | ~~事件 `ts` 与 forge 事件里 `occurred_at` 的精度~~ | 已决：forge-actions §6.4 规定 `occurred_at` / `observed_at` 按 data-model §1 输出三位毫秒（GitHub 秒级时间补 `.000`） | — |

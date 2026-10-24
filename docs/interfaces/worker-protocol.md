@@ -15,9 +15,9 @@
 | 服务端 → 沙盒 | 取消 / 超时 | 容器运行时发信号（SIGTERM → SIGKILL） | 服务端 |
 | 沙盒 → 服务端 | 进度 | worker 的 stdout（JSON Lines），沙盒管理器经运行时日志接口采集 | **不可信自报**，只用于展示 |
 | 沙盒 → 服务端 | 产物 | `/gantry/out/` 下固定四个文件，进程停止后由管理器提取 | **不可信**，逐项校验后才被采纳 |
-| 沙盒 → 外部 | 模型 API、包仓库 | 只经 Egress：模型 API 走反向代理（模型 base URL 指向 `http://<egress>/j/<job_token>/<provider>`，由 Egress 校验 `job_token`、注入 key、按本尝试计量，P-49），包仓库走 `HTTPS_PROXY`（CONNECT 白名单）；沙盒内没有任何 key | `job_token` 视为沙盒可读：它只能让 Egress 给本尝试记账 |
+| 沙盒 → 外部 | 模型 API、包仓库 | 只经 Egress：模型 API 走反向代理（模型 base URL 指向 `http://<egress>/j/<job_token>/<provider>`，由 Egress 校验 `job_token`、注入 key、按本尝试计量，P-49），包仓库走 `HTTPS_PROXY`（CONNECT 白名单，代理凭据里带 `job_token`，P-72）；沙盒内没有任何 key | `job_token` 视为沙盒可读：它只能让 Egress 给本尝试记账 |
 
-不存在：网络回连、Unix socket、沙盒内能调用服务端的 token、服务端对沙盒 `.git` 或工作区目录的任何读取。`job_token` 不是服务端 token：它只被 Egress 的沙盒侧监听器接受，只对本尝试有效、尝试结束即作废、只能从沙盒网段使用（P-49）。
+不存在：网络回连、Unix socket、沙盒内能调用服务端的 token、服务端对沙盒 `.git` 或工作区目录的任何读取。`job_token` 不是服务端 token：它只被 Egress 的沙盒侧监听器接受，只对本尝试有效、尝试结束即作废（P-49）；"只能从沙盒网段使用"的强制方式需核实（P-73），安全底线是令牌本身只能给本尝试记账。
 
 ## 1. 原则
 
@@ -64,8 +64,8 @@
 | 变量 | 值 | 说明 |
 | --- | --- | --- |
 | `GANTRY_JOB` / `GANTRY_OUT` / `GANTRY_WORK` | `/gantry/job.json` / `/gantry/out` / `/gantry/work` | 固定路径，便于测试替身 |
-| `HTTPS_PROXY`、`https_proxy` | Egress 的 CONNECT 端点 | 包仓库的出口（白名单，不注入凭据）；值里不含上游凭据 |
-| 模型 base URL（如 `ANTHROPIC_BASE_URL`，由适配层设置） | `http://<egress>/j/<job_token>/<provider_id>`（由控制面签发令牌时返回，P-49） | 模型调用的唯一出口；Egress 校验令牌、注入 key、按本尝试计量。令牌只出现在这个变量里，不写进 `job.json`、`inputs/`、事件或日志 |
+| `HTTPS_PROXY`、`https_proxy` | `http://job:<job_token>@<egress>:3128`（即签发响应的 `connect_proxy_url`，P-72） | 包仓库的出口（白名单，不注入上游凭据）；包管理器以 `Proxy-Authorization`（Basic，用户名 `job`）把 `job_token` 交给 Egress，Egress 据此按尝试放行、计量与审计 |
+| 模型 base URL（如 `ANTHROPIC_BASE_URL`，由适配层设置） | `http://<egress>/j/<job_token>/<provider_id>`（由控制面签发令牌时返回，P-49） | 模型调用的唯一出口；Egress 校验令牌、注入 key、按本尝试计量。令牌只出现在这个变量与 `HTTPS_PROXY` 里，不写进 `job.json`、`inputs/`、事件或日志 |
 | `NO_PROXY` | `localhost,127.0.0.1` | — |
 | `HOME`、`TMPDIR` | `/gantry/home`、`/gantry/tmp` | — |
 | agent 专用变量 | 由适配层设置（§10） | — |
@@ -79,9 +79,9 @@
 | # | 要求 | 说明 |
 | --- | --- | --- |
 | E1 | 沙盒网络里除 Egress 的沙盒侧监听器外无路由，DNS 由 Egress 解析；控制面 `egress.sock` 与回环监听器都不可达 | 无旁路 |
-| E2 | 只放行本 job 的 `egress_profile`：模型 API（反向代理）+ 包仓库主机（CONNECT）。`github.com`、`api.github.com` 不在其内；依赖指向 `github.com` 源默认拒绝（decisions Q-08） | M1 退出标准；包仓库白名单本身是外泄通道，见 OQ-15 |
+| E2 | 只放行本 job 的 `egress_profile`：模型 API（反向代理）+ 包仓库主机（CONNECT，凭 `Proxy-Authorization` 中的 `job_token` 识别尝试，P-72）。`github.com`、`api.github.com` 不在其内；依赖指向 `github.com` 源默认拒绝（decisions Q-08） | M1 退出标准；包仓库白名单本身是外泄通道，见 OQ-15 |
 | E3 | 模型 API 用反向代理模式：worker 把模型 base URL 指向 `http://<egress>/j/<job_token>/<provider_id>`（明文到 Egress，Egress 再以 TLS 连上游）；Egress 去掉路径前缀，丢弃客户端自带的认证头，注入真实 key | 沙盒内无 key，也无需信任代理 CA |
-| E4 | 按尝试计量 token：Egress 只凭路径中的 `job_token` 识别尝试（P-49）——令牌由服务端在创建沙盒时经控制面签发，只对该尝试有效、只接受来自沙盒网段的请求，不信任沙盒自报的任何其他标识（请求头、`x-gantry-*`）；达到 `limits.tokens_total` 时切断后续模型请求 | 计费口径见 §7.4；即使沙盒内的进程读到令牌，也只能给本尝试记账 |
+| E4 | 按尝试计量 token：Egress 只凭路径中的 `job_token` 识别尝试（P-49）——令牌由服务端在创建沙盒时经控制面签发，只对该尝试有效（"只接受来自沙盒网段的请求"的强制方式需核实，P-73），不信任沙盒自报的任何其他标识（请求头、`x-gantry-*`）；达到 `limits.tokens_total` 时切断后续模型请求 | 计费口径见 §7.4；即使沙盒内的进程读到令牌，也只能给本尝试记账 |
 | E5 | 包仓库走 HTTPS CONNECT 白名单，不注入凭据；私有包仓库走反向代理模式注入凭据 | — |
 | E6 | 出网审计日志带 `job_id` | M3 回放 |
 | E7 | 尝试结束（`collect` 之后）由 `sandbox` 经控制面吊销 `job_token` 并取最终计量；吊销后该令牌的任何请求都被拒 | — |
@@ -974,20 +974,19 @@ V5 / V6 仅当 V1–V4 通过且 `status = succeeded` 时执行；否则补丁�
 
 M1 的 `policy` v0 把 `needs_approval` 一律按 `deny` 处理并上报（fail-closed，decisions P-19，[milestones M1](../milestones.md#m1-单-issue-走通low-档端到端)），M2 引入路径规则审批后才有 `held` 路径。workflow 改动不在此列：它在任何里程碑都是 `deny`（P-48）。
 
-### 8.6 默认限额 **[提议]**
+### 8.6 默认限额
 
-配置项归 [config.md](config.md)。表中**已在 config.md 定义**的键以它为准（本文只引用）；其余是本文新增的键，须由单独的契约 PR 回写 config.md，键名仅示意。
+配置项归 [config.md](config.md)，键名与默认值以它为准；下表只是本文用到的限额与 config 键的对照（此前本节的示意键 `worker.*` 已在 [config §7](config.md#7-sandbox) 落位）。
 
-| 配置键 | 默认 | 状态 |
+| 用途 | config 键 | 默认 **[建议值，待调优]** |
 | --- | --- | --- |
-| `policies.patch.max_files` / `max_bytes` / `max_file_bytes` | 200 / 5,000,000 / 1,000,000 | config.md §5.4 已定义 |
-| `sandbox.limits.wall_time_s`、`models.worker.attempt_wall_s` | 3600、3600；有效 `wall_time` 取二者与预算剩余的最小值 | config.md 已定义 |
-| `policies.patch.max_changed_lines` | 10000 | 新增 |
-| `sandbox.idle_timeout_s` / `sandbox.kill_grace_s` | 300 / 10 | 新增 |
-| `worker.progress.max_line_bytes` / `max_lines` / `max_rate_per_s` | 8192 / 20000 / 20 | 新增 |
-| `worker.artifacts.result_max_bytes` / `report_max_bytes` / `proposals_max_bytes` / `proposals_max_count` | 1 MiB / 256 KiB / 256 KiB / 20 | 新增 |
-| `worker.materials.max_item_bytes` / `max_total_bytes` | 64 KiB / 512 KiB | 新增 |
-| `worker.logs.tail_bytes` | 1 MiB | 新增 |
+| 补丁文件数 / 总字节 / 单文件字节 / 增删行数（§8.3） | `policies.patch.max_files` / `max_bytes` / `max_file_bytes` / `max_changed_lines` | 200 / 5,000,000 / 1,000,000 / 10000 |
+| 墙钟 | `sandbox.limits.wall_time_s`、`models.worker.attempt_wall_s` | 3600、3600；有效 `wall_time` 取二者与预算剩余的最小值 |
+| 空闲超时 / SIGTERM 宽限 | `sandbox.idle_timeout_s` / `sandbox.kill_grace_s` | 300 / 10 |
+| 进度流（§7） | `sandbox.io.progress.max_line_bytes` / `max_lines` / `max_rate_per_s` | 8192 / 20000 / 20 |
+| 产物（§5） | `sandbox.io.artifacts.result_max_bytes` / `report_max_bytes` / `proposals_max_bytes` / `proposals_max_count` | 1 MiB / 256 KiB / 256 KiB / 20 |
+| 不可信材料（§4） | `sandbox.io.materials.max_item_bytes` / `max_total_bytes` | 64 KiB / 512 KiB |
+| 日志尾部 | `sandbox.io.logs_tail_bytes` | 1 MiB |
 
 ## 9. 失败分类
 
@@ -1130,7 +1129,7 @@ claude -p \
 | `output.<schema>.schema.json` | `plan`、`build`、`verify`、`review`、`reasoner`、`arbiter`、`answer`（沙盒角色）与 `admission`、`summarize`、`intent`、`classify`（`direct` 角色，由 `models` 校验）各一份 |
 | `proposals.schema.json` | `proposals.json` |
 | `progress-event.schema.json` | 进度事件 |
-| `fixtures/` | 黄金 `out/` 目录与 stdout 录像，供 `FakeSandboxDriver` 回放和一致性测试 |
+| `fixtures/` | 黄金 `out/` 目录与 stdout 录像，供 `FakeSandboxService` 回放和一致性测试 |
 
 本文所有示例 JSON 应作为这些 schema 的正例测试数据。
 
@@ -1176,7 +1175,7 @@ claude -p \
 | OQ-1 | ~~planner / utility 档的 role 是否走沙盒~~ | — | — | 已决：见 decisions.md P-17（§4.3） |
 | OQ-2 | ~~Egress 如何注入 key 与按 job 计量~~ | — | — | 已决：见 decisions.md P-16；沙盒身份改为 `job_token`，见 decisions.md P-49；控制面见 decisions.md P-50（§2.3） |
 | OQ-3 | ~~补丁闸门归哪个模块~~ | — | — | 已决：见 decisions.md P-25（`repo`） |
-| OQ-4 | 符号链接、二进制已决：见 decisions.md P-68（一律拒绝，无白名单）。仍待定：子模块、`.gitmodules` 是否可经审批放行；真实仓库的图片等二进制资源以后如何供给（补丁格式本身不带二进制） | P5 的子模块判定 | 一律拒 / 可审批 | 子模块一律 deny |
+| OQ-4 | 符号链接、二进制已决：见 decisions.md P-68（一律拒绝，无白名单）。仍待定：子模块、`.gitmodules` 是否可经审批放行；真实仓库的图片等二进制资源如何供给已转为 decisions.md Q-09（推荐：第一版一律拒绝，M3 起经审批放行） | P5 的子模块判定 | 一律拒 / 可审批 | 子模块一律 deny |
 | OQ-5 | 补丁审批的绑定（`subject_digest` = 补丁 sha256）与 M1→M2 切换已决：见 decisions.md P-19、P-20；审批动作 `patch_apply_protected` 已决：见 decisions.md P-54；workflow 补丁一律拒绝并以 `manual_action` 上报已决：见 decisions.md P-48。仍待定：受保护路径以外的 `deny` 是否一律升级 InboxItem；`.github/` 下 `actions/`、`CODEOWNERS`、`dependabot.yml`、`.gitattributes` 是否进规则表（config.md 的 `repo_meta` 是建议） | 上报噪音；规则表范围 | — | 仅受保护路径的 M1 拒绝上报 |
 | OQ-6 | ~~`reasoner` 是否为 gate~~ | — | — | 已决：见 decisions.md P-45（`reasoner` 不输出 verdict，§6.2 已删去该字段）；REJECT / BLOCKED 见 P-24，重新规划回到 `plan` 见 P-55 |
 | OQ-7 | ~~data-model 缺口（`failure_class`、`Attempt.status`、`usage`、`Sandbox.status`、`worktree_snapshot`）~~ | — | — | 已决：见 decisions.md P-22（§9） |
@@ -1187,6 +1186,6 @@ claude -p \
 | OQ-12 | 内容寻址结果库已列入 architecture §6（decisions.md P-25）。仍待定：保留期；被拒产物（quarantine）保留多久 | 存储增长 | — | — |
 | OQ-13 | 镜像仓由 `repo` 维护、`forge` 拉取更新（decisions.md P-25）。仍待定：历史深度、submodule / LFS 策略 | `repo` 的工作区准备；review 需要的历史 | 浅克隆 + 服务端生成 `diff.patch` | 见 §2.4 |
 | OQ-14 | 单次 Attempt 的 `tokens_total` 如何从 BudgetLedger 预留 / 回收；封顶是硬切断还是软限；并发 Attempt 争用预算（token 加权已决：见 decisions.md P-70，`levels.token_weights`） | `engine`、`egress` | — | 硬切断，按加权 token 计 |
-| OQ-15 | 包仓库白名单本身是低带宽外泄通道（URL 路径 / 查询串 / 发布）；是否改为 `egress` 内置只读镜像 / 缓存代理。依赖指向 `github.com` 源默认拒绝，见 decisions.md Q-08；`CONNECT` 如何识别尝试（`job_token` 只在模型 base URL 里）见 [egress-control.md](egress-control.md) OQ-1 | I1 的实际强度 | 只读缓存代理 | 未处理 |
+| OQ-15 | 包仓库白名单本身是低带宽外泄通道（URL 路径 / 查询串 / 发布）；是否改为 `egress` 内置只读镜像 / 缓存代理。依赖指向 `github.com` 源默认拒绝，见 decisions.md Q-08；`CONNECT` 如何识别尝试已决（P-72，`Proxy-Authorization` 携带 `job_token`，审计按尝试归集） | I1 的实际强度 | 只读缓存代理 | 未处理 |
 | OQ-16 | 预热池（M2）下"先启动、后注入"用 `READY` 文件标记是否接受 | worker 启动逻辑；M2 | — | §3.2，**[提议]** |
 | OQ-17 | 仓库内的 `CLAUDE.md` / `AGENTS.md` 是否自动载入 agent 上下文：它们对 agent 有用，但按 I5 属于"仓库内容" | 适配层的 prompt 组装 | 作为 `file_excerpt` 材料包装后注入；或完全不载入 | 未处理，适配层按 I5 不赋予其权限 |

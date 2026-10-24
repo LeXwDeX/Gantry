@@ -210,7 +210,7 @@ pub enum MirrorWant { Branch(String), Oid(GitOid), All }
 ```rust
 // crates/gantry-forge/src/lib.rs（本 crate 的装配面，不是跨模块端口）
 
-/// api.md 模块的 `grant` 前强制对账端口（api.md §6 的 PrRefresher）；由同一实现提供。
+/// `core::ports::PrRefresher`（core.md §6.10，跨泳道，P-51）：api 在 `grant` 前强制对账；由同一实现提供，M0 替身为 `FakeForge`。
 #[async_trait::async_trait]
 impl PrRefresher for ForgeImpl {
     async fn refresh_pr(&self, repo: &RepoSlug, number: u64) -> Result<PrHead, ModuleError>; // = ForgeReader::reconcile_now(Pr) 后读快照
@@ -659,7 +659,7 @@ pub trait TokenProvider {
 
 ## 12. 测试与验收
 
-**替身**：`FakeGitHub`（HTTP 级替身，M0 由 `contract` 泳道交付，P-51，见下）、`FakeRepo`（M0，镜像仓与提交；`provenance` 可脚本化）、`FakePolicy`（M0，实现 `PolicyPort`，可脚本化 `consume_for_execution` 的结果）、`FakeInbox`（M0，实现 `InboxPort`）、`FakeSecrets`、`TestClock`（可拨快的时钟）、`Store::open_temp`（崩溃类测试，子进程 + `SIGKILL`）/ `Store::open_in_memory`（其余，M0 替身，P-51）、故障注入点（`fail` crate 或等价物）。`FakeForge`（M0）不用于测试本模块，而是**被**本模块的一致性测试约束（D 组）。
+**替身**：`FakeGitHub`（HTTP 级替身，M0 由 `contract` 泳道交付，P-51，见下）、`FakeRepo`（M0，镜像仓与提交；`provenance` 可脚本化）、`FakePolicy`（M0，实现 `PolicyPort`，可脚本化 `consume_for_execution` 的结果）、`FakeInbox`（M0，实现 `InboxPort`）、`MemorySecrets`（M0 替身，P-81）、`TestClock`（可拨快的时钟）、`Store::open_temp`（崩溃类测试，子进程 + `SIGKILL`）/ `Store::open_in_memory`（其余，M0 替身，P-51）、故障注入点（`fail` crate 或等价物）。`FakeForge`（M0）不用于测试本模块，而是**被**本模块的一致性测试约束（D 组）。
 
 **`FakeGitHub`**：进程内 axum 服务，实现被测路径所需的 REST / GraphQL / git-http 子集，状态在内存里（仓库、分支、PR、评论、review、check、Issue、合并队列）；可注入：投递 webhook（自动签名，可重复、乱序、丢弃）、响应丢失（变更成功但连接断开）、`403 + retry-after`、`401`、`5xx`、延迟、"要求签名提交"规则、权限集合、App Manifest 转换。M0 替身（P-51）。
 

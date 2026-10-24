@@ -37,7 +37,7 @@
 - **任何 GitHub 写**（含 @ 提及）：只能经 `forge` Outbox（I2）。`notify` 不直接写 GitHub。
 - **邮件、GitHub 提及渠道**：Q-07 待决，schema 里是保留 kind，本规格不实现（N-10）。
 - **静默处理的审计记录**：走事件日志（守护的处置），不进收件箱（N-08）。
-- **推送令牌的注册路由**：归 `api`，契约未定（[api.md OQ-2](../interfaces/api.md#10-开放问题)，N-11）。
+- **推送令牌的注册路由**：归 `api`（`PUT /v1/devices/self/push-token`，M4，P-77）；本模块只存储与使用令牌。
 
 ## 3. 依赖
 
@@ -57,11 +57,11 @@
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
 | 上报请求 `RaiseRequest` | 进程内调用（`InboxPort::raise`）：`engine`、`guardian`、`forge`、`conversation` | §6；`payload` 形状按 `kind` 见 [data-model InboxItem](../data-model.md#inboxitem--approval) | 调用方可信；`summary` 与 `payload` 里可能带不可信文本，须标注（§8） |
-| `dismiss` / `choose` | `api` 转交，带 `DeviceActor`（设备、角色、客户端档案） | [api.md §4.8](../interfaces/api.md#48-inbox) | 设备已鉴权；`note` 是用户文本，限长 |
+| `dismiss` / `choose` | `api` 转交，带 `core::ports::ActorCtx`（设备、角色、客户端档案，P-78） | [api.md §4.8](../interfaces/api.md#48-inbox) | 设备已鉴权；`note` 是用户文本，限长 |
 | 系统关闭 `resolve` | 调用方或本模块的自动关闭规则 | §7.5 | 可信 |
 | 上游事件 | 事件日志订阅 | §3 | 可信（本地事件） |
 | `notify.*` 设置 | settings 生效视图 | [config.md §9](../interfaces/config.md#9-notify) | 可信（已校验） |
-| 推送令牌（M4） | `api` 的令牌注册路由（未定） | N-11 | 设备已鉴权；令牌格式须校验 |
+| 推送令牌（M4） | `api` 的 `PUT /v1/devices/self/push-token`（P-77），体 `{token, environment}` | [api.md §4.10](../interfaces/api.md#410-devices) | 设备已鉴权；令牌格式须校验；不进事件日志、不出现在任何读响应里 |
 
 ## 5. 输出
 
@@ -91,17 +91,20 @@ pub trait InboxPort: Send + Sync {
         -> Result<Vec<Written<InboxItem>>, ResolveError>;
 
     /// 人忽略：open → dismissed。已 dismissed 则原样返回；resolved 则 Err(NotOpen)。
-    async fn dismiss(&self, id: &InboxId, by: &DeviceActor, note: Option<Note>)
+    async fn dismiss(&self, id: &InboxId, ctx: &ActorCtx, note: Option<Note>)
         -> Result<Written<InboxItem>, InboxError>;
 
     /// 人选择：open → resolved，事件带 option_id。
-    async fn choose(&self, id: &InboxId, option: &OptionId, note: Option<Note>, by: &DeviceActor)
+    async fn choose(&self, id: &InboxId, option: &OptionId, note: Option<Note>, ctx: &ActorCtx)
         -> Result<Written<InboxItem>, ChooseError>;
 
     async fn get(&self, id: &InboxId) -> Result<Written<InboxItem>, InboxError>;
     async fn list(&self, q: InboxQuery) -> Result<Page<InboxItem>, InboxError>;   // 游标分页，默认 status=open
     /// GET /v1/inbox/summary（P-63）：按项目的 open 计数，手机档案可用。
     async fn summary(&self) -> Result<InboxSummary, InboxError>;
+    /// PUT /v1/devices/self/push-token（M4，P-77）：按设备覆盖存储 APNs 令牌；不追加事件，令牌不出现在任何读响应里；
+    /// device.revoked 时由本模块的订阅者清除。M4 前 FakeInbox 只记录调用。
+    async fn register_push_token(&self, ctx: &ActorCtx, token: PushToken, env: ApnsEnvironment) -> Result<(), InboxError>;
 }
 
 pub struct RaiseRequest {
@@ -124,9 +127,9 @@ pub enum ResolveTarget { Id(InboxId), Approval(ApprovalId), DedupKey(DedupKey), 
 pub enum Resolution { Answered { message_id: MessageId }, ApprovalSettled { approval_id: ApprovalId, status: ApprovalStatus },
                       DeliveryClosed, DeliveryAbandoned, Superseded { by: InboxId }, External { reason: String }, System { reason: String } }
 
-pub struct DeviceActor { pub device_id: DeviceId, pub role: DeviceRole, pub profile: ClientProfile }   // 由 api 在鉴权后构造
+// 写入上下文用 core::ports::ActorCtx（P-78）：device、role、client_profile 由 api 在鉴权后填入；档案判定读 ctx.client_profile。
 /// GET /v1/inbox/summary 的响应体（P-63）；by_project 只含 open 数 > 0 的项目
-pub struct InboxSummary { pub total: u32, pub by_project: Vec<ProjectOpenCount /* {project_id, open, by_severity} */>, pub no_project: u32 }
+pub struct InboxSummary { pub total_open: u32, pub by_project: Vec<ProjectOpenCount /* {project_id: Option<ProjectId>, open, max_severity}；全局项 project_id = None */> }  // 形状同 api.md §4.8
 ```
 
 ```rust
@@ -153,13 +156,13 @@ pub trait TextComposer: Send + Sync {
 | --- | --- | --- |
 | `id` 不存在 | `NotFound` | `404 not_found` |
 | `dismiss` / `choose` 时已是 `resolved`（或 `choose` 时已是 `dismissed`） | `NotOpen` | `409 conflict`，`reason: invalid_state` |
-| `choose` 的 `option_id` 不在 `payload.options[]`（含 payload 根本没有 `options`） | `OptionUnknown` | `422 validation_failed`，`errors[].pointer = /option_id`，`code = enum` |
+| `choose` 的 `option_id` 不在 `payload.options[]`（含 payload 根本没有 `options`，如 `spec_needed`），或不在 [data-model 选项词表](../data-model.md#上报项的-reason_code-与选项词表)（P-79） | `OptionUnknown` | `422 validation_failed`，`errors[].pointer = /option_id`，`code = enum` |
 | `choose` 作用于 `approval_needed` | `UseApprovalRoute` | `409 conflict`，`reason: invalid_state`（`reason` 取值待契约确认，N-12） |
-| 手机档案对 `escalation` / `approval_needed` 调 `choose` | `ProfileForbidden` | `403 forbidden_profile`（[api.md §2.3、§4.1 注 `✓*`](../interfaces/api.md#23-客户端档案与手机端子集)，P-35）。**判定放在本模块**，因为它依赖 `kind` |
+| 手机档案对 `escalation` / `approval_needed` 调 `choose`，或对 `budget_exhausted` 选 `raise_cap` | `ProfileForbidden` | `403 forbidden_profile`（[api.md §2.3、§4.1 注 `✓*`](../interfaces/api.md#23-客户端档案与手机端子集)，P-35、P-79）。**判定放在本模块**，因为它依赖 `kind` 与选项 |
 | 已 `dismissed` 再 `dismiss` | 幂等成功 | `200` 原样返回 |
 | 同一 `Idempotency-Key` 重放 | 由 `api` 层处理 | 原样返回首次响应 |
 
-角色检查（`dismiss` / `choose` 需 operator；读需 viewer）与 `Idempotency-Key` 归 `api`，本模块不重复检查，但 `DeviceActor` 必须带齐用于审计与档案判定。
+角色检查（`dismiss` / `choose` 需 operator；读需 viewer）与 `Idempotency-Key` 归 `api`，本模块不重复检查，但 `ActorCtx` 的设备、角色与档案必须带齐用于审计与档案判定。
 
 ## 7. 内部设计
 
@@ -186,7 +189,7 @@ pub trait TextComposer: Send + Sync {
 | `kind` | 模板示例 | 说明 |
 | --- | --- | --- |
 | `approval_needed` | `approval:{approval_id}` | 一份审批一项；审批因新推送失效后重新请求是新的 `approval_id`，自然是新项 |
-| `decision_needed` | `decision:{delivery_id}:{node_id}:{reason_code}:{graph_rev}` | gate `REJECT` 后重新规划会 `graph_rev + 1`，之后的新 `REJECT` 是新项；workflow 补丁的 `manual_action`（P-48）用 `decision:{delivery_id}:manual_action:{patch_sha256}` |
+| `decision_needed` | `decision:{delivery_id}:{node_id}:{reason_code}:{graph_rev}` | gate `REJECT` 后重新规划会 `graph_rev + 1`，之后的新 `REJECT` 是新项；workflow 补丁的 `manual_action`（P-48）用 `decision:{delivery_id}:manual_action:{patch_sha256}`；守护的评审争议（`review_dispute`，P-79）用 `decision:{delivery_id}:review_dispute:{reason_code}:{target}` |
 | `spec_needed` | `spec:{delivery_id}:{admission_round}` | 追问轮次变化用 `supersedes` 取代上一轮 |
 | `budget_exhausted` | `budget:{delivery_id}:{dimension}` | — |
 | `escalation` | `esc:{delivery_id}:{reason_code}:{target}` | `target` 为节点、PR 或补丁摘要；`policy` 拒绝受保护路径补丁用补丁 sha256；升档一律用 `escalation`（P-63），`reason_code = level_cap_exceeded` |
@@ -209,7 +212,7 @@ pub trait TextComposer: Send + Sync {
 | `inbox_items` | `id`、`project_id?`、`delivery_id?`、`kind`、`severity`、`summary`、`payload`（JSON）、`status`、`dedup_key`、`resolution?`（JSON）、`created_at`、`updated_at`、`last_seq`。索引：`UNIQUE(dedup_key) WHERE status='open'`；`(status, project_id, severity)`；`(delivery_id, status)`；游标（keyset）分页用 `id`（ULID） |
 | `notify_dispatch` | `(inbox_id, channel)` 主键、`status`、`attempts`、`next_at`、`last_error`（脱敏）；只记服务端渠道（M4 起），结论不进事件日志 |
 | `notify_cursor` | 通知调度器已处理到的事件 `seq`（单行） |
-| `push_tokens`（M4） | `device_id`、`platform`、`token`、`registered_at`、`invalidated_at?` |
+| `push_tokens`（M4） | `device_id`（主键，一设备一令牌，重复注册覆盖）、`platform`、`token`、`environment`（`production` / `sandbox`，P-77）、`registered_at`、`invalidated_at?` |
 
 ### 7.4 `choose` / `dismiss` / `resolve` 的服务端语义
 
@@ -242,10 +245,10 @@ pub trait TextComposer: Send + Sync {
 
 ### 7.6 计数
 
-`summary()` 返回 `InboxSummary{total, by_project: [{project_id, open, by_severity}], no_project}`，全部来自 `status = 'open'` 的投影（store 的 `inbox_summary`），与 `list(status=open)` 必须一致；它是 `GET /v1/inbox/summary` 的响应体（P-63）。
+`summary()` 返回 `InboxSummary{total_open, by_project: [{project_id, open, max_severity}]}`（全局项归入 `project_id = null` 的一行，形状与 api.md §4.8 逐字一致），全部来自 `status = 'open'` 的投影（store 的 `inbox_summary`），与 `list(status=open)` 必须一致；它是 `GET /v1/inbox/summary` 的响应体（P-63）。
 
 - 客户端用 `GET /v1/inbox/summary` 得到初值（手机档案可用），再按 `inbox.raised`（+1）、`inbox.resolved` / `inbox.dismissed`（−1，按事件信封的 `project_id` 归属）增量维护；`log_epoch` 变化（备份恢复，P-67）时重新取初值——所以三类事件的信封 `project_id` 必须等于该项的 `project_id`，且 `inbox.resolved` / `inbox.dismissed` 的 `data` 要能定位 `inbox_id`。
-- 顶栏"需要你 · n" = `total`（含全局项）；项目 tab 徽标 = `by_project[prj]`。`info` 级也计入（[prototype §2.1](../prototype.md)："open 事项数"）。
+- 顶栏"需要你 · n" = `total_open`（含全局项）；项目 tab 徽标 = `by_project[prj]`。`info` 级也计入（[prototype §2.1](../prototype.md)："open 事项数"）。
 - 内部消费者（`SettingsStatus` 之类）直接调用 `summary()`。
 
 ### 7.7 通知管线
@@ -291,7 +294,7 @@ pub trait TextComposer: Send + Sync {
 - 载荷：只放模板文案、`inbox_id`、`project_id`、`kind`、`badge`（当前 open 总数）；**≤ 4 KB 且不含 `summary` / 不可信文本**。`apns-collapse-id` 用 `inbox_id` 或项目合并键，使合并通知替换旧通知；`apns-expiration` 取 `fresh_until`。
 - 令牌：存 `push_tokens`；APNs 返回"令牌失效 / 已注销"→ 立即标记 `invalidated_at` 不再发送；**设备被吊销（`device.revoked` 事件）→ 立即清除该设备全部令牌**。日志里令牌只记前后几位。
 - 谁收：`platform = ios` 且 `status = active` 的设备；路由决定 `kind` 是否推送，不按角色过滤（手机不能签名的 `approval_needed` 仍可提醒，点开后文案写明需在桌面处理，[prototype §4](../prototype.md)）。
-- 凭据：APNs 密钥属于 `SecretRef`，设置键、读取方清单、令牌注册路由、以及"运营者自备 Apple 开发者账号直连还是经中继"都未定（N-11）。
+- 凭据：APNs 密钥属于 `SecretRef`；令牌注册路由已决（P-77）；设置键、读取方清单、以及"运营者自备 Apple 开发者账号直连还是经中继"仍未定（N-11）。
 
 ### 7.10 并发与持久化小结
 
@@ -404,7 +407,7 @@ pub trait TextComposer: Send + Sync {
 
 **计数与查询**
 
-- [ ] 3 个项目、各类 `kind` / `severity` 混合：`summary()`（`GET /v1/inbox/summary`）的 `total`、`by_project`、`by_severity` 与 `list(status=open)` 逐项一致；全局项只计入 `total` 与 `no_project`；手机档案可调用（P-63）。
+- [ ] 3 个项目、各类 `kind` / `severity` 混合：`summary()`（`GET /v1/inbox/summary`）的 `total_open`、`by_project[].open`、`by_project[].max_severity` 与 `list(status=open)` 逐项一致；全局项计入 `total_open` 与 `project_id = null` 的一行；响应体与 api.md §4.8 示例逐字段同形；手机档案可调用（P-63）。
 - [ ] 经 `inbox.raised` / `inbox.resolved` / `inbox.dismissed` 事件增量维护的客户端计数，与 `summary()` 在任意操作序列后一致（属性测试）；每个 `inbox.*` 事件信封的 `project_id` 等于 `item.project_id`。
 - [ ] `list` 的游标分页稳定：分页期间插入新项不重复、不漏；默认 `status=open`；`project_id` / `kind` 过滤正确。
 
@@ -447,9 +450,9 @@ pub trait TextComposer: Send + Sync {
 | N-08 | 静默处理是否进收件箱：design.md 写"控制台收件箱记录处理与跳过的理由"，config.md §6.2 也说"不影响收件箱与事件日志里的审计记录"，但 `InboxItem.kind` 没有对应类型，原型把它放在检视器的"后台守护"区块 | 静默处理的审计只走事件日志，不创建 `InboxItem` | `guardian`、config.md |
 | N-09 | `notify` 资源的内置默认（路由、渠道）未定；按 `severity` 路由、免打扰时段不支持（config OQ-15） | §10 的临时默认 | config.md、`desktop-ui` |
 | N-10 | **Q-07 离线通知渠道**：M1–M3 桌面端关闭时没有任何提醒。`email`、`github_mention` 是保留 kind；若用 `github_mention`，必须走 Outbox（I2），而 `forge` 出站净化会把 `@user` 用反引号中和（forge-actions §2.4），二者冲突；推荐的"手机端推送"在 M4 | 不实现；仅预留 `Notifier` 扩展点 | `forge`、config.md、产品 |
-| N-11 | **APNs（M4）**（(b) 中"`secrets` 读取方没有 `notify`"**已决：见裁决 C13 / P-59**，其余未决）：(a) 推送令牌注册路由与存储未定（api.md OQ-2；Device 无该字段；手机档案白名单要加这条路由）；(b) APNs 密钥与参数（Team ID、Key ID、topic、环境）没有设置键；(c) 自托管下运营者要有 Apple 开发者账号并自签 iOS 应用才能直连 APNs，否则需要中继服务——两种路线未定；(d) 推送文案可含哪些信息（仓库名？PR 编号？） | §7.9 的草案；全部待决 | api.md、config.md、`secrets`、`mobile`、`ops` |
+| N-11 | **APNs（M4）**（(b) 中"`secrets` 读取方没有 `notify`"**已决：见裁决 C13 / P-59**，其余未决）：(a) **已决：见 decisions.md P-77**（`PUT /v1/devices/self/push-token`，令牌存本模块私有表 `push_tokens`、不进事件；原问题：推送令牌注册路由与存储未定，api.md OQ-2；Device 无该字段；手机档案白名单要加这条路由）；(b) APNs 密钥与参数（Team ID、Key ID、topic、环境）没有设置键；(c) 自托管下运营者要有 Apple 开发者账号并自签 iOS 应用才能直连 APNs，否则需要中继服务——两种路线未定；(d) 推送文案可含哪些信息（仓库名？PR 编号？） | §7.9 的草案；全部待决 | api.md、config.md、`secrets`、`mobile`、`ops` |
 | N-12 | **已决：见裁决 C26（api §3.3 必带幂等键清单加 `choose`）；`choose` 对 `approval_needed` 的 `409` `reason` 取值仍待契约确认**。原问题：api.md 小不一致：§3.3 "必带 `Idempotency-Key`" 清单没有 `choose`，而 §4.1 #42 标"必"；OQ-9 的"只有 dismiss"已过时；`choose` 对 `approval_needed` 返回 `409` 但 `reason` 未定 | 必带幂等键；`reason: invalid_state` | api.md |
-| N-13 | **已决：见裁决 C17 / P-63（升档一律用 `escalation`，手机档案不可 `choose`）；`reason_code` 与选项词表由 `engine` 规格定义**。原问题："需要升档"用哪个 `kind`：架构 §8 与原型都有此上报，api.md 暗示是 `escalation`（会增加花费，手机不可选）；其 `reason_code`（如 `level_cap_exceeded`）与选项 `upgrade` / `keep_scope` / `abandon` 由谁定义；升档是否需要 approver（P-36 说是控制，operator 即可） | 已落实到 §7.2、§7.4 | `engine`、api.md |
+| N-13 | **已决：见裁决 C17 / P-63（升档一律用 `escalation`，手机档案不可 `choose`）；`reason_code` 与选项词表由 `engine` 规格定义**。原问题："需要升档"用哪个 `kind`：架构 §8 与原型都有此上报，api.md 暗示是 `escalation`（会增加花费，手机不可选）；其 `reason_code`（如 `level_cap_exceeded`）与选项 `upgrade` / `keep_scope`（P-79 改名 `narrow`）/ `abandon` 由谁定义；升档是否需要 approver（P-36 说是控制，operator 即可） | 已落实到 §7.2、§7.4 | `engine`、api.md |
 | N-14 | **已决（`store` 规格已存在：`WriteTx` 实现 `core::ports::TxHandle`，持久游标见 store.md §6.2）**。原问题：`store` 规格尚未存在：调用方事务如何传入（`StoreTx`）、事件订阅是否支持持久游标 + 至少一次 + 回放 | 已落实到 §3、§6.1 | `store` |
 | N-15 | 存量上报项的保留与归档：投影里 `resolved` / `dismissed` 项是否永久保留 | 永久保留（事件日志本就永久） | `store`、`deploy`（备份体积） |
 | N-16 | 自由文本答复由 `conversation` 判断解决了哪些 open 项；消息与上报项的关联靠 `Message.refs` / `cards`，而 `Ref.kind` 没有 `inbox` | `conversation` 依 `delivery_id` + `kind` 调 `resolve(Answered)`；是否给 `Ref` 加 `inbox` 待定 | `conversation`、data-model |

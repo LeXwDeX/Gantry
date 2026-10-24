@@ -9,7 +9,7 @@
 - **GitHub 引用**：保存 `owner/repo` + 编号 + GitHub node_id；展示用 `#N`。
 - **不可信文本**：来自 GitHub 或沙盒的文本字段统一类型 `UntrustedText`，进入 prompt 前必须经隔离包装。
 - **枚举**：以字符串存储，新增值只追加。`verdict` 用大写（`ACCEPT` 等），其余枚举小写。
-- **档位 `Level`**：线上格式为 `"None"` / `"Low"` / `"Medium"` / `"High"` / `"Max"` / `"Ultimate"`（首字母大写）。
+- **档位 `Level`**：线上格式为 `"None"` / `"Low"` / `"Medium"` / `"High"` / `"Max"` / `"Ultimate"`（首字母大写）。配置里以档位为**对象键**时一律小写（`levels.none`、`levels.low`…`levels.ultimate`，`effort_by_level.low`…），由 `Level` 值找配置条目时转小写（P-71）。
 
 ### 1.1 共用值类型
 
@@ -126,7 +126,7 @@ erDiagram
 
 | 实体 | 字段 | 说明 |
 | --- | --- | --- |
-| Workflow | delivery_id?, conversation_id?, stage?, graph_rev, status, template | `delivery_id` 与 `conversation_id` 恰有一个非空：None 档读代码的问答是挂在会话上的临时图（`delivery_id = null`，必须有 `conversation_id`，`stage = null`，用量记会话台账，P-58）。`graph_rev` 每次图改写 +1；视图只显示当前修订。`status`：`running` / `paused` / `succeeded` / `failed` / `cancelled` |
+| Workflow | delivery_id?, conversation_id?, stage?, graph_rev, status, template | `delivery_id` 与 `conversation_id` 恰有一个非空：None 档读代码的问答是挂在会话上的临时图（`delivery_id = null`，必须有 `conversation_id`，`stage = null`，用量记会话台账，P-58）。`graph_rev` 每次图改写 +1；视图只显示当前修订。`template` 是阶段图名 `<档位键>.<阶段>`（如 `medium.implement`，按 `level_effective`；临时图为 `none.answer`），预算模板族名（如 `medium.plan_build_verify`）记在 `BudgetLedger.template`（[engine §7.4](modules/engine.md#74-图模板每个档位)）。`status`：`running` / `paused` / `succeeded` / `failed` / `cancelled` |
 | Node | workflow_id, role, tier, exec, depends_on[], required, status, verdict?, superseded_by? | `role`：`plan` / `build` / `verify` / `single` / `review:<视角>` / `reasoner` / `arbiter` / `summarize` / `admission` / `heal` / `answer` / `intent` / `classify`（`reasoner` 不是判定节点，`verdict` 恒为空，P-45）；`tier`：`utility` / `planner` / `worker`；`exec`：`sandbox` / `sandbox_ro` / `direct`。三者的固定搭配见 [architecture §9](architecture.md#9-三类模型)。`verdict`：`ACCEPT` / `REVISE` / `REJECT` / `BLOCKED`（gate 节点） |
 | Attempt | node_id, n, sandbox_id?, status, started_at, ended_at, result_ref, failure_class?, failure_detail?, usage | `status`：`preparing` / `running` / `succeeded` / `failed` / `cancelled`。结果存为内容寻址对象 `sha256:…`。`failure_class`：`timeout` / `exec_failed` / `verdict_fail` / `policy_denied` / `cancelled` / `budget_exhausted` / `infra_error`；`failure_detail` 是子码（[worker-protocol §9](interfaces/worker-protocol.md#9-失败分类)），受保护路径带规则 id，如 `policy.path_protected:workflows`（P-48）。`usage` 以 Egress 按 `job_token` 的计量为准（P-49）：`{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, requests}`；worker 自报的用量只存在结果对象里，仅展示 |
 
@@ -147,7 +147,7 @@ erDiagram
 | Message.agent_kind | `planner` / `worker` / `utility`? | 决定气泡边框颜色 |
 | Message.text | string | 用户消息为可信；agent 消息可能引用不可信内容 |
 | Message.tone | `info` / `ok` / `run` / `warn`? | 仅 `role = event`：事件行的语气，决定圆点颜色（运行中 / 完成 / 需要注意），文字仍须独立表达含义 |
-| Message.level_cap | Level? | 用户消息附带的档位上限。手机档案发出的消息由服务端忽略该字段，固定使用项目默认上限（P-35） |
+| Message.level_cap | Level? | 用户消息附带的档位上限。桌面档案的消息带它且 `@` 的是已有交付单元时，视为对该交付单元调整上限（等同 `PATCH /v1/deliveries/{id}`，产生 `delivery.level_changed`，P-82）。手机档案发出的消息由服务端忽略该字段，固定使用项目默认上限（P-35） |
 | Message.refs | Ref[] | 引用的 Issue / PR / 工作树 / 交付单元 |
 | Message.cards | Card[] | 结构化附件，见 §1.1 |
 | Message.delivery_id | `dlv_`? | 消息触发或关联的交付单元 |
@@ -162,11 +162,30 @@ erDiagram
 | `InboxItem.kind` | `payload` |
 | --- | --- |
 | `approval_needed` | `{approval_id}` |
-| `decision_needed` | `{kind, reason_code, options[]: {id, label, primary?}, node_id?, patch?}`。`kind`：`gate_reject`（gate `REJECT`，`options` 为放弃 / 重新规划）/ `manual_action`（需要用户在 Gantry 之外手动完成，如 workflow 补丁，P-48；`patch = {ref: "sha256:…", paths[]}` 指向结果库里的补丁）/ `other`（新增值只追加） |
-| `spec_needed` | `{missing[]: {aspect, question}, options[]?}`（来自准入 `REVISE`；`options[]` 形状同上） |
-| `budget_exhausted` | `{dimension, limit, used}` |
-| `escalation` | `{reason_code, node_id?, attempt_id?, evidence[]: Ref 或 {kind: "result", ref: "sha256:…"}, options[]?}`（gate `BLOCKED` 时附证据）。**升档一律用 `escalation`**（如选项"升到 X 并继续"），手机档案不可对它 `choose`（P-35、P-63） |
+| `decision_needed` | `{kind, reason_code, options[]: {id, label, primary?}, node_id?, patch?}`。`kind`：`gate_reject`（gate `REJECT`）/ `manual_action`（需要用户在 Gantry 之外手动完成，如 workflow 补丁，P-48；`patch = {ref: "sha256:…", paths[]}` 指向结果库里的补丁）/ `review_dispute`（评审争议：是否交回前台改代码，P-79）/ `other`（新增值只追加）。`reason_code` 与 `options[]` 取下文词表 |
+| `spec_needed` | `{missing[]: {aspect, question}}`（来自准入 `REVISE` 或计划的 `blocking_questions`）；**无选项**，用户以自由文本答复（发消息，`refs` 指向该交付单元），由会话服务处理后关闭（P-79） |
+| `budget_exhausted` | `{dimension, limit, used, options[]}`；`options[]` 固定为 `raise_cap`（仅桌面，追加额度见 Q-11）/ `abandon`（P-79） |
+| `escalation` | `{reason_code, node_id?, attempt_id?, target_level?, evidence[]: Ref 或 {kind: "result", ref: "sha256:…"}, options[]?}`（gate `BLOCKED` 时附证据）。**升档一律用 `escalation`**（`reason_code = level_cap_exceeded`，`target_level` 为规则要求的档位，选项见下文词表），手机档案不可对它 `choose`（P-35、P-63）；其余 `reason_code` 无选项 |
 | `security_finding` | `{source: Ref, finding: {severity, category, title: UntrustedText}, attempt_id?}` |
+
+### 上报项的 reason_code 与选项词表
+
+固定词表（P-79）：`payload.options[]` 只能取下表的选项 id，`label` 由创建方用模板生成（可信文本），`primary` 标默认项。表中"无"的上报项不带 `options[]`，用户经控制路由（暂停 / 继续 / 重试 / 放弃）、发消息或 `dismiss` 处理。`choose` 之后由订阅 `inbox.resolved` 的 `engine` 执行（[notify §7.4](modules/notify.md)），`notify` 只校验选项属于 `payload.options[]` 与客户端档案。手机档案：`escalation` 的任何选项、标"仅桌面"的选项返回 `403 forbidden_profile`（P-35）。
+
+| `kind` | `payload.kind` / `reason_code` | 选项 id | 创建方 | 选择后的执行（`engine`） |
+| --- | --- | --- | --- | --- |
+| `escalation` | `level_cap_exceeded`（规则要求的档位超过上限，`target_level`） | `upgrade`（**primary**）/ `narrow` / `abandon` | `engine` | `upgrade`：把上限调到 `target_level`（等同 `PATCH /v1/deliveries/{id}`，P-57 预算不变）；`narrow`：保持上限，`level_effective = level_cap` 继续，缩小范围由用户后续消息表达；`abandon`：放弃 |
+| `decision_needed` | `kind = gate_reject`，`reason_code = gate_reject`（gate `REJECT`） | `replan`（**primary**）/ `abandon` | `engine` | `replan`：回到 `plan`（Low 档重新实现）；`abandon`：放弃 |
+| `decision_needed` | `kind = manual_action`，`reason_code = policy.path_protected:workflows`（P-48） | `done`（**primary**）/ `abandon` | `engine`（守护的愈合轮经 `ReportHint` 由 `guardian` 写） | `done`：用户已在 Gantry 之外手动完成，解除阻塞并按 GitHub 快照重新求值当前阶段（外部推送按 `forge.pr_synchronized(origin = external)` 处理）；`abandon`：放弃 |
+| `decision_needed` | `kind = review_dispute`，`reason_code` ∈ `guardian.human_feedback` / `guardian.scope_expanding_fix` / `guardian.design_or_api_change` | `fix`（**primary**）/ `keep` | `guardian` | `fix`：交回前台改代码（`review → implement`，[engine §7.6](modules/engine.md#76-阶段推进条件) T9）；`keep`：保持现状，只关闭该项 |
+| `decision_needed` | `kind = other`，`reason_code` ∈ `github_state_changed` / `approval_denied` [提议，裁决未覆盖] | `continue` / `abandon` | `engine` | `continue`：解除阻塞并重新求值；`abandon`：放弃 |
+| `spec_needed` | — | 无（自由文本答复，走发消息） | `engine` | `conversation` 调 `supply_spec` 后关闭该项 |
+| `budget_exhausted` | — | `raise_cap`（仅桌面，Q-11）/ `abandon` | `engine`、`guardian`（T-07 补写） | `raise_cap`：按 Q-11 追加额度后继续；`abandon`：放弃 |
+| `approval_needed` | — | 无（只能经审批路由处理，`choose` 返回 `409`） | `engine` / `guardian` | — |
+| `security_finding` | — | 无 | `guardian` | — |
+| `escalation` | `gate_blocked`、`arbiter_escalate`、`attempt_failed`、`no_progress`、`no_change`、`merge_denied_by_policy`、`approval_shape_undefined`、`app_permission_missing`、`models_not_configured`、`outbox_failed:<code>`、`policy.path_protected:<规则 id>`（M1 依赖清单 / lockfile）；`guardian.*`（[guardian §7.9](modules/guardian.md#79-上报) 的词表，评审争议三码除外） | 无 | `engine`、`guardian`、`forge`（`app_permission_missing`） | — |
+
+新增 `reason_code` 或选项 id 须经契约 PR 回写本表；未列出的 `option_id` 由 `notify` 拒绝（`422`）。
 
 ### 审批动作的 target 与 subject_digest
 
@@ -209,8 +228,8 @@ Workflow 文件改动不在表中：它不能经任何审批放行（P-48）。
 
 | 实体 | 字段 | 说明 |
 | --- | --- | --- |
-| Device | name, platform, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr, role, status, last_seen | `pubkey_fpr` 是 mTLS 客户端密钥的指纹；`approval_pubkey` 是配对时登记的审批签名公钥（P-47，P-256 未压缩点，base64url），`approval_pubkey_fpr` 是其 `sha256:` 指纹；`platform`：`windows` / `macos` / `ios`；`role`：`viewer` / `operator` / `approver`，第一台配对设备为 approver，之后默认 operator，改角色与吊销需要 approver 签名；`status`：`active` / `revoked` |
-| BudgetLedger | subject, delivery_id?, conversation_id?, project_id, day?, template?, limits, used | `subject`：`delivery`（交付台账，每个交付单元一个，`template` 与 `limits` 在创建时按 `level_cap` 固定，P-57）/ `conversation`（会话台账，P-58：每个项目会话每个 UTC 日一个，`day` 为日期，`limits` 只有 `tokens` = `levels.None.daily_tokens`，`template` 为空）。交付台账 `limits`：tokens_by_tier、nodes、rounds、wall_time、forge_writes、concurrency；`used`：tokens_by_tier、nodes、attempts、rounds、wall_time、forge_writes。会话台账 `used`：tokens_by_tier。单位见下 |
+| Device | name, platform, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr, role, status, last_seen | `pubkey_fpr` 是 mTLS 客户端密钥的指纹；`approval_pubkey` 是配对时登记的审批签名公钥（P-47，P-256 未压缩点，base64url），`approval_pubkey_fpr` 是其 `sha256:` 指纹；手机档案（`ios`）配对时可省略，此时两者为空（P-76）；`platform`：`windows` / `macos` / `ios`；`role`：`viewer` / `operator` / `approver`，第一台配对设备为 approver，之后默认 operator，改角色与吊销需要 approver 签名；`ios` 设备永远不能是 approver（P-76，第一台设备是手机时见 Q-10）；`status`：`active` / `revoked` |
+| BudgetLedger | subject, delivery_id?, conversation_id?, project_id, day?, template?, limits, used | `subject`：`delivery`（交付台账，每个交付单元一个，`template` 与 `limits` 在创建时按 `level_cap` 固定，P-57）/ `conversation`（会话台账，P-58：每个项目会话每个 UTC 日一个，`day` 为日期，`limits` 只有 `tokens` = `levels.none.daily_tokens`，`template` 为空）。**台账 ID**（Egress 计量归属用，P-74）：交付台账为其交付单元 ID `dlv_…`，会话台账为 `cnv_…:YYYY-MM-DD`（UTC 日）；它是台账的业务键，不是行 ID `bdg_…`（会话台账在当日首笔记账时才建行）。交付台账 `limits`：tokens_by_tier、nodes、rounds、wall_time、forge_writes、concurrency；`used`：tokens_by_tier、nodes、attempts、rounds、wall_time、forge_writes。会话台账 `used`：tokens_by_tier。单位见下 |
 
 BudgetLedger 的计数口径：
 
@@ -223,7 +242,7 @@ BudgetLedger 的计数口径：
 | `forge_writes` | Outbox 动作成功次数的累计数。按小时限速是配置项 `levels.*.budget.forge_writes_per_hour`，由 Outbox 令牌桶执行，不进台账，二者不混用 |
 | `concurrency` | 同时运行的节点数；Ultimate 父交付单元指同时运行的子交付单元数 |
 | Ultimate | 父交付单元的台账汇总所有子交付单元的用量 |
-| 会话台账 | 只计 `tokens_by_tier`；`answer` 临时图与不属于任何交付单元的直接调用（如 `intent`）都记入；达到 `levels.None.daily_tokens` 后当天不再派发新的 None 档问答，回复中提示（P-58） |
+| 会话台账 | 只计 `tokens_by_tier`；`answer` 临时图与不属于任何交付单元的直接调用（如 `intent`）都记入；达到 `levels.none.daily_tokens` 后当天不再派发新的 None 档问答，回复中提示（P-58、P-71） |
 
 ## 4. 状态机
 
@@ -256,7 +275,7 @@ stateDiagram-v2
 ```
 
 - **任何非终态阶段 → `abandoned`**（P-55）：用户放弃（`POST /v1/deliveries/{id}/abandon`）、PR 被关闭且未合并、绑定的 Issue 以 `not_planned` 关闭。
-- `abandoned` 是终态，唯一例外：因 PR 被关闭而进入 `abandoned` 的交付单元，在该 PR 重新打开（`forge.pr_reopened`）时回到 `review`；用户放弃或 Issue `not_planned` 的不会恢复。
+- `abandoned` 是终态，唯一例外：因 PR 被关闭而进入 `abandoned` 的交付单元，在该 PR 重新打开（`forge.pr_reopened`）时回到 `review`；用户放弃或 Issue `not_planned` 的不会恢复（P-75）。
 - 准入只在 High 及以上：Medium `spec → plan` 免准入；Low 从 `spec` 直接进入 `implement`（免准入，跳过 `plan`）；Low 的 `review` 阶段没有评审图，但状态仍经过 `review`（等待 CI）。
 - 计划是独立阶段：计划阶段图 = `plan`（Max 起加 `reasoner`）；实现阶段图 = `build → verify`（Low 为 `single`）。
 - 任何阶段内 gate 判定 `REJECT`：阶段不变，`stage_status = waiting_human`，上报 `decision_needed`（`kind = gate_reject`，放弃或重新规划）；选"重新规划"回到 `plan`（Low 档没有计划阶段，回到 `implement`），选"放弃"进入 `abandoned`。`BLOCKED`：上报 `escalation` 并附证据，`stage_status = blocked`。
@@ -326,7 +345,7 @@ stateDiagram-v2
 ```
 
 - `seq` 全局单调递增，作为客户端事件流游标。
-- `log_epoch`（P-67）：事件日志的纪元号，存于日志元数据，**不在信封里**；每次从备份恢复加一。事件流（`heartbeat`）与所有快照响应（头 `X-Log-Epoch`）携带它，客户端发现变化就丢弃缓存、全量重同步（[api.md §5.3](interfaces/api.md#53-快照--事件流客户端的标准衔接)）。设备吊销另追加到日志之外的 `revocations.journal`，恢复时重放晚于备份的吊销。
+- `log_epoch`（P-67）：事件日志的纪元号，存于日志元数据，**不在信封里**；每次从备份恢复加一。事件流（`heartbeat`）与所有快照响应（头 `X-Log-Epoch`）携带它，客户端发现变化就丢弃缓存、全量重同步（[api.md §5.3](interfaces/api.md#53-快照--事件流客户端的标准衔接)）。设备吊销另追加到日志之外的 `revocations.journal`（只追加；每次写入在吊销提交前 `fsync` 并同步复制到备份目标；事务回滚不删除条目），恢复时重放时间戳晚于备份时刻的条目（P-67、P-80）。
 - 全局事件（设备、全局设置等）的 `project_id` 为 `null`。
 - 事件只追加；投影由 `store` 在同一事务中更新。
 
@@ -337,7 +356,7 @@ stateDiagram-v2
 | `project.added` / `project.updated` | 项目绑定、仓库设置快照变化（设置覆盖变更不用它，见 `settings.updated`） |
 | `settings.updated` | 某 `(scope, resource)` 设置写入；全局写入时 `subject` 为字面量 `settings`、`project_id` 为 `null`（[config.md §2.3](interfaces/config.md)） |
 | `conversation.created` | 项目主对话创建 |
-| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.abandoned` | 交付单元生命周期（`stage_changed` 的 `data` 含新 `stage_status`） |
+| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.abandoned` | 交付单元生命周期（`stage_changed` 的 `data` 含新 `stage_status`；`level_changed` 来自 `PATCH`、桌面消息带 `level_cap` 指向已有交付单元（P-82）、`upgrade` 选项或自动加码） |
 | `delivery.paused` / `delivery.resumed` | 用户暂停 / 继续交付单元（P-56） |
 | `workflow.created` / `workflow.revised` / `workflow.finished` | 图创建、改写、结束（含挂在会话上的临时图，此时 `subject` 为 `wfl_…`、`data.conversation_id` 非空）；结束时 `data.status` 取 `Workflow.status` 的终态值 |
 | `node.queued` / `node.started` / `node.finished` / `node.superseded` | 节点 |
@@ -359,6 +378,6 @@ stateDiagram-v2
 | `forge.drift_detected` | 本地预期与 GitHub 不一致 |
 | `budget.charged` / `budget.exhausted` | 预算（交付台账或会话台账；`data.subject` 区分） |
 | `policy.denied` | `policy` 的规则判定为拒绝（路径规则、大小上限、敏感文件、动作处置）；机械拒绝不发此事件，只发 `patch.rejected`（P-69） |
-| `device.paired` / `device.updated` / `device.revoked` | 设备（`device.updated`：改名、改角色） |
+| `device.paired` / `device.updated` / `device.revoked` | 设备（`device.updated`：改名、改角色、续期换证）。注册推送令牌（`PUT /v1/devices/self/push-token`，P-77）不产生事件，令牌不进事件日志 |
 
 每个事件 `data` 的 JSON Schema 放在 `schemas/events/<type>.json`（M0 产出）。

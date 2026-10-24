@@ -27,7 +27,7 @@
 | M1 | 全部主体：`bootstrap`（离线根 + 在线中间 CA + 服务端证书）、握手校验器、配对（令牌、窗口、CSR 与 `approval_pubkey` 校验、签发链 `[叶子, 中间 CA, 根]`、确认码、首台 approver / 之后 operator）、设备证书续期（`renew` 业务 + `POST /v1/devices/self/renew` 对接，P-64）、`revocations.journal` 与恢复后重放（P-67）、设备注册表与 `device.*` 事件、`set_role` / `revoke` / 重命名、`last_seen` 节流、服务端证书自动续签与热加载、`gantry pair`、`gantry device recover`、启动自检（根私钥不得在服务端） |
 | M2 | 无新增功能；回归 |
 | M3 | 中间 CA 轮换（需要离线根解锁）；`RevocationNotifier` 被 `api` 用于进程内即时断开事件流（M1 的心跳检查保留为兜底） |
-| M4 | `platform = ios` 的配对（配对串需适合二维码）；与 `fe-mobile` 联调；手机档案的 `approver` 限制由 `api` / `policy` 保证，本模块只保证 `platform` 如实记录 |
+| M4 | `platform = ios` 的配对（配对串需适合二维码；`approval_pubkey` 可省略，P-76）；与 `fe-mobile` 联调；手机档案设备永远不能成为 approver（P-76）：配对时角色至多 `operator`，`set_role` 与 `recover --promote` 对 `ios` 设备设 approver 一律拒绝（本模块强制，`api` 另在路由层拒绝） |
 
 ## 2. 不负责
 
@@ -60,7 +60,7 @@
 
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
-| `PairRequest { token, csr_pem, approval_pubkey, device{name, platform} }` | `api` 的配对监听器（单向 TLS，未认证） | [api.md §1.3](../interfaces/api.md) | **完全不可信**：令牌、CSR、`approval_pubkey`、名称都要严格校验（§7.4） |
+| `PairRequest { token, csr_pem, approval_pubkey?, device{name, platform} }`（`approval_pubkey` 仅 `ios` 可省略，P-76） | `api` 的配对监听器（单向 TLS，未认证） | [api.md §1.3](../interfaces/api.md) | **完全不可信**：令牌、CSR、`approval_pubkey`、名称都要严格校验（§7.4） |
 | `RenewRequest { csr_pem }` + 握手出示的证书序列号 | `api`（`POST /v1/devices/self/renew`，mTLS） | api.md §4.10 | 身份可信（已握手 + 在册）；CSR 内容不可信，按 §7.4.4 校验 |
 | 客户端证书链（握手） | `api` 的双向 TLS（mTLS）监听器 | X.509，TLS 1.3 | 不可信，验证后才映射为 Device |
 | `gantry pair` / `gantry device recover` 命令 | 主机管理员（终端） | §7.8；recover 需 root | 主机 root 可信；命令参数仍严格校验 |
@@ -126,7 +126,7 @@ pub trait DeviceDirectory: Send + Sync {
     async fn verifying_key(&self, id: &DeviceId) -> Result<Option<VerifyingKey>, PkiError>;
     /// 引导期（P-66）：库里从未有过任何设备（含已吊销）时为 true。主机命令据此决定能否不经签名
     /// 写入 core::bootstrap_writable 允许的"仅 approver"键；第一台设备配对后恒为 false。
-    async fn bootstrap_period(&self) -> Result<bool, PkiError>;
+    async fn bootstrap_period(&self) -> Result<bool, PkiError>;   // 第一台设备是手机时引导期是否延续，待决（decisions Q-10）
     /// 节流写入（≤ 每设备每 60 s 一次），不产生事件
     async fn touch_last_seen(&self, id: &DeviceId);
 }
@@ -136,6 +136,7 @@ pub trait DeviceAdmin: Send + Sync {
     /// 1–64 字符，无控制字符；自成事务；事件 device.updated（changed: {name}）。operator 起（api 判）
     async fn rename(&self, id: &DeviceId, name: &str, actor: &Actor) -> Result<Device, DeviceError>;
     /// 在调用方事务内执行。actor.id == id → Err(SelfRoleChange)（api 映射 409 conflict / self_role_change）。
+    /// 目标设备 platform = ios 且 role = Approver → Err(MobileCannotApprove)（409 conflict / mobile_cannot_approve，P-76）。
     /// 事件 device.updated（changed: {role: {from, to}}）。新角色对该设备的下一个请求立即生效。
     async fn set_role(&self, tx: &mut WriteTx, id: &DeviceId, role: DeviceRole, actor: &Actor)
         -> Result<Device, DeviceError>;
@@ -188,7 +189,7 @@ pub struct PairingTicket {
 }
 pub struct PairRequest {
     pub token: String, pub csr_pem: String,
-    pub approval_pubkey: String,                // P-256 未压缩点的 base64url（无填充）；须与 CSR 公钥不同（P-47）
+    pub approval_pubkey: Option<String>,        // P-256 未压缩点的 base64url（无填充）；须与 CSR 公钥不同（P-47）；仅 platform = ios 时可为 None（P-76）
     pub device: NewDevice,
 }
 pub struct NewDevice { pub name: String, pub platform: DevicePlatform }       // windows | macos | ios
@@ -332,11 +333,11 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 1. **解析**：请求体严格解析，未知字段 / 类型错 → `Validation`（`422 validation_failed`）；整体大小限制由 `api` 在入口强制（建议 16 KiB）。
 2. **令牌**：`SHA-256(token)` 与当前 `open` 会话比对（常量时间）。无会话 / 不匹配 / 已用 / 过期 / 已作废 → 一律 `TokenInvalid`（`401 pair_token_invalid`，**响应字节完全相同**）；不匹配时按 §7.4.1 计失败次数。
-3. **审批签名公钥**：`approval_pubkey` 为 base64url（无填充）的 P-256 未压缩点（65 字节，首字节 `0x04`），点必须在曲线上；与 CSR 的公钥相同 → `Validation`（指针 `/approval_pubkey`，P-47）；与任一 `active` 设备已登记的 `approval_pubkey` 相同 → `Validation`。
+3. **审批签名公钥**：`platform ∈ {windows, macos}` 时必带，缺失 → `Validation`；`platform = ios` 时可省略（P-76，省略则 Device 不登记审批公钥，`approval_pubkey_fpr = null`）。给出时为 base64url（无填充）的 P-256 未压缩点（65 字节，首字节 `0x04`），点必须在曲线上；与 CSR 的公钥相同 → `Validation`（指针 `/approval_pubkey`，P-47）；与任一 `active` 设备已登记的 `approval_pubkey` 相同 → `Validation`。
 4. **设备字段**：`name` 1–64 字符、不含控制字符与换行；`platform ∈ {windows, macos, ios}`（`ios` 在 M4 前也接受并如实记录）→ 否则 `Validation`。
 5. **CSR**：见 §7.4.4。→ 否则 `Validation`（指针 `/csr`）。令牌在 CSR 校验失败时**不**被消耗（令牌只在签发成功后失效），但失败计入第 2 步之外的限流（`api` 按源 IP，5/min）。
 6. **单一写事务**：
-   1. 角色：同一写事务里 `tx.read().devices(limit 1)` 为空（**含已吊销的设备也算存在**）→ `approver`，否则 `operator`（P-23）。单写者串行化保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。该口径对"唯一 approver 被吊销后重新配对"的后果见 OQ-K11。
+   1. 角色：同一写事务里 `tx.read().devices(limit 1)` 为空（**含已吊销的设备也算存在**）→ `approver`，否则 `operator`（P-23）；但 `platform = ios` 恒为 `operator`（P-76，即使是第一台；此时系统没有 approver 的处理待决，decisions Q-10）。单写者串行化保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。该口径对"唯一 approver 被吊销后重新配对"的后果见 OQ-K11。
    2. 生成 `dev_<ULID>`、序列号；用中间 CA 私钥签发设备叶子（§7.1）。
    3. 追加 `device.paired`：`data = {device_id, name, platform, role, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr}`（`store` 的 `devices` 投影据此落库，`status = active`）；`actor = {kind: "system", id: "pki"}`；`project_id = null`。
    4. 同一事务经 `module_conn("pki")` 写 `pki_device_certs`（`active`）、`pki_device_state`（`pubkey_spki`）；会话置 `redeemed`，写入 `redeemed_device_id` 与 `confirmation_code`。
@@ -371,8 +372,8 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 ### 7.6 吊销与断流
 
 - `revoke` 事务内：追加 `device.revoked`（`data`：`device_id`、`cert_serials[]`、`remaining_approvers`、可选 `via`；`store` 的 `devices` 投影据此置 `status = revoked`），并把该设备全部 `pki_device_certs.status` 置 `revoked`。事件提交之后由本模块订阅 `device.revoked` 并广播 `RevocationNotifier`。
-- **`revocations.journal`**（P-67）：在 `revoke` 事务提交**之前**，向 `<pki.data_dir>/revocations.journal` 追加一行并 `fsync`：`{v:1, device_id, cert_serials[], approval_pubkey_fpr, revoked_at, actor, via?, log_id, log_epoch}`（JSON Lines，`O_APPEND`，服务用户 0600）。追加失败 → 整个吊销失败（失败即关闭，审批保持 `granted` 可重试）。事务随后回滚的情形下文件里会多出一行：重放时会把这台设备也吊销——偏向安全，且该吊销本就是已签名审批所要的结果。文件只追加、从不改写；**不放进 `store` 的备份副本，也不随恢复被覆盖**（`deploy` 的恢复命令必须保留现有文件，architecture §6）；主机应急命令 `recover --revoke` 同样写入。
-- **恢复后重放**：`deploy` 的恢复命令在 `Store::restore_from` 之后、启动 `gantryd` 之前调用 `replay_revocations`（离线模式，§7.8）：逐行读取，对恢复后的库里仍为 `active` 的设备执行与 `revoke` 相同的写入（`device.revoked`，`data.via = "journal_replay"`，`actor = {system, pki}`）；库里不存在的设备（备份早于其配对）跳过并计数；已吊销的跳过。重放本身幂等，也会在每次 `Pki::open` 时以只读方式核对一次，发现未生效的吊销则拒绝启动并提示运行恢复命令。
+- **`revocations.journal`**（P-67、P-80）：在 `revoke` 事务提交**之前**，向 `<pki.data_dir>/revocations.journal` 追加一行并 `fsync`，并**同步复制到备份目标**（`deploy` 的引导配置 `backup.journal_target`，同样追加并 `fsync`；复制失败 → 整个吊销失败）：`{v:1, device_id, cert_serials[], approval_pubkey_fpr, revoked_at, actor, via?, log_id, log_epoch}`（JSON Lines，`O_APPEND`，服务用户 0600）。追加失败 → 整个吊销失败（失败即关闭，审批保持 `granted` 可重试）。事务随后回滚的情形下文件里会多出一行：重放时会把这台设备也吊销——偏向安全，且该吊销本就是已签名审批所要的结果。文件只追加、从不改写；**不放进 `store` 的备份副本，也不随恢复被覆盖**（P-80：事务回滚也不删除已写条目；`deploy` 的恢复命令必须保留现有文件，architecture §6）；主机应急命令 `recover --revoke` 同样写入。
+- **恢复后重放**：`deploy` 的恢复命令在 `Store::restore_from` 之后、启动 `gantryd` 之前调用 `replay_revocations`（离线模式，§7.8）：逐行读取（本地文件与备份目标上的副本取并集，按行去重），重放 `revoked_at` 晚于备份时刻的条目（P-80；更早的条目已在备份里生效），对恢复后的库里仍为 `active` 的设备执行与 `revoke` 相同的写入（`device.revoked`，`data.via = "journal_replay"`，`actor = {system, pki}`）；库里不存在的设备（备份早于其配对）跳过并计数；已吊销的跳过。重放本身幂等，也会在每次 `Pki::open` 时以只读方式核对一次，发现未生效的吊销则拒绝启动并提示运行恢复命令。
 - **新握手**：下一次握手即被拒（§7.3 第 4 步，直接读库，没有缓存可过期）。**会话恢复与 0-RTT 会绕过握手时的证书检查**，所以 `api` 的 `ServerConfig` 必须关闭会话票据与会话缓存、`max_early_data_size = 0`（见 [modules/api.md §7.2](api.md)）；本模块的验收含一个"吊销后无法恢复会话"的联调测试。
 - **已建立的连接**：HTTP 请求在每个请求的步骤 2 复查 `Device.status`；事件流 M1 由 `api` 在每次心跳（15 s）读 `directory.get`，≤ 60 s 内断开（P-30）；M3 起 `api` 订阅 `RevocationNotifier` 即时断开，心跳检查保留为兜底。
 
@@ -413,7 +414,7 @@ pub trait PkiControl: Send + Sync {
 | 项 | 规则 |
 | --- | --- |
 | 权限 | 要求 `geteuid() == 0`，否则拒绝（退出码非 0），不触碰数据库或套接字 |
-| 子命令（形态建议，骨架只定了命令名；deploy.md §7.13 写作 `--revoke <id>` / `--promote <id>`） | `list`（列出设备 id / 名称 / 平台 / 角色 / 状态 / `last_seen` / 指纹，deploy.md 写作 `gantry device list`）；`--revoke <device_id>`；`--promote <device_id>`（把一台 `active` 设备提升为 `approver`） |
+| 子命令（形态建议，骨架只定了命令名；deploy.md §7.13 写作 `--revoke <id>` / `--promote <id>`） | `list`（列出设备 id / 名称 / 平台 / 角色 / 状态 / `last_seen` / 指纹，deploy.md 写作 `gantry device list`）；`--revoke <device_id>`；`--promote <device_id>`（把一台 `active` 的桌面档案设备提升为 `approver`；`ios` 设备 → 拒绝，`mobile_cannot_approve`，P-76） |
 | 确认 | 交互终端上要求输入目标设备 id 才执行；`--yes` 跳过（脚本用） |
 | 事件 | `revoke` → `device.revoked`；`promote` → `device.updated`（`changed: {role: {from, to}}`）；`actor = {kind: "system", id: "host_recover"}`，`data` 带 `via: "host_recover"`、`host_uid`、`sudo_user`（来自 `SUDO_USER`，仅供审计参考，不作为授权依据）。事件类型是否需要专门的 `device.recovered`：OQ-K7 |
 | 幂等 | 已吊销再吊销 → 成功且不重复发事件；已是 approver 再提升 → 成功且不发事件 |
@@ -455,7 +456,7 @@ pub trait PkiControl: Send + Sync {
 | 服务端叶子续签失败 | 保留旧证书继续服务，重试（指数退避）；剩余 ≤ 7 天升级为 `unhealthy` 告警；到期后 `api` 握手失败 |
 | 中间 CA 私钥读不到（`secrets` 故障） | 不能签发（配对、续签失败）；已有设备的握手 / 鉴权不受影响（只需公钥与库）；健康 `degraded` |
 | 数据库从旧备份恢复 | 之后签发的设备证书序列号不在册 → 握手被拒，需重新配对（失败即关闭，宁可误拒）；备份之后发生的吊销由 `replay_revocations` 从 `revocations.journal` 重放（P-67）；`log_epoch` 由 `store` 加一，客户端据此全量重同步 |
-| `revocations.journal` 追加失败 / 磁盘满 | 吊销失败（不提交），`api` 返回 `503 unavailable`，审批保持 `granted`；告警 |
+| `revocations.journal` 追加失败 / 磁盘满 / 同步复制到备份目标失败（P-80） | 吊销失败（不提交），`api` 返回 `503 unavailable`，审批保持 `granted`；告警 |
 | `revocations.journal` 有坏行 | 重放在坏行处停止并报错，恢复命令失败（宁可不启动，也不漏掉吊销）；运维修复后重跑 |
 | 时钟偏差 | 签发 `notBefore` 回拨 5 分钟；服务端时钟异常（早于最近一次签发时间）时拒绝签发并告警 |
 | `recover` 非 root | 立即拒绝，不触碰数据库，退出码非 0 |
@@ -476,7 +477,7 @@ pub trait PkiControl: Send + Sync {
 | `pki.intermediate_validity` | 2 年 | `bootstrap` 与 `rotate` |
 | `pki.server_cert_validity` / `pki.server_cert_renew_before` | 90 天 / 30 天 | — |
 | `pki.client_cert_validity` | 30 天 | 客户端在剩余 1/3 时经 `renew` 自动续期（P-64） |
-| `pki.revocations_journal` | `<pki.data_dir>/revocations.journal` | 只追加；不进 `store` 备份、恢复时保留（P-67） |
+| `pki.revocations_journal` | `<pki.data_dir>/revocations.journal` | 只追加；不进 `store` 备份、恢复时保留（P-67）；每次写入同步复制到备份目标 `backup.journal_target`（`deploy` 的引导配置，P-80） |
 | `pki.not_before_skew` | 5 分钟 | — |
 | `pki.superseded_grace` | 旧证书原 `notAfter` | 续期后旧证书在到期前仍可握手（P-64）；中间 CA 退役等强制场景另行吊销 |
 | `pki.pair_token_ttl` | 10 分钟 | design.md 示例 |
@@ -506,7 +507,7 @@ pub trait PkiControl: Send + Sync {
 | 真实 `rcgen` / `rustls` / `rustls-webpki` | 本模块是被测方，**不用 `TestCA` 代替自己**；用真实 CA 材料跑真实 TLS 握手（`tokio-rustls` 的客户端 / 服务端对） |
 | `TestCA`（M0，`contract` 泳道） | 给 `api`、`fe-desktop` 用；本模块测试里用它构造"外部 CA 签发""过期""尚未生效""错误 EKU"等**反例证书**，并校验 `TestCA` 签出的叶子能通过本模块的 verifier（二者参数一致）。若 `TestCA` 缺 `issue_expired` / `issue_not_yet_valid` / `issue_from_foreign_ca` / `issue_server_auth_only` 等变体，提替身 PR |
 | `Store::open_in_memory` / `open_temp`（store.md §6.1）、`FakeClock`、`SeededEntropy` | 事务、时间、随机数可控；崩溃类测试在提交前注入失败 |
-| `MemorySecrets`（secrets.md §6；M0 是否提供见 secrets.md OQ-10） | 实现 `SecretSink` / `SecretSource`，可注入"读不到""写失败"故障 |
+| `MemorySecrets`（secrets.md §6；M0 替身，P-81） | 实现 `SecretSink` / `SecretSource`，可注入"读不到""写失败"故障 |
 | 固定 CSR 与 `approval_pubkey` 夹具 | P-256、P-384、RSA-2048、Ed25519 各一份；与 CSR 同钥的 `approval_pubkey`、不在曲线上的点、压缩点；带 `CA:TRUE` / 通配 SAN / `serverAuth` 请求扩展的恶意 CSR；签名被破坏的 CSR；超长 / 多块 PEM |
 
 ### 12.2 验收项
@@ -526,7 +527,7 @@ pub trait PkiControl: Send + Sync {
 - [ ] 数据库与日志中搜不到明文令牌（扫描库文件与捕获的 `tracing` 输出）；库里只有 SHA-256。
 - [ ] 新会话作废旧会话：旧令牌立即 `401`。
 - [ ] CSR 反例逐个拒绝（`422`、令牌不消耗）：RSA、Ed25519、P-384、CSR 签名被破坏、超长、多块 PEM、公钥已属于 `active` 设备。
-- [ ] `approval_pubkey` 反例逐个拒绝（`422`，指针 `/approval_pubkey`，令牌不消耗）：缺失、与 CSR 公钥相同、非 P-256、点不在曲线上、压缩点、非 base64url（P-47）。
+- [ ] `approval_pubkey` 反例逐个拒绝（`422`，指针 `/approval_pubkey`，令牌不消耗）：桌面平台缺失、与 CSR 公钥相同、非 P-256、点不在曲线上、压缩点、非 base64url（P-47）。
 - [ ] `verifying_key` 返回的是 `approval_pubkey`：用 mTLS 客户端私钥签的审批在 `policy` 验签失败，用审批签名私钥签的通过（与 `policy` 联调）。
 - [ ] 恶意 CSR（请求 `CA:TRUE`、`keyCertSign`、通配 SAN、`serverAuth`）能被受理，但签出的证书不含这些扩展，subject 被重写为 `CN = <device.id>`。
 - [ ] `name` 含控制字符 / 超 64 字符 / 空 → `422`；`platform` 不在枚举 → `422`；未知字段 → `422 unknown_field`。
@@ -548,7 +549,7 @@ pub trait PkiControl: Send + Sync {
 
 **设备管理与吊销（M1）**
 
-- [ ] `set_role` 后同一设备的下一次 `by_cert_serial` 立刻返回新角色；自改角色 → `SelfRoleChange`；不存在 → `NotFound`；事件 `device.updated` 的 `changed.role = {from, to}`。
+- [ ] `set_role` 后同一设备的下一次 `by_cert_serial` 立刻返回新角色；自改角色 → `SelfRoleChange`；把 `ios` 设备设为 approver → `MobileCannotApprove`（P-76）；不存在 → `NotFound`；事件 `device.updated` 的 `changed.role = {from, to}`。
 - [ ] `revoke`：设备与全部证书置吊销，发 `device.revoked`；重复吊销 `AlreadyRevoked` 且不重复发事件；可吊销自己；吊销后 `verifying_key` 返回 `None`。
 - [ ] `revocations.journal`：每次吊销（API 与 `recover`）恰好追加一行并已 `fsync`；追加失败 → 吊销不提交；**恢复演练**：备份 → 吊销设备 A → 从备份恢复 → `replay_revocations` → A 握手失败、`device.revoked` 带 `via = journal_replay`；不重放就启动 → `Pki::open` 拒绝启动（P-67）。
 - [ ] `set_role` / `revoke` 在调用方事务回滚时不留任何副作用、不广播 `RevocationNotifier`。
@@ -579,7 +580,7 @@ pub trait PkiControl: Send + Sync {
 
 **手机（M4）**
 
-- [ ] `platform = ios` 配对成功并如实记录；配对串长度能放进二维码（版本 ≤ 10，纠错级别 M）；`api` 对该设备给出 `mobile` 档案（联调）。
+- [ ] `platform = ios` 配对成功并如实记录；不带 `approval_pubkey` 也成功（`approval_pubkey_fpr = null`）；作为第一台设备配对时角色仍为 `operator`；`set_role(approver)` 与 `recover --promote` 对它返回 `mobile_cannot_approve`（P-76）；配对串长度能放进二维码（版本 ≤ 10，纠错级别 M）；`api` 对该设备给出 `mobile` 档案（联调）。
 
 **模糊测试（fuzzing）/ 属性测试（property-based testing）（建议）**
 
@@ -590,7 +591,7 @@ pub trait PkiControl: Send + Sync {
 
 | # | 问题 | 本文的临时处理（不构成决定） | 影响 |
 | --- | --- | --- | --- |
-| OQ-K13 | `revocations.journal` 在"事务回滚但日志行已写"时的语义（本文：重放时照样吊销，偏向安全）；主机迁移时日志文件如何随数据目录搬迁（`deploy` 运行手册） | 见 §7.6 | `deploy` |
+| OQ-K13 | ~~`revocations.journal` 在"事务回滚但日志行已写"时的语义~~；主机迁移时日志文件如何随数据目录搬迁 | 语义已决：见 decisions.md P-80（只追加、同步复制到备份目标、回滚不删条目、按时间戳重放）；搬迁步骤归 `deploy` 运行手册 | `deploy` |
 | OQ-K1 | 安装时引导工具的命令形态与由谁调用（`deploy` 的安装脚本调用 `pki::bootstrap::run` 的包装命令）；根私钥导出介质与口令方案；是否支持 TPM / 硬件密钥存放中间 CA（design.md 提过"可选 TPM"，architecture 未采纳） | 库函数 `bootstrap::run`；加密 PKCS#8 导出到指定路径；不支持 TPM | `deploy` |
 | OQ-K2 | （①**已决：见裁决 C18 / P-64**——固定离线根 CA 指纹，链 `[叶子, 中间 CA, 根]`）仍未决：② `pubkey_fpr` / `approval_pubkey_fpr` 对 SPKI DER 还是裸公钥点；③ `cert_serial` 的位数与编码（api.md OQ-10） | `pubkey_fpr` = SPKI DER 的 SHA-256；序列号 128 位随机、小写十六进制 | api.md、`desktop-shell`、`mobile` |
 | OQ-K3 | 配对串的编码、配对监听器的端口与是否按需开启、窗口时长（api.md OQ-12） | §7.4.2 的 URL 形式；仅在会话窗口内开启；10 分钟 | api.md §1.3、`deploy`、`desktop-shell`、`mobile` |

@@ -26,7 +26,7 @@
 
 | 里程碑 | 本模块交付 |
 | --- | --- |
-| M0 | 无实现。评审并冻结 §6 的类型与 trait（`core::ports::SandboxService`、`SandboxSpec`、`JobOutcome`；本模块内部的 `SandboxDriver`、`ContainerSpec`）与 `sandbox.created` / `sandbox.destroyed` 的 `data`；`contract` 泳道交付的 `FakeSandboxService`（实现引擎面 `SandboxService`，按脚本返回 Worker 协议结果；milestones 替身表旧称 `FakeSandboxDriver`，P-52）须通过本文 §12.A 的一致性用例 |
+| M0 | 无实现。评审并冻结 §6 的类型与 trait（`core::ports::SandboxService`、`SandboxSpec`、`JobOutcome`；本模块内部的 `SandboxDriver`、`ContainerSpec`）与 `sandbox.created` / `sandbox.destroyed` 的 `data`；`contract` 泳道交付的 `FakeSandboxService`（实现引擎面 `SandboxService`，按脚本返回 Worker 协议结果，P-52）须通过本文 §12.A 的一致性用例 |
 | M1 | S1–S10：Podman 驱动（`runc` 为必选，`runsc` 同一份代码路径、环境具备即可跑）、stage 与材料打包、挂载与资源限制、计时器与取消、进度采集、intake / collect、销毁、崩溃恢复与孤儿巡检、与 `egress` 的 `job_token` 签发 / 计量 / 吊销、驱动一致性套件、对抗用例。验收退出标准的两条："沙盒内访问 `github.com` / `api.github.com` 失败"和"沙盒内读不到任何模型 key" |
 | M2 | gVisor（`runsc`）默认开启并通过全部隔离用例；预热池（`READY` 文件，OQ-S8）；`devcontainer.json` 安全子集（忽略 `initializeCommand`、`mounts`、`runArgs`、特权字段，OQ-S7）；`sandbox_ro` 的只读工作区挂载 |
 | M3 | 出网审计回放所需的 `job_id` / `sandbox_id` 关联查询入口（审计本体在 `egress`）；沙盒逃逸检测告警（信号清单 OQ-S13）；密钥轮换对本模块无影响（沙盒内无密钥） |
@@ -123,7 +123,7 @@ pub struct SandboxSpec {
     pub job: JobSpecTrusted,               // job.json 中除 materials[] 元数据与 isolation.nonce 外的全部可信字段
     pub raw_materials: Vec<RawMaterial>,   // {id, kind, source(仅标识符), text: UntrustedText}
     pub upstream: Vec<UpstreamInput>,      // {node_id, role, attempt_id, ref: CasRef, files[]}：从 CAS 复制到 inputs/upstream/<node_id>/
-    pub exec: ExecSpec,                    // {image_digest, argv, env}：engine 取自 WorkerAdapter；env 里没有任何密钥
+    pub exec: ExecSpec,                    // {image_digest, argv, env, token_env}：engine 取自 WorkerAdapter；env 里没有任何密钥与令牌
     pub driver: DriverKind, pub trust: Trust,   // Trust: Trusted | Untrusted（OQ-S6）
     pub limits: SandboxLimits,             // == Sandbox.limits：cpu, mem, disk, pids, wall_time（与 JobSpec.constraints.limits 同源）
     pub timers: Timers,                    // {idle_timeout_s, kill_grace_s}，来自 sandbox.* 配置
@@ -188,6 +188,7 @@ pub trait SandboxDriver: Send + Sync {
 pub struct ContainerSpec {
     pub name: String, pub labels: BTreeMap<String, String>,   // 必含 gantry.job_id、gantry.sandbox_id
     pub image: ImageDigest, pub argv: Vec<String>, pub env: BTreeMap<String, String>,
+    pub token_env: TokenEnvSpec,           // WorkerAdapter::token_env()：需由 sandbox 在签发 job_token 后填值的变量名（模型 base URL、HTTPS_PROXY）
     pub mounts: Vec<Mount>,                // Bind{src, dst, ro} | Tmpfs{dst, size_mb}
     pub limits: SandboxLimits,
     pub network: NetworkAttach,            // 沙盒网段与到 Egress 的路由（§7.4）
@@ -286,7 +287,7 @@ podman create --name gantry-sbx-<sbx_id> --runtime=runsc --pull=never --init \
   --tmpfs /gantry/home:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=0700 \
   --tmpfs /gantry/tmp:rw,nosuid,nodev,size=512m,uid=1000,gid=1000,mode=0700 \
   --unsetenv-all --env PATH=… --env GANTRY_JOB=/gantry/job.json --env GANTRY_OUT=/gantry/out --env GANTRY_WORK=/gantry/work \
-  --env HTTPS_PROXY=http://gantry:<job_token>@egress.gantry.internal:3128 --env HOME=/gantry/home --env TMPDIR=/gantry/tmp \
+  --env HTTPS_PROXY=http://job:<job_token>@egress.gantry.internal:3128 --env HOME=/gantry/home --env TMPDIR=/gantry/tmp \
   --env ANTHROPIC_BASE_URL=http://egress.gantry.internal:8081/j/<job_token>/anthropic --env <占位 key>=… \
   --log-driver=k8s-file --log-opt max-size=16m --stop-signal=SIGTERM --stop-timeout=10 --restart=no \
   --label gantry.managed=1 --label gantry.job_id=<att_id> --label gantry.sandbox_id=<sbx_id> \
@@ -297,14 +298,14 @@ gVisor 的 `--runtime-flag`（如 `platform`、`network`、`file-access`、`over
 
 ### 7.4 网络与归属（P-49）
 
-沙盒的**归属**不再依赖网络身份：服务端为每个 Attempt 签发一枚 `job_token`（P-49），放在模型 API base URL 路径中（`http://<egress>/j/<job_token>/<provider>/…`）与 `HTTPS_PROXY` 的代理凭据里；令牌只对该尝试有效、尝试结束即作废、只能从沙盒网段使用。沙盒即使读到令牌也只能给自己的尝试记账。**网络只负责隔离**，契约要求（worker-protocol §2.3）：
+沙盒的**归属**不再依赖网络身份：服务端为每个 Attempt 签发一枚 `job_token`（P-49），放在模型 API base URL 路径中（`http://<egress>/j/<job_token>/<provider>/…`）与 `HTTPS_PROXY` 的代理凭据里；令牌只对该尝试有效、尝试结束即作废（"只能从沙盒网段使用"的强制方式需核实，P-73）。沙盒即使读到令牌也只能给自己的尝试记账。**网络只负责隔离**，契约要求（worker-protocol §2.3）：
 
 | # | 要求 | 说明 |
 | --- | --- | --- |
 | N1 | 沙盒网络里除 Egress 外无路由（E1） | 出路只有：模型 API 反向代理端点、CONNECT 端点、（M2）私有包仓库路由 |
 | N2 | 到宿主机其他端口（含 `gantryd` 的任何监听、Egress 的 `svc_model` 回环监听与控制面）、网关上的其他服务、局域网、云元数据地址 `169.254.169.254`、**其他沙盒**，一律不通 | I1 |
 | N3 | 沙盒内无 DNS；域名由 Egress 在 CONNECT / 反向代理时解析 | E1 |
-| N4 | 来自沙盒的连接源地址属于沙盒网段（`egress.sandbox_cidrs`），使 Egress 能拒绝在沙盒外使用的 `job_token` | P-49 |
+| N4 | 来自沙盒的连接源地址属于沙盒网段（`egress.sandbox_cidrs`），使 Egress 能拒绝在沙盒外使用的 `job_token`——rootless Podman（slirp4netns / pasta）下 Egress 能否看到真实源地址**需核实**（P-73），M1 用 `[集成:podman]` 用例核实；不能强制时安全底线是能力令牌本身 | P-49、P-73 |
 | N5 | 尝试结束后令牌立即作废（`revoke_job_token`，E7） | — |
 
 [deploy.md §7.8](deploy.md) 的主机防火墙按发起**用户**过滤（`meta skuid "gantry-sbx" … tcp dport { 8081, 3128 }`），保证 N1、N2；区分沙盒由令牌完成，不再需要每沙盒唯一的源地址。
@@ -313,7 +314,7 @@ gVisor 的 `--runtime-flag`（如 `platform`、`network`、`file-access`、`over
 pub struct NetworkAttach { /* 渲染成 --network / --add-host 等参数：沙盒网段与到 Egress 的路由 */ }
 ```
 
-建容器之前先向 Egress `issue_job_token(...)`（环境变量只能在创建时设定），把返回的 `model_base_urls` 与 `connect_proxy_url` 经 `WorkerAdapter::env` 写入容器环境（见 [egress.md §6](egress.md#6-对外接口)）；后续任一步失败都 `revoke_job_token`。**拿不到令牌就不启动**（失败闭合：`infra.egress`）。
+建容器之前先向 Egress `issue_job_token(...)`（环境变量只能在创建时设定），把返回的 `model_base_urls` 与 `connect_proxy_url`（`http://job:<job_token>@…`，P-72）按 `ExecSpec.token_env` 声明的变量名写入容器环境（本模块不依赖 `worker` crate，只用名字）（见 [egress.md §6](egress.md#6-对外接口)）；后续任一步失败都 `revoke_job_token`。**拿不到令牌就不启动**（失败闭合：`infra.egress`）。
 
 ### 7.5 计时器、取消与终态判定
 
@@ -406,7 +407,7 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 容器可先启动并空等；`stage` 完成后由管理器**原子创建** `/gantry/inputs/READY`（临时文件 + `rename`），worker 见到该文件才读 `job.json`（worker-protocol §3.2，OQ-16）。
 
 - 池成员按"镜像 digest + 运行时 + limits 档"分桶；成员的 bind mount 源是预分配的空 staging 目录，认领后再填充（宿主目录内容对已运行的容器可见）。
-- 认领是原子的；认领时才向 Egress `issue_job_token`，令牌随 `stage` 写入（池成员在认领前没有任何令牌，其模型 / CONNECT 请求一律被 Egress 拒绝）。令牌经 `inputs/` 下的只读文件交给已启动的 worker [提议]，因为环境变量在启动后无法注入。
+- 认领是原子的；认领时才向 Egress `issue_job_token`，令牌随 `stage` 写入（池成员在认领前没有任何令牌，其模型 / CONNECT 请求一律被 Egress 拒绝）。令牌经 `inputs/` 下的只读文件交给已启动的 worker [提议]，因为环境变量在启动后无法注入——这与 worker-protocol §2.2"令牌只出现在模型 base URL 与 `HTTPS_PROXY` 两个变量里、不写进 `inputs/`"冲突，预热池启用前须先经契约 PR 修订 §2.2（OQ-S15）。
 - `wall_time` 与 `idle_timeout` 从 `READY` 起算。
 - 成员**一次性**：用过即销毁，绝不复用；配置变更（镜像、限额、运行时）使旧桶整体作废；空闲超过 TTL（默认 10 min [建议值，待调优]）销毁。
 - 池成员在认领前不含任何 job 数据、不持有令牌；池大小 `prewarm.pool_size`，`enabled = false` 时 M1 的路径完全不变。
@@ -536,7 +537,7 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 - [ ] **M1 退出标准：沙盒内访问 `github.com` 与 `api.github.com` 失败**：直连（含按 IP 直连）失败；经 `HTTPS_PROXY` 的 CONNECT 被 `egress` 拒绝（403）并留下带 `job_id` 的审计记录；`git clone https://github.com/...` 失败。
 - [ ] 与主机防火墙联跑（deploy.md §7.8 的 `nft` 规则，`doctor` 的金丝雀沙盒）：沙盒只能到 Egress 的两个端口；防火墙规则被临时移除时，本模块的网络配置本身（无 DNS、无多余路由、私有网络命名空间）仍使 `github.com` 不可达（两道独立防线各自可验）。
 - [ ] 网络面：沙盒内尝试连接 `127.0.0.1:<gantryd 端口>`、宿主网关其他端口、局域网地址、`169.254.169.254`、另一个并发沙盒的地址、UDP/53 DNS，全部失败或快速超时；IPv6 不可用。
-- [ ] 两个并发沙盒的归属互不混淆：A 的请求在 `egress` 里归到 A 的 `job_id`；A 伪造头部无效；A 的尝试结束（`revoke_job_token`）后用 A 的令牌请求被拒；在宿主（非沙盒网段）上使用 A 的令牌被拒（P-49）。
+- [ ] 两个并发沙盒的归属互不混淆：A 的请求在 `egress` 里归到 A 的 `job_id`；A 伪造头部无效；A 的尝试结束（`revoke_job_token`）后用 A 的令牌请求被拒；在宿主（非沙盒网段）上使用 A 的令牌被拒——**需核实**（P-73）：核实不可强制时改为断言 Egress `status.detail` 含 `source_check: unverified`，并把结论回写 egress-control.md OQ-2。
 - [ ] 资源：fork 炸弹被 `pids` 限制；内存超限被 OOM 终止且 `TerminalFacts.oom = true`（`runc`；`runsc` 的 OOM 报告 **需核实**，不能报告时用例改为断言退出信号 + cgroup 事件）；`work/` 写满时按 OQ-S3 的方案失败而不是写满宿主。
 - [ ] 容器内全部进程在 `stop` 返回后不存在（后台进程、`setsid` 脱离的进程都被清掉）。
 - [ ] 日志洪水：容器向 stdout 持续写 GB 级数据，宿主磁盘占用有界（`log.max_bytes`），`sandbox` 不阻塞、不 OOM。
@@ -612,3 +613,4 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 | OQ-S12 | 材料总量分配算法（总量 512 KiB 超限时各条如何分配）与 `attempt.progress` 的采样参数骨架未定 | stage、展示 | §7.2 / §7.6 的 **[提议]** |
 | OQ-S13 | M3 逃逸检测的信号清单（意外的系统调用拒绝 / gVisor panic 日志、Egress 收到无效或跨网段的 `job_token`、挂载点之外的宿主文件变化……）及告警去向（InboxItem？日志？） | M3 | 暂不实现，仅预留 `capacity()` 与日志字段 |
 | OQ-S14 | `engine` / `guardian` 的失败重试策略不归本模块；但 `Infra{*}` 是否一律"新沙盒重试"、重试上限，需 `engine` 规格确认 | 错误恢复 | `sandbox` 只返回 `Infra` 与 `retryable` 提示 |
+| OQ-S15 | 预热池（M2）的令牌交付：容器已启动，环境变量无法再注入；本文提议经 `inputs/` 下的只读文件交给 worker，但 worker-protocol §2.2 规定令牌不写进 `inputs/` | 预热池能否与 `job_token` 共存；适配层（`worker`）需在启动 agent CLI 前读文件设变量 | 预热池默认关闭（`prewarm.enabled = false`），启用前须契约 PR 修订 worker-protocol §2.2 |

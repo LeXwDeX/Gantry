@@ -145,7 +145,7 @@
 | `/etc/gantry/` | root:gantry | 0750 | `gantry.toml`（0640，**无密钥**）、`ca/`（根 / 中间 / 服务端证书链，均为公开证书，0644）、`install-state.json` | 是 |
 | `/etc/gantry-egress/` | root:gantry-egress | 0750 | `egress.toml`（0640，无密钥） | 是 |
 | `/var/lib/gantry/` | gantry:gantry | 0750 | 以下各项 | — |
-| `…/pki/revocations.journal` | gantry:gantry | 0600 | 设备吊销的只追加日志（P-67），在事件日志之外 | **是**（每次备份复制一份；恢复时与主机上现有文件**合并**，不覆盖，§7.11） |
+| `…/pki/revocations.journal` | gantry:gantry | 0600 | 设备吊销的只追加日志（P-67），在事件日志之外；每次写入同步复制到 `backup.journal_target`（P-80） | **是**（每次备份复制一份；恢复时与主机上现有文件、`backup.journal_target` 的副本**合并**，不覆盖，§7.11） |
 | `…/gantry.db`（+ `-wal`、`-shm`） | gantry:gantry | 0600 | 事件日志 + 投影 + Outbox + `pki` 表（SQLite） | **是**（在线快照，§7.10） |
 | `…/cas/` | gantry:gantry | 0700 | 结果库（`result_ref`、进度、被拒产物） | **是**（保留期待定，architecture §6） |
 | `…/secrets/` | gantry:gantry | 0700 | 加密密钥文件：App 私钥、webhook secret、中间 CA 私钥 | **是**（只备份加密导出） |
@@ -171,10 +171,10 @@
 | 配对端点 `POST /v1/pair` | HTTPS，单向 TLS + token | `0.0.0.0:8444` | `gantryd` | 仅 `gantry pair` 的有效窗口，窗口外端口关闭（api.md §1.3，OQ-12） | 与 API 同网络 |
 | webhook | HTTP 明文，`POST /webhook`；`GET /setup/github/callback`（只在有未完成的 setup 会话时响应） | `127.0.0.1:8787` | `gantryd`（`forge`） | 常开 | **仅本机**；对外一律经终止 TLS 的反向代理或隧道转入（P-65） |
 | webhook 公网入口（`public` 模式） | HTTPS（公共受信证书，ACME） | `0.0.0.0:443` | 反向代理（如 Caddy） | `public` 模式常开 | 公网，**只转发 `/webhook` 与 `/setup/github/callback`**，其余 404 |
-| Egress 沙盒侧模型 API 反向代理 | HTTP 明文到 Egress（worker-protocol E3），路径 `/j/<job_token>/<provider>/…`（P-49） | `<EGRESS_ADDR>:8081` | `gantry-egress` | 常开 | 仅沙盒网络可达；令牌只接受来自 `egress.sandbox_cidrs` 的请求 |
-| Egress 包仓库 CONNECT | HTTP `CONNECT` 白名单（`Proxy-Authorization` 带 `job_token`） | `<EGRESS_ADDR>:3128` | `gantry-egress` | 常开 | 仅沙盒网络可达 |
-| Egress 私有包仓库反向代理（M2） | HTTP，`/j/<job_token>/registry/<id>/…` | `<EGRESS_ADDR>:<分配>` | `gantry-egress` | M2 起 | 仅沙盒网络可达 |
-| Egress `svc_model`（服务端 `models` 用） | HTTP，`/s/<provider>/…` + `svc_token`（P-50） | `127.0.0.1:8082` | `gantry-egress` | 常开 | **仅回环**；`gantry-sbx` 被主机防火墙挡住 |
+| Egress 沙盒侧模型 API 反向代理 | HTTP 明文到 Egress（worker-protocol E3），路径 `/j/<job_token>/<provider>/…`（P-49） | `<EGRESS_ADDR>:8081` | `gantry-egress` | 常开 | 仅沙盒网络可达；令牌只接受来自 `egress.sandbox_cidrs` 的请求（强制方式需核实，P-73） |
+| Egress 包仓库 CONNECT | HTTP `CONNECT` 白名单（`HTTPS_PROXY=http://job:<job_token>@…`，`Proxy-Authorization` 带 `job_token`，P-72） | `<EGRESS_ADDR>:3128` | `gantry-egress` | 常开 | 仅沙盒网络可达 |
+| Egress 私有包仓库反向代理（M2） | HTTP，`/r/<job_token>/<injection_id>/…`（[提议]，egress-control OQ-1） | `<EGRESS_ADDR>:<分配>` | `gantry-egress` | M2 起 | 仅沙盒网络可达 |
+| Egress `svc_model`（服务端 `models` 用） | HTTP，`/s/<svc_token>/<provider>/…`，请求头 `X-Gantry-Ledger`（P-50、P-74） | `127.0.0.1:8082` | `gantry-egress` | 常开 | **仅回环**；`gantry-sbx` 被主机防火墙挡住 |
 | Egress 控制面 | Unix 套接字（`/control/…`） | `/run/gantry/egress.sock` | `gantry-egress` 监听，`gantryd` 连接 | 常开 | 本机，组 `gantry-link`（P-50） |
 | `gantryd` 控制通道 | Unix 套接字 | `/run/gantry/control.sock` | `gantryd` | 常开 | 仅 root |
 | 出站（`gantryd`） | HTTPS 443 | — | `gantryd` | — | `api.github.com`、`github.com`（拉镜像仓）；M4 增加 APNs |
@@ -366,7 +366,7 @@ table inet gantry {
 }
 ```
 
-`$EGRESS_ADDR`、`$ADMIN_NETS` 由引导配置渲染；同一沙盒网段写入 Egress 的 `egress.sandbox_cidrs`，`job_token` 只接受来自这些网段的请求（P-49）。该规则与 Egress 自身的硬性拒绝（config §8.3：IP 字面量、回环 / 私网 / 链路本地）是**两道**独立防线。`doctor` 的金丝雀沙盒负责验证（§7.14）。Egress 进程自己的出站（模型提供方、包仓库）不受此表限制。`gantryd` 的出站不做主机层过滤（不在骨架范围）。
+`$EGRESS_ADDR`、`$ADMIN_NETS` 由引导配置渲染；同一沙盒网段写入 Egress 的 `egress.sandbox_cidrs`，`job_token` 只接受来自这些网段的请求（P-49；rootless Podman 下 Egress 能否看到真实源地址需核实，P-73，金丝雀沙盒的用例负责核实）。该规则与 Egress 自身的硬性拒绝（config §8.3：IP 字面量、回环 / 私网 / 链路本地）是**两道**独立防线。`doctor` 的金丝雀沙盒负责验证（§7.14）。Egress 进程自己的出站（模型提供方、包仓库）不受此表限制。`gantryd` 的出站不做主机层过滤（不在骨架范围）。
 
 ### 7.9 安装引导期写入（P-66）
 
@@ -397,7 +397,7 @@ table inet gantry {
 
 1. **数据库**：用 SQLite 在线备份接口（或 `VACUUM INTO`）取一致性快照，**不直接拷贝**运行中的 `-wal` 文件；在快照上跑 `PRAGMA integrity_check`，记录事件 `seq` 头。
 2. **CAS**：**先 DB 快照、后复制 CAS**（对象内容寻址、写入先于被事件引用，所以后复制不会漏掉快照所引用的对象）。
-3. **吊销日志**：复制 `/var/lib/gantry/pki/revocations.journal`（只追加文件，复制时读到的前缀总是完整行；末尾不完整的行丢弃）。另装一个 `gantry-journal-sync.path` 单元 **[提议]**：日志文件变化时立即执行 `backup.journal_hook`（管理员配置的异地同步命令），使异地副本比定时备份更新——否则在主机整体丢失、只能用旧备份恢复时，备份之后的吊销无从重放。
+3. **吊销日志**：复制 `/var/lib/gantry/pki/revocations.journal`（只追加文件，复制时读到的前缀总是完整行；末尾不完整的行丢弃）。此外，P-80 要求**每次写入同步复制到备份目标**：引导配置 `backup.journal_target`（备份目标上的一个可追加路径，如挂载的异地卷或备份盘，`gantry:gantry 0600`）由 `pki` 在吊销事务提交前追加并 `fsync`，复制失败则吊销失败——这样即使主机整体丢失、只能用旧备份恢复，备份之后的吊销也能从备份目标上的副本重放。安装时未配置 `backup.journal_target` → 安装失败（`doctor` 同样报红）。
 4. **密钥**：`sudo -u gantry gantry secrets export` 与 `sudo -u gantry-egress gantry secrets export`，各自输出加密包（加密方式归 `secrets`，备份收件人独立于主机主密钥，OPS-08）。
 5. 组装 `tar`（可压缩）+ `MANIFEST.json`（组件清单与 SHA-256、Gantry 版本、`schema_version`、事件 `seq` 头、`log_id` 与 `log_epoch`、创建时间、主机标识），整体用 `age` 公钥加密（**[提议]**，收件人公钥在安装时配置，**私钥永不放在服务端**，与根私钥同等对待）。
 6. 写入 `/var/backups/gantry/`（0700），按保留策略轮转（日 7 / 周 4 / 月 6 **[建议值，待调优]**），然后执行 `backup.post_hook`（管理员配置的异地同步命令：rsync、rclone 等）。**只备份在同一块盘上不算备份**；`doctor` 检查最近一次异地同步成功。
@@ -411,7 +411,7 @@ RPO = 备份间隔（默认 24 h）；RTO 目标 ≤ 30 分钟（已准备好的
 
 1. 用离线保存的 `age` 私钥解密；校验 `MANIFEST.json` 的各组件哈希；**拒绝**恢复到比备份 `schema_version` 更旧的程序。
 2. 停服务；用 `Store::restore_from` 放回数据库（`log_epoch` 加一、`log_id` 不变，P-67）；放回 CAS、密钥、配置并设置属主 / 权限（§6.3）；`gantry secrets import`。
-3. **合并吊销日志**：主机上已有的 `revocations.journal` 保留（原机恢复时它比备份新），与备份里的副本、`backup.journal_hook` 的异地副本按行取并集（去重键 `device_id` + `revoked_at`）；**绝不**用备份副本覆盖现有文件。
+3. **合并吊销日志**：主机上已有的 `revocations.journal` 保留（原机恢复时它比备份新），与备份里的副本、`backup.journal_target` 上的同步副本（P-80）按行取并集（去重键 `device_id` + `revoked_at`）；**绝不**用备份副本覆盖现有文件。
 4. **重放吊销**：离线调用 `pki` 的 `replay_revocations`（P-67）：日志里晚于备份、而恢复后的库里仍 `active` 的设备被重新吊销（`device.revoked`，`via = journal_replay`）。重放失败（坏行等）→ 恢复中止，不启动服务。
 5. 先启 `gantry-egress`，再启 `gantryd`；`gantryd` 启动执行 `forge` 的全量对账（`startup_sweep`，forge-actions §7.1）。
 6. **恢复后核对清单**（脚本逐项提示，不自动处理）：
@@ -551,7 +551,7 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 | `forge.webhook.max_body_bytes` / `ip_allowlist` / `dedupe_retention` / `payload_retention` | `26214400` / `false` / `30d` / `7d` | forge-actions §11 B |
 | `sandbox.runtime_user` / `sandbox.runtime_socket` | `gantry-sbx` / `/run/gantry-sbx/podman.sock` | 待 `sandbox` 规格（OPS-11） |
 | `egress.control_socket` | `/run/gantry/egress.sock` | `gantryd` ↔ Egress 控制面（P-50；与 egress.md §10 同名） |
-| `backup.dest` / `backup.recipients` / `backup.post_hook` / `backup.journal_hook` | `/var/backups/gantry` / 无（必填） / 空 / 空 | §7.10；`journal_hook` 在 `revocations.journal` 变化时触发（P-67） |
+| `backup.dest` / `backup.recipients` / `backup.post_hook` / `backup.journal_target` | `/var/backups/gantry` / 无（必填） / 空 / 无（必填） | §7.10；`journal_target` 是 `revocations.journal` 的同步副本路径，`pki` 每次吊销写入时同步追加（P-80） |
 | `backup.keep_daily/weekly/monthly` | 7 / 4 / 6 | **[建议值，待调优]** |
 | `upgrade.health_timeout_s` | 120 | **[建议值，待调优]** |
 
@@ -600,7 +600,7 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 - [ ] `/run/gantry/egress.sock` 为 `gantry-egress:gantry-link 0660`，`gantry` 可连、`gantry-sbx` 不可连；重启任一单元后另一方的套接字仍在。
 - [ ] `gantry pair` 后 8444 监听，token 被消耗或窗口结束后端口关闭。
 - [ ] 无客户端证书访问 8443 → TLS 握手失败、无 HTTP 响应；8443 上请求 `/webhook` 需持有效证书且返回 `404`；8444 上请求 `/v1/me` → `404`。
-- [ ] 金丝雀沙盒内：连接 `github.com`、`api.github.com`、宿主 8443 / 8444 / 8787 / 8082 / 控制套接字全部失败；`env` 与文件系统中除本尝试的 `job_token` 外没有任何密钥形字符串；用该令牌从沙盒网段以外请求 Egress → 拒绝（P-49；M1 退出标准的主机侧前提）。
+- [ ] 金丝雀沙盒内：连接 `github.com`、`api.github.com`、宿主 8443 / 8444 / 8787 / 8082 / 控制套接字全部失败；`env` 与文件系统中除本尝试的 `job_token` 外没有任何密钥形字符串；用该令牌从沙盒网段以外请求 Egress → 拒绝（P-49；需核实，P-73：核实不可强制时断言 Egress `status.detail` 含 `source_check: unverified` 并记录结论）。
 - [ ] 沙盒用户对 Egress 端口的连接成功、对其他任何地址失败（nft 计数器可见丢弃）。
 - [ ] `systemd-analyze security gantryd.service` 评分不劣于记录的基线。
 
@@ -629,9 +629,9 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 - [ ] 在持续写入负载下备份：快照通过 `PRAGMA integrity_check`，事件 `seq` 连续；归档含 `MANIFEST.json`，哈希全部吻合。
 - [ ] 归档明文部分（哨兵扫描）不含任何密钥值；未用 `age` 私钥无法解密；服务端上不存在 `age` 私钥。
 - [ ] 范围：归档**含**数据库（含 `log_id` / `log_epoch`）、`revocations.journal` 副本、CAS、两个 `secrets` 导出、引导配置；**不含**镜像仓、工作树、工作区、根私钥。
-- [ ] `revocations.journal` 变化后 `journal_hook` 在 1 分钟内执行（`.path` 单元）。
+- [ ] 每次吊销后 `backup.journal_target` 与本地 `revocations.journal` 逐行相同；把 `journal_target` 设为不可写 → 吊销失败（`503`），设备仍 `active`（P-80）。
 - [ ] 轮转保留数量正确；`post_hook` 被调用且失败时备份判失败；定时器 `Persistent=true` 在关机期间错过的备份会补做。
-- [ ] **(M2) 恢复演练**：在第二台干净 VM 上，用最近的真实备份 + 离线 `age` 私钥 + `journal_hook` 的异地日志副本恢复，服务全部启动；事件 `seq` 与备份时一致；`log_epoch` 比备份时大 1，客户端发现后全量重同步（P-67）；备份后被吊销的设备经日志重放仍握手失败；备份时已存在且未吊销的设备用旧证书可直接连上；`forge` 对账补齐备份后在 GitHub 上创建的 PR 并报告差异。度量并记录 RTO（目标 ≤ 30 分钟）。
+- [ ] **(M2) 恢复演练**：在第二台干净 VM 上，用最近的真实备份 + 离线 `age` 私钥 + `backup.journal_target` 上的日志副本（P-80）恢复，服务全部启动；事件 `seq` 与备份时一致；`log_epoch` 比备份时大 1，客户端发现后全量重同步（P-67）；备份后被吊销的设备经日志重放仍握手失败；备份时已存在且未吊销的设备用旧证书可直接连上；`forge` 对账补齐备份后在 GitHub 上创建的 PR 并报告差异。度量并记录 RTO（目标 ≤ 30 分钟）。
 - [ ] 原机恢复：主机上现有的 `revocations.journal` 比备份新，恢复后文件行数不减少（合并而非覆盖）。
 - [ ] 恢复前校验：篡改归档、版本更旧的程序、缺组件，各自被拒绝且现有数据未改动。
 
@@ -672,7 +672,7 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 | OPS-11 | 沙盒主机侧细节：`gantryd` 如何控制 `gantry-sbx` 的 rootless Podman（套接字 vs `sudo`，后者与 `NoNewPrivileges` 冲突）；`workspaces/` 的属主 / ACL；rootless 网络模式（`pasta` / `slirp4netns`）与"沙盒如何到达 Egress"、`skuid` 过滤是否成立（需核实）；基础镜像如何构建、签名、分发（`sandbox.base_image` 的默认值**已决：见裁决 C20 / P-66**——随版本发布、固定摘要的官方 worker 镜像） | §6.3、§7.8、§7.9 的草案 | `sandbox`、`worker`、`egress`、CI |
 | OPS-12 | **已决：见裁决 C20 / P-66**（第一台设备配对之前，主机命令可写入"仅 approver"配置并写审计事件；之后需要审批签名）。原问题：安装期没有设备时如何写入"仅 approver 键" | 已落实到 §7.9 | — |
 | OPS-13 | 项目绑定：App 装好后谁创建 `Project`、`project.added` 由什么触发（api.md OQ-8：安装回调 / API）；默认分支保护检查所需权限与端点（需核实）；`installation_id`、`bot_user_id` 初始化（forge-actions OQ-10） | 安装后由 `forge` 处理 `installation` 事件；`deploy` 只做检查与警告 | `forge`、`api` |
-| OPS-14 | （恢复后吊销回退**已决：见裁决 C21 / P-67**——`revocations.journal` 只追加、恢复时重放；`log_epoch` 加一，客户端全量重同步）仍未决：备份频率与保留；异地目的地；CAS 保留期；出网审计日志是否入备份；`journal_hook` 的异地同步是否默认开启 | 见 §7.10、§7.11 | `store` |
+| OPS-14 | （恢复后吊销回退**已决：见裁决 C21 / P-67**——`revocations.journal` 只追加、恢复时重放；`log_epoch` 加一，客户端全量重同步）仍未决：备份频率与保留；异地目的地；CAS 保留期；出网审计日志是否入备份（`revocations.journal` 的同步副本已决：见 decisions.md P-80，`backup.journal_target` 必填） | 见 §7.10、§7.11 | `store` |
 | OPS-15 | 升级策略：数据库迁移是否允许 N-1 兼容、`schema_version` 与 settings 的迁移（config OQ-20）；Egress 重启对进行中 Attempt 的影响；自动回滚的判据与"丢事件"的容忍；维护窗口 / 排空语义 | 迁移只前进；失败且无新事件才自动恢复数据库 | `store`、`egress`、`engine` |
 | OPS-16 | 应急命令：唯一 approver 被吊销且无其他设备时，下一台配对设备能否成为 approver（"第一台"的判定口径）；命令的实现方式与参数语法（`pki` 规格定） | 语法如 §7.13，口径待定 | `pki` |
 | OPS-17 | 配对窗口：监听端口是否固定 8444、窗口时长与 token TTL（design.md 示例 10 分钟；config OQ-18 未定）、配对串里的"地址"指 API 还是配对监听器（api.md OQ-12；固定根指纹已决，P-64） | 固定 8444，时长由 `pki` 定 | `pki`、桌面 / 手机端 |
@@ -680,4 +680,4 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 | OPS-19 | `gantry doctor` 中 M1 与 M2 的检查集合划分；`--test-mode` 的暴露方式 | §7.14 全量，M1 取子集 | `ops` |
 | OPS-20 | 单主机以外（多主机、HA）不在本版范围；卸载默认保留数据，`--purge` 的确认方式 | 单主机 | — |
 | OPS-21 | Manifest / 权限随里程碑升级（M1 → M2 的 `actions:write`、`merge_queues:read`）由谁提示用户到 GitHub 上"接受新权限"（forge-actions §9.5 上报）；`deploy` 是否提供 `gantry github upgrade-permissions` 引导 | 仅文档说明 | `forge` |
-| OPS-22 | （APNs 归 M4 `ops`、`secrets` 读取方加 `notify`：**已决：见裁决 C17 / P-63、C13 / P-59**）仍未决：推送令牌注册路由（api.md OQ-2）、APNs 密钥与参数的设置键、"运营者自备 Apple 开发者账号直连还是经中继"（见 [notify.md N-11](notify.md#13-开放问题)）；`gantryd` 到 APNs 的出站放行 | 仅在部署侧预留放行与密钥登记位置 | `notify`、`secrets`、`mobile` |
+| OPS-22 | （APNs 归 M4 `ops`、`secrets` 读取方加 `notify`：**已决：见裁决 C17 / P-63、C13 / P-59**）推送令牌注册路由**已决：见 decisions.md P-77**；仍未决：APNs 密钥与参数的设置键、"运营者自备 Apple 开发者账号直连还是经中继"（见 [notify.md N-11](notify.md#13-开放问题)）；`gantryd` 到 APNs 的出站放行 | 仅在部署侧预留放行与密钥登记位置 | `notify`、`secrets`、`mobile` |

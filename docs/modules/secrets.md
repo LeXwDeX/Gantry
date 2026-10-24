@@ -25,7 +25,7 @@
 
 | 里程碑 | 交付 |
 | --- | --- |
-| M0 | milestones 未给 `secrets` 交付物（P-51 的 M0 替身清单也未列）。`core` 已提供 `SecretName` / `Consumer` / `SecretWrite`。本文建议冻结 §6 的 trait 签名并提供 `MemorySecrets` 作为替身（OQ-10），因为 `forge`、`pki`、`egress` 在 M1 与 `secrets` 同期并行开发 |
+| M0 | 冻结 §6 的 trait 签名（`SecretSource` / `SecretSink` 进 `core::ports`，跨泳道，P-51）并交付 `MemorySecrets` 作为替身（decisions P-81，已列入 milestones 替身表）；`core` 已提供 `SecretName` / `Consumer` / `SecretWrite`。`forge`、`pki`、`egress`、`api` 在 M1 与本模块并行时用它 |
 | M1 | milestones 明确："加密存储、按使用方隔离读取、加密备份"。本文展开为：§1 的 1–5、7–10 全部（含 `reader` / `scoped` / `admin` 三级句柄、`stage` / `commit` / `abort`、`check_refs`、`put` 覆盖写（版本递增）、`FileSecrets` 与 `MemorySecrets`（含故障注入）、备份 / 恢复、`harden_process`）；引导期主机写入入口（第一台设备配对前，P-66）所需的本地 `put` |
 | M2 | milestones 未列；无新增 |
 | M3 | milestones 明确："密钥轮换（App 私钥、中间 CA、模型 key）"。本文展开为：`SecretHandle`（自动刷新）、旧版本保留窗口与 `get_version`、`rewrap`、与 `forge` / `pki` / `egress` 重载联动的约定；各自的轮换流程归 `forge`、`pki`、`egress` |
@@ -96,6 +96,7 @@ pub struct Secret { pub value: SecretValue, pub version: SecretVersion }
 pub enum Expect { Any, Absent, Version(SecretVersion) }              // 比较并写入，防丢失更新
 
 // ── 三个能力层级，由窄到宽。业务模块只拿自己需要的最窄的那个。
+// SecretSource / SecretSink 及其类型定义在 core::ports（使用方分属不同泳道，P-51、P-81）；第三级管理句柄只在本 crate。
 
 // 读：仅限一个使用方的命名空间。forge（App 私钥、webhook secret）、egress（运行期取模型 key）拿到这个。
 pub trait SecretSource: Send + Sync {
@@ -387,4 +388,4 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 | OQ-7 | **回收未被引用的 ref**（config.md §2.4 [提议]）由谁触发：引用关系分散在 settings 文档里，`secrets` 看不到 | `secrets` 只提供 `delete`；`api` 在 `settings.updated` 之后计算引用并调用 | `api` |
 | OQ-8 | Egress 的**重载信号**（config.md §2.4"收到重载信号后换新"，M3）：信号形态（SIGHUP、管理接口、轮询 `version()`）未定 | `SecretHandle` 轮询 + `invalidate()`；信号绑定由 `egress` 做 | `egress`（M3） |
 | OQ-9 | （引导期主机写入的审计**已决：见裁决 C20 / P-66**——写审计事件，由调用方追加；读取与 `deploy` 其余安装步骤是否进审计仍未决）secrets 读写是否要进入审计事件（事件目录里没有 `secret.*` 类型；`settings.updated.secret_changes[]` 只覆盖经 settings 的写入，不覆盖 `deploy` 安装流程与读取） | 不进事件日志；只有日志与指标 | `core`（事件目录）、`policy`（审计） |
-| OQ-10 | `secrets` 的 M0 替身：P-51 的 M0 替身清单没有 `MemorySecrets`，而 `forge`、`pki`、`notify`（M4）在 M1 与本模块并行 | 建议由本模块在 M0 交付 `MemorySecrets`（同一套契约测试）；需 milestones 确认 | milestones、`forge`、`pki` |
+| OQ-10 | ~~`secrets` 的 M0 替身~~ | 已决：见 decisions.md P-81（`MemorySecrets` 进 M0 替身清单，读写 trait 在 M0 冻结） | — |

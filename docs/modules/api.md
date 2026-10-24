@@ -2,14 +2,14 @@
 
 > 状态：设计 v0.1 · 里程碑：M1（鉴权、路由骨架、事件流、统一签名原语、settings·模型）→ M2 → M3（即时断流）→ M4（手机档案验收）· 泳道：`sec`（双向 TLS 即 mTLS、鉴权、签名、事件流）+ `be-engine`（资源路由的业务对接，[interfaces/api.md](../interfaces/api.md) 头部分工）· crate / 目录：`crates/gantry-api`
 
-`api` 是服务端对客户端的唯一网络面：一个强制客户端证书的 HTTPS 监听器（mTLS API + 服务端发送事件（Server-Sent Events, SSE）事件流）和一个只含一条路由的单向 TLS 配对监听器。它负责把"握手通过的证书"变成"带角色与档案的设备"，把 47 条契约路由接到各模块，并保证客户端看到的错误、分页、幂等、并发控制、事件游标、审批签名流程都与 [interfaces/api.md](../interfaces/api.md) 逐字一致。它不做业务判断：业务归各模块，放行归 `policy`，证书归 `pki`。
+`api` 是服务端对客户端的唯一网络面：一个强制客户端证书的 HTTPS 监听器（mTLS API + 服务端发送事件（Server-Sent Events, SSE）事件流）和一个只含一条路由的单向 TLS 配对监听器。它负责把"握手通过的证书"变成"带角色与档案的设备"，把 48 条契约路由接到各模块，并保证客户端看到的错误、分页、幂等、并发控制、事件游标、审批签名流程都与 [interfaces/api.md](../interfaces/api.md) 逐字一致。它不做业务判断：业务归各模块，放行归 `policy`，证书归 `pki`。
 
 ## 1. 职责
 
 1. **mTLS 终止**：用 `pki` 提供的客户端证书校验器与服务端证书解析器构造 `rustls::ServerConfig`；仅 TLS 1.3，强制客户端证书，握手失败不产生任何 HTTP 响应（[api.md §1.2](../interfaces/api.md)）；关闭会话票据（session ticket）/ 会话缓存与零往返数据（0-RTT）（§7.2）。
 2. **配对监听器**：独立端口、单向 TLS、只路由 `POST /v1/pair`，其余路径一律 404；只在 `pki` 给出的配对窗口内监听；业务委托 `pki::PairingService::redeem`（请求同时携带 CSR 与审批签名公钥 `approval_pubkey`，P-47；响应链 `[叶子, 中间 CA, 根]`，P-64；api.md §1.3）。
 3. **设备鉴权与角色**：每个请求按 api.md §2.1 的判定链——握手 → `cert_serial` 映射 Device 且 `active` → 角色（**实时查库，不缓存**）→ 客户端档案（`desktop` / `mobile`）→ 限流 → 处理；写操作的事件 `actor` 记为 `{kind: "device", id}`。
-4. **路由实现**：契约 §4.1 的全部 47 条路由（46 条 mTLS + 1 条配对；含控制路由 #43–#45、收件箱计数 #46、证书续期 #47）；读类走 `store` 投影，写类委托所属模块；请求体严格校验（未知字段 → `422 unknown_field`，I7）。
+4. **路由实现**：契约 §4.1 的全部 48 条路由（47 条 mTLS + 1 条配对；含控制路由 #43–#45、收件箱计数 #46、证书续期 #47、推送令牌注册 #48（M4，P-77））；读类走 `store` 投影，写类委托所属模块；请求体严格校验（未知字段 → `422 unknown_field`，I7）。
 5. **统一错误**：`application/problem+json`（RFC 9457），30 个稳定 `code`（api.md §3.1），`X-Request-Id`。
 6. **分页、幂等键、实体标签（ETag）/ If-Match 条件请求、限流、读一致性**：键集（keyset）游标分页；`Idempotency-Key` 去重与重放；settings 的 ETag 条件请求；按设备令牌桶（token bucket）与 `RateLimit-*` 头；每个成功响应带 `X-Event-Seq`；**每个响应**（含错误与事件流响应头）带 `X-Log-Epoch`（P-67）（api.md §3.2–§3.6）。
 7. **SSE 事件流**：先回放 `(游标, head]` 再切到实时，不丢不重；过滤（`project_id`、`types`、手机白名单、`settings.*` 门禁）；15 s 心跳推进游标并携带 `log_epoch`（P-67）；心跳内检查设备吊销与证书到期；`close` 帧；慢消费者断开；每设备并发 ≤ 3（api.md §5）。
@@ -28,7 +28,7 @@
 | M1 | 两个监听器与 TLS 加固；设备鉴权链、角色、档案表（`ios` → `mobile` 子集一并落地，失败即关闭）；统一错误、分页、幂等键、限流、`X-Event-Seq`、`X-Log-Epoch`；SSE 事件流（含游标回放、心跳内吊销检查、心跳 `log_epoch`、`cursor_ahead`）；审批全流程路由 #24–#29 与内部动作签名写入；settings #30 #31（**写入只开放 `models`**）#35 #36；设备 #37–#40 与证书续期 #47（P-64）；配对 #1（CSR + `approval_pubkey`）；业务路由 #2–#6、#10–#12、#17–#22 对接投影 / `conversation`；收件箱计数 #46（P-63）；控制路由 #43–#45（暂停 / 继续 / 重试，引擎 M1 交付，P-56） |
 | M2 | 工作树 #13–#16；交付单元控制 #7 #8 与预算只读 #9；收件箱 #23 #42（M1 的上报项还没有可选项可选，`choose` 随 `spec_needed` / `escalation` 的选项上线）；项目范围 settings #32–#34；settings 的 `levels` / `policies` / `guardian` 等 resource 开放写入（随各设置页，config.md §13）；`settings.*` 事件门禁的完整验收；审批的重新请求路径（与 `policy`、`engine` 配合） |
 | M3 | 进程内即时断流（订阅 `pki::RevocationNotifier`，心跳检查保留为兜底）；预算面板所需的读取验收；密钥轮换对 settings secret 流程的联动验收（同名 `secret_ref` 写入新 `value` 的轮换路径） |
-| M4 | 手机档案的端到端验收（12 条路由、事件白名单、审批路由 `403 forbidden_profile`、`choose` 的 `spec_needed` / `decision_needed` 限制、发消息时忽略 `level_cap`）；`ios` 配对联调 |
+| M4 | 手机档案的端到端验收（13 条路由、事件白名单、审批路由 `403 forbidden_profile`、`choose` 的手机限制（只允许 `decision_needed` 与 `budget_exhausted` 的非 `raise_cap` 选项，P-79）、发消息时忽略 `level_cap`）；`ios` 配对联调（`approval_pubkey` 可省略、永不成为 approver，P-76）；#48 推送令牌注册（P-77） |
 
 ## 2. 不负责
 
@@ -51,7 +51,7 @@
 
 本文中不带路径的 `api.md`、`config.md`、`forge-actions`、`worker-protocol` 均指 `docs/interfaces/` 下的契约；模块规格写作 `modules/<id>.md`，本规格自身称"本文"。
 
-`api` 依赖"全部服务端模块 + `pki`"（architecture §4）。下表只列用到什么；各模块的 trait 以其自己的规格书为准。`engine` / `conversation` / `notify` / `repo` / `forge` 的规格书已经成稿，其中 `engine.md`、`forge.md` 直接采用了 §6.3 的 `DeliveryControl`、`PrRefresher`、`WriteCtx`；收件箱直接用 `core::ports::InboxPort`（P-51）；`conversation.md` 用 `ActorCtx`，`notify.md` 用 `DeviceActor`，与 `WriteCtx` 的对齐见 OQ-A7。
+`api` 依赖"全部服务端模块 + `pki`"（architecture §4）。下表只列用到什么；各模块的 trait 以其自己的规格书为准。`engine` / `conversation` / `notify` / `repo` / `forge` 的规格书已经成稿，`DeliveryControl`、`ConversationService`、`WorktreeLocks`、`PrRefresher` 与 `InboxPort` 都在 `core::ports`（P-51，core.md §6.10），写方法一律带 `ActorCtx`（P-78）。
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
@@ -148,7 +148,7 @@ pub struct RouteSpec {
 | 5 | `GET /v1/deliveries` | viewer | — | 读 | — | 投影 | M1 |
 | 6 | `GET /v1/deliveries/{delivery_id}` | viewer | — | 读 | — | 投影 | M1 |
 | 7 | `PATCH /v1/deliveries/{delivery_id}` | operator | — | 写 | 不适用 | `engine.set_level_cap` | M2 |
-| 8 | `POST /v1/deliveries/{delivery_id}/abandon` | operator | — | 写 | 可带 | `engine.abandon` | M2 |
+| 8 | `POST /v1/deliveries/{delivery_id}/abandon` | operator | — | 写 | 可带 | `engine.abandon` | M1 |
 | 9 | `GET /v1/deliveries/{delivery_id}/budget` | viewer | — | 读 | — | 投影 | M2 |
 | 10 | `GET /v1/projects/{project_id}/conversations` | viewer | ✓ | 读 | — | 投影 | M1 |
 | 11 | `GET /v1/conversations/{conversation_id}/messages` | viewer | ✓ | 读 | — | 投影 | M1 |
@@ -188,25 +188,26 @@ pub struct RouteSpec {
 | 45 | `POST /v1/nodes/{node_id}/retry` | operator | — | 写 | **必** | `engine.retry_node` | M1 |
 | 46 | `GET /v1/inbox/summary` | viewer | ✓ | 读 | — | 投影（`inbox_summary`） | M1 |
 | 47 | `POST /v1/devices/self/renew` | viewer | ✓ | 写 | 可带 | `pki.admin.renew`（传入握手出示的 `cert_serial`） | M1 |
+| 48 | `PUT /v1/devices/self/push-token` | operator | ✓ | 写 | 不适用 | `InboxPort::register_push_token`（`notify` 私有表，不进事件，P-77） | M4 |
 
-`*`：#31 #33 #34 的最低角色是路由下限，实际角色与是否需要签名按改动内容判定（§7.8）；#42 的手机限制：只能选 `spec_needed` 与 `decision_needed`，`escalation`（升档一律走 `escalation`，P-63）与 `approval_needed` → `403 forbidden_profile`（P-35）。`/v1/inbox/summary` 与 `/v1/devices/self/renew` 是字面路径，优先于 `/v1/inbox/{inbox_id}`、`/v1/devices/{device_id}` 匹配。合计 47 条：mTLS 46 条 + 配对 1 条；手机档案 12 条。其余格式遵循契约；方法错误 → `405 method_not_allowed` + `Allow`。
+`*`：#31 #33 #34 的最低角色是路由下限，实际角色与是否需要签名按改动内容判定（§7.8）；#42 的手机限制（由 `notify` 判定，P-79）：只能对 `decision_needed` 与 `budget_exhausted` 选择，`budget_exhausted` 的 `raise_cap`、`escalation`（升档一律走 `escalation`，P-63）与 `approval_needed` → `403 forbidden_profile`（P-35）；`spec_needed` 没有选项，任何档案 `choose` → `422`。`/v1/inbox/summary`、`/v1/devices/self/renew`、`/v1/devices/self/push-token` 是字面路径，优先于 `/v1/inbox/{inbox_id}`、`/v1/devices/{device_id}` 匹配。合计 48 条：mTLS 47 条 + 配对 1 条；手机档案 13 条。其余格式遵循契约；方法错误 → `405 method_not_allowed` + `Allow`。
 
 ### 6.3 对其他模块的需求（facade，占位签名）
 
-读类端点不经 facade，直接用 `store` 的一致读（同一读事务里读投影与最大 `seq`，才能给出正确的 `X-Event-Seq`，api.md §3.6）。写类 facade 的统一约定：`WriteCtx { actor: Actor /* {device, dev_…} */, request_id, dedup: Option<DedupKey> }`；模块用 `dedup` 作为所追加事件的 `dedup_key`，使重放同一 `Idempotency-Key` 在 `store` 层也至多追加一次（见 §7.6）。
+读类端点不经 facade，直接用 `store` 的一致读（同一读事务里读投影与最大 `seq`，才能给出正确的 `X-Event-Seq`，api.md §3.6）。写类 facade 的统一约定：入参一律是 `core::ports::ActorCtx`（P-78，字段见 [core.md §6.10](core.md#610-跨模块端口coreportsp-51)），由本模块在鉴权后构造：`actor = {device, dev_…}`、`device`、`role`、`client_profile`、`request_id`、`idempotency_key`（请求头原文）、`dedup_key`（由 `(device_id, Idempotency-Key)` 派生）；模块用 `dedup_key` 作为所追加事件的 `dedup_key`，使重放同一 `Idempotency-Key` 在 `store` 层也至多追加一次（见 §7.6）。下列 trait 定义在 `core::ports`（跨泳道，P-51），这里只列本模块用到的方法。
 
 ```rust
-#[async_trait] pub trait ConversationService { async fn post_user_message(&self, ctx: WriteCtx, conv: ConversationId, msg: NewUserMessage) -> Result<Message, ModuleError>; }
-#[async_trait] pub trait DeliveryControl     { async fn set_level_cap(&self, ctx: WriteCtx, id: DeliveryId, cap: Level) -> Result<Delivery, ModuleError>;
-                                               async fn abandon(&self, ctx: WriteCtx, id: DeliveryId, reason: Option<String>) -> Result<Delivery, ModuleError>;
+#[async_trait] pub trait ConversationService { async fn post_user_message(&self, ctx: ActorCtx, conv: ConversationId, msg: NewUserMessage) -> Result<Message, ModuleError>; }
+#[async_trait] pub trait DeliveryControl     { async fn set_level_cap(&self, ctx: ActorCtx, id: DeliveryId, cap: Level) -> Result<Delivery, ModuleError>;
+                                               async fn abandon(&self, ctx: ActorCtx, id: DeliveryId, reason: Option<String>) -> Result<Delivery, ModuleError>;
                                                // P-56：控制路由 #43–#45；引擎按目标状态幂等，API 层另有必带的 Idempotency-Key
-                                               async fn pause(&self, ctx: WriteCtx, id: DeliveryId) -> Result<Delivery, ModuleError>;
-                                               async fn resume(&self, ctx: WriteCtx, id: DeliveryId) -> Result<Delivery, ModuleError>;
-                                               async fn retry_node(&self, ctx: WriteCtx, id: NodeId) -> Result<Node, ModuleError>; }
-#[async_trait] pub trait WorktreeLocks       { async fn acquire_human(&self, ctx: WriteCtx, id: WorktreeId, lease: Duration) -> Result<Worktree, LockError>;
-                                               async fn release_human(&self, ctx: WriteCtx, id: WorktreeId) -> Result<Worktree, LockError>; }
+                                               async fn pause(&self, ctx: ActorCtx, id: DeliveryId) -> Result<Delivery, ModuleError>;
+                                               async fn resume(&self, ctx: ActorCtx, id: DeliveryId) -> Result<Delivery, ModuleError>;
+                                               async fn retry_node(&self, ctx: ActorCtx, id: NodeId) -> Result<Node, ModuleError>; }
+#[async_trait] pub trait WorktreeLocks       { async fn acquire_human(&self, ctx: ActorCtx, id: WorktreeId, lease: Duration) -> Result<Worktree, LockError>;
+                                               async fn release_human(&self, ctx: ActorCtx, id: WorktreeId) -> Result<Worktree, LockError>; }
 // 收件箱不再有 api 专用 facade：直接用 core::ports::InboxPort（notify.md §6）的 dismiss / choose / summary；
-// WriteCtx → DeviceActor 的转换见 OQ-A7。
+// notify 的 dismiss / choose / register_push_token 同样接收 ActorCtx（P-78）。
 #[async_trait] pub trait PrRefresher         { async fn refresh_pr(&self, repo: &RepoSlug, number: u64) -> Result<PrHead, ModuleError>; }  // 失败 → 退回投影快照
 
 /// settings 编排需要的上下文（来源见 config.md §11 开头）与聚合
@@ -385,7 +386,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 签名 | 同 challenge / grant（第 5 步主体一致性不适用） |
 | 重发（#31/#33/#34/#39/#40） | 带 `Gantry-Approval: apr_…`；先做 §7.8 的前置检查，再在**同一写事务**里 `policy.consume_internal` + 业务写（`settings.updated` / `pki.admin.set_role` / `pki.admin.revoke`）+ 业务事件；任一失败整体回滚，审批保持 `granted` |
 
-- #39（改角色）：`role ∈ {viewer, operator, approver}`；**不能改自己**（`409 conflict`，`reason: self_role_change`，在消费审批之前判断）；设备不存在 `404`；新角色对该设备的下一个请求立即生效（无缓存）。
+- #39（改角色）：`role ∈ {viewer, operator, approver}`；**不能改自己**（`409 conflict`，`reason: self_role_change`，在消费审批之前判断）；目标是 `ios` 设备且 `role = approver` → `409 conflict`（`reason: mobile_cannot_approve`，同样在消费审批之前判断，P-76）；设备不存在 `404`；新角色对该设备的下一个请求立即生效（无缓存）。
 - #40（吊销）：请求体 `{}`；可吊销自己；设备**已吊销则原样 `200`**——目标态已达成时先于签名校验返回，无副作用（本规格的约定，OQ-A3）；吊销提交后：M1 靠心跳断流，M3 即时断流。
 - `signing::request_digest` 对 #39 的请求体 `{ "role": "operator" }`、对 #40 的 `{}` 计算，空白与键序不影响。
 
@@ -438,6 +439,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | `ConsumeError::Mismatch` | `409 approval_mismatch` | `reason`：`not_granted` / `consumed` / `expired` / `action_mismatch` / `target_mismatch` / `digest_mismatch` / `base_rev_mismatch` |
 | 缺 `Gantry-Approval` 头 | `403 signature_required` | `signing`：`{action, target, subject_digest}` |
 | `DeviceError::SelfRoleChange` | `409 conflict` | `reason: "self_role_change"` |
+| `DeviceError::MobileCannotApprove` | `409 conflict` | `reason: "mobile_cannot_approve"`（P-76） |
 | 状态冲突（放弃已关闭的交付等） | `409 conflict` | `reason: "invalid_state"` |
 | `LockError::Held` | `409 worktree_locked` | `lock` |
 | `PairError::TokenInvalid` | `401 pair_token_invalid` | — |
@@ -497,7 +499,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - **访问日志**（结构化）：`request_id`、`device_id`、`route_id`（契约序号）、方法、状态码、耗时、响应字节数、`rate_class`；**不记请求体和响应体**（settings、grant 尤其）；`Gantry-Approval` 头只记审批 id。
 - **指标**：`api_requests_total{route_id,status}`、`api_request_seconds{route_id}`（直方图）、`api_rate_limited_total{class}`、`api_idempotent_replays_total`、`api_idempotency_conflicts_total{kind}`、`api_sse_streams`（仪表）、`api_sse_events_total{type}`、`api_sse_closes_total{reason}`、`api_sse_replay_events_total`、`api_sse_lag_seconds`、`api_signature_failures_total{code}`（`signature_invalid` / `challenge_invalid` / `stale_head` / `approval_mismatch`，突增是安全信号）、`api_pair_requests_total{result}`、`api_handshake_failures_total{reason}`（来自 `pki` 校验器回调）、`api_auth_failures_total{code}`。
 - **追踪**：每请求一个 span，贯穿到下游模块调用；`request_id` 写入响应头与 problem 体。
-- **健康**：`api` 自身不是 settings 的消费方，不出现在 `status.modules` 里；运维健康检查端点由 `deploy` 另定（不属于 47 条客户端路由）。
+- **健康**：`api` 自身不是 settings 的消费方，不出现在 `status.modules` 里；运维健康检查端点由 `deploy` 另定（不属于 48 条客户端路由）。
 
 ## 12. 测试与验收
 
@@ -519,7 +521,9 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 **契约一致性（M0 起，M1 对真实实现）**
 
 - [ ] 注册表的 `(id, method, pattern, min_role, mobile)` 与 `schemas/openapi.yaml`、api.md §4.1 **逐行相等**（46 + 1 条）；OpenAPI 里有而注册表没有、反之亦然，均失败。
-- [ ] 手机子集恰好是 api.md §2.3 / §4.1 列出的 12 条路由（#2 #3 #4 #10 #11 #12 #21 #22 #41 #42 #46 #47，C26）。
+- [ ] 手机子集恰好是 api.md §2.3 / §4.1 列出的 13 条路由（#2 #3 #4 #10 #11 #12 #21 #22 #41 #42 #46 #47 #48，C26、P-77）。
+- [ ] （M4）#48：`ios` 设备 `PUT /v1/devices/self/push-token` → `204`，`notify` 的 `push_tokens` 有该设备一行；之后 `GET /v1/devices`、`/v1/me`、事件流里都没有令牌；设备吊销后该行被清除（P-77）。
+- [ ] 把 `ios` 设备改为 `approver`（#39）→ `409 conflict`（`reason: mobile_cannot_approve`），在消费审批之前判断，审批不被消费（P-76）。
 - [ ] `X-Log-Epoch`：每个响应（含 `404`、`429`、`5xx`、事件流响应头）都带，值等于 `Store::log_identity().log_epoch`；`restore_from` 后重启，值加一（P-67）。
 - [ ] 每个成功响应都通过 `openapi.yaml` 的 Schema 校验；每个非 2xx 响应都是 `application/problem+json`，`type = urn:gantry:problem:<code>`，`code` ∈ 契约的 30 个；`X-Request-Id` 与 body 的 `request_id` 相同。
 - [ ] 路由白名单：注册表里没有任何接收代码 / 命令 / 补丁 / 脚本的路由；新增路由而未更新白名单测试 → 失败（I6）。
@@ -620,7 +624,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 **M4（手机档案）**
 
-- [ ] 手机端能配对（`ios`）、发消息（带 `level_cap` 被忽略，交付单元的上限是项目默认值，C26）、读收件箱与 `GET /v1/inbox/summary`、续期证书、`choose` 一个 `spec_needed` / `decision_needed` 选项；对 `escalation` / `approval_needed` 的 `choose` → `403 forbidden_profile`；设置、审批、设备管理、交付单元、工作树、工作流、预算路由全部 `403 forbidden_profile`。
+- [ ] 手机端能配对（`ios`）、发消息（带 `level_cap` 被忽略，交付单元的上限是项目默认值，C26）、读收件箱与 `GET /v1/inbox/summary`、续期证书、`choose` 一个 `decision_needed` 选项与 `budget_exhausted` 的 `abandon`；对 `escalation` / `approval_needed` 的 `choose` 与 `raise_cap` → `403 forbidden_profile`；对 `spec_needed` 用发消息答复（`choose` → `422`，P-79）；注册推送令牌（#48）；设置、审批、设备管理、交付单元、工作树、工作流、预算路由全部 `403 forbidden_profile`。
 
 **模糊测试（fuzzing）/ 属性测试（property-based testing）（建议）**
 
@@ -631,13 +635,13 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 | # | 问题 | 本文的临时处理（不构成决定） | 影响 |
 | --- | --- | --- | --- |
-| OQ-A1 | **已决：见裁决 C26**（契约 §2.3 的手机路由数改为实际数；加入 #46 #47 后为 12 条）。原问题：手机路由数文字与表格不一致 | 已落实到 §6.2、§12.2 | — |
+| OQ-A1 | **已决：见裁决 C26**（契约 §2.3 的手机路由数改为实际数；加入 #46 #47 后为 12 条，P-77 加入 #48 后为 13 条）。原问题：手机路由数文字与表格不一致 | 已落实到 §6.2、§12.2 | — |
 | OQ-A2 | **已决：见裁决 C26 / P-56**（必带清单加入 `choose` 与控制路由 #43–#45）。原问题：§3.3 必带清单缺 `choose` | 已落实到 §7.6 | — |
 | OQ-A3 | 目标态已达成的内部动作（吊销已吊销的设备、角色未变）是否仍要求签名 / 消费审批 | 吊销已吊销设备原样 `200`，先于签名校验；改成相同角色按普通写入走完整校验并消费审批，不发事件 | api.md §4.10、`pki` |
 | OQ-A4 | **已决：见裁决 C26**（设置状态字段统一为 `applied_rev`，结构以 config.md §2.8 为准）。原问题：契约示例与 config 的状态字段不一致 | 已落实到 §7.8 | — |
 | OQ-A5 | **已决：见裁决 C26**（手机档案发消息时服务端忽略 `level_cap`，使用项目默认上限，P-35）。原问题：手机能否带 `level_cap` | 已落实到 §7.5 | — |
 | OQ-A6 | **已决：见裁决 C4 / P-50**（模型 key 经 Egress 控制面 `/run/gantry/egress.sock` 两段式写入，只写不读）与**裁决 C20 / P-66**（第一台设备配对前由主机命令写入并记审计事件）。原问题：密钥转交的跨进程通道与引导期写入入口 | 已落实到 §3、§6.3（`SecretTargets`） | — |
-| OQ-A7 | 邻接规格与 §6.3 的对齐：`conversation.md` 的 `post_user_message` 用 `ActorCtx`（本文 `WriteCtx`）、`notify.md` 用 `DeviceActor`；`store.md` 的 `WriteTx` 是具体类型，§6.3 的写 facade 当前不接收调用方事务（靠 `dedup_key` 保证至多一次），而 `pki` / `policy` 的"同一事务"接口接收 `&mut WriteTx` | `WriteCtx { actor, request_id, dedup }` 作为各写 facade 的统一入参；内部动作的"消费 + 业务写"由本模块开 `WriteTx` 后传给 `policy` / `pki` | `conversation`、`notify`、`engine`、`repo` 规格 |
+| OQ-A7 | ~~邻接规格与 §6.3 的写上下文对齐（`WriteCtx` / `ActorCtx` / `DeviceActor`）~~ | 已决：见 decisions.md P-78（统一 `core::ports::ActorCtx`）；内部动作的"消费 + 业务写"仍由本模块开 `WriteTx` 后传给 `policy` / `pki` | — |
 | OQ-A8 | 事件保留期与 `410 cursor_expired`（api.md OQ-13）；`close` 帧 `reason` 的完整集合是否还需要 `revoked_other` 等 | 保留不限；`reason` 取契约的四个值 | `store` |
 | OQ-A9 | **已决：见裁决 C18 / P-64**（`POST /v1/devices/self/renew`，M1，mTLS + 新 CSR，可换 mTLS 密钥，审批密钥不变）。原问题：证书续期路由缺失 | 已落实到 §6.2 #47、§12.2 | — |
 | OQ-A10 | 未启用 / 未实现路由的响应：本规格用 `404 not_found`；是否应改为 `503 unavailable` 以便客户端区分"尚未上线" | `404` | 客户端行为 |

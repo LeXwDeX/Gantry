@@ -11,7 +11,7 @@ Tauri 2 进程里唯一可信的一半：持有两把不可导出的设备私钥
 3. **互相认证 TLS（mTLS）客户端**：桌面端所有 HTTP 请求与事件流只由本进程发出；WebView 不联网（api.md 开头、design-review F36）。rustls 配自定义签名器（调用 Secure Enclave / CNG 中的 mTLS 客户端密钥），服务端证书只信"链到已固定的离线根 CA 指纹"的链（P-64）。**证书自动续期**：证书剩余 1/3 有效期时（建议值）在后台生成新 CSR，经 `POST /v1/devices/self/renew` 续期，校验新链的根指纹后原子替换（P-64）；只涉及 mTLS 客户端密钥，审批签名密钥不变。
 4. **事件流客户端**：唯一一条服务端推送事件（Server-Sent Events，SSE）流；帧解析、心跳与 45 s 空闲判定、指数退避、游标、`close` 帧、`409 cursor_ahead` 与 `log_epoch` 变化（响应头 `X-Log-Epoch` / 心跳 `log_epoch`，P-67）时的全量重同步；把帧转发给 `desktop-ui`（api.md §5）。
 5. **审批签名**：取挑战（challenge）→ 展示前自检（api.md §6.5）→ 生成展示模型 → 用审批签名密钥签名（系统级用户在场：Touch ID / Windows Hello，提示含 `subject_digest` 前 12 位，P-47、C27）→ `grant`。内部动作（`settings_update`、`device_role_change`、`device_revoke`）的"发起审批 → 签名 → 带 `Gantry-Approval` 重发"全链路（api.md §6、§6.6）。
-6. **IPC 边界**：Tauri 能力（capability）只授予本文 §6 的白名单命令；每个命令校验参数；路由白名单把 47 条路由分成"UI 可调"和"外壳专用"两类（§6.4）；严格内容安全策略（Content Security Policy，CSP）、禁止 WebView 导航与新窗口、外链只经 `open_external` / `open_github`。
+6. **IPC 边界**：Tauri 能力（capability）只授予本文 §6 的白名单命令；每个命令校验参数；路由白名单把 48 条路由分成"UI 可调""外壳专用""桌面不用"三类（§6.4）；严格内容安全策略（Content Security Policy，CSP）、禁止 WebView 导航与新窗口、外链只经 `open_external` / `open_github`。
 7. **响应整形**：向 WebView 返回的 HTTP 结果只含状态码、解析后的体、白名单响应头；`problem+json` 的 `detail` 只写日志、不过 IPC（api.md §1.5、§3.1）。
 8. **本机存储**：外观与布局偏好、按项目保存的界面状态（草稿等）、待发送消息队列的持久化块；**不存**任何凭据、配置键、服务端数据快照（OQ-S6）。
 9. **连接健康**：把"mTLS 握手 + 事件流心跳 + 证书有效期与续期 + 时钟偏差 + `log_epoch`"合并为一个 `ConnectionState`（prototype.md §2.1 的单一连接指示）。
@@ -170,7 +170,7 @@ type ConnectionState = {
 | `preview` | 同 `ApprovalSheetModel.preview`：差异（秘密字段不含值）或设备名与新角色 |
 | `can_submit` | `{ ok: true } \| { ok: false, reason }`：`not_connected` / `not_approver`（需要签名而本机不是 approver，临时处理见 OQ-S7）/ `invalid` |
 
-### 6.4 路由分类（47 条，恰好分入一类）
+### 6.4 路由分类（48 条，恰好分入一类）
 
 编号取自 api.md §4.1 路由总表。契约测试（§12）检查：`openapi.yaml` 的每条路由恰好属于下列一类，且新增路由未分类时构建失败。
 
@@ -182,6 +182,7 @@ type ConnectionState = {
 | | #26 `POST /v1/approvals`（发起内部动作审批）、#31 / #33 / #34（settings 的 `PUT` / `DELETE`）、#39 `role`、#40 `revoke` | `guarded_write_*` |
 | | #27 `challenge`、#28 `grant` | `approval_*`（`approval_sign` 内部调用） |
 | | #41 `events` | `events_*` |
+| **桌面不用**（1） | #48 `devices/self/push-token`（APNs 推送令牌，第一版只有手机使用，P-77） | 不暴露给 UI，外壳也不调用；桌面系统通知由客户端据 `inbox.raised` 本地弹出（P-63） |
 
 **`api_request` 的 36 个路由 ID**（`<资源>.<动作>`，与 api.md §4.1 编号一一对应；`desktop-ui` 与本文共用）：
 
@@ -488,7 +489,7 @@ stateDiagram-v2
 **IPC 白名单与参数**
 
 - [ ] [M1] 命令注册表与 Tauri 能力文件逐项一致；WebView 里调用任何不在 §6.1 的命令（含 `plugin:*` 核心插件命令）都失败。
-- [ ] [M1] 契约测试：`openapi.yaml` 的 47 条路由恰好分入 §6.4 的一类；新增未分类路由时测试失败。
+- [ ] [M1] 契约测试：`openapi.yaml` 的 48 条路由恰好分入 §6.4 的一类；新增未分类路由时测试失败。
 - [ ] [M1] `api_request` 拒绝：未知 `route`、未知查询参数、路径参数形态错误、超过 64 KiB 的体、体里有 schema 外字段、`Idempotency-Key` 形态错误、必带幂等键却缺失；这些请求**不会**到达 Mock。
 - [ ] [M1] UI 不能通过 `api_request` 访问外壳专用路由（`challenge`、`grant`、`POST /v1/approvals`、settings 的 `PUT` / `DELETE`、角色、吊销、`pair`、`events`、`devices/self/renew`）。
 - [ ] [M1] 响应整形：`problem.detail` 不出现在 `ApiResult`；响应头只剩白名单四项。
@@ -544,7 +545,7 @@ stateDiagram-v2
 | OQ-S6 | 本机持久化范围：服务端快照与游标是否落盘；待发送消息队列、草稿是否跨重启保留 | 快照与游标只在内存，每次启动重新快照；界面状态块（含草稿、待发送队列）经 `ui_state_*` 持久化 [提议] | 离线可用性、磁盘上的数据敏感度 |
 | OQ-S7 | operator 发起、另一台 approver 签名的内部动作：approver 设备看不到 `settings_update` 的内容，只有摘要 | §7.4.2：`settings_update` 跨设备拒签；设备动作可核对 | `policy` / api §6.6、desktop-ui 设置页 |
 | OQ-S8 | 是否在生物识别之外**保留**外壳自己渲染的详情确认窗口（独立 WebView 窗口、无远程内容、独立能力集），以进一步隔离被注入的主窗口 | 生物识别从 M1 起必选（P-47，提示含 `subject_digest` 前 12 位）；是否另加外壳详情窗口未决，暂不加 | 签名防护强度、体验 |
-| OQ-S9 | `patch_apply_protected`（补丁审批，P-54）需要展示补丁内容并校验 `sha256`，但 api.md 没有取补丁内容的路由；PR 类审批的"改动"（文件、行数、策略命中）同样没有数据源 | 展示模型 `unsigned` 区缺此项时标注"服务端未提供改动明细"，并给出 GitHub 查看 commit 的链接（`open_github`） | api 契约缺口、`policy`、desktop-ui 审批单 |
+| OQ-S9 | `patch_apply_protected`（补丁审批，P-54）需要展示补丁内容并校验 `sha256`，但 api.md 没有取补丁内容的路由（已转为 decisions.md Q-12）；补丁未提交，GitHub 上也看不到，暂用处理会导致"盲签"——Q-12 定案前补丁审批单应禁用签名按钮；PR 类审批的"改动"（文件、行数、策略命中）同样没有数据源 | 展示模型 `unsigned` 区缺此项时标注"服务端未提供改动明细"，并给出 GitHub 查看 commit 的链接（`open_github`） | api 契约缺口、`policy`、desktop-ui 审批单 |
 | OQ-S10 | Windows 上"每次签名的动态提示文案"与"硬件强制用户在场"能否同时满足（CNG 的 UI 策略文案在建键时固定；Windows Hello 一致性验证可带文案但不与密钥使用绑定）；macOS 的 `LAContext` 文案仅一行 | 实现者核实后回写；在此之前以"提示文案由 payload 生成 + 应用层先确认再签名"实现 | 本模块 M2 |
 | OQ-S11 | `DELETE` 项目覆盖没有 `dry_run`，而移除一个"更严"的覆盖等于放宽，可能需要签名 | 先发 `DELETE`，收到 `403 signature_required`（附 `signing`）再走签名链 | api §4.9 |
 | OQ-S12 | 路由分类（UI 可调 / 外壳专用）如何在契约里表达：`openapi.yaml` 增加扩展字段（如 `x-gantry-ipc`），还是本模块自维护 `routes.toml` | 自维护 `routes.toml` + 契约测试对账 | `contract` 泳道 |

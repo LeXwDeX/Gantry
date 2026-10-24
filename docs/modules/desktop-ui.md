@@ -240,7 +240,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | R-20 | 黄色"上次查看 hh:mm 之后"分隔线，紧跟"离开期间摘要"卡，每项可点（§2.3） | `LastSeenDivider`、`AwayChangesCard` | `ui.lastViewed` | "上次查看"的定义与摘要来源都未定（OQ-U10）。M2 临时：本地记录离开时的最新消息 ID，回来后在其后插分隔线；摘要卡只展示本地可确定计数（离开期间新增的事件行数、当前 open 上报项数），每项可点 | M2 |
 | R-21 | 执行计划卡：标题 +"● 实时"，步骤随事件实时更新（§2.3） | `PlanCard` | — | `Card.plan` → `workflows.get(workflow_id)`；`node.*`、`workflow.*` 事件触发刷新；步骤 = 节点（`role` 的中文名 + `status` + `verdict`）；`summary` 当 `UntrustedText` | M1 |
 | R-22 | 审批卡：显示"合并 PR #9 @ a1b2c3d"和实时状态；只有待签名时才有"审阅并签名…"，它只打开审批单（§2.3、P-33） | `ApprovalCard` | `overlay.sheet` | `Card.approval` → `approvals.get`；`approval.*` 事件；动作名 + 目标 + `subject_digest` 前 7 位（短 SHA 统一 7 位，C27）取自 `Approval`，状态文案见 §7.8 | M1 |
-| R-23 | 升档卡：原因 + [升到 X 并继续] [保持当前，缩小范围] [放弃]；处理后变为"已处理：…"（§2.3） | `EscalationCard`（原因 + 证据 `Ref` + 选项按钮，与 `ChoiceCard` 共用按钮组件） | — | 升档一律是 `escalation`（P-63；`reason_code = level_cap_exceeded`，[engine.md §7.11](engine.md) 的选项 `upgrade` / `keep_scope` / `abandon`）；界面不硬编码选项，按 `payload.options[]`（`{id, label, primary?}`）逐个渲染按钮（文案取服务端 `label`，`primary` 强调色），点击 → `inbox.choose { option_id }`，`level_cap` 的修改由引擎在 `inbox.resolved` 后执行，界面不再调 `deliveries.patch`。处理后文案取 `inbox.resolved` 事件的 `data.option_id` 对应 `label`（conversation 会追加"已处理：{label}"事件行），快照里取不到时只显示"已处理"。按钮需 operator；手机档案不能 `choose` `escalation`（P-35） | M1 |
+| R-23 | 升档卡：原因 + [升到 X 并继续] [保持当前，缩小范围] [放弃]；处理后变为"已处理：…"（§2.3） | `EscalationCard`（原因 + 证据 `Ref` + 选项按钮，与 `ChoiceCard` 共用按钮组件） | — | 升档一律是 `escalation`（P-63；`reason_code = level_cap_exceeded`，[engine.md §7.11](engine.md) 的选项 `upgrade` / `narrow` / `abandon`，词表见 data-model，P-79）；界面不硬编码选项，按 `payload.options[]`（`{id, label, primary?}`）逐个渲染按钮（文案取服务端 `label`，`primary` 强调色），点击 → `inbox.choose { option_id }`，`level_cap` 的修改由引擎在 `inbox.resolved` 后执行，界面不再调 `deliveries.patch`。处理后文案取 `inbox.resolved` 事件的 `data.option_id` 对应 `label`（conversation 会追加"已处理：{label}"事件行），快照里取不到时只显示"已处理"。按钮需 operator；手机档案不能 `choose` `escalation`（P-35） | M1 |
 | R-24 | 二选一直接给按钮（如 [改为修复] [维持驳回]）（§2.3） | `ChoiceCard` | — | `Card.choice { inbox_id, options[] }`；`inbox.choose`（与收件箱同一个 `inbox_id`，P-40）；`options` 为空（`spec_needed`）时不渲染按钮，改为"回复补充…"（§7.6） | M1 |
 | R-25 | 引用 chip 点击只在检视器查看，**不改变**输入区上下文（§2.3、P-32） | `RefChip` | `ui.sel` | 只调用 `select(ref)`；`Ref` → 选中项的映射在 §7.9；chip 来自 `refs[]`，**不**从正文文字里解析 | M1 |
 | R-26 | "回复"：把上下文设为该消息所属交付并聚焦输入框（§2.3） | `AgentBubble` 右下角按钮 | `ui.ctx = {kind: delivery, id: message.delivery_id}`，`ui.view = chat`，`levelOverride = null` | 无 API；`delivery_id` 为空或设备只读时不显示 | M2 |
@@ -361,9 +361,9 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | --- | --- | --- |
 | `approval_needed` | 动作 + 目标 + `subject_digest` 前 7 位（取自 `Approval`，C27） | "审阅并签名…" → 打开审批单（**不直接签名**）；审批只经审批路由处理：`choose` 对它返回 `409`（api.md §4.8），界面也不提供 `dismiss` |
 | `decision_needed` | `payload.options[]`（`{id, label, primary?}`，P-63）、`reason_code` | 每个选项一个按钮 → `inbox.choose { option_id }`（带 `Idempotency-Key`）；`primary` 选项强调色。放弃 / 重新规划（gate `REJECT`，P-55）、GitHub 状态外部改变后的继续 / 放弃、workflow 补丁的手动应用（`payload.kind = manual_action`，附补丁，P-48）都是这一类（engine.md §7.11） |
-| `escalation` | `reason_code`、证据 `Ref` 链接、`payload.options[]`（P-63） | 升档一律是 `escalation`（`level_cap_exceeded`）；守护上报（`guardian.escalated`，含 `rework` 等选项）同属此类；按 `options[]` 渲染按钮（同上）；没有 `options[]` 时只给"忽略"（`inbox.dismiss`，对阻塞项不解除暂停，界面文案写明"忽略不会继续任务"） |
-| `spec_needed` | `missing[] { aspect, question }` 逐条列出；有 `options[]` 时同上渲染按钮 | "回复补充…" → 切到该项目对话，`ctx = {kind: delivery, id: delivery_id}`，聚焦输入框（自由文本答复走发消息，api.md §4.8） |
-| `budget_exhausted` | `dimension` / `limit` / `used` | "忽略"（没有追加预算的路由，config.md OQ-10） |
+| `escalation` | `reason_code`、证据 `Ref` 链接、`payload.options[]`（P-63） | 升档一律是 `escalation`（`level_cap_exceeded`）；守护的 `escalation` 没有选项（评审争议改为 `decision_needed`（`review_dispute`），选项 `fix` / `keep`，P-79）；按 `options[]` 渲染按钮（同上）；没有 `options[]` 时只给"忽略"（`inbox.dismiss`，对阻塞项不解除暂停，界面文案写明"忽略不会继续任务"） |
+| `spec_needed` | `missing[] { aspect, question }` 逐条列出；没有选项（P-79） | "回复补充…" → 切到该项目对话，`ctx = {kind: delivery, id: delivery_id}`，聚焦输入框（自由文本答复走发消息，api.md §4.8） |
+| `budget_exhausted` | `dimension` / `limit` / `used` | 按 `payload.options[]` 渲染 `raise_cap`（仅桌面；追加量待决 Q-11，按钮文案取服务端 `label`）/ `abandon`；另有"忽略" |
 | `security_finding` | `finding.severity` / `category` / `title`（`UntrustedText`）、来源 `Ref` | "查看"（选中来源）；"忽略…"需二次确认 |
 
 浮层中点击条目标题行：切换到该项目、`sel` 设为该交付的主项（有 PR 取 PR，否则 Issue）、关闭浮层。
@@ -430,7 +430,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 ### 7.12 配对向导与设备页
 
 - **配对向导**（M1，C28；原型未覆盖，prototype.md §5）：当 `identity_status.state ∈ {unpaired, revoked, cert_expired}` 阻塞整个工作区。步骤：① 粘贴服务端配对串 + 设备名 → `pairingBegin`（外壳生成两把密钥，期间可能弹一次系统授权以创建审批签名密钥，P-47）；② 显示服务端地址、离线根 CA 指纹（分组显示，P-64）与大号 6 位确认码，提示核对服务端控制台，按钮"一致 / 不一致" → `pairingConfirm`；③ 完成后进入水合。`revoked` / `cert_expired` 文案不同："此设备已被吊销 / 证书已过期，需要重新配对"，附 `identityReset`。扫码入口不提供（OQ-S3）。
-- **设备与证书页**（M1，C28）：`devices.list`（含已吊销）、重命名（operator）、吊销与改角色（approver + 签名；不能改自己的角色，附 `409 self_role_change` 提示）、本机证书序列号、到期时间与下次自动续期时间（P-64）。
+- **设备与证书页**（M1，C28）：`devices.list`（含已吊销）、重命名（operator）、吊销与改角色（approver + 签名；不能改自己的角色，附 `409 self_role_change` 提示；`platform = ios` 的设备不提供"审批设备"选项，服务端对其返回 `409 mobile_cannot_approve`，P-76）、本机证书序列号、到期时间与下次自动续期时间（P-64）。
 
 ### 7.13 角色门槛矩阵
 
@@ -598,7 +598,7 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 
 - [ ] [M1] **E2E-18**：Mock 创建一个 open 的 `approval_needed`：tab 徽标、顶栏计数、左栏药丸、气泡药丸（卡片引用）、检视器"需要你"区同时出现；审批完成（或在 GitHub 上被外部合并 → `inbox.resolved`）后同时消失，没有残留。
 - [ ] [M1] tab 徽标与顶栏计数来自 `inbox.summary`，随 `inbox.*` 事件增减并与重新拉取一致（P-63）。
-- [ ] [M1] 各 `kind` 的内联操作：`escalation`（含升档三选项 `upgrade` / `keep_scope` / `abandon`）、`decision_needed` 及其他带 `options` 的上报项调用 `inbox.choose`（带 `Idempotency-Key`），按钮文案取 `label`、`primary` 强调，且卡片与收件箱同步变为"已处理"；`spec_needed` "回复补充…" 切到对话并设 `ctx`；`approval_needed` 只有"审阅并签名…"；只读设备全部禁用。
+- [ ] [M1] 各 `kind` 的内联操作：`escalation`（含升档三选项 `upgrade` / `narrow` / `abandon`）、`decision_needed`（`replan` / `abandon`、`done` / `abandon`、`fix` / `keep`）、`budget_exhausted`（`raise_cap` / `abandon`）等带 `options` 的上报项调用 `inbox.choose`（带 `Idempotency-Key`），按钮文案取 `label`、`primary` 强调，且卡片与收件箱同步变为"已处理"；`spec_needed` "回复补充…" 切到对话并设 `ctx`；`approval_needed` 只有"审阅并签名…"；只读设备全部禁用。
 - [ ] [M1] **E2E-19 外部变化**：GitHub 上直接合并 / 关闭（Mock 注入 `forge.*` + `inbox.resolved`）→ 出现事件行，上报项消失，审批卡显示最终状态而不是可点的按钮。
 
 **审批与签名**
@@ -663,10 +663,10 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 | OQ-U5 | **运行中沙盒数、工作树的沙盒列、写权持有者区分（前台 agent / 后台自愈 / 后台 review）没有数据源**：`Worktree.lock.holder` 只有 `engine` / `guardian` / `human` | 沙盒列留空；写权按 holder 映射；状态栏沙盒数取已加载工作流里运行中的沙盒节点（数据不全则不显示） | data-model、api.md |
 | OQ-U6 | **`Ref` 没有分支种类**，"@main"/"从分支开始任务…"无法表达；"从已有 Issue 开始"需要未绑定 Issue 的列表，没有路由 | 隐藏"从分支开始任务…"；空态的"从已有 Issue 开始"聚焦输入框并提示输入 `#编号` | data-model §1.1、api.md |
 | OQ-U7 | 跨交付的 `refs` 关系（"PR #8 refs #4"）、"相关："行、Milestone 分组没有数据源（`IssueRef` / `PullRequestRef` 不带关系类型，也没有 Milestone 实体） | 地图不画 refs 边，检视器不显示"相关"行；M4 以 `parent_id` 分组 | data-model、`forge` |
-| OQ-U8 | （①②⑤ **已决：见裁决 C17 / P-63**——`escalation` / `spec_needed` / `decision_needed` 的 `payload.options[]` 为 `{id, label, primary?}`；升档一律用 `escalation`，手机档案不可 `choose`；`inbox.resolved` 带 `option_id`）仍未决：③ `spec_needed` 卡片的 `Card.kind`（`choice` + 空选项暂代，conversation.md OQ-6）；④ "创建 Issue 并关联"（原型的孤儿 PR 上报）没有 kind 也没有路由 | 界面按 `payload.options[]` 渲染、不按 `kind` 硬编码；空选项 ="回复补充…"；"创建 Issue 并关联"不渲染 | `conversation`；`mobile` 同受影响 |
+| OQ-U8 | （①②⑤ **已决：见裁决 C17 / P-63**——`escalation` / `spec_needed` / `decision_needed` 的 `payload.options[]` 为 `{id, label, primary?}`；升档一律用 `escalation`，手机档案不可 `choose`；`inbox.resolved` 带 `option_id`）③ `spec_needed` 卡片**已决**（P-79：无选项，`choice` + 空 `options[]`）；仍未决：④ "创建 Issue 并关联"（原型的孤儿 PR 上报）没有 kind 也没有路由 | 界面按 `payload.options[]` 渲染、不按 `kind` 硬编码；空选项 ="回复补充…"；"创建 Issue 并关联"不渲染 | `conversation`；`mobile` 同受影响 |
 | OQ-U9 | （事件行状态**已决：见裁决 C26**——`Message.tone` ∈ `info` / `ok` / `run` / `warn`；守护事件**已决：见裁决 C14 / P-60**——`guardian.triaged` / `heal_requested` / `escalated`）仍未决：`level_effective` 自动加码的原因不在 `Delivery` 里；"已在 GitHub 上处理"的原因字段 | 加码原因取 `delivery.level_changed` 的 `data`（schema 出来后核对）；守护区列出该交付的守护事件行 | data-model、`schemas/events` |
 | OQ-U10 | （`Card.summary` 改为 `items[]`、每项含 `text` 与 `ref`：**已决：见裁决 C26**，可承载多项可点击摘要）仍未决："上次查看"的定义（何时记录、离开多久算离开）；"离开期间摘要"由谁生成、由什么触发（没有"用户回来了"的触发路由） | M2 临时：本地记录并只展示本地可确定的计数（§7.4 R-20）；"离开 ≥ 60 s 且有新消息才显示"[建议值] | `conversation`、api.md、手机端同样受影响 |
-| OQ-U11 | `Message.level_cap` 发给已有交付时是否改变该交付的上限：prototype.md §2.3 的提示暗示会，api.md §4.5 只说"任务级上限"；[conversation.md §7.3](conversation.md) 临时采用"桌面档案会改（`set_level_cap`），手机档案忽略"，并自己标为 OQ-3 | 只在用户显式修改时才发送 `level_cap`；界面不预判结果，以 agent 回执为准 | `conversation`、api.md |
+| OQ-U11 | ~~`Message.level_cap` 发给已有交付时是否改变该交付的上限~~ | 已决：见 decisions.md P-82（桌面档案等同 `PATCH /v1/deliveries/{id}`，发送前提示"上限 X → Y；已触发的闸门不撤销"；手机档案忽略）。界面仍只在用户显式修改选择器时发送 `level_cap` | — |
 | OQ-U12 | **已决：见裁决 C28**（M1 `fe-desktop` 包含档位上限选择器）。原问题：M1 的档位上限来源 | 已落实到 §1.1、R-29 | — |
 | OQ-U13 | 设置页（签名口径**已决：见裁决 C27**——设置保存只在凭据或放宽类改动时需要签名，prototype.md 同步）仍未决："测试连接"无路由；"每个档位里三类模型各做什么"表无服务端来源；"被 n 个项目覆盖"需要 n+1 请求；operator 设备发起 relax 的跨设备流程 | 以 `dry_run` 的 `requires_signature` 为准；不渲染"测试连接"；表用随包静态文字 + 快照测试；n+1 请求仅在该页打开时发；operator 遇到需签名改动时禁用保存 | prototype.md、config.md、api.md |
 | OQ-U14 | **已决：见裁决 C28**（设备与证书页 M1：列表、改名、吊销；外观页 M3）与**裁决 C18 / P-64**（证书自动续期）。配对令牌仍只由主机 `gantry pair` 产生，页面不提供发放 | 已落实到 §1.1、R-63、R-68、§7.12 | — |

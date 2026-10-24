@@ -17,18 +17,22 @@
 
 ## 替身（让泳道互不阻塞）
 
-M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的邻居。所有替身实现 `core::ports` 里的同一个端口 trait（P-51），并通过与真实实现相同的一致性测试。
+M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的邻居。所有替身实现 `core::ports` 里的同一个端口 trait（P-51），并通过与真实实现相同的一致性测试。原则：**调用方与提供方分属不同泳道的接口一律进 `core::ports` 并有替身**（端口与方法清单见 [core §6.10](modules/core.md#610-跨模块端口coreportsp-51)；跨模块写接口统一用 `ActorCtx`，P-78）。
 
 | 替身 | 替代（实现的端口） | 使用者 |
 | --- | --- | --- |
 | Mock API 服务（由 `schemas/openapi.yaml` 生成，事件流回放录制数据） | 整个服务端 | `fe-desktop`、`fe-mobile` |
-| `FakeForge`（内存中的仓库、PR、check，可注入 webhook） | `forge`（`ForgeReader`、`OutboxPort`） | `be-engine`、`guardian` 测试 |
+| `FakeForge`（内存中的仓库、PR、check，可注入 webhook） | `forge`（`ForgeReader`、`OutboxPort`、`PrRefresher`） | `be-engine`、`be-forge`（`guardian`）、`sec`（`api`） |
 | `FakeGitHub`（HTTP 级：模拟 GitHub REST / GraphQL / webhook 投递与限流响应） | GitHub 本身 | `forge` 测试 |
-| `FakeSandboxDriver`（不起容器，按脚本回放 Worker 协议结果；对 `engine` 以 `SandboxService` 暴露，P-52） | `sandbox` + `worker` | `be-engine` |
-| `FakeRepo`（内存中的镜像仓与工作树，补丁按脚本判定通过 / 拒绝） | `repo`（`RepoService`） | `be-engine`、`be-forge` |
+| `FakeSandboxService`（不起容器，按脚本回放 Worker 协议结果，P-52） | `sandbox` + `worker`（`SandboxService`） | `be-engine` |
+| `StubWorkerAdapter`（固定镜像与命令、声明式能力表） | `worker`（`WorkerAdapter`） | `be-engine`（`engine`、`models`）、`sec`（`api` 的 catalog） |
+| `FakeRepo`（内存中的镜像仓与工作树，补丁按脚本判定通过 / 拒绝） | `repo`（`RepoService`、`WorktreeLocks`） | `be-engine`、`be-forge`、`sec`（`api` 的人工锁） |
 | `FakeModelProvider`（按规则返回固定输出） | `models` 的外部调用（`ModelProvider`） | `be-engine`、`conversation` |
 | `FakePolicy`（脚本化动作判定、补丁判定、审批验证与消费） | `policy`（`PolicyPort`） | `be-engine`、`be-forge`、`exec` |
-| `FakeInbox`（记录上报，按 `dedup_key` 去重，维护按项目计数） | `notify`（`InboxPort`） | `be-engine`、`be-forge` |
+| `FakeEngine`（记录调用、按脚本返回，不重现引擎逻辑） | `engine`（`DeliveryControl`、`HealPort`、`ClassifyPort`） | `sec`（`api` 的控制路由）、`be-forge`（`guardian`） |
+| `FakeConversation`（记录 `post_user_message`，按脚本返回 `Message`） | `conversation`（`ConversationService`） | `sec`（`api` 的发消息路由） |
+| `FakeInbox`（记录上报，按 `dedup_key` 去重，维护按项目计数，记录推送令牌注册） | `notify`（`InboxPort`） | `be-engine`、`be-forge`、`sec`（`api` 的收件箱路由） |
+| `MemorySecrets`（内存实现，按使用方隔离，与 `FileSecrets` 共用契约测试，P-81） | `secrets`（`SecretSource`、`SecretSink`） | `be-forge`（`forge`）、`exec`（`egress`）、`sec`（`pki`、`api`） |
 | `Store::open_in_memory`（内存事件日志、投影、Outbox 表、游标） | `store` 的持久化 | 所有服务端泳道 |
 | `EgressStub`（实现控制面：签发 / 吊销令牌、脚本化用量与健康；附一个可接收 `job_token` / `svc_token` 的假数据面） | Egress（`EgressControl`，[egress-control.md](interfaces/egress-control.md)） | `exec`（`sandbox`）、`be-engine`（`models`）、`sec`（`api` 的 secret 转交） |
 | `TestCA`（测试用证书与设备，含审批签名密钥） | `pki` | `api`、`fe-desktop` 集成测试 |
@@ -71,7 +75,7 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 - [ ] 服务端在"创建 PR 成功、写库之前"崩溃，重启后不会重复创建 PR。
 - [ ] 改动 `.github/workflows/` 的补丁被拒绝（`policy.path_protected:workflows`），以 `decision_needed`（`manual_action`）附补丁上报；改动依赖清单或 lockfile 的补丁被策略拒绝并上报。
 - [ ] 写入模型凭据需要 approver 设备用审批签名密钥签名（需用户在场）；没有签名的写入被拒绝。
-- [ ] 沙盒内读到的 `job_token` 在尝试结束后失效，且不能从沙盒网段以外使用；用它只能给本尝试记账。
+- [ ] 沙盒内读到的 `job_token` 在尝试结束后失效；用它只能给本尝试记账。"不能从沙盒网段以外使用"在目标主机的 rootless Podman 网络下核实（需核实，P-73）：能强制则验证拒绝，不能则在 Egress 状态中标明，不作为退出阻塞项。
 - [ ] 设备证书在剩余 1/3 有效期时自动续期，续期后事件流与审批不受影响。
 - [ ] 吊销设备后，其已建立的事件流在心跳间隔内断开（上限 60 秒，建议值）。
 
@@ -120,13 +124,13 @@ M0 必须交付以下替身，之后每条泳道用它们替代尚未完成的�
 | `be-engine` | Milestone 级拆分、子交付单元依赖、受 GitHub / Actions 配额约束的并发调度 |
 | `be-forge` | GitHub 原生任务入口（Issue label、`/gantry` 命令，待 Q-04 确认） |
 | `fe-mobile` | iOS UIKit：扫码配对、只做对话 |
-| `sec` | 手机端客户端档案（只开放对话相关路由，默认不可审批） |
-| `ops` | 手机推送通道（`notify` 的 APNs 实现，APNs 密钥经 `secrets`，P-59、P-63） |
+| `sec` | 手机端客户端档案（只开放对话相关的 13 条路由；手机档案设备永远不能成为 approver，配对时 `approval_pubkey` 可省略，P-76）；推送令牌注册路由 `PUT /v1/devices/self/push-token`（P-77） |
+| `ops` | 手机推送通道（`notify` 的 APNs 实现，令牌经 `InboxPort::register_push_token` 存入 `notify`，APNs 密钥经 `secrets`，P-59、P-63、P-77） |
 
 **退出标准**
 
 - [ ] 一个 Milestone 被拆成多个交付单元并行推进，依赖顺序正确。
-- [ ] 手机端能配对、发消息、收到上报通知。
+- [ ] 手机端能配对、发消息、注册推送令牌并收到上报通知（P-77）。
 
 ## 依赖关系
 

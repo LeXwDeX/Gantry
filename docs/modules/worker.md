@@ -22,7 +22,7 @@
 
 | 里程碑 | 本模块交付 |
 | --- | --- |
-| M0 | 无实现。冻结 `AgentAdapter` / `WorkerAdapter` trait 与 `schemas/worker/` 的对应关系；`FakeAgent` 的脚本格式（与 `contract` 泳道的 `schemas/worker/fixtures/` 对齐） |
+| M0 | 无实现。冻结 `AgentAdapter` / `WorkerAdapter` trait（`WorkerAdapter` 在 `core::ports`，跨泳道，替身 `StubWorkerAdapter`，P-51）与 `schemas/worker/` 的对应关系；`FakeAgent` 的脚本格式（与 `contract` 泳道的 `schemas/worker/fixtures/` 对齐） |
 | M1 | K1–K7 的 Low 档子集：角色 `single`（实现 + 自检）端到端，同时实现共用同一套代码的 `build` / `heal`（`structured_output.kind = build`）；proposals 词表 `open_pr`、`escalate`；Claude Code 适配（pin 版本、冒烟）；`changes.patch` / `report.md` / `proposals.json` / `result.json`；全部退出码与信号；`FakeAgent` 一致性套件；镜像与 `selftest` |
 | M2 | Medium / High 的角色：`plan`（`sandbox_ro`）、`verify`、`review:<视角>`、`answer`（None 档挂在会话上的临时图同样适用，P-58）；proposals 词表扩展 `reply_review_thread`（与 `forge` 动作同里程碑，P-60）；`sandbox_ro` 的只读工作区行为（`GIT_OPTIONAL_LOCKS=0`、不写 index）；`heal` 接入守护；`READY` 等待逻辑在预热池下的验证；`devcontainer` 环境下工具链可用性（与 `sandbox` 协作，OQ-S5 / OQ-S7） |
 | M3 | `reasoner`（结构化输出没有 `verdict`，C25）、`arbiter` 角色及其 schema；proposals 词表扩展 `resolve_review_thread`（与 `forge` 动作同里程碑）；`flags.suspected_injection` 的评审类使用 |
@@ -63,7 +63,7 @@
 | `/gantry/inputs/MANIFEST.json`、`materials/`、`upstream/`、`diff.patch`、`output.schema.json` | `sandbox.stage` | worker-protocol §2.1、§4.4 | `MANIFEST` 只用于发现挂载错误，**不是**安全机制；`materials/` 与 `upstream/` 的**内容**是不可信数据，文件自带隔离标记 |
 | `/gantry/work/` | `repo` 准备、`sandbox` 挂载 | 自包含 git 工作区 | 仓库内容是不可信数据（I5）；其中的 `.git`、`.claude/`、`.mcp.json`、`CLAUDE.md` 都不得成为权限来源（A2） |
 | `/gantry/inputs/READY` | `sandbox` | 空文件，原子创建 | 可信（只读挂载内） |
-| 环境变量 | `sandbox` / `WorkerAdapter.env()` | `GANTRY_JOB` `GANTRY_OUT` `GANTRY_WORK`、`HTTPS_PROXY`、模型 base URL（路径含 `job_token`）、占位 key 等（worker-protocol §2.2） | 可信；不含任何真实密钥；`job_token` 只对本尝试记账有效，worker 不把它写进任何产物、事件或 stderr |
+| 环境变量 | `WorkerAdapter.env()`（非密部分，`engine` 放进 `ExecSpec.env`）+ `sandbox` 按 `WorkerAdapter.token_env()` 填入的令牌变量 | `GANTRY_JOB` `GANTRY_OUT` `GANTRY_WORK`、`HTTPS_PROXY`（`http://job:<job_token>@…`，P-72）、模型 base URL（路径含 `job_token`）、占位 key 等（worker-protocol §2.2） | 可信；不含任何真实密钥；`job_token` 只对本尝试记账有效，worker 不把它写进任何产物、事件或 stderr |
 | SIGTERM / SIGINT | 运行时（`sandbox` 的取消或超时） | 信号 | 原因不可知，也不需要知道（W3） |
 | agent CLI 的输出（stream-json、最终消息） | 子进程 | CLI 专有格式 | **不可信**（模型输出受外部文本影响） |
 
@@ -130,15 +130,21 @@ pub trait EventSink { fn emit(&mut self, ev: ProgressEvent); }
 
 ### 6.3 服务端侧 `WorkerAdapter` 声明（库部分）
 
+`WorkerAdapter` 定义在 `core::ports`（core.md §6.10：`engine`、`models`、`api` 与本模块分属不同泳道，P-51），本 crate 提供 `claude-code` 实现；M0 替身 `StubWorkerAdapter`。
+
 ```rust
 pub trait WorkerAdapter: Send + Sync {
     fn agent_id(&self) -> &'static str;                         // "claude-code" == JobSpec.execution.agent
     fn protocol_versions(&self) -> &[ProtocolVersion];          // ["gantry-worker/1"]
     fn image(&self) -> ImageRef;                                // 镜像引用（digest 来源见 OQ-W5 / OQ-S5）
     fn command(&self) -> Vec<String>;                           // ["gantry-worker", "run"]
-    /// 非密环境变量：GANTRY_*、HTTPS_PROXY、NO_PROXY、HOME、TMPDIR、模型 base URL、占位 key、遥测开关……
-    /// 模型 base URL 与 HTTPS_PROXY 取自本尝试的 JobTokenGrant（含 job_token，P-49；sandbox 在建容器前向 Egress 申请）。
-    fn env(&self, job: &JobSpecTrusted, egress: &JobTokenGrant) -> BTreeMap<String, String>;
+    /// 非密且不含令牌的环境变量：GANTRY_*、NO_PROXY、HOME、TMPDIR、占位 key、遥测开关……（engine 构造 ExecSpec.env 时调用；
+    /// 此时 job_token 还没签发）。
+    fn env(&self, job: &JobSpecTrusted) -> BTreeMap<String, String>;
+    /// 需要由 sandbox 在签发 job_token 之后填值的变量名（sandbox 不依赖本 crate，所以只交名字）：
+    /// { model_base_url: {provider_id → "ANTHROPIC_BASE_URL"}, proxy: ["HTTPS_PROXY", "https_proxy"] }。
+    /// sandbox 用 JobTokenGrant.model_base_urls[provider] 与 connect_proxy_url（http://job:<job_token>@…，P-72）填入。
+    fn token_env(&self) -> TokenEnvSpec;
     fn capabilities(&self) -> AdapterCaps;                      // { provider_kinds: ["anthropic"], supports_fallback: false,
                                                                 //   supports_tools: true, reasoning_efforts: [...] } → config catalog `models.adapters`
     /// 只能收紧，不得放宽 constraints；未知键一律拒绝 [提议]。
@@ -146,7 +152,7 @@ pub trait WorkerAdapter: Send + Sync {
 }
 ```
 
-`engine` 用它构造 `SandboxSpec.exec = {image_digest, argv, env}`；`api` 用 `capabilities()` 组成 `GET /v1/settings/catalog` 的 `models.adapters`。`env()` 返回值里出现形似密钥的值（占位 key 除外）视为缺陷，由单元测试断言。
+`engine` 用它构造 `SandboxSpec.exec = {image_digest, argv, env, token_env}`（`token_env` 取自 `token_env()`）；`api` 用 `capabilities()` 组成 `GET /v1/settings/catalog` 的 `models.adapters`。`env()` 返回值里出现形似密钥的值（占位 key 除外）视为缺陷，由单元测试断言。
 
 ### 6.4 Claude Code 适配：JobSpec → CLI
 
@@ -398,7 +404,7 @@ worker 自身不重试任何事：重试是 `engine` 在新 Attempt 里的决定
 ### F. 网络与凭据（A8 / I1，M1）
 
 - [ ] 在只有 `MockProxy` 与 `MockModelServer` 可达的网络命名空间里运行全流程：所有出站连接都发往这两个地址；没有直接 DNS 查询、没有其他目标。
-- [ ] 环境变量集合恰等于 `WorkerAdapter.env()` 的输出加运行时固有项；其中唯一"形似密钥"的是占位 `gantry-egress-managed`，`job_token` 只出现在模型 base URL 与 `HTTPS_PROXY` 两个值里（P-49）；`env()` 单元测试断言没有 `GITHUB_TOKEN` 与任何真实 key 形态。
+- [ ] 环境变量集合恰等于 `WorkerAdapter.env()` 的输出、`token_env()` 声明的变量（由 `sandbox` 填值）加运行时固有项；`env()` 的输出里没有任何 `job_token`；其中唯一"形似密钥"的是占位 `gantry-egress-managed`，`job_token` 只出现在模型 base URL 与 `HTTPS_PROXY` 两个值里（P-49）；`env()` 单元测试断言没有 `GITHUB_TOKEN` 与任何真实 key 形态。
 - [ ] `job_token` 不出现在 `report.md`、事件、stderr、`result.json` 中（用哨兵令牌验证）。
 - [ ] 遥测 / 自动更新 / 反馈开关已设置（`stub-claude` 记录的环境）。
 - [ ] worker 不在 `report.md`、事件、stderr 中输出环境变量（用含哨兵值的自定义环境变量验证）。

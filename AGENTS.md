@@ -18,6 +18,7 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 | — | [docs/milestones.md](docs/milestones.md) | 可并行开发的里程碑与泳道 |
 | — | [docs/prototype.md](docs/prototype.md) | 界面原型说明 |
 | — | [docs/design.md](docs/design.md) | 设计讨论记录（历史，不作为规格） |
+| — | [docs/reviews/](docs/reviews/) | 评审记录（只读）；[终审记录](docs/reviews/2026-10-24-final-review.md) 给出各模块"能否开工"的结论与已知前置条件 |
 
 文档冲突时的优先级：`decisions.md`（已确定）> `architecture.md` 不变式 > `interfaces/` > `modules/` > 其余。
 
@@ -29,7 +30,7 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 2. 读 `docs/modules/<id>.md` 全文，以及它在"依赖""输入""输出"里引用的每一份 `interfaces/` 契约和 `data-model.md` 章节。
 3. 读 `architecture.md` §5 的不变式，确认本模块要保证哪几条。
 4. 只修改本模块的目录；需要改契约（`docs/interfaces/`、`schemas/`）时，先单独提 PR 修改契约，不要在实现 PR 里顺手改。
-5. 依赖的其他模块尚未实现时，用里程碑文档指定的 fake / mock 替身，不要自己临时实现对方的逻辑。跨模块端口 trait 都在 `core::ports`（decisions P-51），只依赖端口，不依赖对方 crate 的内部类型。
+5. 依赖的其他模块尚未实现时，用里程碑文档指定的 fake / mock 替身，不要自己临时实现对方的逻辑。跨模块端口 trait 都在 `core::ports`（decisions P-51；凡调用方与提供方分属不同泳道的接口都在这里，清单见 [core §6.10](docs/modules/core.md#610-跨模块端口coreportsp-51)），只依赖端口，不依赖对方 crate 的内部类型；跨模块写接口的上下文一律用 `core::ports::ActorCtx`（P-78）。
 6. 按模块规格"测试与验收"一节逐条写测试；全部通过才算完成。
 7. 规格写得不够、互相矛盾或需要做规格外的决定时，**停下来提问或开 Issue**，不要猜。"待决"列表里的问题不要自行拍板。
 
@@ -40,7 +41,7 @@ crates/            服务端 Rust workspace，每个模块一个 crate（gantry-
   gantryd/         服务端可执行文件，组装各 crate
 apps/desktop/      Tauri：src-tauri = desktop-shell，src = desktop-ui
 apps/mobile/       iOS（后续）
-schemas/           契约的机器可读版本：openapi.yaml、events/、worker/、forge/、config/
+schemas/           契约的机器可读版本：openapi.yaml、events/、worker/、forge/、config/、egress/
 deploy/            安装脚本、systemd 单元、备份脚本
 docs/              设计文档
 ```

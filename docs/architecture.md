@@ -38,11 +38,11 @@ Gantry 中的"AI IDE"指**工程编排工作台**：主对话 + 交付关系地�
 | 镜像仓 Mirror | 每个项目在服务端的裸镜像仓，由 `forge` 拉取更新，由 `repo` 维护；沙盒工作区、工作树都从它准备 |
 | 工作树 Worktree | 服务端上某分支的检出，归属一个交付单元 |
 | 沙盒 Sandbox | 一次性的隔离执行环境，worker 在其中运行 |
-| 能力令牌 job_token / svc_token | Egress 用来识别调用方并计量的令牌：`job_token` 每个尝试一枚，放在沙盒内模型 base URL 的路径里，只对该尝试有效（P-49）；`svc_token` 供服务端 `models` 经回环反向代理调用模型（P-50）。见 [interfaces/egress-control.md](interfaces/egress-control.md) |
+| 能力令牌 job_token / svc_token | Egress 用来识别调用方并计量的令牌：`job_token` 每个尝试一枚，放在沙盒内模型 base URL 的路径里与包仓库 `CONNECT` 的 `Proxy-Authorization` 里，只对该尝试有效（P-49、P-72）；`svc_token` 每个服务端进程一枚，供 `models` 经回环反向代理调用模型，每次调用以 `X-Gantry-Ledger` 头声明计入哪个台账（P-50、P-74）。见 [interfaces/egress-control.md](interfaces/egress-control.md) |
 | 三类模型 | 打杂（Utility）、大脑（Planner）、干活（Worker），见 §9 |
 | 后台守护 Guardian | PR 打开后由事件驱动的审核与修复循环 |
 | 上报 | 守护或引擎遇到需要人决定的事，写入收件箱（InboxItem）并通知 |
-| 端口 Port | 跨模块调用的 trait，统一定义在 `core::ports`（P-51），替身实现同一 trait |
+| 端口 Port | 跨模块调用的 trait，统一定义在 `core::ports`（P-51），替身实现同一 trait；写操作的调用方上下文统一为 `core::ports::ActorCtx`（P-78） |
 
 ## 3. 部署拓扑
 
@@ -82,13 +82,13 @@ flowchart TB
 
 ## 4. 模块地图
 
-每个模块有一份规格书 `docs/modules/<id>.md`，按 [模板](modules/_template.md) 写明职责、IO、依赖、状态、错误、验收。跨模块调用的端口 trait（`ForgeReader`、`OutboxPort`、`SandboxService`、`ModelProvider`、`RepoService`、`PolicyPort`、`InboxPort`、`EgressControl`）统一定义在 `core::ports`，M0 交付（P-51）；下表"依赖"列指依赖对方端口的实现，编译期只依赖 `core`。
+每个模块有一份规格书 `docs/modules/<id>.md`，按 [模板](modules/_template.md) 写明职责、IO、依赖、状态、错误、验收。跨模块调用的端口 trait（`ForgeReader`、`OutboxPort`、`SandboxService`、`ModelProvider`、`RepoService`、`PolicyPort`、`InboxPort`、`EgressControl`，以及跨泳道的服务接口 `DeliveryControl`、`ConversationService`、`WorktreeLocks`、`PrRefresher`、`HealPort`、`ClassifyPort`、`WorkerAdapter`、`SecretSource` / `SecretSink`）统一定义在 `core::ports`，M0 交付（P-51，清单见 [core §6.10](modules/core.md#610-跨模块端口coreportsp-51)）；下表"依赖"列指依赖对方端口的实现，编译期只依赖 `core`。
 
 | ID | 模块 | 职责（一句话） | 位置 | 依赖 |
 | --- | --- | --- | --- | --- |
 | `core` | 领域核心 | 领域类型、ID、状态机、事件定义、跨模块端口 trait（`core::ports`）；无 IO | 共享 crate | — |
 | `store` | 事件存储 | 追加式事件日志、投影、游标、Outbox 表 | 服务端 | core |
-| `engine` | 编排引擎 | 档位 → 图模板、调度、预算、阶段机推进；经 `ForgeReader` 按需读取 Issue / PR 正文与评论（不可信文本，不进快照） | 服务端 | core, store, models, sandbox, repo, policy, forge, notify |
+| `engine` | 编排引擎 | 档位 → 图模板、调度、预算、阶段机推进；经 `ForgeReader` 按需读取 Issue / PR 正文与评论（不可信文本，不进快照） | 服务端 | core, store, models, sandbox, repo, policy, forge, notify, worker（`WorkerAdapter`） |
 | `conversation` | 会话服务 | 主对话、意图解析、把消息变成交付单元或查询；把引擎与守护事件渲染为事件行 | 服务端 | core, store, engine, models, notify |
 | `guardian` | PR 后台守护 | 消费 PR 事件，按决策表分流自愈 / 上报 / 无需动作 | 服务端 | core, store, engine, forge, policy, notify |
 | `forge` | GitHub 接入 | App 鉴权、API、Webhook 接收、对账、Outbox 执行（执行时经 `policy` 验证并消费审批）、拉取更新镜像仓 | 服务端 | core, store, repo, policy, notify, secrets |
@@ -136,6 +136,7 @@ flowchart LR
   egress -. 控制面 .-> models
   sandbox --> worker
   sandbox --> engine
+  worker -. WorkerAdapter .-> engine
   models --> engine
   models -. 可选 .-> notify
   policy --> engine
@@ -179,7 +180,7 @@ flowchart LR
 | --- | --- | --- |
 | 服务端核心进程 | 可信 | 状态库；经 `secrets` 读取 GitHub App 私钥、webhook secret、CA 中间证书私钥 |
 | Egress 代理 | 可信，独立进程 | 模型 API key（只存在于此）、私有包仓库凭据；只在反向代理出站时注入到指定目标；`job_token` / `svc_token` 的登记表（只存哈希）。控制面只对主机本地的 `gantryd` 进程用户开放 |
-| 沙盒 | **不可信** | 一次性工作区副本、只读输入、可写输出目录、本尝试的 `job_token`；网络只有 Egress 的沙盒侧监听器（模型 API 反向代理、包仓库 CONNECT 白名单），到不了控制面与回环监听器 |
+| 沙盒 | **不可信** | 一次性工作区副本、只读输入、可写输出目录、本尝试的 `job_token`；网络只有 Egress 的沙盒侧监听器（模型 API 反向代理、包仓库 CONNECT 白名单，均凭 `job_token`，P-72），到不了控制面与回环监听器 |
 | GitHub 内容 | **不可信数据** | — |
 | 桌面端 | 可信但会失窃 | mTLS 客户端密钥与审批签名密钥（均不可导出；后者每次使用需用户在场，P-47）、离线根 CA 指纹（P-64） |
 
@@ -194,13 +195,13 @@ flowchart LR
 | 会话消息、收件箱 | 本地 | 事件日志 + 投影 | 需要 |
 | Gantry 审批记录、审计日志 | 本地，追加式 | 事件日志 | 需要 |
 | 设备（含 `approval_pubkey`）、证书、吊销表 | 本地 | `pki` 表 | 需要 |
-| 吊销日志 `revocations.journal` | 本地，只追加，**在事件日志之外** | `pki` 目录下的独立文件 | 不随备份回滚：从备份恢复时重放晚于备份的吊销（P-67） |
+| 吊销日志 `revocations.journal` | 本地，只追加，**在事件日志之外** | `pki` 目录下的独立文件；每次写入在吊销提交前 `fsync` 并同步复制到备份目标，事务回滚不删除条目 | 不随备份回滚：从备份恢复时重放时间戳晚于备份时刻的条目（P-67、P-80） |
 | `log_epoch` | 本地 | 事件日志元数据；每次从备份恢复加一 | 恢复流程维护（P-67） |
 | PR 的 `head_epoch`、状态清单评论的 `revision` 计数 | 本地事件日志 | `forge.pr_synchronized` 等事件 | 需要（随日志；不得从可重建的快照推出，P-61） |
 | CA 根私钥 | 离线 | 部署时导出到离线介质，服务端不常驻 | 离线保存 |
 | CA 中间私钥、App 私钥、webhook secret | 本地密钥文件（加密） | `secrets/`，仅服务端用户可读 | 需要（加密备份） |
 | 模型 key、私有包仓库凭据 | 本地密钥文件（加密） | Egress 的密钥存储，仅 Egress 进程用户可读；设置写入时 `api` 经 Egress 控制面只写转交、不留存（P-50） | 需要（加密备份） |
-| `job_token` / `svc_token` | Egress | Egress 只存哈希；令牌原文不进事件日志 | 不需要（尝试结束即作废） |
+| `job_token` / `svc_token` | Egress | Egress 只存哈希；令牌原文不进事件日志 | 不需要（`job_token` 尝试结束即作废；`svc_token` 随服务端进程重启轮换，P-74） |
 | 镜像仓 | GitHub | 每项目一个裸仓（`repo` 维护） | 不需要（可重建） |
 | 工作树内容 | GitHub 分支 + 本地检出 | 文件系统 | 不需要（可重建） |
 | 尝试结果（`result_ref`）、进度记录、被拒产物 | 本地 | 内容寻址结果库（CAS） | 需要（保留期待定） |
@@ -214,7 +215,7 @@ flowchart LR
 3. 运行 `gantry github setup`：生成一次性的 App Manifest 提交页，用户在 GitHub 上确认创建并安装到选定仓库；GitHub 经同一入口的 `/setup/github/callback` 回传 `code`，服务端换取并保存 App 私钥、webhook secret 与提交身份（`github.commit_identity`）（细节需核实，见 [modules/deploy.md](modules/deploy.md)）。
 4. 安装引导期（第一台设备配对之前，P-66）：主机命令（需 root）可写入 `github.*`、`sandbox.base_image` 等"仅 approver"配置，并写审计事件；`sandbox.base_image` 默认是随版本发布、固定摘要的官方 worker 镜像。第一台设备配对之后，这类写入改为需要审批签名。
 5. 服务端执行 `gantry pair`，显示二维码 / 配对串（地址 + **离线根 CA 指纹** + 一次性 token，P-64）。
-6. 桌面端扫码，本地生成**两把**密钥（P-47）：mTLS 客户端密钥与审批签名密钥（Secure Enclave / TPM，不可导出，使用需用户在场）；经**单向 TLS 的配对端点**提交 CSR + `approval_pubkey` + token，拿到证书链 `[叶子, 中间 CA, 根]`，校验根与固定的指纹一致；两端显示 6 位确认码，人工核对。第一台配对设备成为 approver（所有者），之后配对的设备默认 operator。
+6. 桌面端扫码，本地生成**两把**密钥（P-47；手机档案可省略审批签名密钥，且永远不能成为 approver，P-76）：mTLS 客户端密钥与审批签名密钥（Secure Enclave / TPM，不可导出，使用需用户在场）；经**单向 TLS 的配对端点**提交 CSR + `approval_pubkey` + token，拿到证书链 `[叶子, 中间 CA, 根]`，校验根与固定的指纹一致；两端显示 6 位确认码，人工核对。第一台配对设备成为 approver（所有者），之后配对的设备默认 operator。
 7. 之后桌面端所有请求走 mTLS；证书剩余 1/3 有效期时经 `POST /v1/devices/self/renew` 自动续期（建议值）。用户在设置页填入模型提供方凭据（凭据写入需要审批签名；只发送到服务端，经 Egress 控制面转交 Egress 保存）。
 
 细节见 [modules/pki.md](modules/pki.md) 与 [modules/deploy.md](modules/deploy.md)。
@@ -326,7 +327,7 @@ sequenceDiagram
 | `classify` | CI 日志分类、事件摘要、状态问答（及提交说明、通知文案等打杂文本） | utility | `direct` |
 
 - 推理深度随档位，由配置决定（[config.md §3](interfaces/config.md)）。
-- 所有模型调用都经 Egress 的反向代理，由 Egress 注入 key 并计量 token，不信任任何自报：沙盒内的 agent CLI 把模型 base URL 指向 `http://<egress>/j/<job_token>/<provider>`，`job_token` 每个尝试一枚、只对该尝试有效、只能从沙盒网段使用（P-49）；服务端 `models` 经 Egress 的回环 HTTP 反向代理调用，带 `svc_token`，用量计入交付台账或会话台账（P-50）。两种令牌同一计量口径，契约见 [interfaces/egress-control.md](interfaces/egress-control.md)。模型 key 只存在 Egress。
+- 所有模型调用都经 Egress 的反向代理，由 Egress 注入 key 并计量 token，不信任任何自报：沙盒内的 agent CLI 把模型 base URL 指向 `http://<egress>/j/<job_token>/<provider>`，`job_token` 每个尝试一枚、只对该尝试有效（"只能从沙盒网段使用"的强制方式需核实，能力令牌本身是安全底线，P-49、P-73）；服务端 `models` 经 Egress 的回环 HTTP 反向代理调用，带进程级 `svc_token`，每次调用以 `X-Gantry-Ledger` 声明计入交付台账或会话台账（P-50、P-74）。两种令牌同一计量口径，契约见 [interfaces/egress-control.md](interfaces/egress-control.md)。模型 key 只存在 Egress。
 - 对话气泡的边框颜色标识发言的 agent 类别。
 
 ## 10. 技术选型 [提议]
@@ -350,7 +351,7 @@ sequenceDiagram
 | --- | --- | --- |
 | Forge | `ForgeReader`（读）、`OutboxPort`（写动作入队）+ 事件归一化 | GitHub.com |
 | 沙盒 | `SandboxService`（引擎面：提交 JobSpec、等待结果、取消）与 `SandboxDriver`（容器面），P-52 | rootless Podman + gVisor |
-| Worker | `WorkerAdapter` trait + Worker 协议 | Claude Code |
+| Worker | `WorkerAdapter` trait（`core::ports`）+ Worker 协议 | Claude Code |
 | 通知 | `InboxPort`（上报）+ `Notifier` trait（推送） | 桌面端系统通知（客户端收到 `severity ≥ warn` 的 `inbox.raised` 时弹出，P-63） |
 | 模型提供方 | `ModelProvider` trait | Anthropic API |
 

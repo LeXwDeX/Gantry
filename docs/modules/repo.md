@@ -16,7 +16,7 @@
 | R4 | **准备沙盒工作区**：从镜像仓为一次 Attempt 生成自包含的一次性副本（HEAD 游离在 `base_sha`、index 干净、无 remote / 凭据 / hooks）；review / verify 另生成 `diff.patch` | [worker-protocol §2.4](../interfaces/worker-protocol.md#24-工作区副本) |
 | R5 | **补丁闸门**（P-69）：在服务端自建的一次性检出上用服务端 git 严格应用补丁，做**机械检查**（能否干净应用、文件列表、大小统计、二进制、符号链接、子模块、权限位、路径规范）并产出 `PatchFacts`；机械拒绝（应用失败、二进制、符号链接、子模块、路径逃逸、`.git` 组件）由本模块发 `patch.rejected`（`reason`），不调用 `policy`；能干净应用的补丁交 `policy` 做规则判定（路径规则、大小上限、权限位、敏感内容）；输出 `ValidatedPatch`，写 `patch.validated` / `patch.rejected` | worker-protocol §8.3；decisions P-25、P-68、P-69 |
 | R6 | **生成提交**：`verdict = allow` 后在镜像仓里创建提交（parent = `base_sha`，tree = `result_tree`，作者 / 提交者取配置 `github.commit_identity`（App 创建时写入，P-69），说明由服务端生成并净化，带 trailer `Gantry-Attempt`），推进工作树分支头；重放幂等 | worker-protocol §8.3 末段、§3.5；P-69 |
-| R7 | **持有补丁（`held`，M2）**：`needs_approval` 的补丁固化保存，不提交不推送；`patch_apply_protected` 审批 `granted` 且 `subject_digest` 等于补丁 sha256 后才提交（审批在承载该提交的 `push_branch` 执行前由 `forge` 消费，P-54） | worker-protocol §8.5；decisions P-20、P-54 |
+| R7 | **持有补丁（`held`，M2）**：`needs_approval` 的补丁固化保存，不提交不推送；`patch_apply_protected` 审批 `granted` 后，本模块在创建提交之前经 `PolicyPort::consume_patch_approval` 核对（`subject_digest` 等于补丁 sha256 等）并**消费**（`consumed_by = att_…`，P-54） | worker-protocol §8.5；decisions P-20、P-54 |
 | R8 | **提交溯源**：回答"某个提交 OID 是否是某次已校验补丁的产物"，供 `forge` 在推送前核对（I8 的执行点之一） | forge-actions §3.3 #1、§8 |
 
 ### 里程碑交付
@@ -51,7 +51,7 @@
 | --- | --- | --- |
 | `core` | 端口 `core::ports::RepoService`（本模块实现）、`PolicyPort`、`AddedLineSource`（P-51）；ID 类型（`prj_` `dlv_` `wtr_` `att_`）、`GitOid`、`Sha256Digest`（CAS 引用即它）、`Seq`、`UntrustedText`、`PatchFacts`、失败码常量（`policy.*`）、事件 `data` 类型、`EffectiveSettings`（`github.commit_identity`） | [data-model §1–§3](../data-model.md)；[core.md §6.10](core.md) |
 | `store` | `Store::begin_write() -> WriteTx`（`append` / `append_with` 追加 `worktree.*` / `patch.*`，与投影同事务）、`ReadSnapshot::worktree(id)`（`Worktree` 与锁的投影）、`Cas`（`put` / `put_file` / `open` / `stat`，`CasKind::Artifact` / `Quarantine`）；`CasRef` 即 `Sha256Digest` | [store.md §6](store.md)；[data-model §5](../data-model.md#5-事件)；architecture §6 |
-| `policy` | `core::ports::PolicyPort`（§6.4）：`evaluate_patch`（大小上限、P6、P8、P9 的规则判定）、`scan_text`、`check_approval`（M2） | [policy.md §6.2、§7.4](policy.md)；worker-protocol §8.3；[config §5.2、§5.4](../interfaces/config.md#52-policiespaths) |
+| `policy` | `core::ports::PolicyPort`（§6.4）：`evaluate_patch`（大小上限、P6、P8、P9 的规则判定）、`scan_text`、`consume_patch_approval`（M2，提交前消费补丁审批，P-54） | [policy.md §6.2、§7.4](policy.md)；worker-protocol §8.3；[config §5.2、§5.4](../interfaces/config.md#52-policiespaths) |
 | 系统 `git` | 子进程，只经 `GitCmd` 封装调用（§7.2）；最低版本 **需核实**（`git apply`、`commit-tree`、`core.protectNTFS` 行为） | worker-protocol §5.3 |
 
 `repo` **不**依赖 `forge`、`sandbox`、`engine`（architecture §4 依赖图：`repo → sandbox / forge / engine`）。反向地，`forge`、`engine`、`sandbox` 都经 `core::ports::RepoService` 使用本模块（`forge` 用 `ensure_mirror` / `mirror_access` / `commit_info` / `provenance`），见 §6.1。提交身份（机器人名 / 邮箱）取配置 `github.commit_identity`（P-69）。
@@ -69,7 +69,7 @@
 | 提交说明 | `engine`（来自 `models` 的 `classify.commit_message` 或模板） | `CommitMessage` | 含模型输出，按**不可信文本**净化 |
 | 提交身份 | 配置 `github.commit_identity`（经 `EffectiveSettings`；App 创建时写入，P-69） | `CommitIdentity` | 可信 |
 | 时间戳 | `engine` | `Timestamp` | 可信（时间戳取 ResultBundle 的 `collected_at`，保证重放得到同一 OID） |
-| 已 `granted` 的 `patch_apply_protected` 审批 ID（`held` 补丁，M2） | `engine` | `ApprovalId`；`repo` 经 `PolicyPort::check_approval` 复核状态与 `subject_digest`（不消费） | 可信，但复核 |
+| 已 `granted` 的 `patch_apply_protected` 审批 ID（`held` 补丁，M2） | `engine` | `ApprovalId`；`repo` 在提交前经 `PolicyPort::consume_patch_approval` 核对并消费（P-54） | 可信，但复核 |
 
 ## 5. 输出
 
@@ -85,7 +85,7 @@
 
 ## 6. 对外接口
 
-以下是 Rust 签名草案；`Ctx` 携带 `actor`、`causation_id`、`correlation_id`，用于写事件信封。`RepoService` 定义在 `core::ports`（P-51），签名以本节为准（§6.1–§6.3 的方法都属于这一个 trait）；`FakeRepo`（M0）实现整个 `RepoService`。
+以下是 Rust 签名草案；`Ctx` 即 `core::ports::ActorCtx`（P-78，携带 `actor`、`causation_id`、`request_id` 等，用于写事件信封）。`api` 的人工锁经 `core::ports::WorktreeLocks`（`acquire_human` / `release_human`，core.md §6.10）进入，由本模块以 `LockHolder::Human` 调 `acquire_lock` / `release_lock` 实现。`RepoService` 定义在 `core::ports`（P-51），签名以本节为准（§6.1–§6.3 的方法都属于这一个 trait）；`FakeRepo`（M0）实现整个 `RepoService`。
 
 ### 6.1 镜像仓与工作树
 
@@ -226,7 +226,7 @@ pub struct ValidatedPatch {
 }
 pub struct CommitPatch {
     pub project_id: ProjectId, pub job_id: AttemptId, pub worktree_id: WorktreeId, pub lock: LockToken,
-    pub approval: Option<ApprovalId>,      // held 补丁必填（patch_apply_protected）；repo 经 PolicyPort::check_approval 复核（只读，不消费）
+    pub approval: Option<ApprovalId>,      // held 补丁必填（patch_apply_protected）；repo 在提交前经 PolicyPort::consume_patch_approval 核对并消费（P-54）
     pub message: CommitMessage,            // {subject, body}
     pub timestamp: Timestamp,              // 确定性；取 ResultBundle.collected_at（秒）
     // 提交身份不由调用方传入：取 EffectiveSettings 的 github.commit_identity（P-69）；未配置 → RepoError::CommitIdentityMissing
@@ -242,7 +242,8 @@ pub struct CommitRecord { pub commit_oid: GitOid, pub tree_oid: GitOid, pub pare
 ```rust
 //   async fn evaluate_patch(&self, facts: &PatchFacts, added: &dyn AddedLineSource) -> Result<PatchPolicyVerdict, PolicyError>;
 //   fn scan_text(&self, text: &str) -> Vec<SecretFinding>;          // 与 P9 同一扫描器；repo 用它扫提交说明
-//   async fn check_approval(&self, approval: &ApprovalId, patch_sha256: &Sha256Digest) -> Result<(), MismatchReason>; // M2 held
+//   async fn consume_patch_approval(&self, tx: &mut dyn TxHandle, approval: &ApprovalId, check: &PatchApprovalCheck)
+//       -> Result<PatchPermit, GateError>;                         // M2 held：提交前核对并消费（P-54）
 pub trait AddedLineSource { fn added_lines(&self, path: &RepoPath) -> Box<dyn Iterator<Item = io::Result<String>> + '_>; } // core::ports
 // repo 的实现 `GitAddedLines`：在 scratch 检出存活期间，对指定路径运行
 //   git diff --cached -U0 --no-color --no-ext-diff --no-textconv --no-renames HEAD -- <path>
@@ -368,15 +369,16 @@ P1–P11 的执行者与失败码一览：
 commit_patch(req):
   1. 读 ValidatedPatchRecord（按 job_id）；缺失 → PatchRecordMissing
      verdict == Deny → VerdictNotCommittable
-     verdict == NeedsApproval → 必须有 req.approval：PolicyPort::check_approval(approval, sha256) 要求 status == granted、未过期、
-                                action == patch_apply_protected、subject_digest == record.sha256；
-                                并让 policy 以当前规则重新 evaluate_patch 一次，若已变为 Deny → 拒绝（config.md §2.6）。
-                                repo 只读审批，不消费——消费在承载该提交的 push_branch 执行开始前，由 forge 经
-                                PolicyPort::consume_for_execution 完成（P-54，policy.md §6.5）
+     verdict == NeedsApproval → 必须有 req.approval；并让 policy 以当前规则重新 evaluate_patch 一次，
+                                若已变为 Deny → 拒绝（config.md §2.6）。审批在第 4a 步消费
   1a. 读 EffectiveSettings 的 github.commit_identity；未配置 → CommitIdentityMissing（P-69）
   2. 校验锁：req.lock.fence == 当前锁的 fence 且 now < lease_until 且 holder ∈ {Engine, Guardian}；Human 持锁时不得提交
   3. 幂等锚点：若 refs/gantry/attempt/<job_id> 已存在 → 取其指向的提交，校验 tree == record.result_tree，返回 CommitRecord
   4. P10：branch_head == record.base_sha，否则返回 RepoError::BaseMoved（不自动 rebase，交 engine 重新派发）
+  4a. verdict == NeedsApproval：PolicyPort::consume_patch_approval(tx, approval, {repo, attempt_id = job_id, patch_sha256 = record.sha256,
+      rules = record 命中的 approve 规则, paths = 命中路径}) 要求 status == granted、未过期、action == patch_apply_protected、
+      subject_digest == record.sha256、target 覆盖本补丁；通过即 consumed（consumed_by = att_…，P-54）。
+      重放时 AlreadyConsumedBySameAttempt 视为通过；ConsumedByOther / ApprovalInvalid → 拒绝，不提交
   5. 净化提交说明：去 NUL / 控制符 / bidi；中和 `@用户` / `@团队`、跨仓库引用、关闭关键字；剥离正文中形似 trailer 的行
      （`Co-authored-by`、`Signed-off-by`、`Gantry-*` 等，防伪造）；`PolicyPort::scan_text` 命中密钥 → 用模板说明替代；
      最后追加固定 trailer：`Gantry-Attempt: <job_id>`
@@ -487,7 +489,7 @@ commit_patch(req):
 
 ## 12. 测试与验收
 
-测试替身：`FakePolicy`（M0，`contract` 泳道交付，实现 `PolicyPort`，可脚本化 `PatchPolicyVerdict` / 扫描结果 / `check_approval`，P-51）、`Store::open_temp` / `open_in_memory`（`store` 的 testing feature，含事件、投影、锁状态机与 CAS，见 [store.md §6.1](store.md)）、**真实 `git`** 构造临时镜像仓（本模块的测试以真实 git 为主，因为校验的事实源就是 git 的行为）。恶意补丁语料放在 `crates/gantry-repo/tests/fixtures/patches/`，手写文本补丁（`git diff` 产生不出的畸形补丁必须手工构造），同时作为 `schemas/worker/fixtures/` 的候选。
+测试替身：`FakePolicy`（M0，`contract` 泳道交付，实现 `PolicyPort`，可脚本化 `PatchPolicyVerdict` / 扫描结果 / `consume_patch_approval`，P-51）、`Store::open_temp` / `open_in_memory`（`store` 的 testing feature，含事件、投影、锁状态机与 CAS，见 [store.md §6.1](store.md)）、**真实 `git`** 构造临时镜像仓（本模块的测试以真实 git 为主，因为校验的事实源就是 git 的行为）。恶意补丁语料放在 `crates/gantry-repo/tests/fixtures/patches/`，手写文本补丁（`git diff` 产生不出的畸形补丁必须手工构造），同时作为 `schemas/worker/fixtures/` 的候选。
 
 ### A. 替身一致性（M0 / M1）
 
@@ -540,7 +542,7 @@ commit_patch(req):
 - [ ] 分支头 ≠ `base_sha` → `BaseMoved`，无提交。
 - [ ] 无锁 / 过期锁 / `human` 持锁 → 对应错误，无提交。
 - [ ] `verdict = Deny` 不可提交（`VerdictNotCommittable`）；`provenance(commit_oid)` 对本模块产生的提交返回记录，对镜像仓里来自 GitHub 的提交返回 `None`（即使其说明里伪造了 `Gantry-Attempt` trailer）。
-- [ ] （M2）`held`：`NeedsApproval` 不提交；`patch_apply_protected` 审批 `granted` 且 `subject_digest == sha256` 后提交，`result_tree` 不变，审批仍为 `granted`（不消费）；`subject_digest` 不符、动作不是 `patch_apply_protected`、审批过期、或 `policy` 以当前规则复评为 Deny → 拒绝。
+- [ ] （M2）`held`：`NeedsApproval` 不提交；`patch_apply_protected` 审批 `granted` 且 `subject_digest == sha256` 后提交，`result_tree` 不变，审批变为 `consumed`（`consumed_by = att_…`，P-54）；在消费之后、提交之前杀进程再重放 → `AlreadyConsumedBySameAttempt`，只产生一个提交；`subject_digest` 不符、动作不是 `patch_apply_protected`、审批过期、或 `policy` 以当前规则复评为 Deny → 拒绝。
 
 ### F. 安全与隔离（M1）
 

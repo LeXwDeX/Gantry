@@ -31,7 +31,7 @@
 
 - **创建、更新、关闭上报项**：上报项由 `engine`（和 `guardian`、`forge`）经 `core::ports::InboxPort` 创建与关闭；本模块只把它们投影成卡片，并在 `choose` 之后追加事件行。`choose` / `dismiss` 路由归 `api`，由 `notify` 执行。唯一例外：自由文本答复 `spec_needed` 时，本模块在 `engine.supply_spec` 成功后调用 `InboxPort::resolve(Answered)`（notify.md §7.4，N-16）。
 - **交付单元的任何状态变化**：创建、调档、放弃、补规格、问答节点的调度都由 `engine` 执行；本模块只调用 `EngineApi`。
-- **鉴权、角色、客户端档案、`Idempotency-Key`、限流**：归 `api`。本模块接收已鉴权的 `WriteCtx`（发起设备，由此读出角色与档案）；仅对"会改变花费或状态的消息衍生操作"再检查档案（§7.12），作为纵深防御。
+- **鉴权、角色、客户端档案、`Idempotency-Key`、限流**：归 `api`。本模块接收已鉴权的 `core::ports::ActorCtx`（P-78：发起设备、角色、客户端档案）；仅对"会改变花费或状态的消息衍生操作"再检查档案（§7.12），作为纵深防御。
 - **审批与签名**：审批卡只含 `approval_id`，不内嵌可签名内容；签名走 `api` §6 与 `desktop-shell`。
 - **模型调用、模型解析、用量折算**：归 [`models`](models.md)。本模块只提供角色指令与材料。
 - **读取 GitHub**：本模块没有 `forge` 依赖（P-59 只给 `engine` 加了 `ForgeReader`）；`refs` 只能解析为 `store` 里已有的快照，见 OQ-1。
@@ -57,7 +57,7 @@
 
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
-| 用户消息 `NewUserMessage { text, level_cap?, refs[] }` + `WriteCtx { actor, request_id, dedup? }` | `api`（`ConversationService::post_user_message`） | [api.md §4.5](../interfaces/api.md)；`text` ≤ 16 KiB，`refs` ≤ 20（`api` 已校验长度与未知字段）；手机档案的 `level_cap` 被服务端忽略（C26、P-35） | `text` 可信（data-model：用户消息为可信）；`refs` 只有最小字段，快照由服务端解析；`WriteCtx.actor` 来自已验证的证书 |
+| 用户消息 `NewUserMessage { text, level_cap?, refs[] }` + `ActorCtx { actor, device, role, client_profile, request_id, idempotency_key?, dedup_key?, … }`（P-78） | `api`（`ConversationService::post_user_message`） | [api.md §4.5](../interfaces/api.md)；`text` ≤ 16 KiB，`refs` ≤ 20（`api` 已校验长度与未知字段）；手机档案的 `level_cap` 被服务端忽略（C26、P-35） | `text` 可信（data-model：用户消息为可信）；`refs` 只有最小字段，快照由服务端解析；`ActorCtx.actor` 来自已验证的证书 |
 | `project.added` | `store` 订阅 | data-model §5.2 | 可信 |
 | 引擎事件：`delivery.created` / `stage_changed` / `level_changed` / `paused` / `resumed` / `abandoned`、`workflow.revised`、`node.finished`（`plan`）、`node.retry_requested`、`attempt.finished`（`answer`）、`budget.exhausted`、`inbox.raised` / `resolved` / `dismissed`；守护事件 `guardian.triaged` / `heal_requested` / `escalated`（P-60） | `store` 订阅 | [engine.md §11](engine.md)、[guardian.md §7.10](guardian.md) | 结构可信；文本字段（`summary`、`payload` 内模型产出）当数据 |
 | `forge.*`（`pr_merged`、`pr_closed`、`issue_closed`、`base_advanced`、`drift_detected`）、`outbox.succeeded` / `failed`、`approval.*`、`policy.denied` | `store` 订阅 | [forge-actions §6](../interfaces/forge-actions.md)、api.md §6 | 结构可信；GitHub 文本为 `UntrustedText` |
@@ -86,11 +86,11 @@ pub trait ConversationService: Send + Sync {
     async fn ensure_conversation(&self, project: &ProjectId) -> Result<ConversationId, ConvError>;
 
     /// POST /v1/conversations/{id}/messages 的业务部分（Idempotency-Key 由 api 处理，其派生的
-    /// `ctx.dedup` 的落点见 OQ-12）。与 api.md §6.3 的 `ConversationService` 签名一致。
+    /// `ctx.dedup_key` 写入所追加的 message.posted 的 dedup_key，P-78）。`core::ports::ConversationService`（core.md §6.10）。
     /// 同步部分：校验 refs → 追加 message.posted(role=user) → 返回该 Message（delivery_id 通常为 None）。
     /// 异步部分：意图解析与路由，由本模块自己的消费者完成，不阻塞返回。
     /// refs 解析不到快照 → ConvError::UnresolvedRef（api 映射为 422 validation_failed）。
-    async fn post_user_message(&self, ctx: WriteCtx, cnv: ConversationId, msg: NewUserMessage)
+    async fn post_user_message(&self, ctx: ActorCtx, cnv: ConversationId, msg: NewUserMessage)
         -> Result<Message, ConvError>;
 
     /// GET /v1/projects/{id}/conversations（目前恰好一项）。
@@ -184,7 +184,7 @@ api ──post_user_message──► 校验 refs ──► store.append(message.
 
 手机档案：服务端**忽略**消息里的 `level_cap`，一律使用项目默认上限（`levels.default_level` 的生效值，C26、P-35）；回执里说明实际生效的上限。
 
-消息带 `level_cap` 且 `B` 恰有一个交付单元、值与其上限不同：桌面档案 → `RouteDecision::SetCapThenContinue`，调 `engine.set_level_cap`（回执提示"已触发的闸门不撤销"，prototype §2.3）；手机档案 → 忽略并说明（升档只在桌面，P-35）。该行为的依据只有 prototype，见 OQ-3。
+消息带 `level_cap` 且 `B` 恰有一个交付单元、值与其上限不同：桌面档案 → `RouteDecision::SetCapThenContinue`，调 `DeliveryControl::set_level_cap`（等同 `PATCH /v1/deliveries/{id}`，产生 `delivery.level_changed`，预算模板不变；客户端发送前已提示"上限 X → Y；已触发的闸门不撤销"，P-82）；值相同 → 不变；手机档案 → 忽略并说明（P-35、P-82）。该行为的依据只有 prototype，见 OQ-3。
 
 ### 7.4 定位与创建：由确定性规则决定，不由模型决定
 
@@ -201,7 +201,7 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 - **材料**（全部按不可信包装，由 `models` 完成隔离标记）：`refs` 快照中的标题 / 摘要、最近 `HISTORY_WINDOW` 条消息里的 agent 与事件行文本、进行中交付单元的标题。历史窗口建议 20 条且总量受 `models` 的材料上限约束。
 - **输出**：`{intent: task | query | control, delivery_id?, needs_code}`（worker-protocol §6.2，[提议]）。校验：schema；`delivery_id` 若给出，必须属于本项目且非终结，否则丢弃。
 - **None 档**：仍调用 `intent`（用来区分 `query` 与 `task`），但无论结果如何都不创建交付单元（§7.6）。
-- **用量**：没有交付单元归属时记入该项目的会话台账（`Attribution::Conversation`，`BudgetLedger.subject = conversation`，每日上限 `levels.None.daily_tokens`，P-58）；超限时回复"今日问答额度已用完"。
+- **用量**：没有交付单元归属时记入该项目的会话台账（`Attribution::Conversation`，`BudgetLedger.subject = conversation`，每日上限 `levels.none.daily_tokens`，P-58）；超限时回复"今日问答额度已用完"。
 
 ### 7.6 路由表（`route` 纯函数）
 
@@ -259,10 +259,10 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 | `InboxItem.kind` | 消息文本 | `cards` |
 | --- | --- | --- |
 | `approval_needed` | "{pr} 可以合并，需要你的审批。" | `approval { approval_id }` |
-| `decision_needed` | 原因模板 + 选项说明；`payload.kind = manual_action`（workflow 补丁，P-48）时说明"需手动应用补丁"并给补丁引用 | `choice { inbox_id, options[] }`（选项取 `payload.options`，`{id, label, primary?}`，P-63） |
-| `spec_needed` | 逐条列出 `missing[].question` | `choice { inbox_id, options[] }`——有选择题时取 `payload.options`（`{id, label, primary?}`，P-63），空选项表示"需要自由文本答复"（OQ-6，暂用） |
-| `escalation` | 原因模板 + 证据引用；升档类（`level_cap_exceeded`）说明"需在桌面处理"（P-63） | `escalation { inbox_id, options[] }`（选项取 `payload.options`，P-63） |
-| `budget_exhausted` | "预算已耗尽：{dimension}（{used}/{limit}）" | `escalation { inbox_id }` |
+| `decision_needed` | 原因模板 + 选项说明；`payload.kind = manual_action`（workflow 补丁，P-48）时说明"需手动应用补丁"并给补丁引用；`review_dispute` 说明"是否交回前台改代码" | `choice { inbox_id, options[] }`（选项取 `payload.options`，`{id, label, primary?}`，词表 P-79） |
+| `spec_needed` | 逐条列出 `missing[].question` | `choice { inbox_id, options: [] }`——`spec_needed` 没有选项（P-79），空选项表示"需要自由文本答复"，客户端渲染为"回复补充…" |
+| `escalation` | 原因模板 + 证据引用；升档类（`level_cap_exceeded`）说明"需在桌面处理"（P-63） | `escalation { inbox_id }`（data-model Card 形状；按钮由客户端取该 InboxItem 的 `payload.options`，只有 `level_cap_exceeded` 有选项，P-79） |
+| `budget_exhausted` | "预算已耗尽：{dimension}（{used}/{limit}）" | `escalation { inbox_id }`（按钮取 `payload.options`：`raise_cap`（仅桌面，Q-11）/ `abandon`，P-79） |
 | `security_finding` | "发现安全问题" + `source` 引用 | `escalation { inbox_id }` |
 
 其他卡片：`plan`（`node.finished` 的 `plan` 节点成功时：`{delivery_id, workflow_id, summary}`，`summary` 为 `UntrustedText`，`source` 记结果来源，截断标记照实填）；`summary`（交付单元 `closed` 时，M2，`classify` 生成：`Card.summary` 为 `items[]`，每项 `{text, ref}`，`text` 为不可信文本、`ref` 指向对应对象，C26）。卡片只放资源 ID，不内嵌任何可签名内容（data-model §1.1）。
@@ -292,7 +292,7 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 
 ### 7.12 手机档案
 
-发起设备的档案为 `mobile` 时（由 `WriteCtx.actor` 的设备平台推出）本模块额外保证：不调用 `set_level_cap`；忽略消息的 `level_cap`，新建交付单元使用项目默认上限（C26、P-35）；`ControlGuidance` 不提供桌面专有入口的跳转；`escalation` / 升档类卡片的选择由 `api` 的 `choose` 路由按 P-35 拒绝，本模块不重复实现但在文案里提示"需在桌面处理"。
+发起设备的档案为 `mobile` 时（读 `ActorCtx.client_profile`）本模块额外保证：不调用 `set_level_cap`；忽略消息的 `level_cap`，新建交付单元使用项目默认上限（C26、P-35）；`ControlGuidance` 不提供桌面专有入口的跳转；`escalation` / 升档类卡片的选择由 `api` 的 `choose` 路由按 P-35 拒绝，本模块不重复实现但在文案里提示"需在桌面处理"。
 
 ## 8. 不变式与安全要求
 
@@ -408,14 +408,14 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 | # | 问题 | 本文暂用 | 影响 |
 | --- | --- | --- | --- |
 | OQ-1 | `refs` 解析：api.md 要求解析不到快照 → 422，但"从已有 Issue 开始"（prototype §2.3）引用的 Issue 可能从未同步；本模块没有 `forge` 依赖。谁为尚无快照的 Issue / PR 建立快照 | 只解析 `store` 里已有的快照，其余 `UnresolvedRef` | 起始体验；与 engine OQ-10 同源 |
-| OQ-2 | **已决：见裁决 C12 / P-58（None 档问答不建交付单元；需要读代码时创建挂在会话上的临时图，`Workflow.delivery_id` 可空并带 `conversation_id`，用量记会话台账，每日上限 `levels.None.daily_tokens`）**。原问题：`answer`（None 档代码问答）的归属与节点挂靠：`Workflow.delivery_id` 必填，None 档没有交付单元与台账，token 封顶无处可取；milestones 未点名里程碑 | 已落实到 §1、§7.6 | 代码问答 |
-| OQ-3 | 发往已有交付单元的 `task` 消息语义：补规格之外（例如交付单元在 `review` 时说"再加一个需求"）怎么办；消息显式 `level_cap` 是否应改已有交付单元的上限（只有 prototype §2.3 暗示，api.md 与 data-model 没写） | 只支持补规格；显式不同上限时先 `set_level_cap`；其余回复"当前阶段不接收补充" | 交互 |
+| OQ-2 | **已决：见裁决 C12 / P-58（None 档问答不建交付单元；需要读代码时创建挂在会话上的临时图，`Workflow.delivery_id` 可空并带 `conversation_id`，用量记会话台账，每日上限 `levels.none.daily_tokens`）**。原问题：`answer`（None 档代码问答）的归属与节点挂靠：`Workflow.delivery_id` 必填，None 档没有交付单元与台账，token 封顶无处可取；milestones 未点名里程碑 | 已落实到 §1、§7.6 | 代码问答 |
+| OQ-3 | 发往已有交付单元的 `task` 消息语义：补规格之外（例如交付单元在 `review` 时说"再加一个需求"）怎么办（显式 `level_cap` 改已有交付上限的部分**已决：见 decisions.md P-82**，桌面档案等同 `PATCH`，手机档案忽略） | 只支持补规格；其余回复"当前阶段不接收补充" | 交互 |
 | OQ-4 | `intent = control`（worker-protocol [提议]）与 P-37（确定性控制，不依赖意图解析）的关系：自然语言控制是否存在；若存在是否需要确认卡 | 一律不执行，只回引导 | 安全、交互 |
 | OQ-5 | **已决：见裁决 C26 / P-35（手机档案发消息时服务端忽略 `level_cap`，使用项目默认上限）**。原问题：手机档案消息的 `level_cap`：api.md §2.3 路由表允许 body 带 `level_cap`，prototype §4 说固定为项目默认 | 已落实到 §7.3、§7.12 | 成本控制 |
-| OQ-6 | 事件行：类型清单、文本是模板还是打杂模型生成（architecture §9 把"事件摘要"列为打杂用途）；`spec_needed` 卡片没有合适的 `Card.kind`（`choice` 带空选项是暂用；新增 `question` kind 需契约 PR） | M1 全模板；`choice` + 空选项 | 事件行体验、data-model |
+| OQ-6 | 事件行：类型清单、文本是模板还是打杂模型生成（architecture §9 把"事件摘要"列为打杂用途）。（`spec_needed` 的卡片**已决**：P-79 定为无选项，用 `choice` + 空 `options[]`，客户端渲染"回复补充"，不另设 `question` kind） | M1 全模板 | 事件行体验 |
 | OQ-7 | "离开期间摘要"卡与"上次查看"：触发时机、是否持久化、是否有路由 / 事件（api.md 没有） | 不实现 | 体验 |
 | OQ-8 | `Message.delivery_id` 的异步关联没有事件；消息 `actor`、`causation_id` 等字段的 schema | 由 `delivery.created.data.source_message_id` 的投影规则回填 | `schemas/events`、`store` |
 | OQ-9 | **已决：见裁决 C12 / P-58（项目内无交付单元归属的用量记入会话台账 `BudgetLedger.subject = conversation`）**。原问题：没有交付单元归属的模型调用（`intent`、状态问答、通知文案）的用量记到哪里：`BudgetLedger` 属于 Delivery，事件目录没有对应记账事件 | 已落实到 §7.5 | 成本可见性 |
 | OQ-10 | `intent` 的 prompt、输出 schema 终稿（worker-protocol §6.2 标 [提议]）、历史窗口大小、确定性回执的 `agent_kind` | §7.5、§7.7 的表 | 意图质量 |
 | OQ-11 | 项目绑定由谁触发 `project.added`（api.md OQ-8）；GitHub 原生入口（Q-04）进入本模块还是直达 `engine` | 本模块只消费 `project.added`；不接原生入口 | M4 |
-| OQ-12 | 契约与模块边界：(a) **已决：见裁决 C13 / P-59**（`conversation` 依赖 `notify`）；(b) api.md 模块规格（§6.3）把 `WriteCtx.dedup` 用作所追加事件的 `dedup_key`，而 core.md / store.md 把 `dedup_key` 限定为 `forge.<kind>` 使用——`message.posted` 能否带 `dedup_key` 未定，本规格不依赖它（靠游标同事务 + 幂等接口）；(c) `Ref.kind` 没有 `inbox`，消息与上报项的关联靠 `delivery_id` + `kind`（notify.md N-16） | 不使用 `dedup_key`；回复与游标同事务 | `store`、`api`、data-model |
+| OQ-12 | 契约与模块边界：(a) **已决：见裁决 C13 / P-59**（`conversation` 依赖 `notify`）；(b) **已决：见 decisions.md P-78**（统一 `ActorCtx`；其 `dedup_key` 写入 `message.posted.dedup_key`，store 允许 `message.posted` 带 `dedup_key`，store.md §7.2）；(c) `Ref.kind` 没有 `inbox`，消息与上报项的关联靠 `delivery_id` + `kind`（notify.md N-16） | (c) 靠 `delivery_id` + `kind` | `store`、data-model |

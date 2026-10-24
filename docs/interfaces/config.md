@@ -25,7 +25,7 @@
 
 | 内容 | 归属 | 说明 |
 | --- | --- | --- |
-| 引导配置：API 监听地址与端口、数据目录、`secrets/` 路径、webhook 监听与公网入口 / 隧道形态 | `deploy` | 文件配置，重启生效，不进事件日志 |
+| 引导配置：API 监听地址与端口、数据目录、`secrets/` 路径、webhook 监听与公网入口 / 隧道形态 | `deploy` | 文件配置，重启生效，不进事件日志。引导配置的键可能与 settings resource 同名前缀（如 `sandbox.workspaces_dir`、`egress.sandbox_cidrs`），但它们写在引导配置文件里，**不是** settings 键；写进 settings 文档按未知键拒绝（V01） |
 | `forge.*` 内部参数（webhook 载荷上限、对账批大小、Outbox 退避、推送传输、限流余量等） | `forge` / `deploy` | forge-actions §11 B / C：引导配置或内部常量，不是设置。例外见 §6.2、§10 |
 | 凭据的值 | 密钥存储（`secrets/`，加密） | 本文只出现引用 `secret_ref`，见 §2.4 |
 | 任务级参数：消息上的档位上限、`@` 引用 | `conversation` / `Message.level_cap` | 属于工作输入，不是配置（I7） |
@@ -53,7 +53,7 @@
 | `core` | — | `Settings` / `EffectiveSettings` 类型、merge、"收紧比较"、JSON Schema 校验；纯函数、无 IO [提议] |
 | `store` | — | 追加 `settings.updated` 事件；投影出当前文档与按 rev 的历史 |
 | `api` | 全部 | settings 路由（api.md §4.9）：合并、校验、角色检查、`dry_run`、secret `value` 的剥离与转存、事件写入 |
-| `models` | `models.*`、`levels.token_weights`、`levels.None.daily_tokens` | 解析三类模型、重试与降级、经 Egress 回环反向代理调用（带 `svc_token`，P-50）、用量记账（交付台账或会话台账，P-58） |
+| `models` | `models.*`、`levels.token_weights`、`levels.none.daily_tokens` | 解析三类模型、重试与降级、经 Egress 回环反向代理调用（带 `svc_token`，P-50）、用量记账（交付台账或会话台账，P-58） |
 | `engine` | `levels.*`、`policies.escalation`、`models.worker`、`sandbox.limits` | 创建交付单元时按 `level_cap` 固化预算与图模板（P-57）；自动加码；Attempt 前把 worker 配置解析进 JobSpec（`execution.*`、`constraints.limits`，见 worker-protocol §4）；入队 Outbox 前调用 `policy` 决定 `requires_approval`（P-62） |
 | `policy` | `policies.*` | 判定（被入队方在入队时调用；被 `forge` 在执行时调用以验证并消费审批；被 `repo` 调用以判定 `PatchFacts`）；每个判定记录 `config_rev` |
 | `repo` | `github.commit_identity`；补丁限额经 `policy` 读取 | 以该身份创建提交（P-69） |
@@ -96,7 +96,7 @@ effective(R, project) = clamp( merge(builtin(R), global(R), override(R, project)
 | `models.utility / planner / worker` 的所有字段 | **自由** | 无方向；§11 校验仍适用 |
 | `levels.default_level` | **自由**（decisions P-22） | 无方向（只是任务的默认上限，单个任务仍可在消息里指定） |
 | `levels.*.graph_template` | 否 [提议，OQ-11] | 方向无法比较，视同敏感键 |
-| `levels.*.budget.*`、`levels.None.daily_tokens` | 仅收紧 | 数值变大 = 放宽 |
+| `levels.*.budget.*`、`levels.none.daily_tokens` | 仅收紧 | 数值变大 = 放宽 |
 | `levels.token_weights` | 否（仅全局） | 任一权重变小 = 放宽（同样的用量计得更少） |
 | `policies.actions.*`、`policies.unlisted_action` | 仅收紧 | 严格度 `auto` < `approve` < `deny`，变小 = 放宽 |
 | `policies.allow_globs` | 否 | 范围变宽 = 放宽（glob 集合无法机械比较大小，故仅全局） |
@@ -185,7 +185,7 @@ effective(R, project) = clamp( merge(builtin(R), global(R), override(R, project)
 | `guardian.status_checklist`、`patrol_interval_s` | 下次更新 / 下个巡检周期 | 立即 |
 | `levels.*`（预算、图模板名） | **交付单元创建时**：`engine` 按 `level_cap` 解析并写入 `BudgetLedger`（模板名 + limits），同时记下 `config_rev`（P-57） | **不变**。已有交付单元继续用创建时的值（依据 BudgetLedger 存的是 `template` 与 `limits`）；之后调整 `level_cap` 也不改变它。自动加码时的图模板从该 `config_rev` 的快照解析 |
 | `levels.token_weights` | 每次记账（`budget.charged`）时 | 下一笔用量起；已记的不重算 |
-| `levels.None.daily_tokens` | 每次派发 None 档问答前 | 立即；当天会话台账的上限随之变化 |
+| `levels.none.daily_tokens` | 每次派发 None 档问答前 | 立即；当天会话台账的上限随之变化 |
 | `levels.default_level` | 创建交付单元（解析默认上限）时 | 不影响已有交付单元 |
 | `models.utility / planner` | 每次调用 | 下一次调用起；进行中的请求不中断 |
 | `models.worker` | Attempt 创建时解析进 JobSpec | 下一个 Attempt；进行中的 Attempt 不变。实际使用的 provider / model / effort 写入 `attempt.started`，供审计与计费 |
@@ -293,7 +293,7 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 | `provider` | providers 的 id | 无 | 全部 | |
 | `model` | string | 无 | 全部 | 必须无默认；示例中的 id 是占位符 |
 | `reasoning_effort` | `none / low / medium / high / max`；planner 与 worker 另可为 `by_level`（推理深度随档位，decisions P-17） | utility `low`；planner `high`；worker `by_level` | 全部 | 抽象枚举，由 `ModelProvider` 映射到具体参数；模型不支持的取值 → 422（V05） |
-| `effort_by_level` | `{low, medium, high, max}`，每项 `{default, critical?}` | 见 §3.3 | planner / worker，且仅当 `reasoning_effort = by_level` | `critical` 由图模板标记的节点使用（OQ-6）；Ultimate 的子交付单元按 Max 解析（[architecture §8](../architecture.md#8-档位阶段与图)），所以没有 `ultimate` 项 |
+| `effort_by_level` | `{low, medium, high, max}`（小写档位键，P-71），每项 `{default, critical?}` | 见 §3.3 | planner / worker，且仅当 `reasoning_effort = by_level` | `critical` 由图模板标记的节点使用（OQ-6）；Ultimate 的子交付单元按 Max 解析（[architecture §8](../architecture.md#8-档位阶段与图)），所以没有 `ultimate` 项 |
 | `fallback` | 数组，最多 3 项，每项 `{provider, model, reasoning_effort?}` | `[]` | 全部 | 见 §3.4 |
 | `adapter` | `claude-code` | `claude-code` | worker | `WorkerAdapter` 实现（P-07），与 worker-protocol `execution.agent` 同一标识；其他适配器后续追加 |
 | `request_timeout_s` | 整数，5–1800 | utility 60；planner 300；worker 600 **[建议值，待调优]** | 全部 | 单次模型请求的空闲超时（流式以"无数据"计） |
@@ -333,7 +333,7 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 `levels.default_level`：新任务的默认档位上限，取值为 `Level`（`"None"` / `"Low"` / `"Medium"` / `"High"` / `"Max"` / `"Ultimate"`，data-model §1），默认 `"Medium"` **[建议值，待调优]**。项目可覆盖。单个任务仍可在消息里指定上限（任务级参数，不是配置）。
 
-档位条目的键为 `low / medium / high / max / ultimate`（这是对象键，不是 `Level` 值）。**`none` 不出现**：None 档不建交付单元，没有预算模板（V07）。None 档只有一个每日上限，放在键 `None` 下（标识符取第二轮裁决的 `levels.None.daily_tokens`，首字母大写，与 `Level` 线上值一致，见 OQ-27）。
+档位条目的键一律小写：`none / low / medium / high / max / ultimate`（这是对象键，不是 `Level` 值；由 `Level` 值找条目时转小写，decisions P-71）。`levels.none` 只有一个键 `daily_tokens`（None 档不建交付单元，没有预算模板与图模板，V07）；其余五个条目各有图模板与预算。
 
 `levels` 的其余顶层键：
 
@@ -341,13 +341,13 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 | --- | --- | --- | --- |
 | `default_level` | `Level` | `"Medium"` | 见上 |
 | `token_weights.input` / `output` / `cache_read` / `cache_write` | 数值 > 0 | `1.0` / `5.0` / `0.1` / `1.25` **[建议值，待按价格调优]** | token 加权（P-44、P-70）：一次调用的加权 token = `Σ 权重 × 该类别 token 数`。所有预算里的 token 上限与台账用量都按加权值计；Egress 的 `tokens_total` 封顶也用同一组权重（签发令牌时随令牌下发）。默认值取一种常见的提供方价格比例（输入 : 输出 : 缓存读 : 缓存写 ≈ 1 : 5 : 0.1 : 1.25），不同提供方须自行调整。仅全局 |
-| `None.daily_tokens` | 正整数 | 500,000 **[建议值，待调优]** | None 档会话台账的每日上限（加权 token，UTC 日，P-58）：每个项目的会话台账每天一个；`answer` 临时图与不属于交付单元的直接调用（如 `intent`）都计入。达到上限后当天不再派发新的 None 档读代码问答。项目可覆盖，仅收紧 |
+| `none.daily_tokens` | 正整数 | 500,000 **[建议值，待调优]** | None 档会话台账的每日上限（加权 token，UTC 日，P-58）：每个项目的会话台账每天一个；`answer` 临时图与不属于交付单元的直接调用（如 `intent`）都计入。达到上限后当天不再派发新的 None 档读代码问答。项目可覆盖，仅收紧 |
 
 ### 4.1 字段
 
 | 键 | 类型 | 对应 | 语义 |
 | --- | --- | --- | --- |
-| `graph_template` | string | `Workflow.template` | 引用 `engine` 登记的模板族名，该族覆盖本档位各阶段的图（[architecture §8](../architecture.md#8-档位阶段与图) 表）。本文不定义模板内容；名字必须在 catalog 中存在且与档位匹配（V08） |
+| `graph_template` | string | `BudgetLedger.template`（族名；各阶段图的 `Workflow.template` 为 `<档位键>.<阶段>`，data-model） | 引用 `engine` 登记的模板族名，该族覆盖本档位各阶段的图（[architecture §8](../architecture.md#8-档位阶段与图) 表）。本文不定义模板内容；名字必须在 catalog 中存在且与档位匹配（V08） |
 | `budget.tokens_by_tier.utility / planner / worker` | 正整数 | `BudgetLedger.limits.tokens_by_tier` | 该交付单元内该类模型的累计**加权** token 上限，以 Egress 计量为准，权重见 `levels.token_weights`（P-70） |
 | `budget.nodes` | 正整数 | `limits.nodes` | 图中节点数上限（被图改写替换的节点也计；尝试另计，不占此项） |
 | `budget.rounds` | 正整数 | `limits.rounds` | 评审迭代轮（`REVISE` 追加的"修正 + 复审"）与守护自愈轮之和的上限；超限或判定无进展即上报（§8） |
@@ -472,7 +472,7 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `approval.ttl_s` | 86400，范围 60–604800 **[建议值，待调优]** | 写入 `Approval.expires_at`；变大 = 放宽 |
+| `approval.ttl_s` | 86400，范围 60–604800 **[建议值，待调优]** | 写入 `Approval.expires_at`；Forge 动作、补丁审批与内部动作的审批统一用它（P-75）；变大 = 放宽 |
 | `patch.max_files` | 200 **[建议值，待调优]** | I8 的"大小"校验；超限 → `policy.denied` 并上报 |
 | `patch.max_bytes` | 5,000,000 **[建议值，待调优]** | 补丁总字节 |
 | `patch.max_changed_lines` | 10000 **[建议值，待调优]** | 总增删行数（`git apply --numstat` 得出，worker-protocol §8.3 P1） |
@@ -566,7 +566,7 @@ api.md §4.9 把这两个只读路由的响应结构交给本文。字段名即�
 
 ## 8. `egress`
 
-`egress` 是独立进程，只读本节配置、`models.providers`、`levels.token_weights` 与它们引用的 secret，这份视图由 `gantryd` 经控制面下发（[egress-control.md](egress-control.md)，P-50）。两种模式（decisions P-16）：模型 API 与私有包仓库走**反向代理**（调用方把 base URL 指向 Egress，Egress 注入凭据并计量：沙盒调用方凭路径中的 `job_token` 识别为某个尝试，P-49；`models` 经回环反向代理凭 `svc_token` 识别，P-50）；公共包仓库走 **HTTPS CONNECT 白名单**（不注入凭据）。
+`egress` 是独立进程，只读本节配置、`models.providers`、`levels.token_weights` 与它们引用的 secret，这份视图由 `gantryd` 经控制面下发（[egress-control.md](egress-control.md)，P-50）。两种模式（decisions P-16）：模型 API 与私有包仓库走**反向代理**（调用方把 base URL 指向 Egress，Egress 注入凭据并计量：沙盒调用方凭路径中的 `job_token` 识别为某个尝试，P-49；`models` 经回环反向代理凭 `svc_token` 识别，P-50）；公共包仓库走 **HTTPS CONNECT 白名单**（不注入凭据；沙盒内的 CONNECT 用 `Proxy-Authorization` 携带 `job_token`，Egress 据此按尝试计量与审计，P-72）。
 
 ### 8.1 键
 
@@ -614,6 +614,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | `routes.<id>` | `{kinds: [InboxItem.kind…], channels: [kind…]}` | 哪些上报类型推到哪些渠道。`InboxItem.kind` 取值见 [data-model](../data-model.md#inboxitem--approval)：`approval_needed / decision_needed / spec_needed / budget_exhausted / escalation / security_finding` |
 
 - 通知文案可由 `utility` 模型生成（`notify` 对 `models` 的依赖是可选的，模型不可用时用固定模板，P-59）；正文不得原样透传不可信文本（I5）。
+- **手机推送**（M4）：推送令牌（APNs device token）不是设置键，由手机经 `PUT /v1/devices/self/push-token` 注册（P-77）。
 - **桌面系统通知**由客户端在收到 `inbox.raised` 且 `severity ≥ warn` 时弹出（P-63），不另设事件；`channels.desktop.enabled` 决定服务端是否把该事项推给桌面通道，本机外观页的开关决定本机是否弹窗（§13.2）。
 - 其他按 `severity` 的路由第一版不支持（OQ-15）。
 - 桌面端关闭时的离线通知见 Q-07。
@@ -646,7 +647,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | V04 | `models.worker`、`models.planner` 及其 `fallback` | **模型必须支持工具调用**（来自 `models` 的能力表，来源见 OQ-3；planner 也用于沙盒只读角色）；对 utility 不要求 | error | `worker_model_no_tools` |
 | V05 | `models.*` | `reasoning_effort`、`effort_by_level` 的每个取值必须被该模型支持；`by_level` 只允许 planner / worker，且必须提供 `effort_by_level` 且 `low / medium / high / max` 齐全、每项有 `default`；`reasoning_effort` 为固定值时 `effort_by_level` 被忽略（可以存在，项目覆盖固定值时全局的该表仍在） | error | `effort_unsupported` / `effort_by_level_required` |
 | V06 | `models.worker` | `adapter` 必须支持该 `provider.kind`；含 `fallback` 时 adapter 必须声明支持降级 | error | `adapter_provider_mismatch` / `fallback_unsupported` |
-| V07 | `levels` | `default_level` 是合法 `Level`；除 `default_level`、`token_weights`、`None` 外，键恰为 `low / medium / high / max / ultimate`；`none`（小写）作为条目键出现拒绝；`None` 只允许 `daily_tokens`（正整数）；`token_weights` 四项齐全且为正数；所有预算字段（含 `forge_writes`、`forge_writes_per_hour`）必填、正整数 | error | `levels_keys` / `budget_not_finite` / `token_weights_invalid` |
+| V07 | `levels` | `default_level` 是合法 `Level`（首字母大写的线上值）；除 `default_level`、`token_weights` 外，键只能是小写档位键 `none / low / medium / high / max / ultimate`（P-71），大写键（如 `None`、`High`）拒绝；`none` 只允许 `daily_tokens`（正整数），不得有图模板或预算；`token_weights` 四项齐全且为正数；其余五个条目的预算字段（含 `forge_writes`、`forge_writes_per_hour`）必填、正整数 | error | `levels_keys` / `budget_not_finite` / `token_weights_invalid` |
 | V08 | `levels.*.graph_template` | 模板名在 catalog 中存在，且与该档位匹配 | error | `template_unknown` / `template_level_mismatch` |
 | V09 | `levels` | 各预算字段随档位非递减（`tokens_by_tier.*`、`nodes`、`rounds`、`wall_time_s`、`forge_writes`）；`ultimate` 预算 ≥ `max`；`concurrency` 不超过 `sandbox.max_concurrent_sandboxes`；`forge_writes_per_hour` 不超过 GitHub 内容创建类的官方每小时上限 × 余量（forge-actions §10.1 / §10.2：500 × 0.5 = 250，余量是 forge 的内部常量） | warning（最后一项 error） | `levels_not_monotonic` / `forge_rate_over_ceiling` |
 | V10 | `egress` | 任何分组不得含 GitHub 域名族、IP 字面量、裸 `*`；`injection.hosts` 不得含 GitHub 域名族 | error | `egress_forbidden_host` |
@@ -717,7 +718,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
   "levels": {
     "default_level": "Medium",
     "token_weights": { "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25 },
-    "None": { "daily_tokens": 500000 },
+    "none": { "daily_tokens": 500000 },
     "low": {
       "graph_template": "low.single",
       "budget": {
@@ -948,7 +949,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | `levels.high.budget.nodes = 50`（全局 40） | `override_loosens_global` | 预算只能降（V19） |
 | `policies.paths.workflows.disposition = "auto"` | `disposition_not_allowed` | 路径规则不允许 `auto`（V15） |
 | `policies.paths.workflows.disposition = "approve"` | `invariant_floor` | Gantry 不修改 workflow 文件，只能 `deny`（V15，P-48） |
-| `levels.None.daily_tokens = 0` | `budget_not_finite` | 必须是正整数（V07） |
+| `levels.none.daily_tokens = 0` | `budget_not_finite` | 必须是正整数（V07） |
 | `egress.profiles.default.groups` 加入 `maven` | `override_loosens_global` | 项目只能收窄（V19） |
 | `guardian.triage.security_finding = "silent_fix"` | `locked_key` | 锁定类（V17） |
 | `models.providers.alt = {…}` | `override_not_allowed` | 提供方与凭据仅全局（V19） |
@@ -1013,7 +1014,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | OQ-7 | ~~预算口径与 token 加权~~ | 已决：单位见 decisions.md P-22；加权见 decisions.md P-44、P-70（`levels.token_weights`，§4） | — |
 | OQ-8 | ~~Ultimate 的预算作用域与 `concurrency` 含义~~ | 已决：见 decisions.md P-22 | — |
 | OQ-9 | ~~`forge_writes_per_hour` 与 `limits.forge_writes` 口径~~ | 已决：见 decisions.md P-22（累计数进台账，按小时限速由 Outbox 令牌桶执行） | — |
-| OQ-10 | 运行中能否给交付单元追加预算？预算耗尽上报后用户有哪些处置？是否需要"全局暂停 / 紧急止损"（属控制动作还是配置）。预算模板在创建时按 `level_cap` 固定、之后调上限也不变已决：见 decisions.md P-57；单个交付单元的暂停 / 继续已决：见 decisions.md P-56 | 本文不提供追加预算与全局暂停 | `engine`、`desktop-ui` |
+| OQ-10 | 运行中能否给交付单元追加预算？预算耗尽上报后用户有哪些处置？是否需要"全局暂停 / 紧急止损"（属控制动作还是配置）。预算模板在创建时按 `level_cap` 固定、之后调上限也不变已决：见 decisions.md P-57；单个交付单元的暂停 / 继续已决：见 decisions.md P-56；预算耗尽的处置选项已决为 `raise_cap` / `abandon`（P-79），`raise_cap` 追加多少与记什么事件待决（decisions.md Q-11） | 本文不提供追加预算与全局暂停 | `engine`、`desktop-ui` |
 | OQ-11 | 项目能否放宽：提高预算、换图模板、新增 egress 分组？语言包仓库组是默认全开（项目收窄）还是项目按需选（需要"项目可选分组"标记）？ | 一律只收紧 / 只收窄；全局默认档案需覆盖各项目所需 | `egress`、`sandbox` |
 | OQ-12 | 危险动作是否允许 `auto`（architecture §7.4 与 design.md 冲突）？`force_push` 的目标范围（仅 Gantry 创建的分支？）。动作 id 词表已决：见 decisions.md P-28 | 取保守：前七个 id 不允许 `auto`；目标范围未建模 | `policy`、`forge`、`engine` |
 | OQ-13 | M1 与 P-11 的过渡、M1 的 merge 签名已决：见 decisions.md P-18、P-19。仍待定："依赖清单"的权威清单；是否纳入 `.github/actions`、CODEOWNERS 等 | 清单为 [建议] | `policy` |
@@ -1030,4 +1031,4 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | OQ-24 | ~~Egress 注入机制~~ | 已决：见 decisions.md P-16（反向代理） | — |
 | OQ-25 | 本文对 api.md 的诉求 A1–A9（§2.7）已被采纳，仍待定：(a) resource 从任务清单点名的三个扩到八个是否接受；(c) 没有独立的版本列表 / 回滚路由，历史取自事件流；(d) `catalog` / `status` 结构（§2.8）是否够用。(b) 已决：见 decisions.md P-22；`status` 字段名统一为 `applied_rev` 已决：见第二轮裁决 C26 | 以 api.md 与本文当前文本一致为准 | `api`、`desktop-ui` |
 | OQ-26 | `forge.merge.method`（项目级合并方式）是否做成设置键：目前是 forge 内部常量（`webhook_secret_previous` 已决：见 decisions.md P-29） | 不收录 `forge.*` | `forge`、`deploy` |
-| OQ-27 | 档位条目键的大小写：预算条目用小写对象键（`low` … `ultimate`），而 None 档的每日上限按第二轮裁决写作 `levels.None.daily_tokens`（首字母大写）。是否统一为 `Level` 线上值（`Low` … `Ultimate`），或把 None 改成小写 `none` | 按裁决原样：其余小写、`None` 大写，V07 分别校验 | `engine`、`models`、`schemas/config/` |
+| OQ-27 | ~~档位条目键的大小写~~ | 已决：见 decisions.md P-71（配置里的档位键一律小写，`levels.none.daily_tokens`；线上 `Level` 值仍首字母大写） | — |

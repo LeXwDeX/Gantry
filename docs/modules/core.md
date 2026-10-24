@@ -31,7 +31,7 @@
 | --- | --- |
 | M0 | 本文 §1 全部**类型**（含全部里程碑用到的事件类型、实体、枚举）；ID、`Timestamp`、`Level`；全部状态机的转移表与测试；JCS、严格 JSON；事件 `data` 类型与 `schemas/events/*.json`；`schemas/forge/*.json`、`schemas/worker/*.json`、`schemas/config/*.json`；settings 的合并 / clamp / `relaxes` / 角色判定与通用校验 V01–V03；`IdempotencyKey::derive`；`testing` feature；`core::ports` 的八个端口 trait（§6.10，P-51）。`contract` 泳道同期交付 §6.9 的替身。退出标准见 §12.1 |
 | M1 | 随 M1 模块启用的校验器与守卫：`models`（V04–V06、V21–V22）、`egress`（V10、V13）、`models` ↔ `egress`（V11）、`github`、`sandbox`（V12）、`policies.actions / paths / approval / patch`（V14–V15）[提议，按 config.md §13 的设置页里程碑推断]；M1 用到的 `ApprovalPayload` 构造与测试向量 |
-| M2 | `levels`（V07–V09，含 `levels.token_weights` 与 `levels.None.daily_tokens`）、`policies.escalation`（V16）、`guardian`（V17）、`notify`（V18）、项目覆盖规则（V19）的校验器；`delivery` 状态机中 `merge → review` 的完整触发器；审批失效的守卫 |
+| M2 | `levels`（V07–V09，含 `levels.token_weights` 与 `levels.none.daily_tokens`）、`policies.escalation`（V16）、`guardian`（V17）、`notify`（V18）、项目覆盖规则（V19）的校验器；`delivery` 状态机中 `merge → review` 的完整触发器；审批失效的守卫 |
 | M3 | 图改写相关（`workflow.revised`、`node.superseded`）的不变式校验；`arbiter` / `reasoner` 的结构化输出一致性规则（类型 M0 已有，规则此时启用） |
 | M4 | `parent_id` / `depends_on` 的无环与父子汇总校验；手机档案的事件白名单常量（见 [api.md §5.4](../interfaces/api.md#54-过滤)） |
 
@@ -147,8 +147,8 @@ impl Timestamp {
 // 档位
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level { None, Low, Medium, High, Max, Ultimate } // serde："None"…"Ultimate"
-pub enum LevelKey { Low, Medium, High, Max, Ultimate }    // 配置对象键 low…ultimate；没有 none（V07）
-impl Level { pub fn capped_by(self, cap: Level) -> Level; pub fn key(self) -> Option<LevelKey>; }
+pub enum LevelKey { None, Low, Medium, High, Max, Ultimate } // 配置对象键 none…ultimate，一律小写（P-71）；none 只有 daily_tokens（V07）
+impl Level { pub fn capped_by(self, cap: Level) -> Level; pub fn key(self) -> LevelKey; } // 转小写即得对象键
 
 // 摘要与引用
 pub struct Sha256Digest([u8; 32]);   // 文本形式 "sha256:" + 64 位小写十六进制
@@ -221,7 +221,7 @@ impl ApprovalPayload {
 | `Approval`、`ApprovalStatus`、`ApprovalTarget`、`SubjectDigest` | §3、§4.4、api.md §6.1 | `SubjectDigest`：PR 类动作为 40 位 head SHA（`GitOid`），补丁与内部动作为 `sha256:…`；每个 `ApprovalAction` 的 `target` / `subject_digest` 形状取 data-model 的列表（P-54），常量表 `APPROVAL_SHAPES`，构造时按 `action` 校验，**表中没有的动作构造失败**（fail-closed） |
 | `OutboxAction`、`OutboxStatus`、`Priority`、`ExpectedEffect`、`GithubRef` | §3、forge-actions §2、§4.2 | `status`：`queued` / `executing` / `succeeded` / `failed` / `cancelled`（`failed` 为终态，P-53）；`ExpectedEffect.matched_webhook_deliveries`（C26） |
 | `Device`、`DevicePlatform`、`DeviceRole`、`DeviceStatus` | §3 | `role`：`viewer` / `operator` / `approver`，实现 `Ord`（`approver > operator > viewer`）；含审批签名公钥 `approval_pubkey`（与 mTLS 证书公钥是两把不同的密钥，P-47） |
-| `BudgetLedger`、`BudgetLimits`、`BudgetUsed` | §3、BudgetLedger 口径 | `subject`：`delivery` / `conversation`（P-58）；会话台账按日、上限 `levels.None.daily_tokens`；交付台账的预算模板在创建时按 `level_cap` 固定（P-57）；台账另需记 `config_rev`（config.md §2.6，OQ-8） |
+| `BudgetLedger`、`BudgetLimits`、`BudgetUsed` | §3、BudgetLedger 口径 | `subject`：`delivery` / `conversation`（P-58）；会话台账按日、上限 `levels.none.daily_tokens`；交付台账的预算模板在创建时按 `level_cap` 固定（P-57）；台账另需记 `config_rev`（config.md §2.6，OQ-8） |
 | `Event`、`Actor`、`ActorKind`、`Seq` | §5.1 | `ActorKind`：`engine` / `guardian` / `user` / `device` / `forge` / `system`；`Seq` 为 ≥ 1 的整数，构造时检查 ≤ 2^53−1 |
 
 **其他规格书对 `core` 类型的引用名与本文的对应**（它们是占位性质的写法，以本文为准；名字冲突的在这里消解）：
@@ -236,7 +236,7 @@ impl ApprovalPayload {
 | `Origin`（`forge`、`guardian`：`self` / `external`） | `ForgeOrigin` | 交付单元的 `origin` 是 `DeliveryOrigin` |
 | `ForgeEvent` | `ForgeEventEnvelope`（`Event<ForgeEventEnvelope>` 即日志中的 `forge.<kind>` 事件） | `occurred_at` 带毫秒（C26） |
 | `Forge`（forge 门面）、`Inbox`（notify）、`ApprovalGate` / `ActionPolicy` / `PatchPolicy`（policy）、`MirrorPort`、`UsageMeter`、`SecretForwarder` | `OutboxPort` + `ForgeReader`、`InboxPort`、`PolicyPort`、`RepoService`、`EgressControl` | 均在 `core::ports`（§6.10，P-51） |
-| `FakeSandboxDriver`（milestones 替身表，供 `engine`） | `FakeSandboxService` | 实现引擎面 `SandboxService`；容器面 `SandboxDriver` 只在 `sandbox` 内部（P-52） |
+| `FakeSandboxDriver`（旧称，已统一） | `FakeSandboxService` | 实现引擎面 `SandboxService`；容器面 `SandboxDriver` 只在 `sandbox` 内部（P-52） |
 | `dedupe_key`（notify 上报项） | `dedup_key` | 与事件信封的 `dedup_key` 同名（P-63） |
 | `applied_seq`（settings status） | `applied_rev` | C26 |
 | `Rng`（`pki`） | 不在 `core`；`core` 只有 `Entropy`（用于 ID 生成） | |
@@ -426,14 +426,18 @@ pub mod fixtures { pub fn load(name: &str) -> serde_json::Value; } // 取自契�
 | 替身 | 实现的端口 / 替代 | 使用者 |
 | --- | --- | --- |
 | `Store::open_in_memory` | `store` 的内存实现（在 `gantry-store` 的 `testing` feature） | 全部服务端模块 |
-| `FakeForge` | `ForgeReader` + `OutboxPort` | `engine`、`guardian`、`conversation`、`api` |
+| `FakeForge` | `ForgeReader` + `OutboxPort` + `PrRefresher` | `engine`、`guardian`、`conversation`、`api` |
 | `FakeGitHub` | HTTP 级 GitHub（REST / GraphQL / git-http 子集，可注入 webhook） | `forge` |
-| `FakeSandboxService`（milestones 旧称 `FakeSandboxDriver`） | `SandboxService`（按脚本返回 Worker 协议结果，P-52） | `engine` |
-| `FakeRepo` | `RepoService` | `engine`、`forge`、`sandbox` |
+| `FakeSandboxService` | `SandboxService`（按脚本返回 Worker 协议结果，P-52） | `engine` |
+| `FakeRepo` | `RepoService` + `WorktreeLocks` | `engine`、`forge`、`sandbox`、`guardian`、`api` |
 | `FakeModelProvider` | `ModelProvider` | `models`（进而 `engine`、`conversation`） |
 | `FakePolicy` | `PolicyPort` | `engine`、`guardian`、`repo`、`forge` |
 | `FakeInbox` | `InboxPort` | `engine`、`guardian`、`conversation`、`forge` |
 | `EgressStub` | `EgressControl`（并可起回环 HTTP 模拟 `svc_model`） | `sandbox`、`models`、`api` |
+| `FakeEngine` | `DeliveryControl` + `HealPort` + `ClassifyPort`（记录调用、按脚本返回，不重现引擎逻辑） | `api`、`guardian` |
+| `FakeConversation` | `ConversationService` | `api` |
+| `StubWorkerAdapter` | `WorkerAdapter`（固定镜像与命令、声明式能力表） | `engine`、`models`、`api` |
+| `MemorySecrets` | `SecretSource` + `SecretSink`（内存实现，按使用方隔离，P-81） | `forge`、`pki`、`egress`、`api`、`secrets` 的一致性用例 |
 | `TestCA`、Mock API 服务 | `pki`；整个服务端 | `api`、`fe-desktop`、`fe-mobile` |
 
 每个替身至少一个使用示例测试（M0 退出标准），并与对应的真实实现共用提供方模块的一致性用例。
@@ -445,6 +449,20 @@ pub mod fixtures { pub fn load(name: &str) -> serde_json::Value; } // 取自契�
 ```rust
 /// 跨端口传递调用方的写事务（store::WriteTx 实现它；实现方向下转型取回 WriteTx）。core 不知道 SQLite。
 pub trait TxHandle: Send { fn as_any_mut(&mut self) -> &mut dyn std::any::Any; }
+
+/// 统一的写操作上下文（P-78）：所有跨模块写接口一律用它，取代各模块的 WriteCtx / ActorRef / DeviceActor / RequestCtx。
+/// 设备请求由 api 在鉴权后构造；服务端模块自行发起的写（actor.kind ∈ engine / guardian / forge / system）设备字段为空。
+pub struct ActorCtx {
+    pub actor: Actor,                          // §6.5；设备请求为 {kind: device, id: dev_…}
+    pub device: Option<DeviceId>,
+    pub role: Option<DeviceRole>,              // 鉴权时的角色（审计用；授权已由 api 判定）
+    pub client_profile: Option<ClientProfile>, // Desktop | Mobile（由 Device.platform 推出，api.md §2.3）
+    pub request_id: RequestId,                 // 服务端发起的写也生成一个，用于日志关联
+    pub idempotency_key: Option<String>,       // API 层 Idempotency-Key 原文（api.md §3.3）
+    pub dedup_key: Option<String>,             // 由 idempotency_key 派生、写入所追加事件的 dedup_key，使重放在 store 层至多追加一次
+    pub causation_id: Option<EventId>,
+}
+pub enum ClientProfile { Desktop, Mobile }
 ```
 
 | 端口 | 提供方（实现） | 主要调用方 | 方法 | 签名 |
@@ -454,11 +472,19 @@ pub trait TxHandle: Send { fn as_any_mut(&mut self) -> &mut dyn std::any::Any; }
 | `SandboxService` | `sandbox` | `engine` | `submit`、`wait`、`progress`、`cancel`、`release`、`recover`、`sweep_orphans`、`capacity`（引擎面，P-52） | [sandbox.md §6.1](sandbox.md) |
 | `ModelProvider` | `models`（`AnthropicProvider`） | `models` 内部的调用器（经 `ModelRouter` 间接服务 `engine`、`conversation`、`notify`） | `kind`、`map_effort`、`complete(ProviderRequest, &EgressRoute)` | [models.md §6](models.md) |
 | `RepoService` | `repo` | `engine`、`forge`、`sandbox`、`guardian`、`api` | 镜像仓、工作树、写权锁、`prepare_workspace`、`validate_patch`、`commit_patch`、`provenance` | [repo.md §6](repo.md) |
-| `PolicyPort` | `policy` | `engine`、`guardian`、`repo`、`forge` | `decide_action`、`request_approval`、`invalidate`、`live_approvals_for_pr`、`decide_proposals`、`evaluate_patch`、`check_approval`、`path_rules`、`path_rules_snapshot`、`scan_text`、`consume_for_execution` | [policy.md §6](policy.md) |
-| `InboxPort` | `notify` | `engine`、`guardian`、`conversation`、`forge`、`api` | `raise(tx: Option<&mut dyn TxHandle>, RaiseRequest)`、`resolve`、`dismiss`、`choose`、`get`、`list`、`summary` | [notify.md §6.1](notify.md) |
-| `EgressControl` | `gantryd` 侧的 Egress 控制面客户端（经 `/run/gantry/egress.sock`，P-50） | `sandbox`、`models`、`api` | `endpoints`、`issue_job_token`、`job_usage`、`revoke_job_token`、`forget_job`、`service_token`、`apply_config`、`secret_present`、`stage_secret`、`activate_secret`、`discard_secret`、`staged_secrets`、`call_usage`、`usage_since`、`status` | [egress.md §6.2](egress.md)；[interfaces/egress-control.md](../interfaces/egress-control.md) |
+| `PolicyPort` | `policy` | `engine`、`guardian`、`repo`、`forge` | `decide_action`、`request_approval`、`invalidate`、`live_approvals_for_pr`、`decide_proposals`、`evaluate_patch`、`consume_patch_approval`（P-54）、`path_rules`、`path_rules_snapshot`、`scan_text`、`consume_for_execution` | [policy.md §6](policy.md) |
+| `InboxPort` | `notify` | `engine`、`guardian`、`conversation`、`forge`、`api` | `raise(tx: Option<&mut dyn TxHandle>, RaiseRequest)`、`resolve`、`dismiss`、`choose`、`get`、`list`、`summary`、`register_push_token`（M4，P-77）；写方法带 `ActorCtx` | [notify.md §6.1](notify.md) |
+| `EgressControl` | `gantryd` 侧的 Egress 控制面客户端（经 `/run/gantry/egress.sock`，P-50） | `sandbox`、`models`、`api` | `endpoints`、`issue_job_token`、`job_usage`、`revoke_job_token`、`forget_job`、`service_token`、`rotate_service_token`（P-74）、`apply_config`、`secret_present`、`stage_secret`、`activate_secret`、`discard_secret`、`staged_secrets`、`call_usage`、`usage_since`、`svc_token_usage`（P-74）、`status` | [egress.md §6.2](egress.md)；[interfaces/egress-control.md](../interfaces/egress-control.md) |
+| `DeliveryControl` | `engine` | `api`、`conversation`（P-82 的调档） | `set_level_cap`、`abandon`、`pause`、`resume`、`retry_node`（均带 `ActorCtx`） | [api.md §6.3](api.md)；[engine.md §6](engine.md) |
+| `ConversationService` | `conversation` | `api` | `ensure_conversation`、`post_user_message(ActorCtx, …)`、`list_conversations`、`list_messages` | [conversation.md §6](conversation.md) |
+| `WorktreeLocks` | `repo` | `api` | `acquire_human`、`release_human`（人工锁，`ActorCtx`） | [api.md §6.3](api.md)；[repo.md §6](repo.md) |
+| `PrRefresher` | `forge` | `api`（`grant` 前强制对账） | `refresh_pr` | [forge.md §6](forge.md) |
+| `HealPort` | `engine` | `guardian` | `request_heal`、`outcome`、`cancel`（P-60） | [engine.md §6](engine.md)；[guardian.md §6](guardian.md) |
+| `ClassifyPort` | `engine` | `guardian` | `classify_ci`、`classify_finding`（P-60） | [engine.md §6](engine.md)；[guardian.md §6](guardian.md) |
+| `WorkerAdapter` | `worker`（`claude-code`） | `engine`（构造 `SandboxSpec.exec`）、`models`（能力表）、`api`（catalog） | `agent_id`、`protocol_versions`、`image`、`command`、`env`、`token_env`、`capabilities`、`validate_agent_options` | [worker.md §6.3](worker.md) |
+| `SecretSource` / `SecretSink` | `secrets` | `forge`、`pki`、`egress`、`api` | `get`、`version`、`present`、`get_version`；`put`、`stage`、`commit`、`abort`、`staged`、`delete`、`list`、`check_refs` | [secrets.md §6](secrets.md) |
 
-不进 `core::ports` 的：只有一个调用方、且调用方本就 crate 依赖提供方的服务接口（`models` 的 `ModelRouter`、`policy` 的 `ApprovalService` / `AuditLog`、`pki` 的 `DeviceDirectory` 等，由 `api` / `engine` 直接依赖），以及模块内部 trait（`sandbox` 的 `SandboxDriver`）。
+判定原则（P-51）：**调用方与提供方属于不同泳道**（milestones 泳道表）的接口一律进 `core::ports`，并有 M0 替身（§6.9）；终审按此补入了 `DeliveryControl` 至 `SecretSource` / `SecretSink` 八组（共 16 组）（此前散落在 `api`、`engine`、`worker`、`secrets` 各自的 crate 里，跨泳道并行时无法编译）。不进 `core::ports` 的：同一泳道内的服务接口（`engine` 的 `EngineApi` 供 `conversation`、`models` 的 `ModelRouter` 供 `engine` / `conversation` / `notify`，均在 `be-engine`；`policy` 的 `ApprovalService` / `AuditLog`、`pki` 的 `DeviceDirectory` 供 `api`，均在 `sec`），以及模块内部 trait（`sandbox` 的 `SandboxDriver`）。
 
 ## 7. 内部设计
 
@@ -517,7 +543,7 @@ crates/gantry-core/
 | `implement` | `PlanInfeasible` | `plan` | 非 Low |
 | `implement` / `review` | `Replan` | `plan` | `REJECT` 后用户选择"重新规划"；非 Low |
 | `propose` | `PrCreated` | `review` | 含 Low（Low 的 review 只等 CI） |
-| `review` | `ReviewRevise` / `CiFailureNeedsCode` | `implement` | 守护的静默自愈不走这条边；只有需要改代码且超出自愈范围时（用户在守护上报项上选择 `rework` 后由 `engine` 触发 `CiFailureNeedsCode`）才走（P-60） |
+| `review` | `ReviewRevise` / `CiFailureNeedsCode` | `implement` | 守护的静默自愈不走这条边；只有需要改代码且超出自愈范围时（用户在守护的 `decision_needed`（`review_dispute`）上选择 `fix` 后由 `engine` 触发 `CiFailureNeedsCode`，P-79）才走（P-60） |
 | `review` | `ReviewAcceptCiGreen` | `merge` | |
 | `merge` | `ApprovalInvalidated` / `BaseAdvanced` | `review` | 同一条边 |
 | `merge` | `MergedAndIssuesClosed` | `closed` | |
@@ -605,7 +631,7 @@ pub enum RelaxCmp {
 2. 事件：每个 `EventType` 一份 `schemas/events/<type>.json`（`forge.<kind>` 共用信封 schema + 按 kind 的 `data` 子 schema）。
 3. 契约示例夹具：把 api.md、forge-actions.md、worker-protocol.md、config.md 中的示例块**原样**提取到 `fixtures/`，文件头记录来源文件与块的哈希；文档块变化而夹具未更新时 CI 失败，提醒同步。
 4. 反例：每条校验规则至少一个反例夹具（config.md §12.3 的"会被拒绝的写入"表逐行录入）。
-5. 已知与 data-model 不符的示例（如 api.md §4.7 `Workflow.status: "finished"`）登记为 `known_failure`，附 OQ 编号；契约 PR 修正后移除。
+5. 已知与 data-model 不符的示例登记为 `known_failure`，附 OQ 编号；契约 PR 修正后移除（终审时没有已知不符项）。
 
 ## 8. 不变式与安全要求
 
@@ -704,7 +730,7 @@ pub enum RelaxCmp {
 
 **预算**
 
-- [ ] `TokenWeights` 由 `levels.token_weights` 构造；`apply` 的加权 token 与手算一致（P-70）；会话台账（`LedgerSubject::Conversation`）只计 token 维度并按 `levels.None.daily_tokens` 判耗尽（P-58）。
+- [ ] `TokenWeights` 由 `levels.token_weights` 构造；`apply` 的加权 token 与手算一致（P-70）；会话台账（`LedgerSubject::Conversation`）只计 token 维度并按 `levels.none.daily_tokens` 判耗尽（P-58）。
 - [ ] `apply` 按 data-model 口径：被图改写替换的节点仍计入 `nodes`，`attempts` 单独计，`wall_time` 为秒，`rounds` 为评审轮与守护自愈轮之和，`forge_writes` 为累计数；`concurrency` 不进 `used`。
 - [ ] `would_exceed` 与 `is_exhausted` 的边界（`used + delta == limit` 不超限但已耗尽）有测试。
 
@@ -732,7 +758,7 @@ pub enum RelaxCmp {
 
 | # | 问题 | 本文临时处理 | 影响 |
 | --- | --- | --- | --- |
-| OQ-1 | **已决：见裁决 C5 / C6（P-51、P-52）**（八个跨模块端口 trait 定义在 `core::ports`，M0 交付；Worker / Forge 数据类型放 `core`；需要 IO 的替身放 `gantry-fakes`）。原问题：**契约类型与扩展点 trait 的归属**。M0 要交付 `FakeForge` / `FakeSandboxDriver` / `FakeRepo` / `FakeModelProvider`，它们要实现的 `Forge` / `SandboxDriver` / `Repo` / `ModelProvider` / `Notifier` / `WorkerAdapter` trait 定义在哪（`core`，还是各模块 crate 的 M0 骨架）？Worker 协议与 Forge payload 类型放 `core` 是否接受？ | 已落实到 §6.9、§6.10；`core` 为此允许 `async-trait` 与 `futures-core`（§3） | `contract` 泳道的 M0 范围；crate 依赖图 |
+| OQ-1 | **已决：见裁决 C5 / C6（P-51、P-52）**（八个跨模块端口 trait 定义在 `core::ports`（终审按同一原则扩充为 16 组，§6.10），M0 交付；Worker / Forge 数据类型放 `core`；需要 IO 的替身放 `gantry-fakes`）。原问题：**契约类型与扩展点 trait 的归属**。M0 要交付 `FakeForge` / `FakeSandboxDriver` / `FakeRepo` / `FakeModelProvider`，它们要实现的 `Forge` / `SandboxDriver` / `Repo` / `ModelProvider` / `Notifier` / `WorkerAdapter` trait 定义在哪（`core`，还是各模块 crate 的 M0 骨架）？Worker 协议与 Forge payload 类型放 `core` 是否接受？ | 已落实到 §6.9、§6.10；`core` 为此允许 `async-trait` 与 `futures-core`（§3） | `contract` 泳道的 M0 范围；crate 依赖图 |
 | OQ-2 | `desktop-shell`（Rust）是否依赖 `core`（architecture §4 把位置写成"共享 crate"）？若是，需要客户端容错解码（api.md §1.4）与 Windows / macOS 编译 | 服务端严格解码；客户端用 `Tolerant<T>` 包装，不改服务端类型；crate 保持跨平台 | `core` 依赖约束、`desktop-shell` 设计 |
 | OQ-3 | JCS、严格 JSON、审批载荷构造放 `core` 不在 architecture §4 对 `core` 的一句话职责里 | 放 `core`（单一实现，避免字节分歧） | `policy`、`api`、`forge`、`desktop-shell` |
 | OQ-4 | `UntrustedText` 的规范化（worker-protocol §4.4 步 2–3）与隔离包装归 `core` 还是 `sandbox`？ | 规范化放 `core`；包装（nonce、标记行）留给 `sandbox` | `sandbox`、`engine` |
@@ -746,4 +772,4 @@ pub enum RelaxCmp {
 | OQ-12 | JSON Schema 方言与 OpenAPI 3.1 对齐的方式 | 2020-12 | `ops` 的校验工具选型 |
 | OQ-13 | settings 稀疏存储下，内置默认随版本变化会静默改变未显式设置的键（config.md OQ-20）；`schema_version` 迁移策略 | 暂无迁移；`SETTINGS_SCHEMA_VERSION` 变化视为破坏性变更 | `core`、`deploy` |
 | OQ-14 | 跨使用方共用同一 `secret_ref`：config.md §2.4 允许"多个字段引用同一个 ref"，而 `secrets` 按使用方隔离 | `split_secret_values` 对"同一名字出现在不同 `Consumer` 的字段里"报错（新增语义码，需契约 PR 登记） | `secrets`、`api` |
-| OQ-15 | `levels.None.daily_tokens`（P-58）使 `levels` 出现 `None` 键，而 V07 与 `LevelKey` 原本排除 `none`；本文让 `levels.None` 只允许 `daily_tokens` 一个键 | V07 改为"`None` 只允许 `daily_tokens`"；`LevelKey` 不变，另设 `LevelsSettings.none_daily_tokens` | config.md V07、`api` 校验 |
+| OQ-15 | ~~`levels.none.daily_tokens` 与 `LevelKey` 的大小写~~ | 已决：见 decisions.md P-71（档位键一律小写，`LevelKey` 含 `None`，`levels.none` 只允许 `daily_tokens`） | — |

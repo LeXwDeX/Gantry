@@ -95,11 +95,11 @@
 ```
 
 - `token` 是不透明字符串（示例仅为示意）。客户端本地生成**两把**密钥（P-47），**私钥都不出设备**：mTLS 客户端密钥（CSR 用它；后台连接无提示使用）与审批签名密钥（Secure Enclave / TPM，不可导出，每次使用必须用户在场：Touch ID / Windows Hello）。CSR 的 subject 由服务端忽略并重写（`CN = device.id`），密钥算法要求见 modules/pki.md（本文按 ECDSA P-256）。
-- `approval_pubkey`：审批签名公钥，P-256 未压缩点的 base64url（无填充）；服务端登记在 Device 上，此后所有审批签名都用它验签（§6.3）。必须与 CSR 的公钥不同，否则 `422 validation_failed`。
+- `approval_pubkey`：审批签名公钥，P-256 未压缩点的 base64url（无填充）；服务端登记在 Device 上，此后所有审批签名都用它验签（§6.3）。必须与 CSR 的公钥不同，否则 `422 validation_failed`。桌面档案（`platform` ∈ `windows` / `macos`）必带，缺失 → `422 validation_failed`；手机档案（`ios`）可省略，省略则 Device 不登记审批公钥、响应里 `approval_pubkey_fpr` 为 `null`（P-76）。
 - `certificate_chain` 为 `[叶子, 中间 CA, 根]`（P-64）；客户端必须验证根证书的指纹等于配对串里固定的离线根 CA 指纹、链完整，再存入系统钥匙串 / 凭据存储。`ca_fingerprint` 是根 CA 指纹。
 - `confirmation_code`（6 位）与服务端控制台显示的一致，由用户人工核对（architecture §7.1 步骤 5）。核对失败的处置、设备在核对前是否已 `active`：OQ-12。
 - token 无效、已用、过期、被作废**统一**返回 `401 pair_token_invalid`，不区分原因（不给枚举 oracle）。响应丢失后 token 已被消耗，只能重新生成 token 再配对（本端点不支持 `Idempotency-Key`）。
-- 配对成功写 `device.paired` 事件。新设备的 `role`：第一台配对设备为 `approver`（所有者），之后配对的设备默认 `operator`（P-23）；示例是第一台设备。
+- 配对成功写 `device.paired` 事件。新设备的 `role`：第一台配对设备为 `approver`（所有者），之后配对的设备默认 `operator`（P-23）；示例是第一台设备。手机档案设备至多 `operator`，即使是第一台（P-76）；第一台是手机时系统暂无 approver，怎样处理待决（decisions Q-10，推荐：安装引导期持续到第一台桌面设备配对，它成为 approver）。
 
 ### 1.4 版本与兼容
 
@@ -149,7 +149,7 @@
 | `operator` | viewer + 发消息、调档 / 暂停 / 继续 / 放弃交付单元、重试失败节点、解除收件箱项、工作树人工锁、**读 settings 并写其中的中性 / 收紧类改动**、重命名设备、为内部动作发起审批请求（§6.6） |
 | `approver` | operator + 获取审批 challenge 并签名 / 拒绝审批；带签名的写入：放宽类、"仅 approver 键"与带 secret `value` 的 settings 写入（config.md §2.5）、改设备角色、吊销设备（§6.6，P-18、P-23） |
 
-第一台配对设备为 approver，之后配对的设备默认 operator（P-23）。
+第一台配对设备为 approver，之后配对的设备默认 operator（P-23）。手机档案设备永远不能成为 approver（P-76，见 §2.3）。
 
 ### 2.3 客户端档案与手机端子集
 
@@ -158,11 +158,11 @@
 | 档案 | 判定 | 可用路由 |
 | --- | --- | --- |
 | `desktop` | `platform` ∈ {`windows`, `macos`} | 全部，按角色 |
-| `mobile` | `platform` = `ios` | 仅下表 12 条（D-11：手机端只给 agent 发消息） |
+| `mobile` | `platform` = `ios` | 仅下表 13 条（D-11：手机端只给 agent 发消息） |
 
 > 角色只有三级，无法表达"只做对话"，所以另设档案（P-23）。`platform` 取值见 data-model Device。
 
-**手机端默认角色 `operator`**（P-23：配对的第二台起默认 operator）：发消息需要 operator；手机端默认不可审批。即使设备被改成 approver，手机档案下审批路由仍是 `403 forbidden_profile`。
+**手机端角色至多 `operator`**（P-23、P-76）：发消息需要 operator；手机档案设备**永远不能**成为 approver——配对时角色至多 `operator`（即使是第一台），`PUT /v1/devices/{id}/role` 与主机上的 `gantry device recover --promote` 把它设为 approver 一律 `409 conflict`（`reason: mobile_cannot_approve`）。审批路由对手机档案一律 `403 forbidden_profile`。
 
 手机端可用路由：
 
@@ -175,11 +175,12 @@
 | `POST /v1/conversations/{conversation_id}/messages` | 发消息（可带 `refs`；手机档案带的 `level_cap` 被服务端忽略，固定使用项目默认上限，P-35） |
 | `GET /v1/inbox`、`GET /v1/inbox/{inbox_id}` | 读收件箱（不能 dismiss） |
 | `GET /v1/inbox/summary` | 按项目的 open 计数（项目列表的"需要你"徽标，P-63） |
-| `POST /v1/inbox/{inbox_id}/choose` | 对 `spec_needed`、`decision_needed` 选择选项（升档用 `escalation`，与审批一样只在桌面） |
-| `POST /v1/devices/self/renew` | 续期本设备的客户端证书（P-64；所有档案都需要） |
+| `POST /v1/inbox/{inbox_id}/choose` | 对 `decision_needed` 与 `budget_exhausted` 选择选项（`budget_exhausted` 的 `raise_cap` 只在桌面；升档用 `escalation`，与审批一样只在桌面；`spec_needed` 没有选项，用发消息答复，P-79） |
+| `POST /v1/devices/self/renew` | 续期本设备的客户端证书（P-64、P-75；所有档案都需要） |
+| `PUT /v1/devices/self/push-token` | 注册 / 更新本设备的 APNs 推送令牌（M4，P-77） |
 | `GET /v1/events` | 事件流；服务端只下发 `project.*`、`conversation.*`、`message.*`、`inbox.*`、`device.revoked` [提议] |
 
-手机端不提供：交付单元、工作树、工作流、预算、审批、settings、设备管理（续期本设备证书除外）。离线推送令牌的注册路由未定（M4 的 `notify` APNs 实现，OQ-2）。
+手机端不提供：交付单元、工作树、工作流、预算、审批、settings、设备管理（续期本设备证书与注册推送令牌除外）。
 
 ---
 
@@ -260,7 +261,7 @@
 | 头 | `Idempotency-Key: <16–64 字符 [A-Za-z0-9_-]>`，建议 ULID / UUID，由客户端为每次**用户意图**生成一次，重试沿用 |
 | 必带 | `POST …/messages`、`POST /v1/approvals`、`POST …/grant`、`POST …/deny`、`POST /v1/inbox/{inbox_id}/choose`、控制路由 `POST /v1/deliveries/{delivery_id}/pause`、`POST /v1/deliveries/{delivery_id}/resume`、`POST /v1/nodes/{node_id}/retry`（P-56）（缺失 → `400 idempotency_key_required`） |
 | 可带 | 其余 `POST` 状态流转。它们本身按"目标状态幂等"：已在目标状态则 `200` 返回当前表示（abandon 已放弃的、dismiss 已 dismissed 的、revoke 已吊销的） |
-| 不适用 | `GET` / `PUT` / `PATCH` / `DELETE`（天然幂等或用 `If-Match`）；`POST /v1/pair` |
+| 不适用 | `GET` / `PUT` / `PATCH` / `DELETE`（天然幂等或用 `If-Match`；含 `PUT /v1/devices/self/push-token`，同值重放无副作用）；`POST /v1/pair` |
 | 作用域 | `(device_id, key)`；服务端保存请求指纹（方法 + 路径 + 正文哈希）与首次响应 |
 | 重放 | 同 key 同指纹：原样返回首次响应（状态码 + 正文），加头 `Idempotent-Replayed: true` |
 | 冲突 | 同 key 不同指纹 → `422 idempotency_key_reuse`；首次仍在处理 → `409 idempotency_in_progress` |
@@ -367,8 +368,9 @@
 | 45 | POST | `/v1/nodes/{node_id}/retry` | operator | — | 重试失败节点（幂等键：必，P-56） | §4.7 |
 | 46 | GET | `/v1/inbox/summary` | viewer | ✓ | 按项目的 open 计数（P-63） | §4.8 |
 | 47 | POST | `/v1/devices/self/renew` | viewer | ✓ | 提交新 CSR 续期本设备证书（P-64） | §4.10 |
+| 48 | PUT | `/v1/devices/self/push-token` | operator | ✓ | 注册 / 更新本设备的 APNs 推送令牌（M4，P-77） | §4.10 |
 
-合计 **47 条**：mTLS API 46 条 + 配对 1 条；手机档案 12 条（#2 #3 #4 #10 #11 #12 #21 #22 #41 #42 #46 #47）。`✓*`：手机档案只能对 `spec_needed` 与 `decision_needed` 选择，`escalation`（升档等会增加花费的选择一律用它，P-63）与 `approval_needed` 返回 `403 forbidden_profile`（P-35）。
+合计 **48 条**：mTLS API 47 条 + 配对 1 条；手机档案 13 条（#2 #3 #4 #10 #11 #12 #21 #22 #41 #42 #46 #47 #48）。`✓*`：手机档案只能对 `decision_needed` 与 `budget_exhausted` 选择，且 `budget_exhausted` 的 `raise_cap` 返回 `403 forbidden_profile`；`escalation`（升档等会增加花费的选择一律用它，P-63）与 `approval_needed` 返回 `403 forbidden_profile`（P-35）；`spec_needed` 没有选项（P-79），任何档案对它 `choose` 都是 `422`。
 
 `*` settings 的"最低角色"是**路由下限**：服务端按改动**内容**判定实际所需角色与签名（config.md §2.5：中性 / 收紧 → operator，无签名；放宽、"仅 approver 键"、任何带 secret `value` 的写入 → approver + 审批签名，§6.6），`dry_run` 先告知 `required_role` / `requires_signature`（§4.9）。读类 settings 路由 operator 起，viewer 不能读 settings。
 
@@ -468,7 +470,7 @@
 | --- | --- | --- |
 | `GET /v1/deliveries` | 查询：`project_id`、`stage`（可重复）、`stage_status`、`active=true`（排除 `closed` / `abandoned`，供左侧"进行中"列表）、分页 | 列表 `Delivery` |
 | `GET /v1/deliveries/{delivery_id}` | — | `Delivery` |
-| `PATCH /v1/deliveries/{delivery_id}` | `{ "level_cap": "Max" }`（仅此字段；`stage` 为 `closed` / `abandoned` 时 `409 conflict`，`reason: invalid_state`） | `200 Delivery`；产生 `delivery.level_changed`。调高上限只放宽引擎可加码的范围，`level_effective` 不会因此自动上升；调低到 `level_effective` 以下时 `level_effective` 随之下调，但已触发的闸门不撤销。两种情况都**不改变**创建时按 `level_cap` 固定的预算模板（P-57；追加预算见 config OQ-10） |
+| `PATCH /v1/deliveries/{delivery_id}` | `{ "level_cap": "Max" }`（仅此字段；`stage` 为 `closed` / `abandoned` 时 `409 conflict`，`reason: invalid_state`） | `200 Delivery`；产生 `delivery.level_changed`。调高上限只放宽引擎可加码的范围，`level_effective` 不会因此自动上升；调低到 `level_effective` 以下时 `level_effective` 随之下调，但已触发的闸门不撤销。两种情况都**不改变**创建时按 `level_cap` 固定的预算模板（P-57；预算耗尽后的追加见 decisions Q-11）。桌面端消息带 `level_cap` 且 `@` 已有交付时等同本路由（P-82，§4.5） |
 | `POST /v1/deliveries/{delivery_id}/abandon` | `{ "reason": "不做了" }`（`reason` 可选，≤ 500 字符） | `200 Delivery`（`stage: abandoned`，`stage_status: done`）；产生 `delivery.abandoned` |
 | `POST /v1/deliveries/{delivery_id}/pause` | `{}`；`Idempotency-Key` 必带 | `200 Delivery`（`stage_status: paused`）；产生 `delivery.paused`。引擎不再派发新节点，运行中的尝试跑到安全点；已是 `paused` 原样 `200`；终态 → `409 conflict`（`invalid_state`）（P-56） |
 | `POST /v1/deliveries/{delivery_id}/resume` | `{}`；`Idempotency-Key` 必带 | `200 Delivery`（`stage_status` 回到暂停前的值，期间上报项已处理则为 `running`）；产生 `delivery.resumed`。不是 `paused` → 已在目标状态则原样 `200`，终态 → `409 conflict` |
@@ -571,7 +573,7 @@
 | `agent_kind` | `planner` / `worker` / `utility` / `null`；只决定气泡边框颜色（D-12：不显示头像） |
 | `refs[]` | `Ref`（data-model §1.1）：`{"kind":"issue","repo":"o/r","number":5}`、`{"kind":"pr","repo":"o/r","number":12}`、`{"kind":"worktree","id":"wtr_…"}`、`{"kind":"delivery","id":"dlv_…"}`。客户端只发上述最小字段，`node_id` / 快照由服务端解析；解析不到 → `422 validation_failed` |
 | `cards[]` | `Card`（data-model §1.1）：`plan` / `approval` / `escalation` / `choice` / `summary`（`summary` 卡为 `items[]`，每项 `{text, ref}`）；`kind` 集合开放，**未知 `kind` 必须降级为不显示或显示"请升级客户端"**。详情总是再取资源，卡片不内嵌可签名内容 |
-| `level_cap` | 用户消息附带的**任务级**档位上限，`null` = 用配置 `levels.default_level` 的生效值；`"None"` = 纯对话不建交付单元（architecture §8；读代码的问答记会话台账，P-58）。不是配置（§8.2）。**手机档案**发出的消息，服务端忽略该字段，固定使用项目默认上限（P-35），回执消息复述实际生效的上限 |
+| `level_cap` | 用户消息附带的**任务级**档位上限，`null` = 用配置 `levels.default_level` 的生效值；`"None"` = 纯对话不建交付单元（architecture §8；读代码的问答记会话台账，P-58）。不是配置（§8.2）。**手机档案**发出的消息，服务端忽略该字段，固定使用项目默认上限（P-35），回执消息复述实际生效的上限。**桌面档案**的消息带 `level_cap` 且 `refs` 里 `@` 的是已有交付单元：视为调整该交付单元的上限，等同 `PATCH /v1/deliveries/{id}`（产生 `delivery.level_changed`，预算模板不变；值与当前上限相同则不变），客户端发送前提示影响（P-82） |
 | `delivery_id` | 服务端异步关联；`POST` 响应里通常是 `null`，客户端从 `delivery.created` 等事件得知，不要轮询它 |
 
 | 路由 | 请求 | 响应 |
@@ -635,7 +637,7 @@
   "stage": "implement",
   "graph_rev": 1,
   "status": "succeeded",
-  "template": "medium.plan_build_verify",
+  "template": "medium.implement",
   "nodes": [
     {
       "id": "nod_01JB7M7V4X2N9R5T8Q3K6W1YZG",
@@ -753,13 +755,13 @@
 | `GET /v1/inbox/{inbox_id}` | — | `InboxItem` |
 | `GET /v1/inbox/summary` | — | 按项目的 open 计数（上例）；供项目 tab 与手机项目列表的徽标，客户端收到 `inbox.*` 事件后可本地增减，也可重新拉取 |
 | `POST /v1/inbox/{inbox_id}/dismiss` | `{ "note": "已知晓" }`（可选） | `200 InboxItem`（`status: dismissed`），产生 `inbox.dismissed`；已是 `dismissed` 则原样 `200`；`resolved` 的 → `409 conflict`（`reason: invalid_state`） |
-| `POST /v1/inbox/{inbox_id}/choose` | `{ "option_id": "upgrade", "note": "可选的补充说明" }`；`Idempotency-Key` 必带 | `200 InboxItem`（`status: resolved`），产生 `inbox.resolved`（`data.option_id`）；选项不在 `payload.options` 中 → `422`；已不是 `open` → `409 conflict` |
+| `POST /v1/inbox/{inbox_id}/choose` | `{ "option_id": "upgrade", "note": "可选的补充说明" }`；`Idempotency-Key` 必带 | `200 InboxItem`（`status: resolved`），产生 `inbox.resolved`（`data.option_id`）；选项不在 `payload.options` 中（含没有选项的 `spec_needed`）→ `422`；已不是 `open` → `409 conflict`；手机档案的限制见 §4.1 `✓*` |
 
-- 带选项的上报项（`decision_needed`、`escalation`、`spec_needed` 中的选择题）在 `payload.options[]` 里给出 `{id, label, primary?}`（`primary` 标记默认 / 推荐项，P-63）；对话里的选择卡片与收件箱**引用同一个 `inbox_id`**，按钮都调 `choose`（P-40）。升档一律是 `escalation`，只能在桌面选择（P-35）。
+- 带选项的上报项（`decision_needed`、`escalation` 的 `level_cap_exceeded`、`budget_exhausted`）在 `payload.options[]` 里给出 `{id, label, primary?}`（`primary` 标记默认 / 推荐项，P-63）；`reason_code` 与选项 id 的词表固定在 [data-model](../data-model.md#上报项的-reason_code-与选项词表)（P-79），客户端按 id 渲染、不自行增减；对话里的选择卡片与收件箱**引用同一个 `inbox_id`**，按钮都调 `choose`（P-40）。升档一律是 `escalation`，只能在桌面选择（P-35）。
 - `project_id` 与 `dedup_key`（P-63）：服务端用 `dedup_key` 去重——同一键已有 `open` 项时不再新建；客户端视 `dedup_key` 为不透明字符串，只用于展示"重复出现"。
 - `decision_needed` 的 `payload.kind = manual_action`（如 workflow 补丁，P-48）表示需要用户在 Gantry 之外手动完成；`payload.patch.ref` 指向的补丁内容读取路由与 `result_ref` 一样尚未定义（OQ-11）。
 - 桌面系统通知：桌面端收到 `inbox.raised` 且 `severity` 为 `warn` / `blocker` 时弹系统通知（P-63），不另设事件或路由。
-- 自由文本答复（如补充验收标准）走发消息路由，消息带 `refs` 指向该交付单元；会话服务据此处理后由服务端 `resolve` 上报项。
+- 自由文本答复（`spec_needed`，如补充验收标准）走发消息路由，消息带 `refs` 指向该交付单元；会话服务据此处理后由服务端 `resolve` 上报项（P-79）。
 - 审批类上报项（`approval_needed`）只能经审批路由（§6）处理，`choose` 对它返回 `409`。
 - `summary` 可能含不可信内容，按 §1.5 渲染。`severity`（`info` / `warn` / `blocker`）与按 `kind` 的 `payload` 形状见 data-model InboxItem。
 
@@ -943,9 +945,11 @@
 | `PATCH /v1/devices/{device_id}` | `{ "name": "书房 Mac" }`（仅 `name`，1–64 字符） | `200 Device`；产生 `device.updated` |
 | `PUT /v1/devices/{device_id}/role` | `{ "role": "operator" }`；头 `Gantry-Approval`（动作 `device_role_change`，§6.6）；**不能改自己**（`409 conflict`，`reason: self_role_change`） | `200 Device`；产生 `device.updated`。新角色对该设备的**下一个请求**立即生效 |
 | `POST /v1/devices/{device_id}/revoke` | `{}`；头 `Gantry-Approval`（动作 `device_revoke`，§6.6） | `200 Device`（`status: revoked`）。可吊销自己；已吊销则原样 `200`。产生 `device.revoked`，同时追加到事件日志之外的 `revocations.journal`（P-67），并断开该设备的全部事件流（§5.5） |
+| `PUT /v1/devices/self/push-token` | `{ "token": "<APNs device token，hex>", "environment": "production" }`（`environment` ∈ `production` / `sandbox`）；operator 起，所有档案可调用（第一版只有手机档案使用：`notify` 的 APNs 渠道只给 `ios` 设备推送），M4（P-77） | `204`。令牌存于 `notify` 的私有表，按设备覆盖；**不进事件日志、不出现在任何读响应里**；设备吊销时清除。令牌格式非法 → `422 validation_failed`；限流同写操作 |
 | `POST /v1/devices/self/renew` | `{ "csr": "-----BEGIN CERTIFICATE REQUEST-----\n…" }`；经现有 mTLS 连接（证书仍有效），viewer 起，所有档案可用（P-64） | `200 { "certificate_chain": [叶子, 中间 CA, 根], "not_after": "…" }`；客户端校验根指纹与配对时固定的一致后替换本地证书，旧证书到期前仍可用。CSR 可沿用或更换 mTLS 客户端密钥，**不涉及**审批签名密钥（`approval_pubkey` 不变）。CSR 非法 → `422 validation_failed`；设备已吊销 → 握手失败 / `401 device_revoked`；限流同写操作 |
 
-- 吊销不可逆；要恢复必须重新配对（新设备记录）。服务端从备份恢复时重放 `revocations.journal` 中晚于备份的吊销，被吊销的设备不会因恢复而复活（P-67）。
+- 吊销不可逆；要恢复必须重新配对（新设备记录）。`revocations.journal` 只追加，每次写入同步复制到备份目标（复制失败则吊销失败），事务回滚不删条目；服务端从备份恢复时重放其中时间戳晚于备份的吊销，被吊销的设备不会因恢复而复活（P-67、P-80）。
+- 手机档案设备不能成为 approver：对 `platform = ios` 的设备 `PUT …/role` 设 `approver` → `409 conflict`（`reason: mobile_cannot_approve`，P-76）。
 - 续期由客户端在证书剩余 1/3 有效期时自动发起（建议值），用户无感；续期失败时顶栏提示"证书将过期"。
 - 改角色与吊销都需要 approver 签名（P-23）。
 
@@ -1254,7 +1258,12 @@ Gantry 审批（architecture §7.4）：用户用设备上的**审批签名密�
 | 请求体带 `model` 或预算字段（如 `POST …/messages`） | `422 validation_failed`，`errors[].code = unknown_field` |
 | 用 mTLS 客户端密钥（而非审批签名密钥）签 challenge | `403 signature_invalid` |
 | `ios` 设备发消息并带 `level_cap: "Max"` | `201`，消息的 `level_cap` 为项目默认上限 |
-| `ios` 设备对 `escalation` 调 `choose` | `403 forbidden_profile` |
+| `ios` 设备对 `escalation` 调 `choose`；对 `budget_exhausted` 选 `raise_cap` | `403 forbidden_profile` |
+| 任何设备对 `spec_needed` 调 `choose` | `422`（没有选项，P-79） |
+| 把 `ios` 设备改为 `approver`（`PUT …/role`） | `409 conflict`，`reason: mobile_cannot_approve`（P-76） |
+| `ios` 设备配对时不带 `approval_pubkey`；`macos` 设备不带 | `201`，`approval_pubkey_fpr: null`；`422 validation_failed` |
+| `ios` 设备 `PUT /v1/devices/self/push-token` 后读 `GET /v1/devices`、事件流 | 都不含推送令牌（P-77） |
+| 桌面设备发消息带 `level_cap: "Max"` 且 `refs` 指向 `level_cap` 为 High 的交付 | `201`，并产生 `delivery.level_changed`（High → Max）；预算模板不变（P-82） |
 | `POST …/pause`、`…/resume`、`/v1/nodes/{id}/retry`、`…/choose` 缺 `Idempotency-Key` | `400 idempotency_key_required` |
 | 服务端从备份恢复后客户端带旧游标重连 | 响应头 `X-Log-Epoch` 变化，客户端全量重同步；备份之后吊销的设备握手仍被拒 |
 | 证书剩余不足 1/3 时 `POST /v1/devices/self/renew` | `200`，新证书链的根指纹与配对时一致 |
@@ -1267,7 +1276,7 @@ Gantry 审批（architecture §7.4）：用户用设备上的**审批签名密�
 
 | I6 的要求 | 本 API 的体现 |
 | --- | --- |
-| 客户端不执行 | 全部写路由只有六类：发消息（数据）、改配置（settings）、审批签名 / 拒绝、状态流转（调档 / 暂停 / 继续 / 放弃 / 重试失败节点 / dismiss / choose）、工作树人工锁、设备管理（含证书续期）。**没有任何路由接收代码、命令、补丁、脚本，也没有"让服务端替客户端运行某物"的路由**；执行只发生在服务端 → 引擎 → 沙盒，GitHub 写只经 Outbox（I1、I2） |
+| 客户端不执行 | 全部写路由只有六类：发消息（数据）、改配置（settings）、审批签名 / 拒绝、状态流转（调档 / 暂停 / 继续 / 放弃 / 重试失败节点 / dismiss / choose）、工作树人工锁、设备管理（含证书续期与推送令牌注册）。**没有任何路由接收代码、命令、补丁、脚本，也没有"让服务端替客户端运行某物"的路由**；执行只发生在服务端 → 引擎 → 沙盒，GitHub 写只经 Outbox（I1、I2） |
 | 不持 GitHub 凭据 | 没有任何响应包含 installation token、App 私钥、webhook secret；客户端不调用 GitHub API，PR / Issue 信息来自服务端快照，跳转链接由 `repo` + `number` 拼出并在系统浏览器打开 |
 | 不持模型凭据 | 模型凭据只作为 `SecretRef.value` 经 `PUT /v1/settings/{resource}`（带审批签名，§6.6）写入且**只写不读**，服务端经 Egress 控制面转交 Egress 保存（P-16、P-50），设置文档里只有 `secret_ref`（§4.9）；客户端提交后不得持久化、不得写日志；任何读路由、事件、日志都不含值 |
 | 客户端持有的只有 | 两把不可导出的设备密钥（mTLS 客户端密钥，只用于连接；审批签名密钥，只用于审批签名且每次需用户在场，P-47）、离线根 CA 指纹、设备证书。签名内容里没有任何凭据 |
@@ -1308,7 +1317,7 @@ Gantry 审批（architecture §7.4）：用户用设备上的**审批签名密�
 | # | 问题 | 本文的临时处理 | 影响 |
 | --- | --- | --- | --- |
 | OQ-1 | ~~角色边界与新设备的初始角色~~ | 已决：见 decisions.md P-23（§1.3、§2.2） | — |
-| OQ-2 | 手机端：APNs 推送令牌的注册路由未定义（角色与档案已决：见 decisions.md P-23） | 无推送令牌路由 | fe-mobile、notify |
+| OQ-2 | ~~手机端 APNs 推送令牌的注册路由~~ | 已决：见 decisions.md P-77（`PUT /v1/devices/self/push-token`，§4.10） | — |
 | OQ-3 | settings 与 config.md 的衔接：(a) `default_level` 已决：见 decisions.md P-22；`status` 的版本字段统一为 `applied_rev`（第二轮裁决 C26）；仍待定：(b) `catalog`、`status` 的响应结构是否够用（config.md §2.8 已给出）；(c) resource 从任务清单点名的三个扩到八个，是否接受；(d) 没有专门的回滚 / 历史列表路由（读 `?rev=N` 再 `PUT`），设置页的"历史"如何列出版本 | 照 config.md 当前文本实现；(d) 暂以事件流中的 `settings.updated` 作历史来源 | config.md、desktop-ui 设置页 |
 | OQ-4 | ~~事件目录缺口~~ | 已决：见 decisions.md P-21 | — |
 | OQ-5 | ~~改设备角色、吊销是否带设备签名~~ | 已决：见 decisions.md P-18、P-23（§6.6） | — |
@@ -1317,7 +1326,7 @@ Gantry 审批（architecture §7.4）：用户用设备上的**审批签名密�
 | OQ-8 | 项目绑定 / 解绑（`project.added`）由什么触发：GitHub App 安装回调还是 API（控制类直达路由已决：见 decisions.md P-37、P-56，调档、暂停、继续、重试、放弃都有直达路由） | 无绑定路由 | forge、deploy、conversation |
 | OQ-9 | ~~InboxItem 的选项回传、计数~~ | 已决：选项经 `choose` 回传，见 decisions.md P-40；`project_id`、`dedup_key`、`options[]` 形状与 `GET /v1/inbox/summary` 见 decisions.md P-63。是否需要显式 resolve 路由仍待定（目前只有 dismiss 与 choose） | notify、desktop-ui 收件箱 |
 | OQ-10 | 线上形态（`Level`、`UntrustedText`、`Ref`、`Card`、`CheckSummary`、`Attempt.status` / `usage`、`Device.platform`、`BudgetLedger` 单位已决：见 decisions.md P-22；`Workflow.status` 已决：见 data-model，示例用 `succeeded`，第二轮裁决 C26；`stage_status` 已决：见 decisions.md P-55）。仍待定：`cert_serial` / `pubkey_fpr` / `approval_pubkey_fpr` 格式 | 本文示例的形态 | core、schemas/ |
-| OQ-11 | `Attempt.result_ref`（内容寻址对象）与 `decision_needed.payload.patch.ref`（workflow 补丁，P-48）的读取路由与格式，依赖 worker-protocol.md 的结果结构 | 不提供；检视器暂只能显示尝试元数据；手动应用的补丁暂无下载入口 | desktop-ui 检视器 |
+| OQ-11 | `Attempt.result_ref`（内容寻址对象）与 `decision_needed.payload.patch.ref`（workflow 补丁，P-48）的读取路由与格式，依赖 worker-protocol.md 的结果结构（已转为 decisions.md Q-12，推荐 M2 新增 `GET /v1/results/{sha256}`） | 不提供；检视器暂只能显示尝试元数据；手动应用的补丁暂无下载入口 | desktop-ui 检视器 |
 | OQ-12 | 配对与证书（证书续期路由已决：见 decisions.md P-64，`POST /v1/devices/self/renew`；固定根指纹已决：同上）。仍待定：配对监听器的端口与是否按需开启；`confirmation_code` 核对失败的处置（设备核对前是否已 `active`、有无 abort 路由）；证书已过期后的恢复（只能重新配对？） | 配对 1 条路由 | pki、deploy、desktop-shell |
 | OQ-13 | 事件保留期与 `410 cursor_expired`（全局事件 `project_id` 与吊销断流已决：见 decisions.md P-21、P-30；备份恢复后的客户端重同步已决：见 decisions.md P-67，`log_epoch`） | 保留不限 | store、api |
 | OQ-14 | §3.7 全部数值默认值（心跳、限流、TTL、体积上限、幂等保留） | 照表 | api 实现与限流配置 |

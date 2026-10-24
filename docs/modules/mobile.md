@@ -6,12 +6,12 @@
 
 ## 1. 职责
 
-1. **配对**：扫码（或手动粘贴）配对串 → 在安全隔区（Secure Enclave）生成 P-256 密钥 → 生成 CSR 与 `approval_pubkey`（§7.2）→ 经单向 TLS 配对端点（固定离线根 CA 指纹，P-64）提交 → 校验证书链 `[叶子, 中间 CA, 根]` → 展示 6 位确认码供人工核对 → 身份存入钥匙串（Keychain）（api.md §1.3，architecture §7.1）。
-2. **互相认证 TLS（mTLS）客户端**：只实现手机档案的 12 条路由（api.md §2.3、§4.1，C26；含 `GET /v1/inbox/summary` 与 `POST /v1/devices/self/renew`）；其余路由在客户端里**根本没有对应方法**。证书剩余 1/3 有效期时自动续期（P-64）。
+1. **配对**：扫码（或手动粘贴）配对串 → 在安全隔区（Secure Enclave）生成 P-256 密钥 → 生成 CSR（`approval_pubkey` 省略，P-76，§7.2）→ 经单向 TLS 配对端点（固定离线根 CA 指纹，P-64）提交 → 校验证书链 `[叶子, 中间 CA, 根]` → 展示 6 位确认码供人工核对 → 身份存入钥匙串（Keychain）（api.md §1.3，architecture §7.1）。
+2. **互相认证 TLS（mTLS）客户端**：只实现手机档案的 13 条路由（api.md §2.3、§4.1，C26；含 `GET /v1/inbox/summary`、`POST /v1/devices/self/renew` 与 `PUT /v1/devices/self/push-token`，P-77）；其余路由在客户端里**根本没有对应方法**。证书剩余 1/3 有效期时自动续期（P-64）。
 3. **事件流**：一条服务端推送事件（Server-Sent Events，SSE）流；快照 + 事件流衔接、游标、退避重连、`close` 帧处理、`log_epoch` 变化时全量重同步（api.md §5，P-67）。
 4. **对话屏**：项目切换、消息流（用户 / agent / 事件行 / 卡片）、输入区、"需要你 · n"（prototype.md §4）。
-5. **"需要你"的手机侧处理**：能答复的（`spec_needed`、`decision_needed`）就地处理；必须在桌面的（签名审批、`escalation`，含一切升档，P-63）清楚说明。
-6. **推送（M4）**：注册、接收、点击直达对应气泡。APNs 归 M4 `ops`（P-63）；**令牌注册路由未定义，是 M4 退出标准的阻塞项**（OQ-M2）。
+5. **"需要你"的手机侧处理**：能答复的（`spec_needed` 用发消息答复、`decision_needed` 选项、`budget_exhausted` 的 `abandon`，P-79）就地处理；必须在桌面的（签名审批、`escalation`，含一切升档，P-63）清楚说明。
+6. **推送（M4）**：注册（`PUT /v1/devices/self/push-token`，P-77）、接收、点击直达对应气泡。APNs 归 M4 `ops`（P-63）。
 7. **不可信内容渲染**（I5）：与桌面端同一套规则，用原生富文本而不是网页。
 8. **无障碍**：动态字体、VoiceOver、点击目标 ≥ 44 pt。
 
@@ -20,11 +20,11 @@
 | 里程碑 | 交付 |
 | --- | --- |
 | M0–M3 | 无交付。M0 起可消费 Mock API 服务与 `TestCA`（M0 契约冻结；`fe-mobile` 泳道从 M4 开工） |
-| M4 | 全部：配对、身份存储、12 条路由的客户端（含证书自动续期、`inbox/summary`）、事件流、对话屏、"需要你"处理、不可信内容渲染、无障碍、推送接收与直达（取决于 OQ-M2 的契约）。建议内部顺序：① 配对 + 网络 + 事件流 ② 对话屏 ③ "需要你" ④ 推送 |
+| M4 | 全部：配对、身份存储、13 条路由的客户端（含证书自动续期、`inbox/summary`、推送令牌注册）、事件流、对话屏、"需要你"处理、不可信内容渲染、无障碍、推送接收与直达（载荷细节见 OQ-M2）。建议内部顺序：① 配对 + 网络 + 事件流 ② 对话屏 ③ "需要你" ④ 推送 |
 
 ## 2. 不负责
 
-- **审批签名**：永远在桌面。手机端不持有审批能力——即使设备角色被改成 approver，手机档案下审批路由也是 `403 forbidden_profile`（api.md §2.3）；客户端里没有 `challenge`、`grant`、审批创建的任何代码。
+- **审批签名**：永远在桌面。手机端不持有审批能力——手机档案设备永远不能成为 approver（P-76：配对时至多 `operator`，改角色被拒），审批路由一律 `403 forbidden_profile`（api.md §2.3）；客户端里没有 `challenge`、`grant`、审批创建的任何代码。
 - **升档**：增加花费，只在桌面处理（P-35）；升档一律是 `escalation`，手机档案不可 `choose`（P-63）。
 - 关系地图、工作树、检视器、设置、设备管理、预算、工作流 → 手机端不提供（prototype.md §4 "不提供"）。
 - 档位上限选择：手机发出的消息固定使用项目默认上限（客户端不发送 `level_cap`；即使带了，服务端也忽略，C26）。
@@ -35,10 +35,10 @@
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
-| `api`（契约） | 手机档案 12 条路由、配对端点、事件流、错误码、`Idempotency-Key`、`X-Log-Epoch`、ETag 之外的通用约定 | [api.md](../interfaces/api.md)：§1.3、§2.3、§3、§4.2、§4.3、§4.5、§4.8、§4.10、§5 |
+| `api`（契约） | 手机档案 13 条路由、配对端点、事件流、错误码、`Idempotency-Key`、`X-Log-Epoch`、ETag 之外的通用约定 | [api.md](../interfaces/api.md)：§1.3、§2.3、§3、§4.2、§4.3、§4.5、§4.8、§4.10、§5 |
 | `data-model`（契约） | `Message`、`Card`、`Ref`、`InboxItem`、事件信封、`UntrustedText` | [data-model.md](../data-model.md) |
 | `pki`（契约） | 配对串格式、离线根 CA 指纹（P-64）、证书链 `[叶子, 中间 CA, 根]`、`approval_pubkey`（P-47）、续期 `POST /v1/devices/self/renew` | [pki.md](pki.md)（§7.4.2 配对串需适合二维码，仍是 pki.md 的 [提议]；§7.1 指纹、§7.7 续期） |
-| `notify`（契约） | APNs 推送载荷、令牌注册（APNs 归 M4 `ops`，P-63） | [notify.md](notify.md)（§7.9：载荷 ≤ 4 KB，只放模板文案与 `inbox_id` / `project_id` / `kind` / `badge`；令牌注册路由是 N-11，未定）；api.md OQ-2 |
+| `notify`（契约） | APNs 推送载荷、令牌注册（APNs 归 M4 `ops`，P-63） | [notify.md](notify.md)（§7.9：载荷 ≤ 4 KB，只放模板文案与 `inbox_id` / `project_id` / `kind` / `badge`；令牌注册路由已决：`PUT /v1/devices/self/push-token`，P-77） |
 | 界面规格 | 手机对话屏规则 | [prototype.md §4](../prototype.md#4-手机端--对话) |
 | Mock API 服务、`TestCA` | M4 之前的开发与测试替身 | [milestones.md](../milestones.md) "替身" |
 | iOS 系统框架 | UIKit、Security（安全隔区密钥、钥匙串）、Foundation `URLSession`、AVFoundation（扫码）、UserNotifications | 平台文档；各能力由实现者核实（OQ-M1） |
@@ -48,7 +48,7 @@
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
 | 配对串 | 扫码 / 粘贴 | 地址 + 离线根 CA 指纹 + 一次性 token（[pki.md §7.4.2](pki.md) 建议的 `gantry+pair://…` URL 形式，适合二维码） | 用户给定，严格校验；token 视为秘密 |
-| API 响应 | 服务端（mTLS） | 手机档案 12 条路由的响应；每个响应带 `X-Log-Epoch`（P-67） | 通道可信；`Message.text`（`agent` / `event`）、`InboxItem.summary`、`UntrustedText` **不可信** |
+| API 响应 | 服务端（mTLS） | 手机档案 13 条路由的响应；每个响应带 `X-Log-Epoch`（P-67） | 通道可信；`Message.text`（`agent` / `event`）、`InboxItem.summary`、`UntrustedText` **不可信** |
 | 事件流帧 | 服务端 | 业务事件（data-model §5.1 信封）、`heartbeat`（含 `log_epoch`）、`close`；服务端只下发 `project.*`、`conversation.*`、`message.*`、`inbox.*`、`device.revoked`（api.md §5.4） | 同上 |
 | 推送通知（M4） | APNs | 载荷由 `notify` 定义（OQ-M2） | 只当"提示"：点击后一律重新向服务端取数据，不信载荷里的文本 |
 | 用户输入 | 触摸 / 键盘 / 听写 | 文本、选项点击 | 用户文本，按纯文本发送 |
@@ -59,20 +59,20 @@
 | 输出 | 去向 | 格式 / 契约 |
 | --- | --- | --- |
 | `POST /v1/conversations/{id}/messages` | 服务端 | 体只含 `text`、`refs`（回复时），不含 `level_cap`（服务端对手机档案也会忽略它，C26）；带 `Idempotency-Key`（api.md §4.5） |
-| `POST /v1/inbox/{id}/choose` | 服务端 | 仅对 `spec_needed` / `decision_needed`；`{ option_id, note? }`；`Idempotency-Key` 必带 |
+| `POST /v1/inbox/{id}/choose` | 服务端 | 仅对 `decision_needed` 与 `budget_exhausted`（`raise_cap` 除外，P-79）；`{ option_id, note? }`；`Idempotency-Key` 必带 |
 | `POST /v1/devices/self/renew` | 服务端（mTLS） | `{ csr }`，后台自动续期（P-64） |
-| `POST /v1/pair` | 配对监听器（单向 TLS） | `{ token, csr, approval_pubkey, device }`，api.md §1.3 |
+| `POST /v1/pair` | 配对监听器（单向 TLS） | `{ token, csr, device }`（`approval_pubkey` 省略，P-76），api.md §1.3 |
 | 事件流订阅 | 服务端 | `GET /v1/events`（一条，`Last-Event-ID`） |
-| 推送令牌注册（M4） | 服务端 | **路由未定义**（OQ-M2） |
+| 推送令牌注册（M4） | 服务端 | `PUT /v1/devices/self/push-token`，`{ token, environment }`（P-77），api.md §4.10 |
 | 本地通知 / 角标（M4） | iOS | 固定模板 |
 | 外链 | 系统浏览器 | 先显示目标主机并确认 |
 
 ## 6. 对外接口
 
-手机端是叶子，没有被其他模块调用的接口。下面是内部分层的草案，用来固定"只有 12 条路由"这一约束。
+手机端是叶子，没有被其他模块调用的接口。下面是内部分层的草案，用来固定"只有 13 条路由"这一约束。
 
 ```swift
-/// 手机档案的全部服务端访问。不得出现这 12 个方法之外的网络方法（配对端点在 `Identity` 里另计）。
+/// 手机档案的全部服务端访问。不得出现这 13 个方法之外的网络方法（配对端点在 `Identity` 里另计）。
 protocol GantryAPI {
     func me() async throws -> Me                                                   // GET  /v1/me                              #2
     func projects(cursor: String?) async throws -> Page<Project>                   // GET  /v1/projects                        #3
@@ -85,6 +85,7 @@ protocol GantryAPI {
     func choose(_ id: InboxID, option: String, note: String?, key: IdempotencyKey) async throws -> InboxItem    // POST …/choose  #42
     func inboxSummary() async throws -> InboxSummary                               // GET  /v1/inbox/summary                   #46（P-63）
     func renewCertificate(csr: String) async throws -> CertificateChain            // POST /v1/devices/self/renew              #47（P-64）
+    func registerPushToken(_ token: String, environment: ApnsEnvironment) async throws  // PUT /v1/devices/self/push-token     #48（P-77，M4）
     func events(after: Int?) -> AsyncThrowingStream<StreamFrame, Error>            // GET  /v1/events                          #41
 }
 struct PostMessage: Encodable { let text: String; let refs: [Ref]? }               // 没有 level_cap、没有其他键
@@ -103,12 +104,12 @@ struct PostMessage: Encodable { let text: String; let refs: [Ref]? }            
 ### 7.2 身份与配对
 
 - **密钥**：mTLS 客户端密钥为 `SecKey` 永久密钥，`kSecAttrTokenIDSecureEnclave`、ECDSA P-256；不可导出；访问控制不要求生物识别（否则后台重连会弹提示）。可访问性级别 `WhenUnlockedThisDeviceOnly`，不进备份 [提议]。
-- **审批签名公钥**：配对契约要求同时提交 `approval_pubkey`（P-47，且须与 CSR 公钥不同）。手机档案不能审批（`403 forbidden_profile`），但为满足契约，配对时仍在安全隔区另生成一把带用户在场访问控制（`.userPresence`）的 P-256 密钥，只提交其公钥、**从不用它签名**；客户端里没有任何调用它签名的代码路径。契约是否允许 `ios` 省略该字段见 OQ-M12。
+- **审批签名公钥**：手机档案配对时**省略** `approval_pubkey`（P-76），不生成审批签名密钥；客户端里没有任何审批签名的代码路径。
 - **CSR**：自行编码 PKCS#10（或用成熟库），由安全隔区密钥签名；服务端忽略并重写 subject。
 - **证书**：配对响应的 `certificate_chain`（`[叶子, 中间 CA, 根]`，P-64）存钥匙串并与 mTLS 密钥组成 `SecIdentity`，供 `URLSession` 的客户端证书挑战使用。
 - **自动续期**（P-64）：前台运行且证书剩余 1/3 有效期（以 `/v1/me` 的 `certificate.renew_after` 为准）时，用同一把（或新生成的）mTLS 密钥生成 CSR，`POST /v1/devices/self/renew`，校验新链根指纹等于固定值后替换 `SecIdentity`；失败退避重试，临近到期才提示。
 - **服务端校验**：`URLSessionDelegate` 的服务端信任挑战里不使用系统信任库，只接受"链 `[叶子, 中间 CA, 根]` 的根证书 SHA-256 等于已固定的离线根 CA 指纹，且链内签名与有效期有效、叶子主机匹配"（P-64；中间 CA 轮换不影响已配对设备）。TLS 1.3 only。
-- **配对流程**：与桌面一致（desktop-shell §7.2）——解析 → 生成两把密钥 → CSR + `approval_pubkey` → `POST /v1/pair` → 校验链（根指纹）与公钥指纹 → 暂存 → 展示确认码 → 用户核对 → 落盘。第一台设备的角色为 `approver`、之后默认 `operator`（P-23）；手机端若恰好是第一台，角色是 `approver`，但档案仍限制路由，界面按手机档案裁剪，不因角色显示任何审批入口。配对界面（扫码取景框、手动粘贴、确认码页）原型未覆盖，按系统规范设计。
+- **配对流程**：与桌面一致（desktop-shell §7.2）——解析 → 生成 mTLS 密钥 → CSR（不带 `approval_pubkey`，P-76）→ `POST /v1/pair` → 校验链（根指纹）与公钥指纹 → 暂存 → 展示确认码 → 用户核对 → 落盘。手机档案设备的角色至多 `operator`，即使是第一台（P-76；此时系统没有 approver 的处理待决，decisions Q-10）；界面按手机档案裁剪，没有任何审批入口。配对界面（扫码取景框、手动粘贴、确认码页）原型未覆盖，按系统规范设计。
 - **吊销 / 过期**：`close(device_revoked)` 或 `401 device_revoked` → 停止请求、删除钥匙串中的密钥与证书、回到配对页；`close(cert_expired)` / 握手连续失败 → 提示重新配对（长期未打开应用、错过自动续期窗口时会发生）。
 
 ### 7.3 数据流
@@ -151,18 +152,19 @@ struct PostMessage: Encodable { let text: String; let refs: [Ref]? }            
 
 | `InboxItem.kind` | 手机上显示与操作 |
 | --- | --- |
-| `spec_needed` | `missing[]` 逐条显示；有 `options[]` 时给按钮 → `choose`；"回复补充"（发消息） |
+| `spec_needed` | `missing[]` 逐条显示；没有选项（P-79），只有"回复补充"（发消息） |
 | `decision_needed` | `payload.options[]`（`{id, label, primary?}`，P-63）→ 按钮（文案取 `label`，`primary` 强调）→ `choose`；服务端若返回 `403 forbidden_profile` 则回退为"需要在桌面处理" |
 | `escalation` | 只读：原因与证据（`Ref` 仅显示编号）；"需要在桌面处理"，无按钮（含升档，P-63） |
 | `approval_needed` | "手机不能签名 · 等待桌面签名" |
-| `budget_exhausted` / `security_finding` | 只读摘要 +"需要在桌面处理"（手机没有 `dismiss`） |
+| `budget_exhausted` | 摘要 + `abandon` 按钮（取 `payload.options` 里的 `abandon`）；`raise_cap` 不显示，提示"追加预算需要在桌面处理"（P-79） |
+| `security_finding` | 只读摘要 +"需要在桌面处理"（手机没有 `dismiss`） |
 | 未知 `kind` | 显示 `summary`（纯文本）+"需要在桌面处理" |
 
 `summary`、`UntrustedText` 一律纯文本。项目徽标与应用角标（M4）以 `GET /v1/inbox/summary` 为准（P-63）。
 
 ### 7.6 推送（M4）
 
-- 注册：授权通知 → 获得设备令牌 → **注册到服务端（路由未定义，OQ-M2）**。
+- 注册：授权通知 → 获得设备令牌 → `PUT /v1/devices/self/push-token`（`environment` 按构建配置取 `production` / `sandbox`，P-77）；令牌变化时重新注册，幂等。
 - 载荷由 `notify` 定义；本规格要求的最小集合：`project_id`、`inbox_id`（必要时 `message_id`）。展示文案由服务端模板生成，**不透传不可信文本**（config.md §9）；锁屏上是否显示项目名由用户的系统设置决定。
 - 点击：应用冷启动或回到前台 → 水合 → 用 `inbox_id` 取 `GET /v1/inbox/{id}` → 切到对应项目 → 定位气泡（M-02 的规则）。载荷里的任何字段只当"提示"。
 - 角标：= 全部项目 open 项数（`inbox/summary` 之和；前台由事件更新；后台由推送载荷的 `badge`，若 `notify` 提供）。
@@ -209,7 +211,7 @@ struct PostMessage: Encodable { let text: String; let refs: [Ref]? }            
 
 | # | 要求 |
 | --- | --- |
-| M-S1 | 网络层只实现 §6 的 12 个方法；构建期扫描网络层源码，不得出现这 12 条之外的路径字面量（含 `/v1/approvals`、`/v1/deliveries`、`/v1/settings`、`/v1/worktrees`；`/v1/devices` 只允许 `/v1/devices/self/renew`） |
+| M-S1 | 网络层只实现 §6 的 13 个方法；构建期扫描网络层源码，不得出现这 13 条之外的路径字面量（含 `/v1/approvals`、`/v1/deliveries`、`/v1/settings`、`/v1/worktrees`；`/v1/devices` 只允许 `/v1/devices/self/renew` 与 `/v1/devices/self/push-token`） |
 | M-S2 | TLS 1.3 only；不使用系统信任库；只信固定的离线根 CA 指纹；App Transport Security 保持默认严格 |
 | M-S3 | 私钥不可导出；吊销 / 重置时删除钥匙串条目；审批签名私钥没有任何签名调用（静态检查） |
 | M-S4 | 不使用 `WKWebView`、不解析 HTML；服务端文本只进属性字符串 |
@@ -264,13 +266,13 @@ struct PostMessage: Encodable { let text: String; let refs: [Ref]? }            
 
 **milestones fe-mobile 退出标准（M4）**
 
-- [ ] **配对**：模拟器里扫码（可用粘贴路径等价）→ 请求体含 `csr` 与 `approval_pubkey`（两把公钥不同）→ 确认码页 → 一致 → 进入对话屏；不一致 → 回到起点并删除密钥；`pair_token_invalid` 各种原因显示同一提示；配对串指纹与服务端证书不符 → 失败。
+- [ ] **配对**：模拟器里扫码（可用粘贴路径等价）→ 请求体含 `csr`、不含 `approval_pubkey`（P-76）→ 确认码页 → 一致 → 进入对话屏；不一致 → 回到起点并删除密钥；`pair_token_invalid` 各种原因显示同一提示；配对串指纹与服务端证书不符 → 失败。
 - [ ] **发消息**：输入文本发送 → Mock 收到 `{text}`（回复时另有 `refs`），**没有** `level_cap`、没有其他键；用户气泡出现，元信息"@全项目 · 上限 项目默认"；服务端回复经事件流出现，种类文字 + 边框颜色正确。
-- [ ] **收到上报通知**：Mock 产生 `inbox.raised` 并触发推送（`simctl push` 载荷含 `project_id`、`inbox_id`）→ 点击通知 → 应用水合后直达对应项目与气泡，"需要你"计数一致。**依赖 OQ-M2 的注册路由契约；在它定下之前，此项用载荷直注入的方式测试直达逻辑，注册逻辑留空**。
+- [ ] **收到上报通知**：Mock 产生 `inbox.raised` 并触发推送（`simctl push` 载荷含 `project_id`、`inbox_id`）→ 点击通知 → 应用水合后直达对应项目与气泡，"需要你"计数一致。**注册路由已决（P-77），载荷细节见 OQ-M2；在载荷定下之前，此项用载荷直注入的方式测试直达逻辑，注册逻辑留空**。
 
 **档案与路由**
 
-- [ ] M-S1 契约测试：网络层源码只含 12 条路由；除配对端点外，其余 34 条 mTLS 路由在客户端里不可能被发起（编译期没有方法）。
+- [ ] M-S1 契约测试：网络层源码只含 13 条路由；除配对端点外，其余 34 条 mTLS 路由在客户端里不可能被发起（编译期没有方法）。
 - [ ] 手机档案的服务端拒绝（Mock 返回 `403 forbidden_profile`）被正确处理：`choose` 在 `escalation` 项上 → 回退为"需要在桌面处理"。
 - [ ] 事件流只含白名单类型时界面正常；收到白名单外的类型（Mock 故意注入）被忽略且游标照常前进。
 
@@ -314,14 +316,14 @@ struct PostMessage: Encodable { let text: String; let refs: [Ref]? }            
 | # | 问题 | 本文的临时处理 | 影响 |
 | --- | --- | --- | --- |
 | OQ-M1 | iOS 最低版本、是否支持 iPad、浅色主题 / 深色跟随系统、其他语言；各平台 API（安全隔区密钥与 `SecIdentity` 的组合、`URLSession` 流式读取）的具体用法需实现者核实 | 深色 + `zh-CN`；iPhone；最低版本由实现者在 M4 开工时提出 | 设计、`fe-mobile` |
-| OQ-M2 | （APNs 归 M4 `ops`：**已决：见裁决 C17 / P-63**）仍未决：**APNs 令牌注册路由未定义**（api.md OQ-2），推送载荷与 `notify` 的 APNs 实现未写。M4 退出标准"收到上报通知"依赖它 | 路由留空；载荷最小集 `project_id` + `inbox_id`；测试用载荷直注入 | api.md、`notify`、`ops`；**阻塞 M4 退出标准** |
+| OQ-M2 | （APNs 归 M4 `ops`：**已决：见裁决 C17 / P-63**）令牌注册路由**已决：见 decisions.md P-77**（`PUT /v1/devices/self/push-token`）；仍未决：推送载荷与 `notify` 的 APNs 实现细节 | 载荷最小集 `project_id` + `inbox_id`；测试用载荷直注入 | `notify`、`ops`（路由已不阻塞 M4；载荷由 `notify` §7.9 定） |
 | OQ-M3 | prototype.md §4 要求写"等待桌面签名（MacBook Pro 在线 / 离线）"，但手机档案没有设备路由，拿不到桌面在线状态与设备名 | 只写"手机不能签名 · 等待桌面签名" | prototype.md、api.md §2.3 |
 | OQ-M4 | 输入区上方"上限 X（项目默认）"需要知道项目默认档位，但 `levels.default_level` 只在 settings 里，手机档案没有 settings 路由 | 显示"上限 项目默认"，不带具体档位（服务端对手机档案固定用项目默认上限，C26）；agent 回执会复述实际生效的上限 | prototype.md、api.md、config.md |
 | OQ-M5 | "上次查看"的定义与"离开期间摘要"的来源（同 desktop-ui OQ-U10；`Card.summary` 已改为 `items[]`，C26）；手机端是否本地生成 | 不显示摘要卡；仅在离开 ≥ 60 s 且有新消息时插入分隔线 [建议值] | `conversation`、api.md |
 | OQ-M6 | 本机持久化范围：消息缓存、草稿、待发送队列、上次查看是否落盘（隐私 vs 离线可用） | 实体缓存仅内存；其余首版也仅内存，待决 | 隐私、离线体验 |
 | OQ-M7 | （CA 指纹固定对象与证书续期**已决：见裁决 C18 / P-64**——固定离线根 CA 指纹、链 `[叶子, 中间 CA, 根]`、`POST /v1/devices/self/renew` 自动续期）仍未决：配对串格式、确认码核对失败的处置（同 desktop-shell OQ-S3 / S4） | 与桌面同一临时处理 | `pki`、api OQ-12 |
 | OQ-M8 | 后台策略：是否使用静默推送 / 后台刷新；进程被回收后的续传 | 仅前台保持事件流；回收后重新水合；后台靠可见推送提醒 | 体验、`notify` |
-| OQ-M9 | （升档的上报类型**已决：见裁决 C17 / P-63**——升档一律用 `escalation`，手机档案不可 `choose`；选项为 `{id, label, primary?}`）仍未决：`spec_needed` 没有合适的 `Card.kind`（conversation.md 暂用 `choice` + 空选项） | 药丸与定位只认卡片引用；`403 forbidden_profile` 兜底 | `conversation` |
+| OQ-M9 | （升档的上报类型**已决：见裁决 C17 / P-63**——升档一律用 `escalation`，手机档案不可 `choose`；选项为 `{id, label, primary?}`）`spec_needed` 的卡片也**已决**（P-79：无选项，`choice` + 空 `options[]`，渲染为"回复补充"） | 药丸与定位只认卡片引用；`403 forbidden_profile` 兜底 | `conversation` |
 | OQ-M10 | 是否提供最小的"本机信息 / 重新配对"页（prototype.md §4 "不提供设置"） | 在应用设置（iOS 系统设置）之外，仅在吊销 / 过期时进入配对页；不另做页面 | 设计 |
 | OQ-M11 | 应用分发（TestFlight / App Store）、证书与签名、最小权限（相机、通知）的申请文案 | 本文不涉及 | `ops` |
-| OQ-M12 | 配对契约要求所有设备提交 `approval_pubkey`（P-47），但手机档案永远不能审批：是否允许 `platform = ios` 省略该字段 | 照契约提交一把从不使用的安全隔区审批公钥（§7.2） | api.md §1.3、`pki` |
+| OQ-M12 | ~~配对时手机档案是否可省略 `approval_pubkey`~~ | 已决：见 decisions.md P-76（可省略；手机档案设备永远不能成为 approver） | — |

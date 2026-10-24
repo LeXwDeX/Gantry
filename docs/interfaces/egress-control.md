@@ -1,6 +1,6 @@
 # Egress 控制面契约（`gantryd` ↔ Egress）
 
-> 状态：设计 v0.1（2026-10-24）· 契约 · 协议版本 `gantry-egress-control/1` · 机器可读版本：`schemas/egress/*.json`（M0 由 `contract` 泳道据本文生成；冲突以本文为准）· 决策：decisions P-49（`job_token`）、P-50（控制面与 `svc_token`）
+> 状态：设计 v0.1（2026-10-24）· 契约 · 协议版本 `gantry-egress-control/1` · 机器可读版本：`schemas/egress/*.json`（M0 由 `contract` 泳道据本文生成；冲突以本文为准）· 决策：decisions P-49（`job_token`）、P-50（控制面与 `svc_token`）、P-72（`CONNECT` 携带 `job_token`）、P-73（网段限制需核实）、P-74（`svc_token` 每进程一枚与台账请求头）
 > 使用者：`sandbox`（签发 / 吊销 `job_token`、取尝试用量）、`models`（签发 `svc_token`、取调用用量）、`api`（转交 secret、查询 `present`、读状态）、`gantryd` 的设置应用（下发配置视图）、`egress`（实现方）。端口 trait `EgressControl` 定义在 `core::ports`（P-51），M0 替身是 `EgressStub`（[milestones](../milestones.md#替身让泳道互不阻塞)）。
 > 标注 **[提议]** 的取值是本文给出的默认值，骨架文档没有定；标注 OQ-n 的点见 §9 开放问题，不要自行拍板。
 
@@ -11,9 +11,10 @@
 | 通道 | 端点 | 调用方 | 鉴权 | 用途 |
 | --- | --- | --- | --- | --- |
 | 控制面 | Unix socket `/run/gantry/egress.sock`，HTTP/1.1 + JSON，路径前缀 `/control/v1/` | `gantryd`（`sandbox`、`models`、`api`、设置应用） | 仅主机本地；按对端进程用户（`SO_PEERCRED`） | 令牌签发 / 吊销、secret 只写转交与 `present` 查询、用量拉取、配置视图、状态 |
-| 沙盒数据面 · 模型 | `http://<egress-sbx>/j/<job_token>/<provider_id>/…` | 沙盒内的 agent CLI | `job_token` + 源地址在沙盒网段 | 模型 API 反向代理，按尝试计量（P-49） |
-| 沙盒数据面 · 包仓库 | `HTTPS_PROXY`（CONNECT 白名单） | 沙盒内的包管理器 | 见 OQ-1 | 公共包仓库，不注入凭据 |
-| 回环数据面 · 模型 | `http://127.0.0.1:<port>/s/<svc_token>/<provider_id>/…` | `gantryd` 的 `models` | `svc_token` + 只在回环监听器上接受 | 服务端直接调用模型，计入交付台账或会话台账（P-50） |
+| 沙盒数据面 · 模型 | `http://<egress-sbx>/j/<job_token>/<provider_id>/…` | 沙盒内的 agent CLI | `job_token`（源地址网段限制的强制方式需核实，P-73） | 模型 API 反向代理，按尝试计量（P-49） |
+| 沙盒数据面 · 包仓库 | `HTTPS_PROXY=http://job:<job_token>@<egress-sbx>:3128`（CONNECT 白名单） | 沙盒内的包管理器 | `Proxy-Authorization`（Basic，用户名 `job`）携带 `job_token`（P-72） | 公共包仓库，不注入凭据；按尝试的出网档案放行、计量（字节与连接数）与审计 |
+| 沙盒数据面 · 私有包仓库（M2） | `http://<egress-sbx>/r/<job_token>/<injection_id>/…` **[提议]**（OQ-1） | 沙盒内的包管理器 | `job_token` | 私有包仓库反向代理，注入凭据，只读 |
+| 回环数据面 · 模型 | `http://127.0.0.1:<port>/s/<svc_token>/<provider_id>/…`，请求头 `X-Gantry-Ledger`、`x-gantry-tier`、`x-gantry-call-id` | `gantryd` 的 `models` | `svc_token`（每个 `gantryd` 进程一枚，P-74）+ 只在回环监听器上接受 | 服务端直接调用模型；按请求头声明的台账（交付台账或会话台账）实时计量（P-50、P-74） |
 
 不存在：控制面上的任何 TCP 端点；从沙盒到控制面或回环监听器的路由；任何读出 secret 值的操作；Egress 对 Gantry 事件日志的写入。控制面统一称 `egress.sock`，**不再使用** `models_uds` 等别名（P-50）。
 
@@ -22,7 +23,7 @@
 | # | 原则 | 依据 |
 | --- | --- | --- |
 | EC1 | 控制面只在主机本地：Unix socket，不监听 TCP，不挂进任何沙盒，沙盒网络不可达 | I1、P-15、P-50 |
-| EC2 | 令牌是**能力**，不是身份声明：持有 `job_token` 只意味着"可以给这个尝试记账"，持有 `svc_token` 只意味着"可以给这个台账记账"；令牌不授予任何控制面权限 | P-49 |
+| EC2 | 令牌是**能力**，不是身份声明：持有 `job_token` 只意味着"可以给这个尝试记账"，持有 `svc_token` 只意味着"可以以服务端名义经回环监听器调用模型"（归属由服务端的可信请求头声明，P-74）；令牌不授予任何控制面权限 | P-49、P-74 |
 | EC3 | 密钥只写不读：控制面没有返回 secret 值的操作，响应、错误、日志、审计里都不出现值 | I6、config §2.4 |
 | EC4 | 计量只有一个事实源（Egress），两种令牌同一口径（同一用量解析、同一组 `levels.token_weights`）；记账（`budget.charged`、`Attempt.usage`）由 `gantryd` 写事件日志 | P-22、P-50、P-70 |
 | EC5 | 失败闭合：无配置、配置非法、令牌未知 / 已吊销 / 过期、对端用户不符、审计写失败——一律拒绝 | W8 |
@@ -62,26 +63,27 @@
 | 形状 | `gjt1_` + 32 字节随机数的 base64url（无填充，43 字符）**[提议]**；调用方视为不透明字符串 |
 | 签发 | `sandbox` 在创建容器之前经 §4.1 签发；一个 Attempt 一枚，以 `job_id`（= `Attempt.id`，`att_…`）为键 |
 | 绑定 | `job_id`、`sandbox_id`、`project_id`、台账（`{subject: "delivery", id: dlv_…}`，或 None 档临时图的 `{subject: "conversation", id: cnv_…, day}`）、`tier`、`provider`、出网档案与分组快照、`tokens_total` 封顶、`token_weights` 快照、`expires_at` |
-| 用法 | 沙盒内模型 base URL：`http://<egress-sbx>/j/<job_token>/<provider_id>`（由签发响应直接给出）。Egress 去掉 `/j/<job_token>/<provider_id>` 前缀后拼到该 provider 的真实 `base_url` 之后转发 |
-| 有效范围 | 只在**沙盒侧监听器**上接受；请求源地址必须在沙盒网段（引导配置 `egress.sandbox_cidrs`，强制方式见 OQ-2）；`provider_id` 必须等于绑定的 provider |
+| 用法 | 沙盒内模型 base URL：`http://<egress-sbx>/j/<job_token>/<provider_id>`（由签发响应直接给出）。Egress 去掉 `/j/<job_token>/<provider_id>` 前缀后拼到该 provider 的真实 `base_url` 之后转发。包仓库：`HTTPS_PROXY=http://job:<job_token>@<egress-sbx>:3128`（签发响应的 `connect_proxy_url` 已含令牌），Egress 从 `Proxy-Authorization` 取令牌（P-72）。私有包仓库（M2）：`/r/<job_token>/<injection_id>/…` **[提议]** |
+| 有效范围 | 只在**沙盒侧监听器**（模型 / `CONNECT` / 私有仓库三个入口）上接受；`provider_id` 必须等于绑定的 provider。"只能从沙盒网段使用"的强制方式**需核实**（P-73）：rootless Podman 下 Egress 能可靠看到沙盒源地址时，按引导配置 `egress.sandbox_cidrs` 拒绝网段外使用；不能时不做此项检查，`GET /control/v1/status` 的 `detail` 标明 `source_check: unverified`。安全底线不依赖网段：令牌每尝试一枚、短期、只能给本尝试记账、不授予控制面权限 |
 | 有效期 | 从签发到吊销；另有硬上限 `expires_at` = 签发时刻 + `wall_time_s` + 600 s **[提议]**，到期自动作废，防止吊销调用丢失时令牌长期有效 |
 | 吊销 | 尝试结束、`collect` 之后由 `sandbox` 调 §4.2；吊销即时生效，之后该令牌的任何请求都被拒绝，在途请求允许完成并计入 |
 | 存储 | Egress 只存 `sha256(job_token)`；原文只在签发响应中出现一次，由 `sandbox` 写进容器的环境变量。**不进**事件日志、`job.json`、`inputs/`、Gantry 日志、Egress 审计（审计记 `job_id`） |
-| 泄露后果 | 沙盒内任何进程都可能读到它。它只能在本尝试存续期间、从沙盒网段、对绑定的 provider 发请求，用量记在本尝试上并受 `tokens_total` 封顶；不能读配置、不能取用量、不能影响其他尝试 |
+| 泄露后果 | 沙盒内任何进程都可能读到它。它只能在本尝试存续期间（网段限制可强制时还须从沙盒网段，P-73）、对绑定的 provider 与本尝试的出网档案发请求，用量记在本尝试上并受 `tokens_total` 封顶；不能读配置、不能取用量、不能影响其他尝试 |
 
-### 3.2 `svc_token`（服务端直接调用，P-50）
+### 3.2 `svc_token`（服务端直接调用，P-50、P-74）
 
 | 属性 | 规定 |
 | --- | --- |
 | 形状 | `gst1_` + 43 字符随机 base64url **[提议]**；控制面上用 `svc_token_id`（`svt_` + ULID，Egress 内部标识，不是 data-model 实体）指代它 |
-| 签发 | `models` 经 §4.3 签发，按 **（台账，tier）** 一枚，过期前复用 **[提议]**（OQ-3） |
-| 绑定 | `project_id`、台账（`delivery` 或 `conversation` + `day`）、`tier`（`utility` / `planner`）、`expires_at`；可选 `tokens_total`（Egress 侧封顶，见 OQ-3） |
-| 用法 | `http://127.0.0.1:<port>/s/<svc_token>/<provider_id>/…`；可选请求头 `x-gantry-call-id: <ULID>`，让用量按调用归集（§4.5 可按 `call_id` 查询） |
-| 有效范围 | 只在**回环监听器**（引导配置 `egress.loopback_listen`，默认 `127.0.0.1:8090` **[提议]**）上接受；该监听器只绑回环地址，沙盒网段不可达。沙盒侧监听器拒绝 `/s/…`，回环监听器拒绝 `/j/…` |
-| 有效期 | 默认 3600 s **[提议]**；会话台账的令牌最晚在该 UTC 日结束时作废（台账按日划分，P-58） |
-| 吊销 | 交付单元进入终态时由 `models` 吊销其交付台账的令牌；也可随时吊销 |
+| 签发 | **每个 `gantryd` 进程一枚**（P-74）：`models` 在进程启动时经 §4.3 签发，进程内所有服务端模型调用共用。签发同时吊销此前所有未吊销的 `svc_token`（上一个进程留下的，或本进程轮换前的），任一时刻至多一枚有效 |
+| 绑定 | 不绑定台账与项目：只记 `issued_to`（`gantryd` 进程标识，仅用于审计）与 `expires_at` |
+| 用法 | `http://127.0.0.1:<port>/s/<svc_token>/<provider_id>/…`，每次请求**必须**带三个头：`X-Gantry-Ledger: <台账 ID>`（交付台账 `dlv_…`；会话台账 `cnv_…:YYYY-MM-DD`，即 [data-model](../data-model.md#device--budgetledger) 的台账 ID）、`x-gantry-tier: utility\|planner`、`x-gantry-call-id: <ULID>`。这些头来自服务端，Egress 视为可信（`svc_token` 只在回环监听器上有效，沙盒不可达），据此记录每条用量的归属，不校验台账是否存在。无项目的全局调用（modules/models.md OQ-3）用 `X-Gantry-Ledger: unattributed`，用量记录的 `ledger` 为 `null` |
+| 有效范围 | 只在**回环监听器**（引导配置 `egress.listen.svc_model`，默认 `127.0.0.1:8082`，与 deploy.md §6.4 的端口表一致）上接受；该监听器只绑回环地址，沙盒网段不可达。沙盒侧监听器拒绝 `/s/…`，回环监听器拒绝 `/j/…` 与 `/r/…` |
+| 有效期 | 从签发到吊销；硬上限 `expires_at` = 签发时刻 + 24 h **[提议]**。`models` 在到期前 1 h 轮换（签发新令牌，旧令牌随之吊销；旧令牌上的在途请求允许完成并计入） |
+| 吊销 | 签发新令牌时自动吊销旧令牌；`gantryd` 正常退出时显式吊销（§4.3）；进程崩溃留下的令牌由下一个进程签发时吊销，或到期作废 |
+| 对账 | 令牌吊销（进程重启或轮换）后，`gantryd` 按该 `svc_token_id` 拉取其全部用量记录（§4.5），与已记的 `budget.charged` 按 `call_id` 对账、补记遗漏（P-74） |
 | 存储 | 与 `job_token` 相同：Egress 只存哈希；原文只在 `gantryd` 进程内存 |
-| 泄露后果 | 主机上的其他本地进程能连回环端口，但没有令牌只能得到拒绝；拿到令牌也只能给该台账记账，到期即失效 |
+| 泄露后果 | 主机上的其他本地进程能连回环端口，但没有令牌只能得到拒绝。拿到令牌的本地进程可以以服务端名义调模型、把用量记到任意台账，直到轮换或进程重启；这要求已能读 `gantryd` 进程内存，即已越过服务端信任边界（[architecture §5](../architecture.md#5-信任边界与不变式)） |
 
 ## 4. 操作
 
@@ -91,7 +93,7 @@
 | 4.2 | 吊销 `job_token` 并取最终用量 | `POST /control/v1/jobs/{job_id}/revoke` | `sandbox` | 是 | M1 |
 | 4.2 | 查询尝试的当前用量 | `GET /control/v1/jobs/{job_id}/usage` | `sandbox` | 读 | M1 |
 | 4.2 | 遗忘尝试（`attempt.finished` 落库之后） | `DELETE /control/v1/jobs/{job_id}` | `sandbox` | 是 | M1 |
-| 4.3 | 签发 `svc_token` | `POST /control/v1/svc-tokens` | `models` | 否（每次新令牌） | M1 |
+| 4.3 | 签发 `svc_token`（并吊销此前的） | `POST /control/v1/svc-tokens` | `models`（进程启动、轮换） | 否（每次新令牌） | M1 |
 | 4.3 | 吊销 `svc_token` | `POST /control/v1/svc-tokens/{svc_token_id}/revoke` | `models` | 是 | M1 |
 | 4.4 | 写入 secret：暂存 | `POST /control/v1/secrets/stage` | `api` | 以 `request_id` 为键 | M1 |
 | 4.4 | 写入 secret：激活 / 丢弃 | `POST /control/v1/secrets/staged/{staged_id}/activate`、`…/discard` | `api` | 是 | M1 |
@@ -133,7 +135,7 @@
   "model_base_urls": {
     "anthropic": "http://10.89.0.1:8081/j/gjt1_q3Vb7nT1xK9wL2mP5sR8uY0aC4eG6iJ9kM1oQ3sU5wX/anthropic"
   },
-  "connect_proxy_url": "http://10.89.0.1:3128",
+  "connect_proxy_url": "http://job:gjt1_q3Vb7nT1xK9wL2mP5sR8uY0aC4eG6iJ9kM1oQ3sU5wX@10.89.0.1:3128",
   "effective_groups": ["model_api", "npm", "crates"],
   "issued_at": "2026-10-24T12:40:58.120Z",
   "expires_at": "2026-10-24T13:20:58.120Z",
@@ -143,7 +145,7 @@
 
 | 规则 | 说明 |
 | --- | --- |
-| 字段 | `ledger.subject` ∈ `delivery` / `conversation`；`conversation` 时另带 `day`（UTC 日期，P-58）。`tier` ∈ `planner` / `worker`（沙盒内只用这两类）。`groups` 是创建时固化的分组集合，有效集合 = 此快照 ∩ 当前配置（config §2.6），`effective_groups` 是签发时的有效集合。`tokens_total` 与 `token_weights` 一起决定封顶：加权用量达到 `tokens_total` 即切断后续请求（worker-protocol §2.3 E4） |
+| 字段 | `ledger.subject` ∈ `delivery` / `conversation`；`conversation` 时另带 `day`（UTC 日期，P-58）。`tier` ∈ `planner` / `worker`（沙盒内只用这两类）。`groups` 是创建时固化的分组集合，有效集合 = 此快照 ∩ 当前配置（config §2.6），`effective_groups` 是签发时的有效集合。`tokens_total` 与 `token_weights` 一起决定封顶：加权用量达到 `tokens_total` 即切断后续请求（worker-protocol §2.3 E4）。`connect_proxy_url` 已含 `job:<job_token>@`，`sandbox` 原样写进容器的 `HTTPS_PROXY`（P-72） |
 | 重放 | 同一 `job_id` 且绑定完全相同、令牌仍有效 → `200`，**签发新令牌**、旧令牌立即作废、已计用量保留，`reissued: true`（用于 `sandbox` 在签发响应丢失后重试；只应发生在容器启动之前） |
 | 冲突 | 同一 `job_id` 绑定不同 → `409 binding_mismatch`；该 `job_id` 已吊销 → `409 job_revoked`（新尝试必须用新的 `job_id`） |
 | 校验 | `groups` 必须是 `profile` 在当前配置中的分组子集；`provider` 必须存在且凭据可解析，否则 `422 validation_failed`（凭据缺失为 `credential_missing`）；没有任何已应用配置 → `503 not_configured` |
@@ -184,14 +186,12 @@
 
 ### 4.3 签发与吊销 `svc_token`
 
-请求（None 档会话台账）：
+请求（`gantryd` 启动时）：
 
 ```json
 {
-  "project_id": "prj_01JBX2C7Q5N8D4F6G9H3K1M0PA",
-  "ledger": { "subject": "conversation", "id": "cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ", "day": "2026-10-24" },
-  "tier": "utility",
-  "ttl_s": 3600
+  "issued_to": { "process": "gantryd", "pid": 4182, "started_at": "2026-10-24T08:00:01.004Z" },
+  "ttl_s": 86400
 }
 ```
 
@@ -202,18 +202,21 @@
   "svc_token_id": "svt_01JBX5A2C4E6G8J1L3N5Q7S9UW",
   "svc_token": "gst1_Zt4Kp9Qm2Wx7Rb5Nc8Hv1Lj3Fd6Gs0Ay2Eu4Io6Ok8P",
   "model_base_urls": {
-    "anthropic": "http://127.0.0.1:8090/s/gst1_Zt4Kp9Qm2Wx7Rb5Nc8Hv1Lj3Fd6Gs0Ay2Eu4Io6Ok8P/anthropic"
+    "anthropic": "http://127.0.0.1:8082/s/gst1_Zt4Kp9Qm2Wx7Rb5Nc8Hv1Lj3Fd6Gs0Ay2Eu4Io6Ok8P/anthropic"
   },
-  "expires_at": "2026-10-24T13:40:58.120Z"
+  "expires_at": "2026-10-25T08:00:01.120Z",
+  "revoked_previous": ["svt_01JBWZ8M2P4R6T8V0X2Z4B6D8F"]
 }
 ```
 
 | 规则 | 说明 |
 | --- | --- |
-| 字段 | `ledger` 同 §4.1；`tier` ∈ `utility` / `planner`；`ttl_s` 可选，默认 3600，上限 86400 **[提议]**；`conversation` 台账的 `expires_at` 不晚于该 `day` 的 UTC 结束时刻。可选 `tokens_total`（见 OQ-3） |
-| 复用 | `models` 在令牌过期前对同一（台账，tier）复用它；过期或收到 `token_invalid` 后重新签发 |
+| 字段 | `issued_to` 只进审计；`ttl_s` 可选，默认 86400，范围 3600–604800 **[提议]** |
+| 签发即轮换 | 签发成功即吊销此前所有未吊销的 `svc_token`，`revoked_previous` 列出它们（P-74）；`models` 对其中每一枚做一次对账（下行） |
 | 吊销 | `POST /control/v1/svc-tokens/{svc_token_id}/revoke`，请求体 `{}`，响应 `200 {"svc_token_id": "…", "state": "revoked", "revoked_at": "…"}`；已吊销原样返回 |
-| 记账 | `models` 在每次调用结束后按 `x-gantry-call-id` 取该调用的用量（§4.5），以 `weighted_tokens` 记 `budget.charged`（交付台账或会话台账）；定期按游标对账，补记遗漏 |
+| 记账 | Egress 每个请求完成即写一条用量记录（实时计量，归属取自请求头）。`models` 在每次调用结束后按 `x-gantry-call-id` 取该调用的用量（§4.5），以 `weighted_tokens` 记 `budget.charged` 到 `X-Gantry-Ledger` 指明的台账 |
+| 对账 | 令牌吊销后（`revoked_previous` 或显式吊销），`models` 用 `GET /control/v1/usage?svc_token_id=<id>` 取该令牌的全部记录，与已记账的 `call_id` 比对，补记遗漏（P-74）；平时也按游标定期对账 |
+| 封顶 | Egress 不对 `svc_token` 封顶（令牌不绑定台账）；会话台账的每日上限与交付台账的余额由 `models` 在派发前检查 |
 
 ### 4.4 密钥：只写不读
 
@@ -269,7 +272,7 @@
 
 ### 4.5 拉取用量
 
-`GET /control/v1/usage?after=<cursor>&limit=<n>`（`limit` 默认 200，最大 1000），或 `GET /control/v1/usage?call_id=<ULID>`（取某次 `svc_token` 调用的记录）。每一条记录对应一次已完成（或中断）的上游请求：
+`GET /control/v1/usage?after=<cursor>&limit=<n>`（`limit` 默认 200，最大 1000），或 `GET /control/v1/usage?call_id=<ULID>`（取某次 `svc_token` 调用的记录），或 `GET /control/v1/usage?svc_token_id=<svt_…>&after=<cursor>`（取某枚 `svc_token` 的全部记录，吊销后对账用，P-74）。每一条记录对应一次已完成（或中断）的上游请求：
 
 ```json
 {
@@ -278,7 +281,7 @@
       "seq": 90211,
       "at": "2026-10-24T12:41:03.120Z",
       "caller": { "kind": "svc", "svc_token_id": "svt_01JBX5A2C4E6G8J1L3N5Q7S9UW", "call_id": "01JBX5D2F4H6K8M0P2R4T6V8XZ" },
-      "project_id": "prj_01JBX2C7Q5N8D4F6G9H3K1M0PA",
+      "project_id": null,
       "ledger": { "subject": "conversation", "id": "cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ", "day": "2026-10-24" },
       "tier": "utility",
       "provider": "anthropic",
@@ -309,8 +312,9 @@
 | --- | --- |
 | 游标 | `seq` 在 Egress 内单调递增；`after` 取上一页的 `next_cursor`（不透明字符串）；没有更多时 `next_cursor` 为当前最后一条的游标，调用方下次带它轮询 |
 | 交付语义 | 至少一次：调用方以 `seq` 去重，把游标与它写下的 `budget.charged` 放在同一个 `store` 事务里推进 |
-| 加权 | `weighted_tokens` = `Σ token_weights.<类别> × 该类别 token 数`，权重取签发令牌时的快照（`job_token`）或当前配置（`svc_token`），与台账口径一致（P-70） |
-| 记账分工 | `caller.kind = svc` 的记录由 `models` 逐条记账；`caller.kind = job` 的记录不记账，尝试用量以 §4.2 的 `FinalUsage` 为准（OQ-4） |
+| 归属 | `caller.kind = job` 的 `project_id`、`ledger`、`tier` 取自令牌绑定；`caller.kind = svc` 的 `ledger`、`tier` 由请求头 `X-Gantry-Ledger`、`x-gantry-tier` 解析而来（P-74），`project_id` 为 `null`（Egress 不知道台账属于哪个项目，由 `models` 记账时补全） |
+| 加权 | `weighted_tokens` = `Σ token_weights.<类别> × 该类别 token 数`，权重取签发令牌时的快照（`job_token`）或请求时的当前配置（`svc_token`），与台账口径一致（P-70） |
+| 记账分工 | `caller.kind = svc` 的记录由 `models` 逐条记账，令牌吊销时按 `svc_token_id` 全量对账（P-74）；`caller.kind = job` 的记录不记账，尝试用量以 §4.2 的 `FinalUsage` 为准（OQ-4） |
 | 保留 | 记录至少保留 7 天 **[提议]**；游标早于保留窗口 → `410 cursor_expired`，调用方从当前位置继续，并对仍未记账的 `svc` 调用逐个按 `call_id` 补查 |
 | 不含 | 请求 / 响应体、头、令牌原文、上游 URL 的查询串 |
 
@@ -357,7 +361,7 @@
   "detail": null,
   "unresolved_secret_refs": [],
   "active_jobs": 3,
-  "active_svc_tokens": 2,
+  "active_svc_tokens": 1,
   "usage_head": "90212"
 }
 ```
@@ -368,12 +372,12 @@
 {
   "sandbox_model_base": "http://10.89.0.1:8081",
   "connect_proxy_url": "http://10.89.0.1:3128",
-  "loopback_model_base": "http://127.0.0.1:8090",
+  "loopback_model_base": "http://127.0.0.1:8082",
   "registry_base": null
 }
 ```
 
-`health` ∈ `ok` / `degraded` / `unhealthy`：审计写失败、无已应用配置为 `unhealthy`；最近一次配置被拒、有未解析的 `secret_ref` 为 `degraded`。`registry_base` 是私有包仓库反向代理（M2）的基址，M1 为 `null`。
+`health` ∈ `ok` / `degraded` / `unhealthy`：审计写失败、无已应用配置为 `unhealthy`；最近一次配置被拒、有未解析的 `secret_ref` 为 `degraded`。`registry_base` 是私有包仓库反向代理（M2）的基址，M1 为 `null`。`connect_proxy_url` 不含令牌；尝试专用的带令牌地址只在 §4.1 的签发响应里出现。`detail` 在网段检查无法强制时含 `source_check: unverified`（P-73）。`active_svc_tokens` 正常为 1（P-74）。
 
 ## 5. 数据面上的令牌约定
 
@@ -381,15 +385,19 @@
 
 | 情形 | Egress 的处理 | 响应 |
 | --- | --- | --- |
-| 路径不是 `/j/<令牌>/<provider_id>/…`（沙盒侧）或 `/s/<令牌>/<provider_id>/…`（回环） | 拒绝 | `404`，错误体同模型 API 错误形状（modules/egress.md §6.4） |
+| 路径不是 `/j/<令牌>/<provider_id>/…` / `/r/<令牌>/<injection_id>/…`（沙盒侧）或 `/s/<令牌>/<provider_id>/…`（回环） | 拒绝 | `404`，错误体同模型 API 错误形状（modules/egress.md §6.4） |
 | 令牌格式不符、未知、已吊销、已过期 | 拒绝；四种情况**同一响应**，不给探测线索；审计记 `rule`（`token.unknown` / `token.revoked` / `token.expired`），不记令牌原文 | `403`，`error.type = token_invalid` |
-| `job_token` 来自沙盒网段以外的源地址；`svc_token` 出现在沙盒侧监听器；`job_token` 出现在回环监听器 | 拒绝 | `403 token_invalid`（同上，审计记 `token.wrong_listener` / `token.source_not_allowed`） |
+| 沙盒侧 `CONNECT` 不带 `Proxy-Authorization` | 要求认证 | `407`，`Proxy-Authenticate: Basic realm="gantry-egress"` **[提议]**（部分包管理器只在收到质询后才发送代理凭据） |
+| `CONNECT` 的 `Proxy-Authorization` 不是 Basic、用户名不是 `job`，或其中的令牌无效 | 拒绝（与上一行的令牌无效同一响应） | `403`，`Connection: close`（审计记 `token.*`，P-72） |
+| `CONNECT` 令牌有效，但目标 `host:port` 不在该尝试的有效分组 | 拒绝 | `403`（审计记 `job_id` 与目标主机） |
+| `job_token` 来自沙盒网段以外的源地址（仅在网段检查可强制时，P-73）；`svc_token` 出现在沙盒侧监听器；`job_token` 出现在回环监听器 | 拒绝 | `403 token_invalid`（同上，审计记 `token.wrong_listener` / `token.source_not_allowed`） |
 | `provider_id` 不是令牌绑定的（`job_token`）或不存在 | 拒绝 | `403`，`error.type = provider_not_allowed` |
 | 加权用量达到 `tokens_total` | 拒绝新请求，置 `capped`；在途请求允许完成 | `403`，`error.type = budget_exhausted` |
-| 请求带 `authorization`、`x-api-key`、`x-gantry-*` 等头 | 沙盒侧一律丢弃（身份只来自令牌）；回环侧只保留 `x-gantry-call-id` 用于归集，转发上游前全部剥离 | — |
+| 回环请求缺 `X-Gantry-Ledger` / `x-gantry-tier` / `x-gantry-call-id` 之一，或格式不符 | 拒绝，不转发、不计量 | `400`，`error.type = ledger_header_invalid` **[提议]** |
+| 请求带 `authorization`、`x-api-key`、`x-gantry-*` 等头 | 沙盒侧一律丢弃（身份只来自令牌）；回环侧读取 `X-Gantry-Ledger`、`x-gantry-tier`、`x-gantry-call-id` 作归属（P-74），转发上游前全部剥离 | — |
 | 正常 | 去掉前缀，注入 provider 的真实 key，转发；按令牌归属计量 | 透传上游响应，不回显令牌与 key |
 
-令牌原文只出现在请求路径里：Egress 的访问日志与审计在记录路径前先把令牌段替换为 `job_id` / `svc_token_id`；调用方（适配层、`models`）同样不得记录完整 base URL。
+令牌原文只出现在请求路径或 `Proxy-Authorization` 里：Egress 的访问日志与审计在记录前先把令牌替换为 `job_id` / `svc_token_id`（`Proxy-Authorization` 整个不记）；调用方（适配层、`models`）同样不得记录完整 base URL。
 
 ## 6. 错误
 
@@ -419,7 +427,7 @@
 
 | 文档 | 关系 |
 | --- | --- |
-| [worker-protocol.md](worker-protocol.md) | §2.2 的模型 base URL 来自 §4.1 的响应；§2.3 E1–E7 由本文与 modules/egress.md 实现；§3.2 阶段 1（签发）、6（吊销并取最终计量）、7（确认已吊销）调用本文 §4.1–§4.2；§7.4 的计量口径即本文 §4.2 / §4.5 |
+| [worker-protocol.md](worker-protocol.md) | §2.2 的模型 base URL 与 `HTTPS_PROXY`（含 `job_token`，P-72）来自 §4.1 的响应；§2.3 E1–E7 由本文与 modules/egress.md 实现；§3.2 阶段 1（签发）、6（吊销并取最终计量）、7（确认已吊销）调用本文 §4.1–§4.2；§7.4 的计量口径即本文 §4.2 / §4.5 |
 | [config.md](config.md) | §2.4 的 secret 转交与 `present` 即本文 §4.4；§2.6 的 `egress.*` 热加载即本文 §4.6；§2.8 `status` 的 `modules.egress` 来自本文 §4.7；§4 的 `levels.token_weights` 随 §4.6 下发、随令牌快照；§8 的 `egress` resource 是视图的来源 |
 | [api.md](api.md) | §4.9 settings 写入中的凭据字段经本文 §4.4 转交；客户端从不直接接触本文的任何端点 |
 | [data-model.md](../data-model.md) | `Attempt.usage` 取自 §4.2 的 `FinalUsage`；`BudgetLedger.subject`（`delivery` / `conversation`）即本文的 `ledger`；`Workflow.conversation_id`（None 档临时图）对应 `ledger.subject = conversation` |
@@ -432,7 +440,9 @@
 
 - [ ] 非 `gantry` 用户连接 `egress.sock` → 连接被关闭、无 HTTP 响应、审计有 `control.peer_not_allowed`；`gantry-sbx` 用户无法打开该 socket。
 - [ ] 签发 → 用 `model_base_urls` 调模型成功并计量 → 吊销 → 同一令牌再请求得到 `403 token_invalid`；吊销重复调用返回同一份 `FinalUsage`。
-- [ ] 从沙盒网段以外使用 `job_token`、在沙盒侧使用 `svc_token`、在回环使用 `job_token`、使用伪造 / 过期令牌 → 全部 `403 token_invalid`，响应完全相同，不计入任何账本。
+- [ ] 在沙盒侧使用 `svc_token`、在回环使用 `job_token`、使用伪造 / 过期令牌 → 全部 `403 token_invalid`，响应完全相同，不计入任何账本。从沙盒网段以外使用 `job_token` → 同样拒绝：**需核实**（P-73），在目标主机的 rootless Podman 网络下验证；不能强制时断言 `status.detail` 含 `source_check: unverified`。
+- [ ] `CONNECT`：`HTTPS_PROXY=http://job:<job_token>@…` 到白名单主机 → 隧道建立，审计按 `job_id` 记录目标与字节数；不带 `Proxy-Authorization` → `407`；令牌无效或用户名不是 `job` → `403`；目标不在有效分组 → `403`；尝试吊销后同一 `HTTPS_PROXY` → `403`（P-72）。
+- [ ] `svc_token`：签发第二枚 → 第一枚立即 `403`，`revoked_previous` 列出它；回环请求缺 `X-Gantry-Ledger` → `400 ledger_header_invalid` 且无用量记录；用量记录的 `ledger`、`tier` 与请求头一致；`usage?svc_token_id=` 返回该令牌的全部记录（P-74）。
 - [ ] 同一 `job_id` 以相同绑定重复签发 → 新令牌可用、旧令牌失效、用量不清零；以不同绑定签发 → `409 binding_mismatch`。
 - [ ] 加权用量达到 `tokens_total` → 后续请求 `403 budget_exhausted`，`FinalUsage.capped = true`。
 - [ ] secret：暂存后数据面仍用旧值；激活后新请求用新值；丢弃后 `present` 不变；任何响应、日志、审计里都搜不到值；暂存过期后激活 → `410 staged_expired`。
@@ -447,9 +457,9 @@
 
 | # | 问题 | 本文暂用 | 影响 |
 | --- | --- | --- | --- |
-| OQ-1 | `CONNECT`（公共包仓库）与私有包仓库反向代理怎样识别尝试：P-49 只把 `job_token` 放在模型 base URL 里，而按档案放行包仓库需要知道是哪个尝试 | **[提议]** `HTTPS_PROXY=http://job:<job_token>@<egress>:3128`，Egress 从 `Proxy-Authorization` 取令牌，规则同 §5；私有仓库路由用 `/r/<job_token>/<injection_id>/…` | `egress`、`sandbox`、`worker`、worker-protocol §2.2 |
-| OQ-2 | "只能从沙盒网段使用"如何强制：rootless Podman 下 Egress 能否看到沙盒的真实源地址、沙盒网段如何配置（modules/egress.md OQ-E1） | 引导配置 `egress.sandbox_cidrs`；若无法可靠判定源地址，暂只靠令牌 + 吊销 + 有效期，并在 `status.detail` 标明 | `sandbox`、`egress`、`deploy` |
-| OQ-3 | `svc_token` 的粒度（每（台账，tier）一枚还是每次调用一枚）、默认有效期、Egress 是否对它封顶（会话台账的每日上限由谁强制） | 每（台账，tier）一枚、3600 s；Egress 不封顶，`models` 派发前检查台账余额 | `models`、`engine` |
+| OQ-1 | ~~`CONNECT` 怎样识别尝试~~；私有包仓库反向代理的路由形状 | `CONNECT` 已决：见 decisions.md P-72（`Proxy-Authorization` 携带 `job_token`）。私有包仓库路由仍为 **[提议]** `/r/<job_token>/<injection_id>/…`（M2，modules/egress.md 对齐） | `egress`、`sandbox`、`worker` |
+| OQ-2 | "只能从沙盒网段使用"如何强制：rootless Podman 下 Egress 能否看到沙盒的真实源地址 | 已转为 decisions.md P-73：标"需核实"，M1 在目标主机上核实（`sandbox`、`deploy` 的 `[集成:podman]` 用例）；核实前不承诺此项，`status.detail` 标明；安全底线是能力令牌本身 | `sandbox`、`egress`、`deploy` |
+| OQ-3 | ~~`svc_token` 的粒度、有效期与封顶~~ | 已决：见 decisions.md P-74（每个 `gantryd` 进程一枚，台账由请求头 `X-Gantry-Ledger` 声明；Egress 不对它封顶，`models` 派发前检查台账余额） | — |
 | OQ-4 | 尝试用量的记账时点：吊销时一次记账，还是按 §4.5 的记录实时增量记账（影响运行中的预算预警与并发尝试争用，worker-protocol OQ-14） | 吊销时一次记账；实时记录只用于展示与预警 | `engine`、`sandbox` |
 | OQ-5 | socket 位置与属主：modules/deploy.md 目前写的是 `/run/gantry-egress/egress.sock`（目录 `gantry-egress:gantry-link 0750`），本文按 P-50 定为 `/run/gantry/egress.sock`，并提议由 systemd socket 激活创建 | 以本文为准，deploy 规格对齐 | `deploy`、`egress` |
 | OQ-6 | Egress 数据库（令牌登记、用量记录）丢失或损坏时的恢复：`gantryd` 如何发现未吊销的令牌、如何补齐用量 | 全部现存令牌视为作废（运行中的尝试会因模型请求失败而终止，记 `infra.egress`），用量按 `incomplete` 处理 | `egress`、`engine` |
