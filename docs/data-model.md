@@ -25,8 +25,8 @@
 | `plan` | `delivery_id`、`workflow_id`、`summary`（UntrustedText） |
 | `approval` | `approval_id` |
 | `escalation` | `inbox_id` |
-| `choice` | `inbox_id`、`options[]`（`{id, label}`） |
-| `summary` | `delivery_id`、`text`（UntrustedText） |
+| `choice` | `inbox_id`、`options[]`（`{id, label, primary?}`，同 InboxItem `payload.options[]`） |
+| `summary` | `delivery_id`?、`items[]`：每项 `{text: UntrustedText, ref: Ref?}`（如"离开期间摘要"，每项可点开对应引用） |
 
 ## 2. 实体总览
 
@@ -46,7 +46,7 @@
 | `act_` | OutboxAction | 待执行的 GitHub 写动作 |
 | `dev_` | Device | 已配对设备 |
 | `evt_` | Event | 事件日志中的一条事件 |
-| `bdg_` | BudgetLedger | 预算台账 |
+| `bdg_` | BudgetLedger | 预算台账：交付台账（每个交付单元一个）或会话台账（每个项目会话每天一个，P-58） |
 
 ```mermaid
 erDiagram
@@ -61,6 +61,9 @@ erDiagram
   Node ||--o{ Attempt : runs
   Attempt ||--o| Sandbox : uses
   Conversation ||--o{ Message : contains
+  Conversation ||--o{ Workflow : "None 档临时图"
+  Conversation ||--o{ BudgetLedger : "会话台账（按日）"
+  Project ||--o{ InboxItem : raises
   Delivery ||--o{ InboxItem : raises
   Delivery ||--o{ Approval : requires
   Delivery ||--o{ OutboxAction : enqueues
@@ -91,10 +94,10 @@ erDiagram
 | --- | --- | --- |
 | project_id | `prj_` | — |
 | title | string | 简短标题 |
-| level_cap | Level | 用户设定的上限 |
-| level_effective | Level | 当前实际档位（≤ 上限） |
+| level_cap | Level | 用户设定的上限；预算模板在创建时按它固定（P-57） |
+| level_effective | Level | 当前实际档位（≤ 上限）。初值由引擎在规格阶段按风险评估给出，之后只能在上限内升、不自动降；用户把上限调到低于它时随上限下调，但已触发的闸门不撤销（P-57） |
 | stage | Stage | 见 §4.1 |
-| stage_status | `running` / `waiting_human` / `blocked` / `done` | 当前阶段内的状态；gate 判定 `REJECT` 时为 `waiting_human` |
+| stage_status | `running` / `waiting_human` / `blocked` / `paused` / `done` | 当前阶段内的状态，转移规则见 §4.1（P-55） |
 | issues | IssueRef[] | 关联 Issue（可为空，见"无规格"警告） |
 | pr | PullRequestRef? | 关联 PR |
 | worktree_id | `wtr_`? | — |
@@ -123,9 +126,9 @@ erDiagram
 
 | 实体 | 字段 | 说明 |
 | --- | --- | --- |
-| Workflow | delivery_id, stage, graph_rev, status, template | `graph_rev` 每次图改写 +1；视图只显示当前修订。`status`：`running` / `paused` / `succeeded` / `failed` / `cancelled` |
-| Node | workflow_id, role, tier, exec, depends_on[], required, status, verdict?, superseded_by? | `role`：`plan` / `build` / `verify` / `single` / `review:<视角>` / `reasoner` / `arbiter` / `summarize` / `admission` / `heal` / `answer` / `intent` / `classify`；`tier`：`utility` / `planner` / `worker`；`exec`：`sandbox` / `sandbox_ro` / `direct`。三者的固定搭配见 [architecture §9](architecture.md#9-三类模型)。`verdict`：`ACCEPT` / `REVISE` / `REJECT` / `BLOCKED`（gate 节点） |
-| Attempt | node_id, n, sandbox_id?, status, started_at, ended_at, result_ref, failure_class?, failure_detail?, usage | `status`：`preparing` / `running` / `succeeded` / `failed` / `cancelled`。结果存为内容寻址对象 `sha256:…`。`failure_class`：`timeout` / `exec_failed` / `verdict_fail` / `policy_denied` / `cancelled` / `budget_exhausted` / `infra_error`；`failure_detail` 是子码（[worker-protocol §9](interfaces/worker-protocol.md#9-失败分类)）。`usage` 以 Egress 计量为准：`{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, requests}`；worker 自报的用量只存在结果对象里，仅展示 |
+| Workflow | delivery_id?, conversation_id?, stage?, graph_rev, status, template | `delivery_id` 与 `conversation_id` 恰有一个非空：None 档读代码的问答是挂在会话上的临时图（`delivery_id = null`，必须有 `conversation_id`，`stage = null`，用量记会话台账，P-58）。`graph_rev` 每次图改写 +1；视图只显示当前修订。`status`：`running` / `paused` / `succeeded` / `failed` / `cancelled` |
+| Node | workflow_id, role, tier, exec, depends_on[], required, status, verdict?, superseded_by? | `role`：`plan` / `build` / `verify` / `single` / `review:<视角>` / `reasoner` / `arbiter` / `summarize` / `admission` / `heal` / `answer` / `intent` / `classify`（`reasoner` 不是判定节点，`verdict` 恒为空，P-45）；`tier`：`utility` / `planner` / `worker`；`exec`：`sandbox` / `sandbox_ro` / `direct`。三者的固定搭配见 [architecture §9](architecture.md#9-三类模型)。`verdict`：`ACCEPT` / `REVISE` / `REJECT` / `BLOCKED`（gate 节点） |
+| Attempt | node_id, n, sandbox_id?, status, started_at, ended_at, result_ref, failure_class?, failure_detail?, usage | `status`：`preparing` / `running` / `succeeded` / `failed` / `cancelled`。结果存为内容寻址对象 `sha256:…`。`failure_class`：`timeout` / `exec_failed` / `verdict_fail` / `policy_denied` / `cancelled` / `budget_exhausted` / `infra_error`；`failure_detail` 是子码（[worker-protocol §9](interfaces/worker-protocol.md#9-失败分类)），受保护路径带规则 id，如 `policy.path_protected:workflows`（P-48）。`usage` 以 Egress 按 `job_token` 的计量为准（P-49）：`{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, requests}`；worker 自报的用量只存在结果对象里，仅展示 |
 
 ### Worktree / Sandbox
 
@@ -143,7 +146,8 @@ erDiagram
 | Message.role | `user` / `agent` / `event` | `event` 是折叠显示的后台事件行 |
 | Message.agent_kind | `planner` / `worker` / `utility`? | 决定气泡边框颜色 |
 | Message.text | string | 用户消息为可信；agent 消息可能引用不可信内容 |
-| Message.level_cap | Level? | 用户消息附带的档位上限 |
+| Message.tone | `info` / `ok` / `run` / `warn`? | 仅 `role = event`：事件行的语气，决定圆点颜色（运行中 / 完成 / 需要注意），文字仍须独立表达含义 |
+| Message.level_cap | Level? | 用户消息附带的档位上限。手机档案发出的消息由服务端忽略该字段，固定使用项目默认上限（P-35） |
 | Message.refs | Ref[] | 引用的 Issue / PR / 工作树 / 交付单元 |
 | Message.cards | Card[] | 结构化附件，见 §1.1 |
 | Message.delivery_id | `dlv_`? | 消息触发或关联的交付单元 |
@@ -152,17 +156,34 @@ erDiagram
 
 | 实体 | 字段 | 说明 |
 | --- | --- | --- |
-| InboxItem | delivery_id?, kind, severity, summary, payload, status | `kind`：`approval_needed` / `decision_needed` / `spec_needed` / `budget_exhausted` / `escalation` / `security_finding`；`severity`：`info` / `warn` / `blocker`；`status`：`open` / `resolved` / `dismissed`；`payload` 按 kind 见下表 |
-| Approval | delivery_id?, action, target, subject_digest, device_id?, signature?, status, expires_at | `action`：`ForgeActionKind`（如 `merge_pr`）或内部动作（`settings_update` / `device_role_change` / `device_revoke`）；`subject_digest`：PR 类动作为 head SHA，补丁审批为补丁内容的 `sha256:…`，内部动作为请求体的 `sha256:…`（[api.md §6](interfaces/api.md#6-审批签名)）；`status` 见 §4.4；绑定的 head 变化即 `invalidated` |
+| InboxItem | project_id?, delivery_id?, kind, severity, summary, payload, status, dedup_key | `project_id` 为空只用于全局事项（P-63）；`kind`：`approval_needed` / `decision_needed` / `spec_needed` / `budget_exhausted` / `escalation` / `security_finding`；`severity`：`info` / `warn` / `blocker`（`≥ warn` 的 `inbox.raised` 触发桌面系统通知）；`status`：`open` / `resolved` / `dismissed`；`payload` 按 kind 见下表；`dedup_key`：同一键已有 `open` 项时不再新建（`dismissed` / `resolved` 之后可再建） |
+| Approval | delivery_id?, action, target, subject_digest, device_id?, signature?, status, expires_at, consumed_by? | `action` 与各动作的 `target` / `subject_digest` 形状见下文"审批动作的 target 与 subject_digest"（P-54）；签名用设备的审批签名密钥，服务端用 `Device.approval_pubkey` 验签（P-47）；`status` 见 §4.4；`expires_at` = 创建时刻 + `policies.approval.ttl_s`（默认 24 小时，建议值）；`consumed_by`：消费方的 Outbox 动作 ID（`act_`）、尝试 ID（`att_`，补丁审批）或请求 ID（内部动作） |
 
 | `InboxItem.kind` | `payload` |
 | --- | --- |
 | `approval_needed` | `{approval_id}` |
-| `decision_needed` | `{reason_code, options[]: {id, label}, node_id?}`；gate `REJECT` 时 `options` 为放弃 / 重新规划 |
-| `spec_needed` | `{missing[]: {aspect, question}}`（来自准入 `REVISE`） |
+| `decision_needed` | `{kind, reason_code, options[]: {id, label, primary?}, node_id?, patch?}`。`kind`：`gate_reject`（gate `REJECT`，`options` 为放弃 / 重新规划）/ `manual_action`（需要用户在 Gantry 之外手动完成，如 workflow 补丁，P-48；`patch = {ref: "sha256:…", paths[]}` 指向结果库里的补丁）/ `other`（新增值只追加） |
+| `spec_needed` | `{missing[]: {aspect, question}, options[]?}`（来自准入 `REVISE`；`options[]` 形状同上） |
 | `budget_exhausted` | `{dimension, limit, used}` |
-| `escalation` | `{reason_code, node_id?, attempt_id?, evidence[]: Ref 或 {kind: "result", ref: "sha256:…"}}`（gate `BLOCKED` 时附证据） |
+| `escalation` | `{reason_code, node_id?, attempt_id?, evidence[]: Ref 或 {kind: "result", ref: "sha256:…"}, options[]?}`（gate `BLOCKED` 时附证据）。**升档一律用 `escalation`**（如选项"升到 X 并继续"），手机档案不可对它 `choose`（P-35、P-63） |
 | `security_finding` | `{source: Ref, finding: {severity, category, title: UntrustedText}, attempt_id?}` |
+
+### 审批动作的 target 与 subject_digest
+
+`Approval.action` ∈ `ForgeActionKind` ∪ {`settings_update`、`device_role_change`、`device_revoke`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、`patch_apply_protected`}（P-54）。下表是**全部**已定义形状；`action` 合法但不在下表中（例如某个 `ForgeActionKind` 被配置为 `approve`，而它的形状尚未定义）时一律 **fail-closed**：不创建审批，按拒绝处理并上报（`escalation`，`reason_code = approval_shape_undefined`）。`target` 中的数组在规范化时保持原序（[api.md §6.3](interfaces/api.md#63-规范化与签名)）。
+
+| `action` | 类别 | `target` | `subject_digest` | 谁创建 / 谁消费 |
+| --- | --- | --- | --- | --- |
+| `merge_pr` | Forge 动作 | `{kind:"pr", repo, number}` | PR 的 head SHA（40 位十六进制，= Outbox `payload.expected_head_sha`） | 引擎创建；`forge` 执行开始前消费 |
+| `force_push` | 条件伪动作（`push_branch` 且 `force=true`） | `{kind:"branch", repo, branch, expected_remote_oid}` | 将要推送的提交 SHA（`local_head_oid`） | 引擎 / 守护创建；`forge` 执行开始前消费 |
+| `push_outside_prefix` | 条件伪动作（`push_branch` 到非 `gantry/` 前缀分支） | `{kind:"branch", repo, branch, expected_remote_oid}` | 将要推送的提交 SHA（`local_head_oid`） | 同上 |
+| `resolve_review_thread_human` | 条件伪动作（`resolve_review_thread` 且线程含人类评论） | `{kind:"review_thread", repo, number, thread_node_id}` | `"sha256:"` + 线程当前评论 ID 列表（升序）的 JCS 摘要；有新回复即不再一致 | 守护 / 引擎创建；`forge` 执行开始前消费 |
+| `patch_apply_protected` | 补丁闸门（补丁命中处置为 `approve` 的路径规则，M2 起） | `{kind:"patch", repo, attempt_id, rules:[规则 id…], paths:[路径…]}` | 补丁内容的 `sha256:…`（`ValidatedPatch.sha256`） | 引擎创建；`repo` 在应用补丁、创建提交之前消费 |
+| `settings_update` | 内部动作 | `{kind:"settings", scope, project_id?, resource, base_rev}` | 请求体的 `"sha256:"` + JCS 摘要（[api.md §6.6](interfaces/api.md#66-内部动作的签名写入settings改角色吊销)） | 客户端发起；`api` 在执行写入的同一事务里消费 |
+| `device_role_change` / `device_revoke` | 内部动作 | `{kind:"device", id}` | 请求体的 `"sha256:"` + JCS 摘要 | 同上 |
+| 其他 `ForgeActionKind`（`push_branch`、`create_pr` 等） | — | 未定义 | 未定义 | fail-closed（见上） |
+
+Workflow 文件改动不在表中：它不能经任何审批放行（P-48）。
 
 ### OutboxAction
 
@@ -172,13 +193,13 @@ erDiagram
 | idempotency_key | string | 由（项目、交付单元、动作类型、目标、意图摘要、`epoch`）派生（[forge-actions §2.2](interfaces/forge-actions.md#22-幂等键)） |
 | kind | ForgeActionKind | 见 [interfaces/forge-actions.md](interfaces/forge-actions.md) |
 | payload | object | — |
-| requires_approval | `apr_`? | 需要审批时引用审批 |
+| requires_approval | `apr_`? | 需要审批时引用审批。是否需要由**入队方**在入队时调用 `policy` 决定并写入；`forge` 不读策略配置，只在执行时调用 `policy` 验证并消费该审批（P-62） |
 | depends_on | `act_`[] | 前置动作；任一前置终态失败则本动作 `cancelled` |
 | priority | `high` / `normal` / `low` | 限流紧张时先饿死 `low` |
 | not_before | time? | 最早执行时间（限流退避、写速率令牌桶延后） |
-| epoch | int | 默认 0；有意重做已终态的动作时 +1 |
-| status | `queued` / `executing` / `succeeded` / `failed` / `cancelled` | — |
-| attempts | int | 执行次数 |
+| epoch | int | 默认 0；有意重做已终态的动作（含人工重试）时创建新动作，`epoch` +1 |
+| status | `queued` / `executing` / `succeeded` / `failed` / `cancelled` | `failed` 只表示**终态**失败（重试用尽或不可重试）；临时错误留在 `queued` 退避重试（P-53），见 §4.3 |
+| attempts | int | 执行次数（限流等待不计） |
 | lease_until | time? | 执行租约；过期的 `executing` 行在重启后重放 |
 | last_error | object? | `{code, message}`，最近一次失败（脱敏） |
 | expected_effects | object[] | 执行前写入的预期 GitHub 效果，用于在记录之前识别自身事件 |
@@ -188,20 +209,21 @@ erDiagram
 
 | 实体 | 字段 | 说明 |
 | --- | --- | --- |
-| Device | name, platform, cert_serial, pubkey_fpr, role, status, last_seen | `platform`：`windows` / `macos` / `ios`；`role`：`viewer` / `operator` / `approver`，第一台配对设备为 approver，之后默认 operator，改角色与吊销需要 approver 签名；`status`：`active` / `revoked` |
-| BudgetLedger | delivery_id, template, limits, used | `limits`：tokens_by_tier、nodes、rounds、wall_time、forge_writes、concurrency；`used`：tokens_by_tier、nodes、attempts、rounds、wall_time、forge_writes；单位见下 |
+| Device | name, platform, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr, role, status, last_seen | `pubkey_fpr` 是 mTLS 客户端密钥的指纹；`approval_pubkey` 是配对时登记的审批签名公钥（P-47，P-256 未压缩点，base64url），`approval_pubkey_fpr` 是其 `sha256:` 指纹；`platform`：`windows` / `macos` / `ios`；`role`：`viewer` / `operator` / `approver`，第一台配对设备为 approver，之后默认 operator，改角色与吊销需要 approver 签名；`status`：`active` / `revoked` |
+| BudgetLedger | subject, delivery_id?, conversation_id?, project_id, day?, template?, limits, used | `subject`：`delivery`（交付台账，每个交付单元一个，`template` 与 `limits` 在创建时按 `level_cap` 固定，P-57）/ `conversation`（会话台账，P-58：每个项目会话每个 UTC 日一个，`day` 为日期，`limits` 只有 `tokens` = `levels.None.daily_tokens`，`template` 为空）。交付台账 `limits`：tokens_by_tier、nodes、rounds、wall_time、forge_writes、concurrency；`used`：tokens_by_tier、nodes、attempts、rounds、wall_time、forge_writes。会话台账 `used`：tokens_by_tier。单位见下 |
 
 BudgetLedger 的计数口径：
 
 | 项 | 口径 |
 | --- | --- |
-| `tokens_by_tier` | 按 tier 累计 token，以 Egress 计量为准 |
+| `tokens_by_tier` | 按 tier 累计的**加权** token，以 Egress 计量为准（`job_token` / `svc_token` 同一口径，P-49、P-50）；加权 = `Σ levels.token_weights.<类别> × 该类别 token 数`（P-44、P-70） |
 | `nodes` / `attempts` | `nodes` 数节点（被图改写替换的节点也计）；`attempts` 另计，不占 `nodes` |
 | `wall_time` | 秒；该交付单元所有尝试运行时长之和 |
 | `rounds` | 评审迭代轮与守护自愈轮之和 |
 | `forge_writes` | Outbox 动作成功次数的累计数。按小时限速是配置项 `levels.*.budget.forge_writes_per_hour`，由 Outbox 令牌桶执行，不进台账，二者不混用 |
 | `concurrency` | 同时运行的节点数；Ultimate 父交付单元指同时运行的子交付单元数 |
 | Ultimate | 父交付单元的台账汇总所有子交付单元的用量 |
+| 会话台账 | 只计 `tokens_by_tier`；`answer` 临时图与不属于任何交付单元的直接调用（如 `intent`）都记入；达到 `levels.None.daily_tokens` 后当天不再派发新的 None 档问答，回复中提示（P-58） |
 
 ## 4. 状态机
 
@@ -210,48 +232,79 @@ BudgetLedger 的计数口径：
 ```mermaid
 stateDiagram-v2
   [*] --> spec
-  spec --> plan: 准入 ACCEPT（READY）
+  spec --> plan: High 起准入 ACCEPT（READY）；Medium 免准入
   spec --> spec: 准入 REVISE（NOT_READY，追问）
   spec --> implement: Low 档（免准入、无计划阶段）
   plan --> implement: 计划产出
   implement --> propose: 补丁通过校验
-  implement --> plan: 实现发现计划不可行
+  implement --> plan: 实现发现计划不可行 / REJECT 后选重新规划
+  review --> plan: REJECT 后选重新规划
   propose --> review: PR 已创建
-  review --> implement: REVISE / CI 失败需改代码
+  review --> implement: REVISE / 需要改代码且超出守护自愈范围
   review --> merge: 判定 ACCEPT 且 CI 通过
   merge --> review: 审批后有新推送 / base 前移需重验（forge.base_advanced）
   merge --> closed: GitHub 确认合并且 Issue 关闭
   spec --> abandoned: 用户放弃 / Issue not_planned
-  review --> abandoned: PR 被关闭未合并
+  plan --> abandoned: 用户放弃 / Issue not_planned
+  implement --> abandoned: 用户放弃 / Issue not_planned
+  propose --> abandoned: 用户放弃 / PR 关闭未合并
+  review --> abandoned: 用户放弃 / PR 关闭未合并
+  merge --> abandoned: 用户放弃 / PR 关闭未合并
+  abandoned --> review: PR 重新打开（仅限因 PR 关闭而放弃）
   closed --> [*]
   abandoned --> [*]
 ```
 
-- Low 档从 `spec` 直接进入 `implement`（免准入，跳过 `plan`）；`review` 阶段没有评审图，但状态仍经过 `review`（等待 CI）。
-- 任何阶段内 gate 判定 `REJECT`：阶段不变，`stage_status = waiting_human`，上报 `decision_needed`（放弃或重新规划）；`BLOCKED`：上报 `escalation` 并附证据。
+- **任何非终态阶段 → `abandoned`**（P-55）：用户放弃（`POST /v1/deliveries/{id}/abandon`）、PR 被关闭且未合并、绑定的 Issue 以 `not_planned` 关闭。
+- `abandoned` 是终态，唯一例外：因 PR 被关闭而进入 `abandoned` 的交付单元，在该 PR 重新打开（`forge.pr_reopened`）时回到 `review`；用户放弃或 Issue `not_planned` 的不会恢复。
+- 准入只在 High 及以上：Medium `spec → plan` 免准入；Low 从 `spec` 直接进入 `implement`（免准入，跳过 `plan`）；Low 的 `review` 阶段没有评审图，但状态仍经过 `review`（等待 CI）。
+- 计划是独立阶段：计划阶段图 = `plan`（Max 起加 `reasoner`）；实现阶段图 = `build → verify`（Low 为 `single`）。
+- 任何阶段内 gate 判定 `REJECT`：阶段不变，`stage_status = waiting_human`，上报 `decision_needed`（`kind = gate_reject`，放弃或重新规划）；选"重新规划"回到 `plan`（Low 档没有计划阶段，回到 `implement`），选"放弃"进入 `abandoned`。`BLOCKED`：上报 `escalation` 并附证据，`stage_status = blocked`。
+- 守护的静默自愈不改变阶段（`heal` 节点挂在 `review` 阶段）；只有需要改代码且超出自愈范围时才走 `review → implement`（P-60）。
+
+**阶段内状态 `stage_status`**（P-55）：
+
+| 值 | 含义 |
+| --- | --- |
+| `running` | 正在推进，或在等 CI / GitHub 的结果 |
+| `waiting_human` | 存在引擎创建的、需要人处理的未决上报项（`spec_needed`、`decision_needed`、`approval_needed`、`budget_exhausted`、需要选择的 `escalation`，含"需要超过上限"） |
+| `blocked` | gate 判定 `BLOCKED`；或子交付单元在等 `depends_on`（Ultimate）；外部条件变化才能继续 |
+| `paused` | 用户暂停（`POST /v1/deliveries/{id}/pause`，P-56）：不派发新节点，运行中的尝试跑到安全点 |
+| `done` | 交付单元进入终态（`closed` / `abandoned`） |
+
+| 转移 | 触发 |
+| --- | --- |
+| （进入新阶段）→ `running` | `delivery.stage_changed` |
+| `running` → `waiting_human` | 引擎创建需人处理的上报项 |
+| `running` → `blocked` | `BLOCKED` 判定；等待依赖 |
+| `waiting_human` / `blocked` → `running` | 对应上报项被 `resolve` / `choose`（`dismiss` 不改变状态），或阻塞条件消失 |
+| `running` / `waiting_human` / `blocked` → `paused` | `delivery.paused`；记下暂停前的值 |
+| `paused` → 暂停前的值 | `delivery.resumed`；若期间上报项已处理则为 `running` |
+| 任意 → `done` | 进入 `closed` 或 `abandoned`（`abandoned → review` 的恢复把它重新置为 `running`） |
+
 - 每个阶段的**退出证据**：
 
 | 阶段 | 退出证据 |
 | --- | --- |
-| spec | 准入 verdict `ACCEPT`（Low 档免），规格写回 Issue |
-| plan | 计划节点产出且通过 schema 校验 |
-| implement | 补丁在干净检出上应用成功，策略校验通过 |
+| spec | High 及以上：准入 verdict `ACCEPT`；规格写回 Issue。Medium / Low 免准入 |
+| plan | 计划节点产出且通过 schema 校验（Max 起含 `reasoner` 预演报告） |
+| implement | 补丁在干净检出上应用成功（`repo` 机械检查），策略判定通过（`policy`），`repo` 已创建提交 |
 | propose | Outbox `create_pr` 成功，PR 编号写入快照 |
-| review | 当前 head 上：评审判定 `ACCEPT`、required checks 通过 |
+| review | 当前 head 上：评审判定 `ACCEPT`（Low 档无评审图）、required checks 通过 |
 | merge | GitHub 返回 merged，head 与审批绑定的 `subject_digest` 一致 |
 | closed | 关联 Issue 全部关闭（非默认分支合并时由 Forge 主动关闭） |
 
 ### 4.2 节点
 
-`pending → queued → running → (succeeded | failed | skipped | cancelled)`；`superseded` 表示被图改写替换。失败节点可由引擎在同一图内新建尝试（新 Attempt），不修改旧尝试。
+`pending → queued → running → (succeeded | failed | skipped | cancelled)`；`superseded` 表示被图改写替换。失败节点可由引擎在同一图内新建尝试（新 Attempt），不修改旧尝试。用户经 `POST /v1/nodes/{node_id}/retry` 重试失败节点时，引擎追加 `node.retry_requested` 并新建尝试（P-56）。
 
 ### 4.3 Outbox 动作
 
-`queued → executing → succeeded`；`executing → failed`（可重试）`→ queued`；限流时 `executing → queued`（设 `not_before`）；非终态 `→ cancelled`。执行前先按幂等键查询 GitHub 是否已存在目标对象，存在则直接 `succeeded`。
+`queued → executing → succeeded`；临时错误（网络、5xx、限流、令牌过期）与限流时 `executing → queued`（设 `not_before` 退避，P-53）；重试用尽或不可重试错误 `executing → failed`（**终态**，只此时发 `outbox.failed`）；非终态 `→ cancelled`。**没有** `failed → queued`：人工重试创建新动作（新 `epoch`）。执行前先按幂等键查询 GitHub 是否已存在目标对象，存在则直接 `succeeded`。
 
 ### 4.4 审批
 
-`pending → granted → (consumed | invalidated | expired)`；`pending → (denied | invalidated | expired)`。`granted` 只在 `subject_digest` 仍与当前主体一致时可被消费（PR 类动作即 head 未变），消费即 `consumed`，只能消费一次。
+`pending → granted → (consumed | invalidated | expired)`；`pending → (denied | invalidated | expired)`。`pending → expired` 的期限是 `policies.approval.ttl_s`（默认 24 小时，建议值）。`granted` 只在 `subject_digest` 仍与当前主体一致时可被消费（PR 类动作即 head 未变），消费即 `consumed`，只能消费一次。**审批在执行开始前消费**（P-54）：`forge` 在把 Outbox 动作置为 `executing` 的同一事务里消费并记下 `consumed_by = act_…`；之后该动作的临时错误重试沿用这次消费，但动作终态失败**不退回**审批，重做需要新审批。
 
 ## 5. 事件
 
@@ -273,6 +326,7 @@ stateDiagram-v2
 ```
 
 - `seq` 全局单调递增，作为客户端事件流游标。
+- `log_epoch`（P-67）：事件日志的纪元号，存于日志元数据，**不在信封里**；每次从备份恢复加一。事件流（`heartbeat`）与所有快照响应（头 `X-Log-Epoch`）携带它，客户端发现变化就丢弃缓存、全量重同步（[api.md §5.3](interfaces/api.md#53-快照--事件流客户端的标准衔接)）。设备吊销另追加到日志之外的 `revocations.journal`，恢复时重放晚于备份的吊销。
 - 全局事件（设备、全局设置等）的 `project_id` 为 `null`。
 - 事件只追加；投影由 `store` 在同一事务中更新。
 
@@ -283,23 +337,28 @@ stateDiagram-v2
 | `project.added` / `project.updated` | 项目绑定、仓库设置快照变化（设置覆盖变更不用它，见 `settings.updated`） |
 | `settings.updated` | 某 `(scope, resource)` 设置写入；全局写入时 `subject` 为字面量 `settings`、`project_id` 为 `null`（[config.md §2.3](interfaces/config.md)） |
 | `conversation.created` | 项目主对话创建 |
-| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.abandoned` | 交付单元生命周期 |
-| `workflow.created` / `workflow.revised` / `workflow.finished` | 图创建、改写、结束 |
+| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.abandoned` | 交付单元生命周期（`stage_changed` 的 `data` 含新 `stage_status`） |
+| `delivery.paused` / `delivery.resumed` | 用户暂停 / 继续交付单元（P-56） |
+| `workflow.created` / `workflow.revised` / `workflow.finished` | 图创建、改写、结束（含挂在会话上的临时图，此时 `subject` 为 `wfl_…`、`data.conversation_id` 非空）；结束时 `data.status` 取 `Workflow.status` 的终态值 |
 | `node.queued` / `node.started` / `node.finished` / `node.superseded` | 节点 |
+| `node.retry_requested` | 用户请求重试失败节点（P-56）；引擎随后新建尝试 |
 | `attempt.started` / `attempt.finished` | 尝试 |
 | `attempt.progress` | 尝试进度（worker 自报经采样节流），仅展示，不驱动状态机 |
-| `patch.validated` / `patch.rejected` | `repo` 在干净检出上应用并经 `policy` 校验补丁的结论（含 `result_tree` 或拒绝原因） |
+| `patch.validated` / `patch.rejected` | 由 `repo` 写：`patch.validated` 含 `result_tree` 与判定（`allow` / `needs_approval`）；`patch.rejected` 含 `reason`，覆盖机械拒绝（不可应用、路径非法、`.git`、二进制、符号链接、子模块）与策略拒绝两种（P-69） |
 | `sandbox.created` / `sandbox.destroyed` | 沙盒 |
 | `worktree.created` / `worktree.locked` / `worktree.unlocked` / `worktree.removed` | 工作树 |
 | `message.posted` | 对话消息（用户、agent、事件行） |
-| `inbox.raised` / `inbox.resolved` / `inbox.dismissed` | 上报 |
+| `inbox.raised` / `inbox.resolved` / `inbox.dismissed` | 上报（`inbox.raised` 且 `severity ≥ warn` 时桌面端弹系统通知，不另设事件，P-63） |
+| `guardian.triaged` | 守护对一个事件的分流处置：`event_ref`（触发事件的 `seq` 或 `dedup_key`）、`class`（config §6.1 的类 id）、`action`（`silent_fix` / `silent_reply` / `batch` / `escalate` / `noop` / `defer` / `finalize` 等）（P-60） |
+| `guardian.heal_requested` | 守护请求引擎开一轮自愈（`heal` 节点） |
+| `guardian.escalated` | 守护上报（附 `class`、`reason_code`、`inbox_id`） |
 | `approval.requested` / `approval.granted` / `approval.consumed` / `approval.invalidated` / `approval.expired` / `approval.denied` | 审批 |
 | `outbox.enqueued` / `outbox.executing` / `outbox.succeeded` / `outbox.failed` / `outbox.cancelled` | GitHub 写动作 |
 | `forge.<kind>` | 归一化后的 Forge 事件，`<kind>` 见 [forge-actions §6.3](interfaces/forge-actions.md#63-目录)（如 `forge.pr_synchronized`、`forge.base_advanced`） |
 | `forge.synced` | 对账得到的 GitHub 交付事实变化 |
 | `forge.drift_detected` | 本地预期与 GitHub 不一致 |
-| `budget.charged` / `budget.exhausted` | 预算 |
-| `policy.denied` | 策略拒绝 |
+| `budget.charged` / `budget.exhausted` | 预算（交付台账或会话台账；`data.subject` 区分） |
+| `policy.denied` | `policy` 的规则判定为拒绝（路径规则、大小上限、敏感文件、动作处置）；机械拒绝不发此事件，只发 `patch.rejected`（P-69） |
 | `device.paired` / `device.updated` / `device.revoked` | 设备（`device.updated`：改名、改角色） |
 
 每个事件 `data` 的 JSON Schema 放在 `schemas/events/<type>.json`（M0 产出）。

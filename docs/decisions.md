@@ -22,6 +22,8 @@
 
 ## 提议（默认采用，可推翻）
 
+P-47–P-70 来自[第二轮裁决](reviews/2026-10-24-rulings-round2.md)（产品负责人代理，C1–C24）；同一轮的 C25–C29 是契约小修，直接落在相应文档里，不另立编号。被修订的旧条目保留原文，并在条目末尾注明"已被 P-xx 修订"。
+
 | # | 决策 | 理由 |
 | --- | --- | --- |
 | P-01 | 不自研编辑器；"AI IDE"指编排工作台 | 编辑器是无底洞，现有编辑器足够 |
@@ -34,16 +36,16 @@
 | P-08 | 事件流用 SSE + 游标 | 简单、可穿透代理 |
 | P-09 | 第一版单人自托管、只支持 github.com、不接收 fork PR | 收窄 MVP |
 | P-10 | Low 档也走 PR，不直推默认分支 | 默认分支通常受保护 |
-| P-11 | 改动 `.github/workflows/`、依赖清单、lockfile 一律需要 Gantry 审批。过渡：M1 的 `policy` v0 对这些改动一律拒绝并上报（fail-closed），M2 起改为"需要审批"（P-19） | 防注入借 CI 执行 |
+| P-11 | 改动 `.github/workflows/`、依赖清单、lockfile 一律需要 Gantry 审批。过渡：M1 的 `policy` v0 对这些改动一律拒绝并上报（fail-closed），M2 起改为"需要审批"（P-19）（workflow 部分已被 P-48 修订：workflow 改动一律拒绝，不再"需要审批"） | 防注入借 CI 执行 |
 | P-12 | 用户必须在 GitHub 上完成仓库要求的人工 review；Gantry 审批只授权 Gantry 自己的动作 | App 不能 approve 自己创建的 PR |
-| P-13 | 内网部署的 webhook 入口用只转发 `/webhook` 的隧道，不用 smee.io | smee 仅供开发，且经第三方中继 |
+| P-13 | 内网部署的 webhook 入口用只转发 `/webhook` 的隧道，不用 smee.io（已被 P-65 修订：webhook 只在回环地址明文监听，对公网经终止 TLS 的反向代理或隧道；隧道还要转发 `/setup/github/callback`） | smee 仅供开发，且经第三方中继 |
 | P-14 | License：不复用 GraphAgent v1 的 AGPL DAG 代码，重新实现，仓库保持 MIT | 与 D-01 中"独立重设计 runtime"一致 |
 | P-15 | 沙盒与服务端之间只有文件（只读输入、可写输出目录）和 worker 进程的 stdout；没有任何网络端点或 Unix socket | 沙盒不可信，任何可回连的服务端端点都是攻击面（I1） |
-| P-16 | 出网代理（Egress）两种模式：(a) 模型 API 用反向代理模式——调用方（沙盒内的 worker 与服务端的 `models` 模块）把模型 base URL 指向 Egress，Egress 注入 key 并按调用方计量 token（沙盒调用方以沙盒网络身份映射到 job，不信任沙盒自报）；(b) 包仓库用 HTTPS CONNECT 白名单，不注入凭据；私有包仓库走反向代理模式。模型 key 只存在 Egress；服务端 `models` 的调用也经 Egress | CONNECT 隧道既不能注入请求头也读不到用量；key 只在一处，计量只有一个事实源 |
+| P-16 | 出网代理（Egress）两种模式：(a) 模型 API 用反向代理模式——调用方（沙盒内的 worker 与服务端的 `models` 模块）把模型 base URL 指向 Egress，Egress 注入 key 并按调用方计量 token（沙盒调用方以沙盒网络身份映射到 job，不信任沙盒自报）；(b) 包仓库用 HTTPS CONNECT 白名单，不注入凭据；私有包仓库走反向代理模式。模型 key 只存在 Egress；服务端 `models` 的调用也经 Egress（沙盒身份部分已被 P-49 修订：改用每个尝试一枚的 `job_token`；`models` 的调用方式已被 P-50 修订：经回环 HTTP 反向代理并使用 `svc_token`） | CONNECT 隧道既不能注入请求头也读不到用量；key 只在一处，计量只有一个事实源 |
 | P-17 | 节点的角色（`role`）、模型层级（`tier`）、执行位置（`exec`）是三个字段。需要读仓库内容的角色经 Worker 协议在沙盒中运行，只处理结构化文本的角色由 `models` 直接调用；角色表见 architecture §9。推理深度随档位，由配置决定 | 执行位置由"是否要读仓库"决定，而不是由模型层级决定 |
-| P-18 | 设备签名审批的最小实现提前到 M1（`sec` 与 `fe-desktop`）；M2 保留因新推送失效的完整交互、路径规则审批、审计日志、可配置策略。所有签名走同一原语：challenge → 规范化载荷 → 设备签名 → 服务端验签，动作为 `ForgeActionKind`（如 `merge_pr`）或内部动作（`settings_update`、`device_role_change`、`device_revoke`），见 api.md §6。设置写入：涉及凭据或放宽安全的改动需要审批设备签名，收紧类改动 operator 即可 | M1 退出标准要求用户审批 merge，M1 设置页要写模型凭据 |
-| P-19 | M1 的 `policy` v0 对 `.github/workflows/`、依赖清单、lockfile 的改动一律拒绝并上报（fail-closed）；M2 起改为"需要审批"（P-11） | M1 没有路径规则审批的交互，宁可拒绝 |
-| P-20 | 审批状态：`pending → granted → consumed \| invalidated \| expired`；`pending → denied \| invalidated \| expired`。审批绑定 `subject_digest`：PR 类动作是 head SHA，补丁审批（PR 创建前）是补丁内容的 sha256。`Approval.action` 用 `ForgeActionKind` 标识或内部动作标识 | 补丁审批发生在 PR 之前，没有 head 可绑 |
+| P-18 | 设备签名审批的最小实现提前到 M1（`sec` 与 `fe-desktop`）；M2 保留因新推送失效的完整交互、路径规则审批、审计日志、可配置策略。所有签名走同一原语：challenge → 规范化载荷 → 设备签名 → 服务端验签，动作为 `ForgeActionKind`（如 `merge_pr`）或内部动作（`settings_update`、`device_role_change`、`device_revoke`），见 api.md §6。设置写入：涉及凭据或放宽安全的改动需要审批设备签名，收紧类改动 operator 即可（动作集合已被 P-54 修订；签名所用密钥已被 P-47 修订：审批签名密钥独立于 mTLS 密钥） | M1 退出标准要求用户审批 merge，M1 设置页要写模型凭据 |
+| P-19 | M1 的 `policy` v0 对 `.github/workflows/`、依赖清单、lockfile 的改动一律拒绝并上报（fail-closed）；M2 起改为"需要审批"（P-11）（workflow 部分已被 P-48 修订：M2 起仍拒绝，只有依赖清单与 lockfile 改为需要审批） | M1 没有路径规则审批的交互，宁可拒绝 |
+| P-20 | 审批状态：`pending → granted → consumed \| invalidated \| expired`；`pending → denied \| invalidated \| expired`。审批绑定 `subject_digest`：PR 类动作是 head SHA，补丁审批（PR 创建前）是补丁内容的 sha256。`Approval.action` 用 `ForgeActionKind` 标识或内部动作标识（`Approval.action` 的取值与消费时点已被 P-54 修订；补丁审批的动作标识改为 `patch_apply_protected`） | 补丁审批发生在 PR 之前，没有 head 可绑 |
 | P-21 | 事件目录补齐：`settings.updated`、`device.updated`、`inbox.dismissed`、`conversation.created`、`approval.expired`、`approval.consumed`、`outbox.executing`、`outbox.cancelled`、`forge.<kind>`（含 `forge.base_advanced`）、`attempt.progress`（采样，仅展示）、`patch.validated`、`patch.rejected`；全局事件的 `project_id` 为 `null` | 四份契约各自提出的缺口 |
 | P-22 | data-model 补齐 Attempt / Sandbox / InboxItem / Project / PR 快照 / OutboxAction / BudgetLedger 的字段与枚举，`Level` 线上格式为 `"None"`…`"Ultimate"`，定义 `UntrustedText` / `Ref` / `Card` / `CheckSummary`；每个项目一个主对话；`default_level` 移到配置 `levels.default_level`（项目可覆盖）。用量以 Egress 计量为准；`forge_writes` 是累计数，按小时限速是配置项、由 Outbox 令牌桶执行，二者不混用 | 契约需要可生成 schema 的确定形状 |
 | P-23 | 第一台配对设备为 approver（所有者）；之后配对的设备默认 operator；手机端按 api.md 的"客户端档案"只开放对话相关路由，默认不可审批。改角色、吊销需要 approver 签名 | 防会话劫持后自我提权 |
@@ -61,15 +63,39 @@
 | P-35 | 手机端可做文字答复、补规格、二选一；升档（增加花费）与签名只在桌面 | 手机只对话（D-11），但不应把可答复的事都推给桌面 |
 | P-36 | 单个交付的升档、暂停、继续、重试、放弃属于"控制"，可在工作页完成；全局预算模板与上限只在设置页 | 区分控制与配置（I7） |
 | P-37 | 工作页提供确定性控制：暂停 / 继续、重试失败节点、放弃交付（带确认），不依赖意图解析 | Max / Ultimate 跑偏时需要立即止损（交互评审 #7） |
-| P-38 | 新增 `secrets` 模块（库）：服务端密钥加密存储、按使用方隔离读取、轮换、加密备份；`forge`、`pki`、`egress` 只能读各自的密钥 | 原"密钥模块"无主 |
+| P-38 | 新增 `secrets` 模块（库）：服务端密钥加密存储、按使用方隔离读取、轮换、加密备份；`forge`、`pki`、`egress` 只能读各自的密钥（读取方已被 P-59 修订：`notify` 也读取自己的密钥，M4 APNs） | 原"密钥模块"无主 |
 | P-39 | 唯一 approver 设备丢失时，用服务端主机上的应急命令 `gantry device recover`（需主机 root，写审计事件）吊销设备或把一台设备提升为 approver | 否则吊销与改角色无人能签 |
 | P-40 | 带选项的上报项与对话里的选择卡片是同一个 InboxItem，按钮统一调 `POST /v1/inbox/{id}/choose`；自由文本答复走发消息 | 选择结果需要确定的回传路径 |
-| P-41 | 补丁中的二进制文件只有路径命中 `policies.patch.binary_allowlist` 且经审批才放行；符号链接一律拒绝 | 二进制与符号链接难以审查，后者还可越出工作区 |
+| P-41 | 补丁中的二进制文件只有路径命中 `policies.patch.binary_allowlist` 且经审批才放行；符号链接一律拒绝（已被 P-68 修订：撤销 `binary_allowlist`，二进制一律拒绝） | 二进制与符号链接难以审查，后者还可越出工作区 |
 | P-42 | `merge_pr`、强制推送、受保护路径改动不允许配置为 `auto`；其他动作可以 | 危险动作必须有人签名 |
 | P-43 | 设置资源为 8 个：`models`、`levels`、`policies`、`guardian`、`sandbox`、`egress`、`notify`、`github` | 与设置页分组一一对应 |
 | P-44 | token 用量按 input / output / cache_read / cache_write 分别记录；预算按加权 token 计，权重是配置项（默认按提供方价格比例，建议值） | 不同类别成本差异大 |
 | P-45 | reasoner 不是判定节点：只产出预演报告，不输出 verdict | 判定只由 gate 与 arbiter 给出 |
 | P-46 | 项目覆盖：安全策略、预算、守护阈值、沙盒限额只能收紧；模型选择可自由覆盖 | 防止项目级配置绕过全局安全基线 |
+| P-47 | **双密钥**：桌面端有两把不可导出的密钥。mTLS 客户端密钥用于无提示的后台连接；**审批签名密钥**单独生成，存于 Secure Enclave / TPM，每次使用必须用户在场（Touch ID / Windows Hello）。配对请求 `POST /v1/pair` 同时提交 CSR 与 `approval_pubkey`，服务端登记在 Device 上；所有审批签名都用审批签名密钥，服务端用登记的 `approval_pubkey` 验签（第二轮裁决 C1） | 后台连接不能每次弹生物识别；若签名也用 mTLS 密钥，被植入的进程可以无提示地签审批 |
+| P-48 | **Gantry 不修改 `.github/workflows/`**：App 不申请 `workflows` 权限；补丁触及 workflow 文件时 `policy` 一律拒绝（`failure_detail = policy.path_protected:workflows`），上报 `decision_needed`（`payload.kind = manual_action`），附补丁供用户手动应用。依赖清单与 lockfile 仍按 P-11 / P-19：M1 拒绝，M2 起需要审批（C2） | 没有 `workflows` 权限 GitHub 本身也会拒绝推送；改 CI 等于借 CI 的 secrets 执行代码，宁可让人手动做 |
+| P-49 | **沙盒身份用每个尝试一枚的能力令牌 `job_token`**：服务端为每个 Attempt 签发，放在模型 API base URL 路径中（`http://<egress>/j/<job_token>/<provider>/…`），只对该尝试有效、尝试结束即作废、只能从沙盒网段使用；Egress 校验令牌并按尝试计量。沙盒即使读到令牌也只能给自己的尝试记账（C3） | rootless Podman 下按源地址识别沙盒不可靠；能力令牌不依赖网络拓扑，泄露的后果被限定在该尝试自身 |
+| P-50 | **Egress 控制面契约**：新增 [interfaces/egress-control.md](interfaces/egress-control.md)。`gantryd` 经主机本地 Unix socket `/run/gantry/egress.sock` 调用控制面：签发 / 吊销 `job_token`、写入 secret（只写不读）、查询 secret 是否存在（`present`）、拉取用量、签发服务令牌 `svc_token`。服务端 `models` 的模型调用走 Egress 的**回环 HTTP 反向代理**，带 `svc_token`（与 `job_token` 同一计量口径，计入会话台账或交付台账）。控制面统一称 `egress.sock`，不再使用 `models_uds`（C4） | 几份模块规格各自给 Egress 接口留了缺口；计量只有一个事实源、一套口径 |
+| P-51 | **共享端口与替身**：所有跨模块端口 trait 定义在 `core::ports`（M0 交付）：`ForgeReader`、`OutboxPort`、`SandboxService`、`ModelProvider`、`RepoService`、`PolicyPort`、`InboxPort`、`EgressControl`。M0 替身补齐：`Store::open_in_memory`、`FakePolicy`、`FakeInbox`、HTTP 级 `FakeGitHub`（供 `forge` 测试）、`EgressStub`（C5） | 端口放在被依赖方的 crate 里会让替身与调用方互相等待；放进 `core` 才能真正并行 |
+| P-52 | **沙盒端口分两层**：`SandboxService`（引擎面：提交 JobSpec、等待结果、取消）与 `SandboxDriver`（容器面：rootless Podman + gVisor 的具体操作）。`engine` 只依赖 `SandboxService`（C6） | 引擎不该知道容器细节；驱动可替换（Firecracker）而不动引擎 |
+| P-53 | **Outbox 失败语义**：临时错误留在 `queued`，以 `not_before` 退避重试，不进入 `failed`；重试用尽或不可重试错误才进入终态 `failed`，只在终态发 `outbox.failed`；人工重试创建新动作（新 `epoch`）。删除 `failed → queued` 边（C7） | `failed` 既表示"会重试"又表示"已放弃"时，消费者无法据事件决定是否上报 |
+| P-54 | **审批动作标识与形状**：`Approval.action` ∈ `ForgeActionKind` ∪ {`settings_update`、`device_role_change`、`device_revoke`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、`patch_apply_protected`}。每个动作的 `target` 与 `subject_digest` 形状在 [data-model](data-model.md#审批动作的-target-与-subject_digest) 中列表定义；未定义形状的动作一律 fail-closed（按拒绝处理并上报）。**审批在执行开始前消费**（`consumed`，记录消费方的 Outbox 动作 ID 或尝试 ID）；执行终态失败不退回，需要新审批（C8） | 形状不确定就无法规范化签名；"成功后消费"会让失败重试反复使用同一授权 |
+| P-55 | **阶段机补全**：任何非终态阶段 → `abandoned`（用户放弃、PR 关闭未合并、Issue `not_planned`）；`REJECT` 后选择"重新规划" → `plan`；`merge` 阶段 PR 被关闭 → `abandoned`，PR 重新打开则回到 `review`。`stage_status` 为 `running` / `waiting_human` / `blocked` / `paused` / `done`，转移规则见 data-model §4.1。**准入只在 High 及以上**：Medium 为 `spec → plan`（免准入），Low 为 `spec → implement`（免准入、无计划阶段）。**计划是独立阶段**：计划阶段图 = `plan`（Max 起加 `reasoner`），实现阶段图 = `build → verify`（Low 为 `single`）。architecture §8 按"计划阶段 / 实现阶段 / 评审阶段"三列重写；Low 的阶段列表包含 `review`（只等 CI）（C9） | 原阶段机缺放弃、重新规划与暂停的出边；计划节点放在实现阶段图里与阶段名不符 |
+| P-56 | **控制路由与事件**：新增 `POST /v1/deliveries/{delivery_id}/pause`、`POST /v1/deliveries/{delivery_id}/resume`、`POST /v1/nodes/{node_id}/retry`（operator，`Idempotency-Key` 必带）；事件 `delivery.paused`、`delivery.resumed`、`node.retry_requested`（C10） | P-37 的确定性控制此前没有路由与事件 |
+| P-57 | **档位实际值**：`level_effective` 初值由引擎在规格阶段按风险评估给出（≤ `level_cap`），之后只能在上限内升，不自动降；已触发的闸门永不撤销。预算模板在交付单元创建时按 `level_cap` 固定（C11） | 自动降档会撤销已承诺的审视；预算随档位漂移会让台账失去可比性 |
+| P-58 | **None 档记账**：None 档问答不建交付单元。需要读代码时创建挂在会话上的临时图：`Workflow.delivery_id` 可空，此时必须有 `conversation_id`；用量记入每个项目的**会话台账**（`BudgetLedger.subject = conversation`），每日上限是配置项 `levels.None.daily_tokens`（C12） | None 档的 `answer` 节点也花 token，不能不记账 |
+| P-59 | **模块依赖修正**：`engine` 依赖 `forge`（只用 `ForgeReader` 按需读取 Issue / PR 正文与评论，作为不可信文本，不进快照）与 `notify`；`conversation` 依赖 `notify`；`forge` 依赖 `policy`（执行时验审批）与 `notify`；`guardian` 依赖 `core`、`store`、`notify`；`notify` 依赖 `models`（可选，打杂模型生成通知文案）与 `secrets`（M4 APNs 密钥）；`forge`、`egress` 依赖 `secrets`（C13） | 模块规格写作时发现的实际依赖与 architecture §4 不符 |
+| P-60 | **守护事件与范围**：新增事件 `guardian.triaged`（`event_ref`、`class`、`action`）、`guardian.heal_requested`、`guardian.escalated`，会话服务把它们渲染为事件行。分流规则以 [modules/guardian.md](modules/guardian.md) 的决策表为唯一来源（含"无需动作"的显式行），architecture §7.3 与 config `guardian` 小节与之对齐；规则表外的事件一律上报。`reply_review_thread` 提前到 M2；M2 的 `be-engine` 泳道交付 `request_heal` 与 `classify` 端口。守护静默自愈不改变交付阶段；需要改代码且超出自愈范围时才走 `review → implement`（C14） | 静默处理必须可审计；M2 的"回复理由"依赖 `reply_review_thread` |
+| P-61 | **状态清单评论幂等**：`upsert_status_comment` 的幂等键含单调递增的 `revision`；`revision` 与 `head_epoch` 计数保存在本地事件日志中（随日志备份），不依赖可重建的 PR 快照（C15） | 快照重建若从 0 计数，会与历史幂等键 / 去重键相撞而被静默吞掉 |
+| P-62 | **forge 不读策略**：是否需要审批由入队方在入队时调用 `policy` 决定，结果写入 `OutboxAction.requires_approval`；`forge` 只在执行时调用 `policy` 验证并消费审批（C16） | 判定只有一个入口（I3），执行方不做第二次判定 |
+| P-63 | **上报项**：`InboxItem` 增加 `project_id` 与 `dedup_key`；`escalation`、`spec_needed`、`decision_needed` 的 `payload.options[]` 为 `{id, label, primary?}`；升档一律用 `escalation`（手机档案不可 `choose`，P-35）。新增 `GET /v1/inbox/summary`（按项目的 open 计数，手机可用）。桌面系统通知由 `inbox.raised`（`severity ≥ warn`）触发，不新增事件。`notify` 归 `be-engine` 泳道（M1 上报与计数），APNs 归 M4 `ops`（C17） | 项目 tab 的徽标需要计数；重复上报需要去重键 |
+| P-64 | **证书链与续期**：配对时固定的是**离线根 CA** 指纹；服务端下发链 `[叶子, 中间 CA, 根]`，客户端校验根指纹与固定值一致；中间 CA 轮换不影响已配对设备。新增 `POST /v1/devices/self/renew`（mTLS，提交新 CSR），M1 交付；客户端在证书剩余 1/3 有效期时自动续期（建议值）（C18） | 固定中间 CA 会让中间 CA 轮换（M3）迫使所有设备重新配对 |
+| P-65 | **webhook 入口与 App 创建**：webhook 监听只在回环地址上以明文 HTTP 提供；对公网暴露一律经终止 TLS 的反向代理或隧道（公网证书）。首次部署顺序：先配置 webhook 入口，再用 App Manifest 创建 App；`gantry github setup` 生成一次性的 Manifest 提交页，并经同一入口的 `/setup/github/callback` 接收 `code`（细节需核实）（C19） | Manifest 创建时就要填 webhook URL；TLS 由成熟的反向代理 / 隧道终止，`gantryd` 不管理公网证书 |
+| P-66 | **安装引导期**：第一台设备配对之前，主机命令（需 root）可以写入 `github.*` 与 `sandbox.base_image` 等"仅 approver"配置，并写审计事件；第一台设备配对之后改为需要审批签名。`sandbox.base_image` 默认使用随版本发布、固定摘要的官方 worker 镜像（C20） | 配对前没有 approver 能签名，而 App 凭据与镜像又是跑通前提 |
+| P-67 | **备份恢复**：事件日志有 `log_epoch`，每次从备份恢复加一；事件流与快照响应携带 `log_epoch`，客户端发现变化就全量重同步。设备吊销同时追加写入日志之外的 `revocations.journal`（只追加），恢复时重放晚于备份的吊销（C21） | 恢复后 `seq` 可能回退并被复用，客户端游标会错位；恢复不能让已吊销的设备复活 |
+| P-68 | **二进制文件**：第一版补丁中的二进制文件一律拒绝（与 worker-protocol 不生成 `--binary` 一致），撤销 P-41 中的 `binary_allowlist`；符号链接一律拒绝（C22） | 补丁格式本身就不携带二进制内容，白名单无从生效 |
+| P-69 | **补丁校验分工**：`repo` 做机械检查并产出 `PatchFacts`（能否干净应用、文件列表、大小、二进制、符号链接、子模块、权限位）；`policy` 基于 `PatchFacts` 和配置做规则判定（路径规则、大小上限）。应用失败等机械拒绝由 `repo` 发 `patch.rejected`（`reason`）；`policy.denied` 只用于策略判定。提交由 `repo` 创建；提交身份来自配置 `github.commit_identity`（App 创建时写入）（C23） | 事实与判定分开：`policy` 不解析补丁、不碰文件系统，`repo` 不做可配置的判断 |
+| P-70 | **token 加权**：保留 P-44；配置增加 `levels.token_weights`（`input`、`output`、`cache_read`、`cache_write`，默认值为建议值，标"待按价格调优"）；config 原 OQ-7 关闭（C24） | P-44 已定加权，但没有配置键可落 |
 
 ## 待决
 

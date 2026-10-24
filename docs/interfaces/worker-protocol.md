@@ -1,7 +1,7 @@
 # Worker 协议（服务端 ↔ 沙盒内 worker）
 
 > 状态：设计 v0.1 · 契约 · 协议版本 `gantry-worker/1` · 机器可读版本落在 `schemas/worker/`（M0 产出，清单见 §11.1）
-> 使用者：`sandbox`、`worker`、`engine`、`repo`（直接）；`policy`、`forge`、`egress`、`models`（间接）
+> 使用者：`sandbox`、`worker`、`engine`、`repo`（直接）；`policy`、`forge`、`egress`、`models`（间接）。`sandbox` 与 Egress 之间的控制面（签发 / 吊销 `job_token`、拉取用量）见 [egress-control.md](egress-control.md)
 > 标注 **[提议]** 的取值是本文给出的默认值，骨架文档没有定；标注 OQ-n 的点见 §12 开放问题，不要自行拍板。
 
 本文规定一次 Attempt 在沙盒里执行时，服务端与沙盒内 worker 交换什么、怎么交换、哪些可信。它是 [architecture.md §5](../architecture.md#5-信任边界与不变式) 中 I1（沙盒只计算）、I2（GitHub 写入唯一路径）、I3（放行唯一决策点）、I5（外部文本不可信）、I8（执行产物先验后推）的落地契约。核心立场：**沙盒与服务端之间只有文件和 stdout，没有任何网络端点或 socket（decisions P-15），沙盒交回的一切都是不可信输入。**
@@ -15,9 +15,9 @@
 | 服务端 → 沙盒 | 取消 / 超时 | 容器运行时发信号（SIGTERM → SIGKILL） | 服务端 |
 | 沙盒 → 服务端 | 进度 | worker 的 stdout（JSON Lines），沙盒管理器经运行时日志接口采集 | **不可信自报**，只用于展示 |
 | 沙盒 → 服务端 | 产物 | `/gantry/out/` 下固定四个文件，进程停止后由管理器提取 | **不可信**，逐项校验后才被采纳 |
-| 沙盒 → 外部 | 模型 API、包仓库 | 只经 Egress：模型 API 走反向代理（模型 base URL 指向 Egress，由它注入 key），包仓库走 `HTTPS_PROXY`（CONNECT 白名单）；沙盒内没有任何 key | — |
+| 沙盒 → 外部 | 模型 API、包仓库 | 只经 Egress：模型 API 走反向代理（模型 base URL 指向 `http://<egress>/j/<job_token>/<provider>`，由 Egress 校验 `job_token`、注入 key、按本尝试计量，P-49），包仓库走 `HTTPS_PROXY`（CONNECT 白名单）；沙盒内没有任何 key | `job_token` 视为沙盒可读：它只能让 Egress 给本尝试记账 |
 
-不存在：网络回连、Unix socket、沙盒内的服务端 token、服务端对沙盒 `.git` 或工作区目录的任何读取。
+不存在：网络回连、Unix socket、沙盒内能调用服务端的 token、服务端对沙盒 `.git` 或工作区目录的任何读取。`job_token` 不是服务端 token：它只被 Egress 的沙盒侧监听器接受，只对本尝试有效、尝试结束即作废、只能从沙盒网段使用（P-49）。
 
 ## 1. 原则
 
@@ -36,13 +36,13 @@
 
 | 模块 | 在本协议中负责 |
 | --- | --- |
-| `engine` | 解析 tier → 模型名；预留预算；生成 JobSpec 的可信部分（role 指令、constraints、upstream 引用）；消费分类后的结果；重试、上报、入队 Outbox |
-| `sandbox` | 创建 / 注入 / 启动 / 监督 / 提取 / 销毁；计时器与信号；隔离包装与写入 `inputs/`；向 `egress` 登记沙盒网络身份与取计量；采集 stdout |
-| `repo` | 从镜像仓准备工作区副本；在干净检出上应用与校验补丁（补丁闸门）；调用 `policy` 取路径 / 审批判定；生成提交 |
+| `engine` | 解析 tier → 模型名；预留预算；生成 JobSpec 的可信部分（role 指令、constraints、upstream 引用）；经 `SandboxService` 提交 / 取消（P-52）；消费分类后的结果；重试、上报、入队 Outbox |
+| `sandbox` | 对引擎提供 `SandboxService`，对下经 `SandboxDriver` 操作容器（P-52）：创建 / 注入 / 启动 / 监督 / 提取 / 销毁；计时器与信号；隔离包装与写入 `inputs/`；经 Egress 控制面为本尝试签发 / 吊销 `job_token` 并拉取计量（[egress-control.md](egress-control.md)）；采集 stdout |
+| `repo` | 从镜像仓准备工作区副本；在干净检出上应用补丁并做机械检查，产出 `PatchFacts`（补丁闸门，机械拒绝发 `patch.rejected`）；交 `policy` 做规则判定；以 `github.commit_identity` 生成提交（P-69） |
 | `worker`（沙盒内） | 读 JobSpec、驱动 agent、写 `out/`、打进度、按退出码约定退出 |
 | `worker`（服务端侧 `WorkerAdapter`） | 声明镜像、命令行、所需环境变量、支持的协议版本；不碰产物内容 |
-| `policy` | 路径规则、敏感文件规则、proposals 判定、审批 |
-| `egress` | 模型 API 反向代理（注入 key、按沙盒网络身份映射到 job 计量与封顶）、包仓库 CONNECT 白名单、出网审计 |
+| `policy` | 基于 `PatchFacts` 的规则判定（路径规则、大小上限、敏感文件、权限位变化）、proposals 判定、审批（P-69） |
+| `egress` | 模型 API 反向代理（校验 `job_token`、注入 key、按尝试计量与封顶，P-49）、包仓库 CONNECT 白名单、出网审计 |
 
 ## 2. 通道与沙盒布局
 
@@ -65,26 +65,26 @@
 | --- | --- | --- |
 | `GANTRY_JOB` / `GANTRY_OUT` / `GANTRY_WORK` | `/gantry/job.json` / `/gantry/out` / `/gantry/work` | 固定路径，便于测试替身 |
 | `HTTPS_PROXY`、`https_proxy` | Egress 的 CONNECT 端点 | 包仓库的出口（白名单，不注入凭据）；值里不含上游凭据 |
-| 模型 base URL（如 `ANTHROPIC_BASE_URL`，由适配层设置） | Egress 的模型 API 反向代理端点 | 模型调用的唯一出口；Egress 注入 key |
+| 模型 base URL（如 `ANTHROPIC_BASE_URL`，由适配层设置） | `http://<egress>/j/<job_token>/<provider_id>`（由控制面签发令牌时返回，P-49） | 模型调用的唯一出口；Egress 校验令牌、注入 key、按本尝试计量。令牌只出现在这个变量里，不写进 `job.json`、`inputs/`、事件或日志 |
 | `NO_PROXY` | `localhost,127.0.0.1` | — |
 | `HOME`、`TMPDIR` | `/gantry/home`、`/gantry/tmp` | — |
 | agent 专用变量 | 由适配层设置（§10） | — |
 
-不注入 `GITHUB_TOKEN`、模型 key、SSH 私钥；镜像不含 `gh`，git credential helper 为空。
+不注入 `GITHUB_TOKEN`、模型 key、SSH 私钥；镜像不含 `gh`，git credential helper 为空。`job_token` 是唯一出现在沙盒里的令牌，不是凭据：泄露给沙盒内任何进程的后果只是给本尝试多记账（仍受 `tokens_total` 封顶）。
 
 ### 2.3 对 Egress 的要求
 
-协议依赖 `egress` 提供以下能力（细节归 `egress` 规格，模式见 decisions P-16）：
+协议依赖 `egress` 提供以下能力（控制面契约见 [egress-control.md](egress-control.md)，模式见 decisions P-16、P-49、P-50）：
 
 | # | 要求 | 说明 |
 | --- | --- | --- |
-| E1 | 沙盒网络里除 Egress 外无路由，DNS 由 Egress 解析 | 无旁路 |
+| E1 | 沙盒网络里除 Egress 的沙盒侧监听器外无路由，DNS 由 Egress 解析；控制面 `egress.sock` 与回环监听器都不可达 | 无旁路 |
 | E2 | 只放行本 job 的 `egress_profile`：模型 API（反向代理）+ 包仓库主机（CONNECT）。`github.com`、`api.github.com` 不在其内；依赖指向 `github.com` 源默认拒绝（decisions Q-08） | M1 退出标准；包仓库白名单本身是外泄通道，见 OQ-15 |
-| E3 | 模型 API 用反向代理模式：worker 把模型 base URL 指向 Egress（明文到 Egress，Egress 再以 TLS 连上游）；Egress 丢弃客户端自带的认证头，注入真实 key | 沙盒内无 key，也无需信任代理 CA |
-| E4 | 按调用方计量 token：沙盒调用方以**沙盒网络身份**（登记时绑定的源地址）映射到 `job_id`，不信任沙盒自报的任何标识；达到 `limits.tokens_total` 时切断后续模型请求 | 计费口径见 §7.4 |
+| E3 | 模型 API 用反向代理模式：worker 把模型 base URL 指向 `http://<egress>/j/<job_token>/<provider_id>`（明文到 Egress，Egress 再以 TLS 连上游）；Egress 去掉路径前缀，丢弃客户端自带的认证头，注入真实 key | 沙盒内无 key，也无需信任代理 CA |
+| E4 | 按尝试计量 token：Egress 只凭路径中的 `job_token` 识别尝试（P-49）——令牌由服务端在创建沙盒时经控制面签发，只对该尝试有效、只接受来自沙盒网段的请求，不信任沙盒自报的任何其他标识（请求头、`x-gantry-*`）；达到 `limits.tokens_total` 时切断后续模型请求 | 计费口径见 §7.4；即使沙盒内的进程读到令牌，也只能给本尝试记账 |
 | E5 | 包仓库走 HTTPS CONNECT 白名单，不注入凭据；私有包仓库走反向代理模式注入凭据 | — |
 | E6 | 出网审计日志带 `job_id` | M3 回放 |
-| E7 | 沙盒结束时撤销该 job 的登记 | — |
+| E7 | 尝试结束（`collect` 之后）由 `sandbox` 经控制面吊销 `job_token` 并取最终计量；吊销后该令牌的任何请求都被拒 | — |
 
 ### 2.4 工作区副本
 
@@ -110,7 +110,7 @@ sequenceDiagram
   participant V as repo + policy
   E->>E: 预留预算，生成 JobSpec，解析 tier 与模型
   E->>S: create（SandboxSpec）
-  S->>X: 登记 job_id，白名单，token 上限
+  S->>X: 签发 job_token（job_id、白名单、token 上限）
   S->>S: stage：准备工作区，写 job.json 与 inputs，建空 out
   S->>W: start（只读挂载，环境变量）
   loop 运行中
@@ -119,7 +119,7 @@ sequenceDiagram
   end
   W->>W: 写 out 产物，result.json 最后原子写入，退出
   S->>S: 确认全部进程已停，再 collect out（白名单，不跟随链接）
-  S->>X: 取本 job 计量，撤销登记
+  S->>X: 吊销 job_token，取本 job 最终计量
   S-->>E: RawArtifacts + 运行时事实 + 计量
   S->>S: destroy（容器，工作区，staging）
   E->>V: 校验结果，补丁，proposals
@@ -134,14 +134,14 @@ sequenceDiagram
 | 阶段 | 操作 | 执行者 | 做什么 | 事件 | 失败 → 分类（§9） |
 | --- | --- | --- | --- | --- | --- |
 | 0 预留 | — | `engine` | 从 BudgetLedger 预留；解析 tier → 模型；生成 JobSpec；创建 Attempt（n+1） | `node.started`、`attempt.started` | 预算不足：不创建，`budget.exhausted` |
-| 1 创建 | `create` | `sandbox` | 按 SandboxSpec 创建**未启动**的容器；向 `egress` 登记沙盒网络身份 → `job_id` | `sandbox.created` | `infra.sandbox_create` |
+| 1 创建 | `create` | `sandbox` | 经 Egress 控制面为本尝试签发 `job_token`（绑定 `job_id`、档案、`tokens_total`）；按 SandboxSpec 创建**未启动**的容器，模型 base URL 带该令牌 | `sandbox.created` | `infra.sandbox_create` / `infra.egress` |
 | 2 注入 | `stage` | `sandbox` | 挂载 `repo` 准备的工作区副本；写 `job.json`、`inputs/`（含隔离包装，§4.4）；建空 `out/`；算 MANIFEST | — | `infra.workspace_prep` |
 | 3 启动 | `start` | `sandbox` | 以非 root 用户启动 `gantry-worker run`；开始计 `wall_time` | — | `infra.sandbox_create` |
 | 4 运行 | — | worker | 校验 JobSpec → 驱动 agent → 流式输出进度 | `attempt.progress`（采样，§7） | §3.3、§3.4 |
 | 5 结束 | `stop` | `sandbox` | 进程退出，或超时 / 取消 / 被杀：确保容器内**全部**进程已终止 | — | — |
-| 6 提取 | `collect` | `sandbox` | 进程停止后从 `out/` 提取白名单文件；取退出状态、OOM / 信号事实、stdout / stderr 尾部、`egress` 计量 | — | `infra.collect` |
-| 7 销毁 | `destroy` | `sandbox` | 删除容器、工作区副本、staging；撤销登记；幂等，失败重试，残留由巡检清理 | `sandbox.destroyed` | 不影响分类 |
-| 8 终结 | — | `engine` + `repo` | 按 §8 校验 → 分类 → 写 `attempt.finished`（含 `result_ref`、`failure_class`、`usage`）；`repo` 校验补丁并为通过的补丁生成本地提交；proposals 交 `policy` | `patch.validated` / `patch.rejected`、`attempt.finished`、`node.finished`、`policy.denied` | §9 |
+| 6 提取 | `collect` | `sandbox` | 进程停止后从 `out/` 提取白名单文件；取退出状态、OOM / 信号事实、stdout / stderr 尾部；吊销 `job_token` 并取最终计量 | — | `infra.collect` |
+| 7 销毁 | `destroy` | `sandbox` | 删除容器、工作区副本、staging；确认 `job_token` 已吊销（幂等）；失败重试，残留由巡检清理 | `sandbox.destroyed` | 不影响分类 |
+| 8 终结 | — | `engine` + `repo` | 按 §8 校验 → 分类 → 写 `attempt.finished`（含 `result_ref`、`failure_class`、`usage`）；`repo` 机械检查补丁、产出 `PatchFacts` 交 `policy` 判定，为通过的补丁生成本地提交；proposals 交 `policy` | `patch.validated` / `patch.rejected`（`repo`）、`attempt.finished`、`node.finished`、`policy.denied`（仅策略判定） | §9 |
 
 `SandboxSpec`（engine → sandbox）与 data-model 的 Sandbox 实体对应：
 
@@ -150,7 +150,7 @@ sequenceDiagram
 | `job` | engine | JobSpec 的可信部分 + 待包装的原始材料 |
 | `image_digest`、`driver`、`trust` | 配置 / 档位 | `trust`：trusted / untrusted |
 | `limits` | 预算模板 + [config.md](config.md) 的 `sandbox.limits.*` | cpu、mem、disk、pids、`wall_time`；与 JobSpec `constraints.limits` 同源 |
-| `egress_profile`、`egress.tokens_total` | 配置 / 预算 | 白名单与 token 封顶（强制方是 `egress`） |
+| `egress_profile`、`egress.tokens_total` | 配置 / 预算 | 白名单与 token 封顶（签发 `job_token` 时交给 Egress，强制方是 `egress`） |
 | `workspace` | engine | `repo`、`base_sha`、（review / verify）`pr_base_sha`；对应 `Sandbox.worktree_snapshot` = `{mirror, base_sha, pr_base_sha?}`（镜像仓引用 + 基线提交 SHA） |
 
 预热池（M2）**[提议]**：容器可先启动并空等，`stage` 完成后由管理器**原子创建** `/gantry/inputs/READY`，worker 见到该文件后才读 `job.json`。M1 不需要，但 worker 的启动逻辑按"等待 READY"写，两种方式都兼容（OQ-16）。
@@ -338,17 +338,17 @@ worker 不需要区分 SIGTERM 的原因：原因只由管理器记录。取消�
 
 | role | 作用 | tier | exec | `output.patch` | 典型 proposals | `structured_output.kind` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `plan` | 把规格拆成步骤 | planner | `sandbox_ro` | forbidden | — | `plan` |
+| `plan` | 把规格拆成步骤（计划阶段） | planner | `sandbox_ro` | forbidden | — | `plan` |
 | `build` | 实现 / 修复 | worker | `sandbox` | required 或 optional | `open_pr`、`escalate` | `build` |
 | `verify` | 在候选 head 上跑检查并判定 | worker | `sandbox` | forbidden | — | `verify` |
 | `single` | Low 档单节点：实现 + 自检 | worker | `sandbox` | required 或 optional | `open_pr`、`escalate` | `build` |
 | `review:<视角>` | 某视角的评审 | worker | `sandbox_ro` | forbidden | — | `review` |
-| `reasoner` | 预演执行路径，找失败点 | planner | `sandbox_ro` | forbidden | — | `reasoner` |
+| `reasoner` | 预演执行路径，找失败点（计划阶段，Max 起） | planner | `sandbox_ro` | forbidden | — | `reasoner` |
 | `arbiter` | 对一组 review 做唯一裁决 | planner | `sandbox_ro` | forbidden | — | `arbiter` |
 | `heal` | 后台守护的自愈（CI 失败、属实的 bot finding、review 意见） | worker | `sandbox` | required 或 optional | `reply_review_thread`、`resolve_review_thread`、`escalate` | `build` |
 | `answer` | None 档涉及代码的问答 | worker | `sandbox_ro` | forbidden | — | `answer` |
 | `summarize` | High 档汇总 review | planner | `direct` | — | — | `summarize` |
-| `admission` | 需求准入 | planner | `direct` | — | — | `admission` |
+| `admission` | 需求准入（仅 High 及以上，P-55） | planner | `direct` | — | — | `admission` |
 | `intent` | 意图解析 | planner | `direct` | — | — | `intent` |
 | `classify` | CI 日志分类、事件摘要、状态问答等打杂文本 | utility | `direct` | — | — | `classify` |
 
@@ -362,7 +362,7 @@ worker 不需要区分 SIGTERM 的原因：原因只由管理器记录。取消�
 
 | 步 | 做什么 |
 | --- | --- |
-| 1 选取 | `engine` 按 `@` 引用与阶段需要，从 `forge` 的快照取原始文本，附来源（`repo`、`number`、`item_id`） |
+| 1 选取 | `engine` 按 `@` 引用与阶段需要，经 `ForgeReader` 按需拉取 Issue / PR 正文与评论的原始文本（不可信文本，不进快照，P-59），附来源（`repo`、`number`、`item_id`） |
 | 2 规范化 | 按 UTF-8 解码（非法序列替换）；去掉 NUL 与除 `\n` `\t` 外的 C0 控制符、ANSI 转义；去掉 bidi 控制符（U+202A–202E、U+2066–2069）与 Unicode Tag 字符（U+E0000–E007F）；记录去掉的个数 |
 | 3 截断 | 单条上限 64 KiB、总量上限 512 KiB（**[提议]**）；超出取头 + 尾，中间放截断标记；写 `truncated = true`，保留 `original_bytes` 与原文哈希 |
 | 4 生成 nonce | 128 位随机；材料文本里若已含该串则重新生成 |
@@ -618,13 +618,13 @@ git apply --index --whitespace=nowarn -p1 changes.patch
 
 ### 6.1 公共类型
 
-**Verdict**（gate 节点：`verify`、`review`、`arbiter`、`admission`；`reasoner` 见 OQ-6；语义见 decisions P-24）：
+**Verdict**（gate 节点：`verify`、`review`、`arbiter`、`admission`；`reasoner` 不是 gate，不输出 verdict，decisions P-45；语义见 decisions P-24）：
 
 | 值 | 对 judge 的含义 | 引擎处理 |
 | --- | --- | --- |
 | `ACCEPT` | 满足验收，没有阻塞项（准入：READY） | 推进 |
 | `REVISE` | 有可修复的问题，需再改一轮（准入：NOT_READY） | 追加修正 + 复审节点（有界，[architecture §8](../architecture.md#8-档位阶段与图)）；准入则在对话中追问 |
-| `REJECT` | 方案本身不可接受，小修无益 | 交付单元 `stage_status = waiting_human`，上报 `decision_needed`（放弃或重新规划），记 `failure_class = verdict_fail` |
+| `REJECT` | 方案本身不可接受，小修无益 | 交付单元 `stage_status = waiting_human`，上报 `decision_needed`（`kind = gate_reject`，放弃或重新规划；选重新规划回到 `plan` 阶段，P-55），记 `failure_class = verdict_fail` |
 | `BLOCKED` | 无法判断：缺信息、环境 / 权限不足、输入互相矛盾 | 上报 `escalation`，附 `blocking_reasons` 与本结果的 `result_ref` 作证据 |
 
 **gate 公共字段**：
@@ -694,7 +694,8 @@ git apply --index --whitespace=nowarn -p1 changes.patch
 | --- | --- | --- | --- |
 | `scenarios[]` | `{id, description, path[], predicted_outcome, likelihood, failure_points[]}` | 是 | `path[]` 是预演的步骤序列；`predicted_outcome` ∈ `ok` / `fail` / `unknown`；`failure_points[]`：`{location, reason}` |
 | `plan_adjustments[]` | `{step_id, change, reason}` | 是（可空） | — |
-| `verdict` | Verdict | 否 | 是否为 gate 未定，OQ-6 |
+
+`reasoner` 只产出预演报告，**没有** `verdict` 字段（decisions P-45）；出现即按未知字段忽略，引擎不据此判定。
 
 **`arbiter`**：gate 公共字段 +
 
@@ -890,7 +891,7 @@ worker 的 stdout **只**输出协议事件，每行一个 JSON 对象（JSON Li
 
 | 数据 | 来源 | 用途 |
 | --- | --- | --- |
-| **计量用量** | `egress` 反向代理按沙盒网络身份映射到 `job_id` 统计的模型 API 请求 / 响应 token | 写入 `Attempt.usage`，驱动 BudgetLedger 与 `budget.charged` / `budget.exhausted`，封顶切断 |
+| **计量用量** | `egress` 反向代理按 `job_token` 归属到本尝试统计的模型 API 请求 / 响应 token（P-49；`sandbox` 吊销令牌时经控制面取最终值，egress-control.md） | 写入 `Attempt.usage`，按 `levels.token_weights` 加权后驱动 BudgetLedger 与 `budget.charged` / `budget.exhausted`，封顶切断 |
 | 自报用量 | stdout `usage` 事件、`result.usage_reported` | 进度条与展示；与计量值显著偏离时记审计日志（异常信号） |
 
 ## 8. 服务端校验
@@ -903,9 +904,9 @@ worker 的 stdout **只**输出协议事件，每行一个 JSON 对象（JSON Li
 | V2 | 产物 intake | 白名单与文件类型（§8.2） | `exec.protocol` |
 | V3 | `result.json` | schema；`job_id`、`job_sha256` 匹配；产物声明与实际一致 | `exec.protocol` |
 | V4 | `structured_output` | role schema；一致性规则（§6.1）；引用完整性 | `exec.output_invalid` |
-| V5 | 补丁（`repo` 执行） | §8.3 | `policy.*` 或 `exec.output_invalid` |
+| V5 | 补丁（`repo` 机械检查并产出 `PatchFacts`，`policy` 规则判定，P-69） | §8.3 | `policy.*` 或 `exec.output_invalid` |
 | V6 | proposals | §8.4 | 逐条处置，不使 Attempt 失败 |
-| V7 | 终结 | 分类、写事件（`patch.validated` / `patch.rejected`、`attempt.finished`）、`repo` 为通过的补丁生成提交 | — |
+| V7 | 终结 | 分类、写事件（`repo` 写 `patch.validated` / `patch.rejected`；`attempt.finished`）、`repo` 为通过的补丁生成提交 | — |
 
 V5 / V6 仅当 V1–V4 通过且 `status = succeeded` 时执行；否则补丁与 proposals 一律丢弃（原文留存审计）。
 
@@ -925,25 +926,27 @@ V5 / V6 仅当 V1–V4 通过且 `status = succeeded` 时执行；否则补丁�
 
 **原则：不自己写 patch 解析器，以"应用之后服务端 git 看到的事实"为准**，避免校验器与 `git apply` 的解析差异被利用。顺序：先看原始字节数 → 在一次性检出上应用 → 用服务端 git 枚举结果 → 逐项规则。
 
-下表"归属"列的"闸门"指 `repo` 的补丁闸门（decisions P-25）。一次性检出里**不执行任何仓库内容**（hooks 关闭，不构建不测试），`deny` 或 `needs_approval` 时整体丢弃或冻结。路径逃逸、穿过符号链接写入由 `git apply` 自身拒绝，P4 / P5 是第二道防线。
+**分工**（decisions P-69）：`repo` 做**机械检查**——能否干净应用、文件列表、大小、二进制、符号链接、子模块、权限位、路径规范——并产出 `PatchFacts`；`policy` 只基于 `PatchFacts` 与配置做**规则判定**（路径规则、大小上限、敏感文件、权限位变化），不解析补丁、不读文件系统。机械拒绝由 `repo` 发 `patch.rejected`（带 `reason`），**不发** `policy.denied`；`policy.denied` 只用于策略判定。下表"归属"列写明是哪一种。一次性检出里**不执行任何仓库内容**（hooks 关闭，不构建不测试），`deny` 或 `needs_approval` 时整体丢弃或冻结。路径逃逸、穿过符号链接写入由 `git apply` 自身拒绝，P4 / P5 是第二道防线。
 
 | # | 检查 | 方法 | 默认判定 | 归属 |
 | --- | --- | --- | --- | --- |
-| P1 | 大小 | 补丁字节数 ≤ `policies.patch.max_bytes`；`git apply --numstat -z` 得文件数 ≤ `max_files`、总变更行 ≤ `max_changed_lines`；应用后单文件 ≤ `max_file_bytes` | deny `policy.size` | 闸门 |
-| P2 | 严格可应用 | 在 `base_sha` 的一次性检出上 `git apply --index -p1`，原子 | `exec.output_invalid`（`patch_not_applicable`） | 闸门 |
-| P3 | 枚举事实 | `git diff --cached --raw -z --no-renames --full-index HEAD` 与 `--numstat -z`；其后各项都基于这份清单 | — | 闸门 |
-| P4 | 路径规范 | UTF-8；无绝对路径、`..`、空组件、`\`、NUL；任何组件不得是 `.git`（含大小写变体、NTFS 8.3 `GIT~1`、HFS 可忽略字符）；不得有两条路径仅大小写或 Unicode 规范化不同 | deny `policy.path_invalid` / `policy.dotgit` | 闸门（结构性） |
-| P5 | 文件类型 | 仅允许模式 `100644`、`100755`。`120000`（符号链接）→ 拒；`160000`（子模块 gitlink）→ 拒；`.gitmodules` 的任何改动同处理 | deny `policy.symlink` / `policy.submodule` | 闸门（结构性），可否经审批见 OQ-4 |
-| P6 | 权限位 | 新文件 `100755`：允许并记录；已有文件 `100644 ↔ 100755`：交 `policy` | `needs_approval`（M1 等同 deny，decisions P-19） | `policy` |
-| P7 | 二进制 | `numstat` 为 `- -`，或补丁出现 `Binary files` / `GIT binary patch` | deny `policy.binary`（是否允许见 OQ-4） | 闸门 |
-| P8 | 路径规则 | 每个变更路径（新旧路径都算）：不在 `allow` 或命中 `deny` → deny；命中 `approval_required`（`.github/workflows/`、依赖清单、lockfile…）→ M1 deny 并上报（fail-closed），M2 起 `needs_approval`（decisions P-19）。取 `policy` **当前**规则 | deny `policy.path_outside_allow` / `policy.path_denied` / `policy.path_protected`（M1）；`needs_approval`（M2） | `policy` |
-| P9 | 敏感文件与内容 | 文件名（`.env*`、私钥、证书、含凭据的 `.npmrc` 等）与新增行的密钥模式扫描 | deny `policy.secret` | `policy` |
-| P10 | base 一致 | `artifacts.patch.base_sha` 等于 JobSpec；提交的 parent 必须是 `base_sha`。Worktree 分支头已前移时不自动 rebase 补丁，按冲突处理，交 `engine` 重新派发 | 冲突 → `engine` 决定 | 闸门 |
-| P11 | 空补丁 | 声明了补丁但无变更，视为无补丁 | — | 闸门 |
+| P1 | 大小 | `repo` 量出补丁字节数、`git apply --numstat -z` 的文件数与总变更行、应用后单文件大小，写入 `PatchFacts`（过大时可在应用前提前拒绝）；`policy` 对照 `policies.patch.max_bytes` / `max_files` / `max_changed_lines` / `max_file_bytes` 判定 | deny `policy.size` | 事实 `repo`，判定 `policy` |
+| P2 | 严格可应用 | 在 `base_sha` 的一次性检出上 `git apply --index -p1`，原子 | `exec.output_invalid`（`patch.rejected`，`reason = patch_not_applicable`） | `repo`（机械） |
+| P3 | 枚举事实 | `git diff --cached --raw -z --no-renames --full-index HEAD` 与 `--numstat -z`；其后各项都基于这份清单，组成 `PatchFacts` | — | `repo` |
+| P4 | 路径规范 | UTF-8；无绝对路径、`..`、空组件、`\`、NUL；任何组件不得是 `.git`（含大小写变体、NTFS 8.3 `GIT~1`、HFS 可忽略字符）；不得有两条路径仅大小写或 Unicode 规范化不同 | deny `policy.path_invalid` / `policy.dotgit` | `repo`（机械） |
+| P5 | 文件类型 | 仅允许模式 `100644`、`100755`。`120000`（符号链接）→ **一律拒绝**（P-68）；`160000`（子模块 gitlink）→ 拒；`.gitmodules` 的任何改动同处理 | deny `policy.symlink` / `policy.submodule` | `repo`（机械） |
+| P6 | 权限位 | 新文件 `100755`：允许并记录；已有文件 `100644 ↔ 100755`：作为事实交 `policy` | `needs_approval`（审批动作 `patch_apply_protected`；M1 等同 deny，decisions P-19） | 事实 `repo`，判定 `policy` |
+| P7 | 二进制 | `numstat` 为 `- -`，或补丁出现 `Binary files` / `GIT binary patch` | deny `policy.binary`，**一律拒绝**，没有白名单（P-68） | `repo`（机械） |
+| P8 | 路径规则 | 每个变更路径（新旧路径都算）：不在 `allow` 或命中 `deny` → deny；命中 `workflows`（`.github/workflows/**`）→ **一律 deny**，M2 起也不变（P-48），上报 `decision_needed`（`kind = manual_action`）并附补丁；命中其他处置为 `approve` 的规则（依赖清单、lockfile、`repo_meta`…）→ M1 deny 并上报（fail-closed），M2 起 `needs_approval`（审批动作 `patch_apply_protected`，decisions P-19、P-54）。取 `policy` **当前**规则 | deny `policy.path_outside_allow` / `policy.path_denied` / `policy.path_protected:<规则 id>`（如 `policy.path_protected:workflows`）；`needs_approval`（M2） | `policy` |
+| P9 | 敏感文件与内容 | 文件名（`.env*`、私钥、证书、含凭据的 `.npmrc` 等）与新增行的密钥模式扫描（新增行由 `repo` 惰性提供） | deny `policy.secret` | `policy` |
+| P10 | base 一致 | `artifacts.patch.base_sha` 等于 JobSpec；提交的 parent 必须是 `base_sha`。Worktree 分支头已前移时不自动 rebase 补丁，按冲突处理，交 `engine` 重新派发 | 冲突 → `engine` 决定 | `repo`（机械） |
+| P11 | 空补丁 | 声明了补丁但无变更，视为无补丁 | — | `repo` |
 
-输出 `ValidatedPatch`：`{sha256, result_tree, files[{path, mode, status, added, deleted}], verdict: allow | needs_approval | deny, reasons[]}`，并写 `patch.validated`（allow / needs_approval）或 `patch.rejected`（deny、不可应用）。`result_tree` 是应用后的 git tree OID，提交只能用它；`sha256` 是补丁内容的摘要，补丁审批的 `subject_digest` 就是它（decisions P-20）。
+`failure_detail` 的子码沿用 `policy.*` 前缀（含机械拒绝的 `policy.path_invalid`、`policy.dotgit`、`policy.symlink`、`policy.submodule`、`policy.binary`），以保持 data-model 词表稳定；区分"机械拒绝"与"策略拒绝"看事件：前者只有 `patch.rejected`，后者另有 `policy.denied`。
 
-提交（verdict = allow 后）：`repo` 在项目镜像仓里创建提交，parent = `base_sha`，作者 / 说明由服务端生成（说明可由 Utility 模型根据已校验的 diff 生成），带 trailer `Gantry-Attempt: <job_id>`。之后推送由 `forge` Outbox 执行。
+`repo` 的输出：`PatchFacts`（形状以 [modules/policy.md](../modules/policy.md) 为准：能否干净应用、文件列表及每个文件的模式 / 状态 / 增删行 / 二进制 / 符号链接 / 子模块标记、补丁字节数、总变更行）交 `policy`；最终结论为 `ValidatedPatch`：`{sha256, result_tree, files[{path, mode, status, added, deleted}], verdict: allow | needs_approval | deny, reasons[]}`。`repo` 写 `patch.validated`（allow / needs_approval）或 `patch.rejected`（机械拒绝、不可应用、策略 deny）。`result_tree` 是应用后的 git tree OID，提交只能用它；`sha256` 是补丁内容的摘要，补丁审批（`patch_apply_protected`）的 `subject_digest` 就是它（decisions P-20、P-54）。
+
+提交（verdict = allow，或 `patch_apply_protected` 审批已被 `repo` 消费之后）：`repo` 在项目镜像仓里创建提交，parent = `base_sha`，提交身份取配置 `github.commit_identity`（App 创建时写入，P-69），说明由服务端生成（可由 Utility 模型根据已校验的 diff 生成），带 trailer `Gantry-Attempt: <job_id>`。之后推送由 `forge` Outbox 执行。
 
 ### 8.4 proposals 校验（V6）
 
@@ -963,12 +966,13 @@ V5 / V6 仅当 V1–V4 通过且 `status = succeeded` 时执行；否则补丁�
 | 结果 | Attempt | 补丁 | proposals | 事件 / 上报 | 重试 |
 | --- | --- | --- | --- | --- | --- |
 | `allow` | succeeded | 生成本地提交，交 `engine` 推进阶段 | 逐条判定 | — | — |
-| `needs_approval`（M2 起） | succeeded（补丁待批） | 保留为 `held`，**不提交不推送**；`engine` 发起 Gantry 审批（`push_branch`，`subject_digest` = `ValidatedPatch.sha256`） | 依赖补丁的挂起 | `approval.requested`；InboxItem `approval_needed` | 批准后提交；拒绝 → 视同 `deny` |
-| `deny` | failed，`policy_denied` | 丢弃（不应用到任何持久检出）；原文隔离留存审计 | 全部丢弃 | `policy.denied`（含 reason 码与路径）；M1 命中受保护路径（`policy.path_protected`）一律上报 InboxItem `escalation`；其他 deny 是否升级见 OQ-5 | 默认不自动重试；是否带反馈重试由 `engine` 决定 |
-| 结构无效（V2–V4、P2） | failed，`exec_failed` | 丢弃 | 丢弃 | `attempt.finished` | 可重试 |
+| `needs_approval`（M2 起） | succeeded（补丁待批） | 保留为 `held`，**不提交不推送**；`engine` 发起 Gantry 审批（`patch_apply_protected`，`subject_digest` = `ValidatedPatch.sha256`，P-54） | 依赖补丁的挂起 | `approval.requested`；InboxItem `approval_needed` | 批准后由 `repo` 消费审批并提交（审批在提交前消费）；拒绝 → 视同 `deny` |
+| `deny`（策略判定） | failed，`policy_denied` | 丢弃（不应用到任何持久检出）；原文隔离留存审计 | 全部丢弃 | `patch.rejected` + `policy.denied`（含 reason 码与路径）。命中 `workflows`（`policy.path_protected:workflows`）：上报 `decision_needed`（`kind = manual_action`，`payload.patch` 指向隔离留存的补丁，供用户手动应用，P-48），M1、M2 相同；M1 命中其他受保护路径（`policy.path_protected:<规则 id>`）上报 InboxItem `escalation`；其他 deny 是否升级见 OQ-5 | 默认不自动重试；是否带反馈重试由 `engine` 决定 |
+| `deny`（机械拒绝：P4、P5、P7） | failed，`policy_denied` | 同上 | 全部丢弃 | 只有 `patch.rejected`（`reason` 即子码），不发 `policy.denied`（P-69） | 默认不自动重试 |
+| 结构无效（V2–V4、P2） | failed，`exec_failed` | 丢弃 | 丢弃 | `attempt.finished`；P2 另有 `patch.rejected`（`reason = patch_not_applicable`） | 可重试 |
 | 部分 proposals 无效 | 不受影响 | — | 逐条 `rejected` 并记原因 | 每条一个 `policy.denied` | — |
 
-M1 的 `policy` v0 把 `needs_approval` 一律按 `deny` 处理并上报（fail-closed，decisions P-19，[milestones M1](../milestones.md#m1-单-issue-走通low-档端到端)），M2 引入路径规则审批后才有 `held` 路径。
+M1 的 `policy` v0 把 `needs_approval` 一律按 `deny` 处理并上报（fail-closed，decisions P-19，[milestones M1](../milestones.md#m1-单-issue-走通low-档端到端)），M2 引入路径规则审批后才有 `held` 路径。workflow 改动不在此列：它在任何里程碑都是 `deny`（P-48）。
 
 ### 8.6 默认限额 **[提议]**
 
@@ -1004,7 +1008,7 @@ M1 的 `policy` v0 把 `needs_approval` 一律按 `deny` 处理并上报（fail-
 | `budget_exhausted` | `budget.tokens` | `egress` 报告封顶切断；同时 `budget.exhausted` | 不重试，上报 `budget_exhausted` |
 | `infra_error` | `infra.sandbox_create`、`infra.workspace_prep`、`infra.egress`、`infra.collect`、`infra.lost` | 沙盒基础设施步骤失败 | 新沙盒重试 |
 | `verdict_fail` | `verdict.revise` / `verdict.reject` / `verdict.blocked` | 结果合法、`status = succeeded`，gate 的 verdict 不是 `ACCEPT` | 不是重试，按 §6.1 进入图的迭代 / 上报 |
-| `policy_denied` | `policy.size` / `path_invalid` / `dotgit` / `symlink` / `submodule` / `binary` / `path_outside_allow` / `path_denied` / `path_protected` / `secret` | §8.3 的 deny | 默认不重试 |
+| `policy_denied` | `policy.size` / `path_invalid` / `dotgit` / `symlink` / `submodule` / `binary` / `path_outside_allow` / `path_denied` / `path_protected:<规则 id>` / `secret` | §8.3 的 deny（`path_invalid` / `dotgit` / `symlink` / `submodule` / `binary` 是 `repo` 的机械拒绝，其余是 `policy` 的判定） | 默认不重试；`path_protected:workflows` 上报 `manual_action` |
 | `cancelled` | `cancel.requested` | 取消先于其他终止原因 | 不是失败，不重试不上报；Node `cancelled` |
 
 **判定优先级**（自上而下，命中即止；用服务端观察到的事实，不用 worker 自报）：
@@ -1035,7 +1039,7 @@ M1 的 `policy` v0 把 `needs_approval` 一律按 `deny` 处理并上报（fail-
 | A5 | 产物由**适配层**生成：`changes.patch`（适配层跑 git，§5.3）、`report.md`、`proposals.json`；`result.json` 最后原子写 |
 | A6 | `structured_output` 用 `output.schema.json` 校验；失败至多修复 1 轮（计入预算），仍失败则 `status = failed`、`error.kind = output_invalid` |
 | A7 | 处理 SIGTERM / SIGINT：宽限期内终止 agent，尽力写 `status = cancelled` 的结果，退出码 12 |
-| A8 | 不开网络、不读 JobSpec 以外的凭据；所有出站走 `HTTPS_PROXY` |
+| A8 | 不开网络、不读 JobSpec 以外的凭据；所有出站只经 Egress（模型调用走带 `job_token` 的 base URL，其余走 `HTTPS_PROXY`）；不把 `job_token` 写进 `out/`、进度事件或日志 |
 
 一致性测试用 `FakeAgent`（按脚本产出事件与文件）验证 A1–A8，不依赖真实模型。
 
@@ -1095,7 +1099,7 @@ claude -p \
 | 项 | 处理 |
 | --- | --- |
 | 仓库内 `.claude/` 配置、hooks、`.mcp.json`、插件 | 属仓库内容（I5），不得成为权限来源：只加载适配层写入 `HOME` 的配置，禁用项目级 hooks / MCP。仓库的 `CLAUDE.md` / `AGENTS.md` 是否自动载入见 OQ-17 |
-| API key 与 base URL | 沙盒内无 key，但 CLI 需要有值才启动：设占位值（如 `ANTHROPIC_API_KEY=gantry-egress-managed`，**不是密钥**）；`ANTHROPIC_BASE_URL` 指向 Egress 的反向代理端点，Egress 丢弃占位 key 并注入真实 key（§2.3 E3） |
+| API key 与 base URL | 沙盒内无 key，但 CLI 需要有值才启动：设占位值（如 `ANTHROPIC_API_KEY=gantry-egress-managed`，**不是密钥**）；`ANTHROPIC_BASE_URL` 设为 `http://<egress>/j/<job_token>/<provider_id>`，Egress 校验令牌、丢弃占位 key 并注入真实 key（§2.3 E3、E4） |
 | 遥测 / 自动更新 / 反馈 | 用环境变量关闭（如 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`、`DISABLE_AUTOUPDATER`、`DISABLE_TELEMETRY`）；这些流量本来也会被白名单挡掉，关闭是为了避免启动重试拖慢 |
 | 会话持久化 | 写入 `/gantry/home`（tmpfs）；一个 job 一个会话；A6 的修复轮用同会话续接 |
 | 上游错误重试风暴 | 代理按 job 限速并封顶；适配层把连续上游错误计入 `exec.model_api` |
@@ -1110,7 +1114,7 @@ claude -p \
 | 事件翻译 | §10.2 | 适配层各自翻译，输出同一套 §7 事件 |
 | 结构化输出 | `--json-schema` / 适配层校验 | CLI 的 schema / 最后消息文件（若提供）+ 适配层校验 |
 | 权限 | CLI 权限规则 | 关闭 CLI 自带沙盒与审批，以外层沙盒为边界；仍下发最小权限 |
-| 认证 | 占位 key + base URL 指向 Egress 反向代理 | 同；若只支持订阅登录则不能无人值守（Q-03） |
+| 认证 | 占位 key + base URL 指向 Egress 反向代理（路径带 `job_token`） | 同；CLI 必须允许把 base URL 设为带路径前缀的地址；若只支持订阅登录则不能无人值守（Q-03） |
 | 网络 | 模型 API 主机在 `egress_profile` 内 | 把该提供方的 API 主机加入对应 `egress_profile` |
 
 **不得变化**：JobSpec / `result.json` / 事件 / 补丁格式 / 退出码 / 服务端校验。新增 agent 只新增一个适配层和一个 `execution.agent` 取值。
@@ -1136,7 +1140,7 @@ claude -p \
 | --- | --- | --- |
 | `node.started`、`attempt.started`、`sandbox.created`、`sandbox.destroyed`、`attempt.finished`、`node.finished`、`policy.denied`、`approval.requested`、`budget.charged`、`budget.exhausted` | 已在 [data-model §5.2](../data-model.md#52-事件类型目录) | 本文直接使用 |
 | `attempt.progress` | 已在 data-model §5.2 | 采样节流后转发给客户端，仅展示 |
-| `patch.validated`、`patch.rejected` | 已在 data-model §5.2 | 补丁校验结论；提交由 `attempt.finished` 的 `result_tree` 幂等重建（§3.5） |
+| `patch.validated`、`patch.rejected` | 已在 data-model §5.2 | 由 `repo` 写的补丁校验结论（机械拒绝只有 `patch.rejected`，P-69）；提交由 `attempt.finished` 的 `result_tree` 幂等重建（§3.5） |
 
 ### 11.3 一致性与对抗测试
 
@@ -1145,10 +1149,11 @@ claude -p \
 | 黄金路径（FakeAgent 产出合法四件套） | `succeeded`，补丁生成提交 |
 | 沙盒内访问 `github.com`、`api.github.com` | 失败（M1 退出标准） |
 | 沙盒内 `env`、文件系统搜索模型 key | 无（M1 退出标准） |
-| 补丁改 `.github/workflows/x.yml` | M1 `policy_denied`（`policy.path_protected`）并上报；M2 `needs_approval`（M1 退出标准） |
-| 补丁含符号链接 / 子模块 / `.git/hooks/*` / `a/../../x` | `policy_denied`，对应 detail |
+| 补丁改 `.github/workflows/x.yml` | M1、M2 都 `policy_denied`（`policy.path_protected:workflows`），上报 `decision_needed`（`manual_action`）并附补丁（P-48，M1 / M2 退出标准） |
+| 补丁改 `Cargo.lock` | M1 `policy_denied`（`policy.path_protected:lockfiles`）并上报；M2 `needs_approval`（`patch_apply_protected`） |
+| 补丁含符号链接 / 子模块 / `.git/hooks/*` / `a/../../x` | `policy_denied`，对应 detail；只有 `patch.rejected`，没有 `policy.denied`（机械拒绝） |
 | 补丁含大小写不同的 `.GIT/config`、`GIT~1` | `policy.dotgit` |
-| 补丁含二进制 | `policy.binary` |
+| 补丁含二进制 | `policy.binary`（一律拒绝，P-68） |
 | 补丁超大 / 文件数过多 | `policy.size` |
 | 补丁基于错误的 `base_sha` / 上下文不匹配 | `exec.output_invalid` |
 | `out/` 里有符号链接 `result.json -> /etc/passwd`、FIFO、额外文件 | 丢弃，不跟随，不阻塞 |
@@ -1159,6 +1164,7 @@ claude -p \
 | 墙钟超时、空闲超时、取消 | 对应分类；SIGTERM → SIGKILL；产物不被采纳 |
 | 服务端在 `collect` 之后 / 提交之前崩溃 | 重启后恢复，不重复提交 |
 | `egress` 封顶 | `budget_exhausted`（`budget.tokens`），`budget.exhausted` |
+| 尝试结束后用同一 `job_token` 再请求模型；从沙盒网段以外使用 `job_token`；用伪造的令牌 | 全部被 Egress 拒绝，不计入任何尝试（P-49） |
 | proposals 指向 `targets` 以外的句柄 / 含 `@` 提及 | 该条被拒，其余不受影响 |
 
 ## 12. 开放问题
@@ -1168,19 +1174,19 @@ claude -p \
 | # | 问题 | 影响 | 候选 | 正文暂用 |
 | --- | --- | --- | --- | --- |
 | OQ-1 | ~~planner / utility 档的 role 是否走沙盒~~ | — | — | 已决：见 decisions.md P-17（§4.3） |
-| OQ-2 | ~~Egress 如何注入 key 与按 job 计量~~ | — | — | 已决：见 decisions.md P-16（§2.3） |
+| OQ-2 | ~~Egress 如何注入 key 与按 job 计量~~ | — | — | 已决：见 decisions.md P-16；沙盒身份改为 `job_token`，见 decisions.md P-49；控制面见 decisions.md P-50（§2.3） |
 | OQ-3 | ~~补丁闸门归哪个模块~~ | — | — | 已决：见 decisions.md P-25（`repo`） |
-| OQ-4 | 符号链接、子模块、`.gitmodules`、二进制：是否可经 Gantry 审批放行，还是一律拒绝 | P5、P7 的判定；真实仓库常有图片 / 二进制资源 | 一律拒 / 二进制可审批 / 全部可审批 | 一律 deny |
-| OQ-5 | 补丁审批的绑定（`subject_digest` = 补丁 sha256）与 M1→M2 切换已决：见 decisions.md P-19、P-20。仍待定：受保护路径以外的 `deny` 是否一律升级 InboxItem；`.github/` 下 `actions/`、`CODEOWNERS`、`dependabot.yml`、`.gitattributes` 是否进规则表（config.md 的 `repo_meta` 是建议） | 上报噪音；规则表范围 | — | 仅受保护路径的 M1 拒绝上报 |
-| OQ-6 | REJECT / BLOCKED 的分支与 admission 的映射已决：见 decisions.md P-24。仍待定：`reasoner` 是否为 gate | `Node.verdict` 取值 | — | `reasoner` 的 `verdict` 可选 |
+| OQ-4 | 符号链接、二进制已决：见 decisions.md P-68（一律拒绝，无白名单）。仍待定：子模块、`.gitmodules` 是否可经审批放行；真实仓库的图片等二进制资源以后如何供给（补丁格式本身不带二进制） | P5 的子模块判定 | 一律拒 / 可审批 | 子模块一律 deny |
+| OQ-5 | 补丁审批的绑定（`subject_digest` = 补丁 sha256）与 M1→M2 切换已决：见 decisions.md P-19、P-20；审批动作 `patch_apply_protected` 已决：见 decisions.md P-54；workflow 补丁一律拒绝并以 `manual_action` 上报已决：见 decisions.md P-48。仍待定：受保护路径以外的 `deny` 是否一律升级 InboxItem；`.github/` 下 `actions/`、`CODEOWNERS`、`dependabot.yml`、`.gitattributes` 是否进规则表（config.md 的 `repo_meta` 是建议） | 上报噪音；规则表范围 | — | 仅受保护路径的 M1 拒绝上报 |
+| OQ-6 | ~~`reasoner` 是否为 gate~~ | — | — | 已决：见 decisions.md P-45（`reasoner` 不输出 verdict，§6.2 已删去该字段）；REJECT / BLOCKED 见 P-24，重新规划回到 `plan` 见 P-55 |
 | OQ-7 | ~~data-model 缺口（`failure_class`、`Attempt.status`、`usage`、`Sandbox.status`、`worktree_snapshot`）~~ | — | — | 已决：见 decisions.md P-22（§9） |
 | OQ-8 | 词表缺失：Finding 的 `severity` / `category`、review 视角清单（Low 单节点与 High 汇总节点的 role 已决：见 decisions.md P-17） | §6 schema；guardian 分流依赖 `category` 和 `nit` | — | 见 §6.1，标 **[提议]** |
 | OQ-9 | proposals 词表（已与 forge-actions §3.5 对齐，`heal` 的 role 已决：见 decisions.md P-17）。仍待定：是否需要 worker 提议 `create_issue`（后续跟进）；review 评论由谁发（本文假设只由 `arbiter` / `summarize` 的结果经 `engine` 发） | §5.4 | — | 封闭小词表，不含危险动作与自由评论 |
-| OQ-10 | 是否需要保留多提交粒度；提交说明来源（`classify` 生成 vs `build` 建议）；提交作者身份 | §5.3、§8.3 | 服务端按 plan step 切分提交 | 单补丁、单提交，说明服务端生成 |
+| OQ-10 | 是否需要保留多提交粒度；提交说明来源（`classify` 生成 vs `build` 建议）。提交由 `repo` 创建、身份取 `github.commit_identity` 已决：见 decisions.md P-69 | §5.3、§8.3 | 服务端按 plan step 切分提交 | 单补丁、单提交，说明服务端生成 |
 | OQ-11 | ~~事件目录缺 `attempt.progress`、补丁校验事件~~ | — | — | 已决：见 decisions.md P-21（§11.2） |
 | OQ-12 | 内容寻址结果库已列入 architecture §6（decisions.md P-25）。仍待定：保留期；被拒产物（quarantine）保留多久 | 存储增长 | — | — |
 | OQ-13 | 镜像仓由 `repo` 维护、`forge` 拉取更新（decisions.md P-25）。仍待定：历史深度、submodule / LFS 策略 | `repo` 的工作区准备；review 需要的历史 | 浅克隆 + 服务端生成 `diff.patch` | 见 §2.4 |
-| OQ-14 | 单次 Attempt 的 `tokens_total` 如何从 BudgetLedger 预留 / 回收；封顶是硬切断还是软限；并发 Attempt 争用预算 | `engine`、`egress` | — | 硬切断 |
-| OQ-15 | 包仓库白名单本身是低带宽外泄通道（URL 路径 / 查询串 / 发布）；是否改为 `egress` 内置只读镜像 / 缓存代理。依赖指向 `github.com` 源默认拒绝，见 decisions.md Q-08 | I1 的实际强度 | 只读缓存代理 | 未处理 |
+| OQ-14 | 单次 Attempt 的 `tokens_total` 如何从 BudgetLedger 预留 / 回收；封顶是硬切断还是软限；并发 Attempt 争用预算（token 加权已决：见 decisions.md P-70，`levels.token_weights`） | `engine`、`egress` | — | 硬切断，按加权 token 计 |
+| OQ-15 | 包仓库白名单本身是低带宽外泄通道（URL 路径 / 查询串 / 发布）；是否改为 `egress` 内置只读镜像 / 缓存代理。依赖指向 `github.com` 源默认拒绝，见 decisions.md Q-08；`CONNECT` 如何识别尝试（`job_token` 只在模型 base URL 里）见 [egress-control.md](egress-control.md) OQ-1 | I1 的实际强度 | 只读缓存代理 | 未处理 |
 | OQ-16 | 预热池（M2）下"先启动、后注入"用 `READY` 文件标记是否接受 | worker 启动逻辑；M2 | — | §3.2，**[提议]** |
 | OQ-17 | 仓库内的 `CLAUDE.md` / `AGENTS.md` 是否自动载入 agent 上下文：它们对 agent 有用，但按 I5 属于"仓库内容" | 适配层的 prompt 组装 | 作为 `file_excerpt` 材料包装后注入；或完全不载入 | 未处理，适配层按 I5 不赋予其权限 |

@@ -14,10 +14,10 @@
 | --- | --- |
 | I1 | 沙盒拿不到 token；git 推送与 API 调用都发生在 `forge` 进程内（§8、§9.4） |
 | I2 | 所有 GitHub 写只有 Outbox 一条路；动作带幂等键；先查后做（§2） |
-| I3 | `merge_pr` / force push 在**执行点**复核审批状态与 head SHA（§2.5） |
+| I3 | 是否需要审批由入队方在入队时调用 `policy` 决定；`forge` 不读策略配置，只在**执行开始前**经 `policy` 验证并消费审批，复核 head SHA（§2.5，P-54、P-62） |
 | I4 | webhook 只是提示，事件由"回读 GitHub 后的状态差异"产生；对账器补漏并记录 drift（§5–§7） |
 | I5 | 所有来自 GitHub 的文本字段都是 `UntrustedText`；写出去的文本先中和 `@mention`（§2.4、§6.2） |
-| I8 | 推送的提交必须与 `policy` 校验过的是同一个对象（§3.3、§8） |
+| I8 | 推送的提交必须与 `repo` 校验、`policy` 判定过的是同一个对象（§3.3、§8）；`.github/workflows/` 的改动永不推送（P-48） |
 
 **标注约定**
 
@@ -25,21 +25,21 @@
 - **需核实**：作者没有在官方文档中确认；实现前必须核实，汇总在 §13。**不要把它当作已知事实。**
 - **[自选]**：Gantry 自己选的默认值，不是 GitHub 的数字，可在配置里改（§11）。
 
-**相邻契约**（同为设计草稿；冲突时按 [AGENTS.md](../../AGENTS.md) 的优先级处理，并登记在 §14）：[config.md](config.md)（`policies.actions` 动作 id、`guardian.patrol_interval_s`、`levels.*.budget.forge_writes_per_hour`、`github.app.*`）、[api.md](api.md)（审批资源）、[worker-protocol.md](worker-protocol.md)（proposals 词表、补丁校验、文本净化入口）。
+**相邻契约**（同为设计草稿；冲突时按 [AGENTS.md](../../AGENTS.md) 的优先级处理，并登记在 §14）：[config.md](config.md)（`policies.actions` 动作 id、`guardian.patrol_interval_s`、`levels.*.budget.forge_writes_per_hour`、`github.*`）、[api.md](api.md)（审批资源）、[data-model.md](../data-model.md#审批动作的-target-与-subject_digest)（审批动作的 `target` / `subject_digest` 形状）、[worker-protocol.md](worker-protocol.md)（proposals 词表、补丁校验、文本净化入口）。
 
 ---
 
 ## 0. 先读这 10 条
 
-1. `engine` / `guardian` 只能 `outbox.enqueue(kind, payload, requires_approval?)`，不得调用任何 GitHub 写接口，不得持有 App token。
+1. `engine` / `guardian` 只能 `outbox.enqueue(kind, payload, requires_approval?)`，不得调用任何 GitHub 写接口，不得持有 App token。是否需要审批由入队方在入队前调用 `policy` 决定并写入 `requires_approval`；`forge` 不读 `policies.*`（P-62）。
 2. `idempotency_key` 由 `(project, delivery, kind, target, intent, epoch)` 派生；重复入队返回同一行（§2.2）。
 3. 执行 = **先查后做**：`executing` 的行在崩溃重启后重放，靠"存在性检查 + 标记"避免重复创建（§2.3、§2.4）。
-4. `merge_pr` 恒需 Gantry 审批；`forge` 在执行点再核对"审批已授予、head 三方一致（审批的 `subject_digest` / payload / GitHub 实时）"（§2.5）。
-5. `push_branch` 只推 `gantry/` 前缀分支、不 force；越界必须带审批（§3.1）。
+4. `merge_pr` 恒需 Gantry 审批；`forge` 在**执行开始前**核对"审批已授予、head 三方一致（审批的 `subject_digest` / payload / GitHub 实时）"，并经 `policy` 消费审批（`consumed_by = act_…`）；执行终态失败不退回审批（§2.5，P-54）。
+5. `push_branch` 只推 `gantry/` 前缀分支、不 force；越界必须带审批（`push_outside_prefix` / `force_push`，§3.1）；触及 `.github/workflows/` 的提交永不推送（P-48）。
 6. webhook 先验 HMAC、落盘、再回 2xx，之后异步处理；GitHub **不会**自动重投失败的投递（官方），丢失由对账器补（§5、§7）。
-7. 事件来自"回读后的状态差异"，所以进入引擎的 ForgeEvent 已对账、已去重（§6.1）。
+7. 事件来自"回读后的状态差异"，所以进入引擎的 ForgeEvent 已对账、已去重（§6.1）。临时错误让动作留在 `queued` 退避重试，`outbox.failed` 只在终态发出（§2.6，P-53）。
 8. 自身动作产生的事件带 `origin=self`：`guardian` 不据此唤醒，但 `engine` 仍更新快照，`policy` 仍因 head 变化使审批失效（§4.5）。
-9. App **不申请** `Workflows`、`Administration` 等高危权限；启动自检发现多余高危权限即拒绝启动（§9）。
+9. App **不申请** `Workflows`、`Administration` 等高危权限，Gantry 不修改 `.github/workflows/`（P-48）；启动自检发现多余高危权限即拒绝启动（§9）。
 10. 限流：写请求按安装串行，遵守 `retry-after` / `x-ratelimit-reset`，无头时至少等 60 秒再指数退避（官方，§10）。
 
 ---
@@ -52,7 +52,7 @@ flowchart LR
     E["engine"]
     G["guardian"]
   end
-  P["policy<br/>审批状态"]
+  P["policy<br/>验证并消费审批"]
   subgraph F["forge"]
     OB[("outbox 表")] --> EX["执行器<br/>先查后做 · 限流闸"]
     WH["/webhook 入口<br/>HMAC · 去重 · 先 2xx"] --> IB[("webhook_inbox")]
@@ -61,7 +61,7 @@ flowchart LR
   end
   E -- enqueue --> OB
   G -- enqueue --> OB
-  P -. 审批状态 .-> EX
+  EX -. 执行前验证 / 消费审批 .-> P
   EX -- "App 安装令牌" --> GH["GitHub"]
   GH -- "webhook" --> WH
   RC -- "只读" --> GH
@@ -74,8 +74,8 @@ flowchart LR
 | 角色 | 可以 | 不可以 |
 | --- | --- | --- |
 | `engine` / `guardian` | 入队动作；订阅 ForgeEvent | 直接写 GitHub；持有 token；自行放行危险动作 |
-| `policy` | 判定是否需要审批；验签；维护 Approval 状态 | 执行 GitHub 写 |
-| `forge` | 执行 Outbox；执行点复核审批；归一化事件；对账 | 判断"该不该做"（只做机械校验）；自动补做被人删除的对象（只上报 drift） |
+| `policy` | 判定是否需要审批（入队方在入队时调用）；验签；验证并消费审批（`forge` 在执行时调用）；维护 Approval 状态 | 执行 GitHub 写 |
+| `forge` | 执行 Outbox；执行开始前经 `policy` 验证并消费审批；归一化事件；对账 | 读策略配置、判断"该不该做"（只做机械校验，P-62）；自动补做被人删除的对象（只上报 drift） |
 | `sandbox` | —— | 触达 token、GitHub 网络（I1） |
 
 ---
@@ -91,7 +91,7 @@ flowchart LR
 | `depends_on` | 前置动作 ID 列表；任一前置终态失败 → 本动作 `cancelled` |
 | `priority` | `high` / `normal` / `low`；限流紧张时先饿死 `low`（§10.2） |
 | `not_before` | 最早执行时间；限流退避、定时动作用 |
-| `epoch` | 默认 0；引擎**有意**重做一个已终态失败/已取消的动作时 +1，使键不同 |
+| `epoch` | 默认 0；引擎**有意**重做一个已终态失败 / 已取消的动作（含用户的人工重试）时创建新动作并 +1，使键不同（P-53） |
 | `lease_until` / `last_error` | 执行租约与最近一次失败（`code` + 脱敏消息） |
 | `expected_effects` / `github_ref` | 执行前写 `expected_effects`，成功后在 `github_ref` 补真实对象 ID（§4.2） |
 
@@ -140,7 +140,8 @@ idempotency_key = "gk1_" + lower(base32_rfc4648_nopad(first16(sha256(
 
 ```
 claim(queued -> executing, lease)
-  -> 前置检查：depends_on 已 succeeded；审批复核（§2.5）；限流闸放行（§10）
+  -> 前置检查：depends_on 已 succeeded；限流闸放行（§10）；审批复核（§2.5）
+  -> 消费审批：经 policy 置 consumed，consumed_by = 本动作（P-54；已被本动作消费则跳过）
   -> 存在性检查（probe）——命中：补记 github_ref，succeeded，结束
   -> 写 expected_effects（write-ahead，见 §4.2）
   -> 变更调用（可能是多步，每步各有 probe）
@@ -166,7 +167,7 @@ claim(queued -> executing, lease)
 | 对象 | 标记 |
 | --- | --- |
 | PR 正文、Issue 正文、评论、线程回复 | 正文最后一行：`<!-- gantry:v1 act=act_… dlv=dlv_… kind=… [slot=…] -->` |
-| 提交（`git` 传输） | 不需要：提交由 `engine` 在补丁校验后创建（已带 `Gantry-Attempt` trailer，[worker-protocol §8](worker-protocol.md)），其 OID 就是标识 |
+| 提交（`git` 传输） | 不需要：提交由 `repo` 在补丁校验后创建（提交身份取 `github.commit_identity`，已带 `Gantry-Attempt` trailer，[worker-protocol §8](worker-protocol.md)，P-69），其 OID 就是标识 |
 | 提交（`api` 传输） | `forge` 重建提交时追加 trailer：`Gantry-Action: act_…`、`Gantry-Delivery: dlv_…`（保留原有 `Gantry-Attempt`） |
 | 分支 | 分支名本身（`gantry/` 前缀 + 稳定后缀，由 `engine` 生成） |
 
@@ -186,31 +187,35 @@ claim(queued -> executing, lease)
 
 ### 2.5 审批复核（I3）
 
-`requires_approval` 非空时，执行器在**每次**尝试前复核（`forge` 不验签，验签是 `policy` 的事；`forge` 只信 Approval 行状态并对照 GitHub 实时值）：
+`requires_approval` 由入队方在入队时调用 `policy` 后写入（P-62）；`forge` 不读 `policies.*`，不判断"该不该审批"。`requires_approval` 非空时，执行器在**执行开始前**复核并消费（P-54）。`forge` 不验签（验签是 `policy` 的事），只经 `policy` 读 Approval 状态并对照 GitHub 实时值：
 
 | # | 复核项 | 不通过 |
 | --- | --- | --- |
-| 1 | Approval 存在且 `status = granted`、未过期 | `approval_invalid`，动作 `cancelled` |
-| 2 | `approval.action` 与本动作 `kind` 匹配，`approval.target` 与 payload 目标一致 | 同上 |
+| 1 | Approval 存在且 `status = granted`、未过期；或已被**本动作**消费（`consumed_by = 本动作 id`，即本动作的临时错误重试） | `approval_invalid`，动作 `cancelled` |
+| 2 | `approval.action` 与本动作匹配（`kind`，或由载荷推出的条件伪动作），`approval.target` 与 payload 目标一致；该 `action` 在 data-model 中有定义的形状，否则 fail-closed | 同上 |
 | 3 | `merge_pr`：`approval.subject_digest == payload.expected_head_sha == GitHub 实时 head`（执行前 `GET` PR） | `precondition_failed(head_changed)` |
-| 4 | `push_branch`：`approval.target.branch == payload.branch`；`force=true` 时 `approval.subject_digest == payload.local_head_oid` 且 `target.expected_remote_oid == payload.expected_remote_oid`；命中 `approve` 路径（M2 起）时 `approval.subject_digest == payload.validation_ref`（补丁 sha256） | `approval_invalid` |
+| 4 | `push_branch` 带 `force=true`（`force_push`）或推到非 `gantry/` 前缀分支（`push_outside_prefix`）：`approval.target.branch == payload.branch`、`approval.target.expected_remote_oid == payload.expected_remote_oid`、`approval.subject_digest == payload.local_head_oid` | `approval_invalid` |
+| 5 | `resolve_review_thread` 且线程含人类评论（`resolve_review_thread_human`）：`approval.target.thread_node_id == payload.thread_node_id`，`approval.subject_digest` 等于线程当前评论 ID 列表的摘要（有新回复即不一致） | `precondition_failed(thread_has_new_replies)` |
 
-成功后 `forge` 通知 `policy` 把审批置为 `consumed`（`approval.consumed`，data-model §4.4）。**绝不**传 `bypass_rules=true`（merge-async 的参数，官方）。
+全部通过后，`forge` 经 `policy` 把审批置为 `consumed`（`approval.consumed`，`consumed_by = act_…`），**然后**才发出第一个变更请求。之后动作若终态失败，审批**不退回**；要重做必须新审批 + 新动作（`epoch + 1`）。临时错误重试沿用同一次消费（复核项 1）。**绝不**传 `bypass_rules=true`（merge-async 的参数，官方）。
 
-**`Approval.action`、`target` 与 `subject_digest` 的取值**（[api.md §6](api.md) 把 Forge 动作的取值交给本文）。`action` 用 [config.md §5.1](config.md) 的动作 id；`target` 沿用 api.md 的 `{kind, repo, …}` 形状；`subject_digest` 见 decisions P-20：
+**`Approval.action` 与 Outbox 动作的对应**（全部形状以 [data-model](../data-model.md#审批动作的-target-与-subject_digest) 为准，P-54）：
 
-| `Approval.action` | 授权的 Outbox 动作 | `target` | `subject_digest` |
-| --- | --- | --- | --- |
-| `merge_pr` | `merge_pr` | `{kind:"pr", repo, number}` | PR 的 head（= `payload.expected_head_sha`） |
-| `force_push` | `push_branch`（`force=true`） | `{kind:"branch", repo, branch, expected_remote_oid}` | 将要推送的提交（`local_head_oid`） |
-| `push_branch` | `push_branch`，且 `policies.paths` 命中处置为 `approve` 的路径（M2 起；M1 这类补丁被拒绝，decisions P-19） | `{kind:"branch", repo, branch, path_rules:[…]}` | 补丁内容的 sha256（= `payload.validation_ref`） |
-| `delete_branch` `publish_release` `change_repo_settings` | 第一版不实现（§3.4，decisions P-27） | — | — |
+| `Approval.action` | 授权的 Outbox 动作 | 谁消费 |
+| --- | --- | --- |
+| `merge_pr` | `merge_pr` | `forge`，执行开始前 |
+| `force_push` | `push_branch`（`force=true`） | `forge`，执行开始前 |
+| `push_outside_prefix` | `push_branch`（非 `gantry/` 前缀） | `forge`，执行开始前 |
+| `resolve_review_thread_human` | `resolve_review_thread`（线程含人类评论；默认处置 `deny`） | `forge`，执行开始前 |
+| `patch_apply_protected` | 无 Outbox 动作：补丁命中处置为 `approve` 的路径规则（依赖清单、lockfile 等，M2 起）时，由 `repo` 在应用补丁、创建提交**之前**消费；之后的 `push_branch` 不再需要审批 | `repo` |
+| 其他 `ForgeActionKind`（被配置为 `approve`） | 形状未定义 → fail-closed：入队方不得入队，按拒绝上报 | — |
+| `delete_branch` `publish_release` `change_repo_settings` | 第一版不实现（§3.4，decisions P-27） | — |
 
-命中 `deny` 路径的补丁不会走到 Outbox。
+命中 `deny` 路径的补丁不会走到 Outbox；`.github/workflows/` 的改动在任何里程碑都是 `deny`（P-48）。
 
 ### 2.6 失败分类与重试
 
-`outbox.failed` 事件的 `data.code` 取下表。默认 `max_attempts = 5`，退避 `delay = min(300s, 2s × 2^(n-1))` 加全抖动 **[自选]**；限流等待以 GitHub 给的值为准（取较大者），且**限流等待不消耗尝试次数**（但有 `rate_limit_max_waits` 上限，§10.3）。
+`outbox.failed` 事件的 `data.code` 取下表。**临时错误不进入 `failed`**（P-53）：动作回到 `queued`，设 `not_before` 退避，`attempts + 1`；只有重试用尽（默认 `max_attempts = 5`）或不可重试的错误才进入终态 `failed` 并发 `outbox.failed`。退避 `delay = min(300s, 2s × 2^(n-1))` 加全抖动 **[自选]**；限流等待以 GitHub 给的值为准（取较大者），且**限流等待不消耗尝试次数**（但有 `rate_limit_max_waits` 上限，§10.3）。
 
 | `code` | 触发 | 重试 | 说明 |
 | --- | --- | --- | --- |
@@ -225,7 +230,7 @@ claim(queued -> executing, lease)
 | `approval_invalid` | §2.5 | 否 | 动作 `cancelled` |
 | `signature_required` | 推送被"要求签名提交"规则拒绝 | 切换传输重试 **一次** | §8 |
 
-终态失败后：`forge` 追加 `outbox.failed`，**不自行补救**；是否上报、是否 `epoch+1` 重做由 `engine` / `guardian` 决定。
+"重试"列为"是"的码在重试用尽之前都只出现在 `last_error` 里（动作仍为 `queued`），不发事件；终态失败后：`forge` 追加 `outbox.failed`，**不自行补救**；是否上报、是否重做（新动作，`epoch + 1`）由 `engine` / `guardian` 决定。人工重试同样创建新动作，不把 `failed` 改回 `queued`。
 
 ### 2.7 排序、优先级、合并
 
@@ -244,13 +249,13 @@ claim(queued -> executing, lease)
 
 | # | `kind` | 作用 | 里程碑 | App 权限 | Gantry 审批 | 限流类 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `push_branch` | 推送 `repo` 生成的已校验提交到 `gantry/` 前缀分支 | M1 | Contents: write | 否。**是**：`force=true`（policy id `force_push`）；非 `gantry/` 前缀分支（`push_outside_prefix`）；改动命中 `policies.paths` 中处置为 `approve` 的路径（默认 `workflows`、`dependency_manifests`、`lockfiles`、`repo_meta`，P-11；M1 这类补丁直接被拒绝、不入队，P-19）。命中 `deny` 的路径根本不入队 | G（api 传输按 C） |
+| 1 | `push_branch` | 推送 `repo` 生成的已校验提交到 `gantry/` 前缀分支 | M1 | Contents: write | 否。**是**：`force=true`（`force_push`）；非 `gantry/` 前缀分支（`push_outside_prefix`）。补丁命中处置为 `approve` 的路径（`dependency_manifests`、`lockfiles`、`repo_meta`）时，审批是 `patch_apply_protected`，在 `repo` 提交前已消费，推送本身不再需要审批（M2 起；M1 这类补丁直接被拒绝、不入队，P-19）。`.github/workflows/` 改动与命中 `deny` 的路径根本不入队（P-48） | G（api 传输按 C） |
 | 2 | `create_pr` | 创建 PR；base 为默认分支时写 `Closes #N` | M1 | Pull requests: write | 否 | C |
 | 3 | `update_pr` | 改标题 / 正文 / base / open-closed | M1 † | Pull requests: write | 否（已有 `granted` 审批时改 base，由 `policy` 要求，`forge` 只校验） | C |
 | 4 | `upsert_status_comment` | 每个目标一条可编辑的状态清单评论 | M2 | PR：Pull requests: write；Issue：Issues: write（官方：issue 评论接口接受 Issues 或 Pull requests 写权限） | 否 | C |
 | 5 | `create_comment` | 在 Issue / PR 对话区发一条普通评论（非状态清单） | M2 † | 同上 | 否 | C；会通知订阅者，应优先用 #4，`policy` 可限频 |
-| 6 | `reply_review_thread` | 回复 review 线程 | M3 | Pull requests: write | 否 | C |
-| 7 | `resolve_review_thread` | 标记线程已解决 | M3 | Pull requests: write（GraphQL，需核实 OQ-9） | 否；线程含人类评论时 `policy` 可要求审批（默认建议禁止，OQ-9） | M |
+| 6 | `reply_review_thread` | 回复 review 线程 | M2（提前，P-60：守护对不成立的 bot finding 回复理由） | Pull requests: write | 否 | C |
+| 7 | `resolve_review_thread` | 标记线程已解决 | M3 | Pull requests: write（GraphQL，需核实 OQ-9） | 否；线程含人类评论时为条件伪动作 `resolve_review_thread_human`，默认 `deny`，配置为 `approve` 时审批形状见 data-model | M |
 | 8 | `create_issue` | 新建 Issue（子任务、后续跟进） | M2 † | Issues: write | 否 | C |
 | 9 | `update_issue` | 只更新 Issue 正文里的 Gantry 规格块 / 标题 / 标签集 | M2 † | Issues: write | 否 | C |
 | 10 | `close_issue` | 关闭 Issue（PR 合入非默认分支时主动关闭，data-model §4.1 `closed`） | M1 | Issues: write | 否 | M |
@@ -270,7 +275,7 @@ claim(queued -> executing, lease)
 | `push_branch` | `branch:{branch}` | `local_head_oid` `expected_remote_oid` `force` | 读远端 ref（`GET /git/ref/heads/{branch}` 或 `git ls-remote`）。等于 `local_head_oid` → 视为已完成。等于 `expected_remote_oid`（或不存在且期望为 `null`）→ 推送。否则 `remote_diverged`。api 传输：远端 head 提交含本动作 `Gantry-Action`、作者为 bot、tree 等于 `expected_tree_oid` → 已完成 | 超时先重读 ref；非 fast-forward、lease 失败不重试；被签名规则拒绝 → §8 |
 | `create_pr` | `pr:{head}->{base}` | `base` `head` `title` `body` `draft` `closes` | `GET /pulls?head={owner}:{branch}&base={base}&state=all`。命中且作者为 bot、正文含本动作标记 → 已完成。命中 open 但无本动作标记（人手开的）→ `existing_pr`；命中已 closed / merged 且无本动作标记（旧周期遗留）→ 忽略，继续创建。422 "已存在" 视为触发再探测 | 刚推送的分支可能有传播延迟，短重试（§2.6 `target_missing`） |
 | `update_pr` | `pr:{number}` | 仅包含要改的字段 | `GET` PR，逐字段比较（正文比较时忽略标记）；全部相等 → 已完成 | PATCH 天然幂等，`transient` 直接重试 |
-| `upsert_status_comment` | `comment:{pr\|issue}:{n}:slot:{slot}` | `render_digest`（渲染后正文哈希） | ① 取投影里记的 `comment_id`，`GET` 校验作者 + 标记 `slot`；② 没有则分页列评论找（作者 = bot 且标记 `slot` 相同）；③ 都没有才创建。找到且正文哈希相同 → 空操作（**不编辑**，不产生事件）；不同 → PATCH | 创建路径 `transient` 后必须重走 ②，防重复评论；评论 404（被人删）→ 重新创建并记 drift `effect_missing`；"编辑不产生通知"是假设（OQ-7）；超长则截断并指向控制台（OQ-8） |
+| `upsert_status_comment` | `comment:{pr\|issue}:{n}:slot:{slot}` | `revision`（该 slot 单调递增的修订号）、`render_digest`（渲染后正文哈希）（P-61） | ① 取投影里记的 `comment_id`，`GET` 校验作者 + 标记 `slot`；② 没有则分页列评论找（作者 = bot 且标记 `slot` 相同）；③ 都没有才创建。找到且正文哈希相同 → 空操作（**不编辑**，不产生事件）；不同 → PATCH | `revision` 由入队方在本地事件日志里维护（随日志备份，不从可重建的快照推出，P-61），所以 A→B→A 的状态序列得到三个不同的键；创建路径 `transient` 后必须重走 ②，防重复评论；评论 404（被人删）→ 重新创建并记 drift `effect_missing`；"编辑不产生通知"是假设（OQ-7）；超长则截断并指向控制台（OQ-8） |
 | `create_comment` | `comment:{pr\|issue}:{n}:{client_ref}`（`client_ref` 由调用方给，如 proposal 的稳定标识） | `body` | 分页列该目标的评论（`since` = 入队时间 − 5 分钟），找作者为 bot 且标记 `act` 相同者 → 已完成 | `transient` 后必须先探测再重试，防重复评论 |
 | `reply_review_thread` | `thread:{thread_node_id}` | `body` `in_reply_to_comment_id` | 取线程评论列表（GraphQL `reviewThread.comments`），存在作者为 bot 且标记 `act` 相同的 → 已完成 | 线程已删除 → `target_missing` |
 | `resolve_review_thread` | `thread:{thread_node_id}:resolve` | 空（`reason` 不入键） | 线程 `isResolved == true` → 已完成。线程评论数 ≠ `expected_comment_count` → `thread_has_new_replies`（不替人吞掉没看过的回复） | 幂等，`transient` 直接重试 |
@@ -325,6 +330,7 @@ claim(queued -> executing, lease)
   "repo": "acme/shop-api",
   "target": { "type": "pr", "number": 57 },
   "slot": "delivery_status",
+  "revision": 7,
   "head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486",
   "title": "Gantry 状态",
   "items": [
@@ -336,7 +342,7 @@ claim(queued -> executing, lease)
 }
 ```
 
-`state` 取 `pending` / `running` / `passed` / `failed` / `skipped` / `blocked`。是否维护该评论由 `guardian.status_checklist.enabled`（config.md §6）决定，那是入队方的责任，`forge` 不看。
+`state` 取 `pending` / `running` / `passed` / `failed` / `skipped` / `blocked`。`revision` 每次入队新版本 +1，计数保存在本地事件日志（`outbox.enqueued` 的载荷即记录），从备份恢复后从日志里的最大值继续（P-61）。是否维护该评论由 `guardian.status_checklist.enabled`（config.md §6）决定，那是入队方的责任，`forge` 不看。
 
 **5. `create_comment`** —— 由 `engine` / `guardian` 发起（不在 worker proposals 词表里）；`body` 经 §2.4 净化。
 
@@ -471,7 +477,7 @@ claim(queued -> executing, lease)
 
 ### 3.5 与相邻契约的词表对应
 
-`ForgeActionKind` 是 Outbox 的分类；`policies.actions` 的 id（config.md §5.1）与之**同名**，且出厂默认值覆盖全部 14 个（decisions P-28）；另有三个条件伪动作 id（`force_push`、`push_outside_prefix`、`resolve_review_thread_human`）由 `policy` 从载荷推出。worker 的 proposal `kind`（worker-protocol §5.4）是第三套词表，对应如下：
+`ForgeActionKind` 是 Outbox 的分类；`policies.actions` 的 id（config.md §5.1）与之**同名**，且出厂默认值覆盖全部 14 个（decisions P-28）；另有三个条件伪动作 id（`force_push`、`push_outside_prefix`、`resolve_review_thread_human`）由 `policy` 从载荷推出，它们也是合法的 `Approval.action`（P-54）。补丁闸门的审批 `patch_apply_protected` 不对应任何 Outbox 动作。worker 的 proposal `kind`（worker-protocol §5.4）是第三套词表，对应如下：
 
 | `ForgeActionKind`（本文） | `policies.actions` id（config §5.1） | worker proposal `kind`（worker-protocol §5.4） |
 | --- | --- | --- |
@@ -520,14 +526,14 @@ worker 的 `escalate` 提议不是 GitHub 写动作，不经 Outbox。
     {
       "event": "pull_request.opened",
       "match": { "head_ref": "gantry/42-fix-pagination", "base_ref": "main" },
-      "matched_delivery_ids": ["72d3162e-cc78-11e3-81ab-4c9367dc0958"]
+      "matched_webhook_deliveries": ["72d3162e-cc78-11e3-81ab-4c9367dc0958"]
     }
   ],
   "recorded_at": "2026-10-24T12:40:58.221Z"
 }
 ```
 
-`bot.github_id` 是 App 机器人账号的用户 ID（`sender.id`），在 App 创建后由 `deploy` / `forge` 初始化时取得并存入 `Project.bot_user_id`（data-model；如何取得见 OQ-10）。
+`matched_webhook_deliveries` 是已匹配到该预期效果的 webhook 投递 GUID（`X-GitHub-Delivery`），不是交付单元 ID。`bot.github_id` 是 App 机器人账号的用户 ID（`sender.id`），在 App 创建后由 `deploy` / `forge` 初始化时取得并存入 `Project.bot_user_id`（data-model；如何取得见 OQ-10）。
 
 ### 4.3 动作 → 预期 GitHub 事件 → 匹配键
 
@@ -584,7 +590,7 @@ worker 的 `escalate` 提议不是 GitHub 写动作，不经 Outbox。
 
 ### 5.1 入口
 
-独立监听（与 mTLS API 不共享端口、中间件与认证，[架构 §3](../architecture.md#3-部署拓扑)），只服务 `POST /webhook`。内网部署用只转发该路径的隧道（P-13），不使用 smee.io。
+独立监听（与 mTLS API 不共享端口、中间件与认证，[架构 §3](../architecture.md#3-部署拓扑)），**只在回环地址上以明文 HTTP 提供**（默认 `127.0.0.1:8787`），服务 `POST /webhook`，以及 App 创建期间由 `gantry github setup` 临时开放的 `GET /setup/github/callback`（接收 Manifest 流程回传的 `code`，细节需核实，P-65）。对公网暴露一律经终止 TLS 的反向代理或隧道（公网证书），它们只转发这两个路径；不使用 smee.io。首次部署先配置好该入口，再创建 App。
 
 | 步 | 动作 | 失败时响应 |
 | --- | --- | --- |
@@ -667,7 +673,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 | `actor` | `{login, github_id, type: user/bot/app/unknown, association?}` | `association` 取 `author_association`（评论 / 评审类）；全部视为外部数据 |
 | `origin` | `self` / `self_unattributed` / `external` | §4 |
 | `caused_by_action` | `act_`? | `origin=self` 时必填 |
-| `occurred_at` / `observed_at` | time | GitHub 侧时间 / `forge` 观测时间 |
+| `occurred_at` / `observed_at` | time | GitHub 侧时间 / `forge` 观测时间；两者都按 data-model §1 的线上格式输出（UTC、**三位毫秒**、`Z` 结尾）。GitHub 给的秒级时间补 `.000`；`dedup_key` 模板里的 GitHub 时间戳按 GitHub 原样，不补毫秒 |
 | `stale` | bool | G4 |
 | `data` | object | §6.3；其中来自 GitHub 的文本字段类型为 `UntrustedText`（标 (U)） |
 
@@ -687,7 +693,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 | `pr_merged` | `pull_request.closed` 且 `merged=true` | `merge_commit_sha` `head_sha`(合并时) `base_ref` `merged_by` `via_merge_queue` `merge_method`(可空) | `pr_merged:{repo}:{n}:{merge_commit_sha}` |
 | `base_advanced` | `push` 到默认分支（及其他活跃 PR 的 base 分支） | `base_ref` `before` `after` `affected_prs[]` | `base:{repo}:{ref}:{after}` |
 
-`head_epoch` 由 `forge` 在每个 PR 的快照里维护，每次观测到 head 变化 +1；即使 head 回到旧 SHA（A→B→A）每次变化也是不同事件。`base_advanced` 存在的原因：GitHub 不会在 base 前移时给 PR 发事件，而状态机有"base 前移需重验"（data-model §4.1 `merge --> review`）；引擎据 `forge.base_advanced` 让 `merge` 阶段的交付单元重验（decisions P-26）。
+`head_epoch` 由 `forge` 为每个 PR 维护，每次观测到 head 变化 +1；计数的事实源是本地事件日志（即已追加的 `forge.pr_synchronized` 的最大值，随日志备份），**不是**可重建的 PR 快照——快照重建后从日志最大值继续，否则新事件会与历史 `dedup_key` 相撞而被吞掉（P-61）；即使 head 回到旧 SHA（A→B→A）每次变化也是不同事件。`base_advanced` 存在的原因：GitHub 不会在 base 前移时给 PR 发事件，而状态机有"base 前移需重验"（data-model §4.1 `merge --> review`）；引擎据 `forge.base_advanced` 让 `merge` 阶段的交付单元重验（decisions P-26）。
 
 **合并队列**
 
@@ -753,7 +759,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
   "actor": { "login": "gantry-acme[bot]", "github_id": 9988776, "type": "bot", "association": null },
   "origin": "self",
   "caused_by_action": "act_01JBA1H5T7XA3P9C2E6J8M1QWD",
-  "occurred_at": "2026-10-24T12:41:02Z",
+  "occurred_at": "2026-10-24T12:41:02.000Z",
   "observed_at": "2026-10-24T12:41:03.412Z",
   "stale": false,
   "data": {
@@ -784,7 +790,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
   "actor": { "login": "github-actions[bot]", "github_id": 41898282, "type": "bot", "association": null },
   "origin": "external",
   "caused_by_action": null,
-  "occurred_at": "2026-10-24T12:44:10Z",
+  "occurred_at": "2026-10-24T12:44:10.000Z",
   "observed_at": "2026-10-24T12:44:11.087Z",
   "stale": false,
   "data": {
@@ -909,8 +915,8 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 - 探测：读目标分支的生效规则（`GET /repos/{o}/{r}/rules/branches/{branch}`，是否需要额外权限需核实 OQ-3）；失败则退到"推送被拒"信号。
 - 推送被拒且原因是签名要求 → `signature_required`（拒绝消息原文需核实）→ 把 Project 的 `effective_transport` 置为 `api`，**重试一次**。
 - `api` 传输对多提交补丁：按序创建提交链（父提交串联，blob 复用），只在最后做**一次** ref 更新（`force=false`；非 fast-forward 会失败）。中间提交在 ref 更新前不可见，崩溃后留下的是无引用的孤儿对象，无害；重放时按 §3.2 的 `Gantry-Action` trailer 判断是否已完成。
-- 提交身份（`git` 传输）：`name = {slug}[bot]`，`email = {bot_user_id}+{slug}[bot]@users.noreply.github.com`（格式需核实）。
-- 不论哪种传输，`forge` 在推送前**机械检查**：目标分支名前缀、diff 是否触及 `.github/workflows/**`（没有 `Workflows` 权限时 GitHub 本身也会拒绝，需核实原文）、`expected_remote_oid`。`git push` 带 `--force-with-lease=<ref>:<expected>`，仅在 `force=true` 且审批通过时才允许非 fast-forward。
+- 提交身份（`git` 传输）：提交由 `repo` 创建，身份取配置 `github.commit_identity`（`gantry github setup` 创建 App 时写入，建议值 `name = {slug}[bot]`，`email = {bot_user_id}+{slug}[bot]@users.noreply.github.com`，格式需核实，P-69）；`forge` 不改写提交。
+- 不论哪种传输，`forge` 在推送前**机械检查**：目标分支名前缀、diff 是否触及 `.github/workflows/**`（触及即拒绝，`validation_failed`；正常情况下这类补丁在 `policy` 就已被拒绝，这是第二道防线，P-48；没有 `Workflows` 权限时 GitHub 本身也会拒绝，需核实原文）、`expected_remote_oid`。`git push` 带 `--force-with-lease=<ref>:<expected>`，仅在 `force=true` 且审批通过时才允许非 fast-forward。
 - 令牌只经环境变量 / askpass 注入，**不写入 remote URL、`.git/config`、日志或命令行参数**（I1）。
 
 ---
@@ -935,7 +941,7 @@ GitHub 等待响应的上限是 10 秒，超时即视为失败（官方）。目
 
 | 权限 | 为什么不要 | 若真的需要 |
 | --- | --- | --- |
-| **Workflows**（write） | 允许修改 `.github/workflows/**`，等于让 Gantry 能改 CI 代码并借 CI 的 secrets 执行（P-11） | 单独的契约 PR + 新的审批类别；不得默认开启 |
+| **Workflows**（write） | 允许修改 `.github/workflows/**`，等于让 Gantry 能改 CI 代码并借 CI 的 secrets 执行 | **不提供**：Gantry 不修改 workflow 文件，这类补丁一律拒绝并以 `manual_action` 上报，由用户手动应用（P-48） |
 | **Administration** | 改分支保护、仓库设置、webhook | 同上；也不用它读保护规则（改用 GraphQL `mergeStateStatus` 与 `rules/branches`） |
 | Secrets / Variables / Environments / Pages / Deployments / Packages 等 | 与交付闭环无关 | —— |
 | 组织与账户级权限 | 单人自托管不需要 | —— |
@@ -1078,15 +1084,15 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 | --- | --- | --- |
 | `guardian.patrol_interval_s` | 对账巡检周期（≥ 300，默认 1800） | §7.1 |
 | `levels.*.budget.forge_writes_per_hour` | 每个交付单元的 GitHub 写速率（Outbox 令牌桶） | §2.7、§10.2 |
-| `policies.actions.*`、`policies.paths.*` | 哪些动作 / 路径需要审批（决定 `requires_approval`） | §3.5、§2.5 |
 | `github.app.app_id` / `private_key` / `webhook_secret` / `webhook_secret_previous` | App 鉴权与 webhook 验签（含轮换） | §5.2、§9.4 |
-| `guardian.status_checklist.enabled` | 是否维护状态清单评论（入队方读取） | §3.3 |
+
+`forge` **不读** `policies.*`（P-62）：是否需要审批由入队方在入队时调用 `policy` 决定，结果在 `requires_approval` 里；执行时 `forge` 只经 `policy` 验证并消费审批（§2.5）。`guardian.status_checklist.*` 由入队方（`guardian`）读取，`forge` 也不读。`github.commit_identity` 由 `repo` 读取（§8）。
 
 **B. 引导配置（文件，重启生效，`deploy` 拥有；config.md §1.1 的"引导配置"）**
 
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `forge.webhook.listen` | `127.0.0.1:8787` | 独立监听地址，路径固定 `/webhook`；入口形态（直接暴露或隧道）见 P-13 |
+| `forge.webhook.listen` | `127.0.0.1:8787` | 独立监听地址，**只允许回环地址**，明文 HTTP；路径 `/webhook`（与创建 App 期间的 `/setup/github/callback`）；对公网经终止 TLS 的反向代理或隧道（P-65） |
 | `forge.webhook.max_body_bytes` | `26214400` | 官方载荷上限 25 MB |
 | `forge.webhook.ip_allowlist` | `false` | §5.2 |
 | `forge.webhook.dedupe_retention` / `payload_retention` | `30d` / `7d` | §5.3 |
@@ -1135,6 +1141,12 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 - [ ] 要求签名的仓库：`git` 传输被拒 → 自动降级 `api` 并重试一次，`verified == true` 且 tree 一致。
 - [ ] 出站净化：含 `@user`、`owner/repo#N`、行首 `/gantry`、`Fixes #999`（未绑定）、伪造的 `<!-- gantry:… -->` 的正文，写出时全部被中和 / 剥离；含密钥的正文 → `validation_failed(secret_detected)` 且不写出。
 - [ ] `forge_writes_per_hour` 超限 → 动作保持 `queued` 并延后，不进入 `failed`。
+- [ ] 注入 3 次 `transient` 后成功 → 动作始终在 `queued` / `executing` 之间，没有 `outbox.failed`；注入 `max_attempts` 次 `transient` → 恰一条 `outbox.failed`，动作终态 `failed`（P-53）。
+- [ ] 带审批的 `merge_pr`：第一个变更请求发出之前审批已是 `consumed`（`consumed_by` = 该动作）；变更请求得到 `not_mergeable` 终态失败 → 审批仍是 `consumed`，用同一审批重新入队被拒（P-54）。
+- [ ] `forge` 的代码路径不读取 `policies.*`（依赖检查 / 测试替身不提供该配置，P-62）。
+- [ ] 状态清单 A→B→A：三个不同的幂等键（`revision` 递增）；从备份恢复后 `revision` 与 `head_epoch` 从日志最大值继续，不与历史键相撞（P-61）。
+- [ ] 含 `.github/workflows/` 改动的提交在推送前的机械检查中被拒（P-48）。
+- [ ] webhook 监听地址配置为非回环地址 → 启动失败（P-65）。
 - [ ] 同一 `upsert_status_comment` slot 连续入队 3 次 → 前两次 `cancelled(superseded)`，GitHub 上只有 1 条评论。
 
 ---
@@ -1153,7 +1165,7 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 | OQ-6 | 内容创建类限流的端点级清单（评论编辑、加标签、请求 reviewer、git data API 的 POST 是否计入）；`git push` 的限流；Search API 限流 | §3.1 限流类 |
 | OQ-7 | 编辑评论是否产生通知（本文假设不产生） | `upsert_status_comment` 的"避免通知噪音"前提 |
 | OQ-8 | 评论正文长度上限（我所知为 65,536 字符）与 PR / Issue 正文上限 | 截断策略 |
-| OQ-9 | GraphQL：`mergeStateStatus`、`reviewDecision`、`isRequired`、`closingIssuesReferences` 字段在 installation token 下是否可用；GraphQL 主限流与点数；`resolveReviewThread` 对 App 的权限与行为；**自动 resolve 人类评审线程**是否允许（建议默认禁止，否则可绕过"需解决全部对话"的分支保护） | §3.2、§6.3、§7.2 |
+| OQ-9 | GraphQL：`mergeStateStatus`、`reviewDecision`、`isRequired`、`closingIssuesReferences` 字段在 installation token 下是否可用；GraphQL 主限流与点数；`resolveReviewThread` 对 App 的权限与行为；**自动 resolve 人类评审线程**是否允许（建议默认禁止，否则可绕过"需解决全部对话"的分支保护；处置默认 `deny`，配置为 `approve` 时的审批形状已决：见 decisions.md P-54） | §3.2、§6.3、§7.2 |
 | OQ-10 | App 机器人账号的 `user.id`、`login`、noreply 邮箱格式，以及其在各类事件 `sender` 里的表示 | §4、§8 |
 | OQ-11 | 是否需要新增动作：`submit_review(COMMENT)`（M3 arbiter 汇总是否放进 PR review）、`remove_labels`；`approve` 类调用在客户端层的机械屏蔽如何测试 | §3.4 |
 | OQ-12 | `add_labels` 对不存在的标签是否自动创建；Issue `state_reason` 的完整取值（是否含 `duplicate`） | §3.2、§6.3 |
@@ -1170,18 +1182,18 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 
 | 文档 | 缺口或不一致 |
 | --- | --- |
-| data-model §3 OutboxAction | 已决：见 decisions.md P-22（`depends_on` `priority` `not_before` `epoch` `lease_until` `last_error` `expected_effects` 已回写）。仍待定：`failed` 要区分"可重试"与"终态" |
-| data-model §3 Approval | 已决：见 decisions.md P-20（`consumed`、`subject_digest`） |
+| data-model §3 OutboxAction | 已决：见 decisions.md P-22（`depends_on` `priority` `not_before` `epoch` `lease_until` `last_error` `expected_effects` 已回写）；`failed` 只表示终态已决：见 decisions.md P-53 |
+| data-model §3 Approval | 已决：见 decisions.md P-20（`consumed`、`subject_digest`）；动作集合、形状表与执行前消费已决：见 decisions.md P-54 |
 | data-model §3 Project | 已决：见 decisions.md P-22（`bot_user_id`、`allowed_merge_methods`、`merge_queue_enabled`）。`app_slug`、`effective_transport`（git / api）留作 `forge` 内部状态 |
-| data-model §3 IssueRef / PullRequestRef | 已决：见 decisions.md P-22（`draft`、`mergeable_state`、`in_merge_queue`、`base_sha`）。`head_epoch`、未解决线程数留在 `forge` 的快照里 |
+| data-model §3 IssueRef / PullRequestRef | 已决：见 decisions.md P-22（`draft`、`mergeable_state`、`in_merge_queue`、`base_sha`）。未解决线程数留在 `forge` 的快照里；`head_epoch` 的事实源是本地事件日志已决：见 decisions.md P-61 |
 | data-model §5.2 事件目录 | 已决：见 decisions.md P-21 |
-| config.md §5.1 `policies.actions` | 已决：见 decisions.md P-28（动作 id 与 `kind` 同名，全部列出） |
-| config.md §10 `github.*` | webhook secret 轮换已决：见 decisions.md P-29。仍待定：`forge.merge.method` 是否应为设置键（OQ-14） |
+| config.md §5.1 `policies.actions` | 已决：见 decisions.md P-28（动作 id 与 `kind` 同名，全部列出）；`forge` 不读策略已决：见 decisions.md P-62 |
+| config.md §10 `github.*` | webhook secret 轮换已决：见 decisions.md P-29；`github.commit_identity` 已决：见 decisions.md P-69。仍待定：`forge.merge.method` 是否应为设置键（OQ-14） |
 | config.md OQ-9 与 data-model BudgetLedger | 已决：见 decisions.md P-22（累计数与按小时限速分开，§2.7） |
 | api.md §6 与 config.md | 已决：`Approval.action` 统一用 `merge_pr` 等动作 id（decisions P-20） |
 | worker-protocol §5.4 | 已对齐：proposals 词表见 §3.5 |
 | milestones M1 与 M2 | 已决：见 decisions.md P-18（签名审批最小实现在 M1）、P-19（M1 受保护路径 fail-closed） |
-| `modules/forge.md`、`modules/guardian.md` | 尚不存在；本文引用了 guardian 的分流规则 |
+| `modules/forge.md`、`modules/guardian.md` | 已存在；guardian 的分流决策表是唯一来源（decisions.md P-60）。FA §4.2 的 `matched_delivery_ids` 已改名 `matched_webhook_deliveries`（第二轮裁决 C26） |
 
 ### 14.2 本次核对的官方页面（2026-10-24）
 
