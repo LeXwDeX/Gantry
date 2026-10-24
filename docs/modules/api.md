@@ -87,7 +87,7 @@
 | SSE 帧 | 客户端 | api.md §5.1 |
 | 事件 `settings.updated`（`secret_changes[]` 只含 `{ref, op, version}`，无值无哈希） | `store` | data-model §5.2；config.md §2.3。**这是本模块唯一自己追加的事件**，其余事件由所属模块追加（`message.posted` 归 `conversation`、`device.*` 归 `pki`、`approval.*` 归 `policy`、`worktree.*` 归 `repo`、`inbox.*` 归 `notify`、`delivery.*` 归 `engine`） |
 | 对下游模块的调用 | 各模块 | §6.3；写调用携带 `dedup_key = (device_id, Idempotency-Key, 序号)` |
-| 秘密转交 | `egress` / `secrets` | `SecretForwarder` |
+| 秘密转交 | `egress` / `secrets` | `SecretSink`（secrets.md §6） |
 | 指标、结构化日志 | 运维 | §11 |
 
 ## 6. 对外接口
@@ -99,7 +99,7 @@ pub struct ApiServer { /* 内部 */ }
 
 pub struct Services {
     pub clock: Arc<dyn Clock>, pub entropy: Arc<dyn Entropy>,
-    pub store: Arc<dyn Store>,                       // 写事务 + 一致读 + 事件日志
+    pub store: Store,                                // store.md §6.1：写事务 + 一致读 + 事件日志
     pub pki: PkiHandles,                             // directory / admin / pairing / tls / revocations
     pub policy: Arc<dyn ApprovalService>,
     pub forge: Arc<dyn PrRefresher>,
@@ -108,7 +108,7 @@ pub struct Services {
     pub repo: Arc<dyn WorktreeLocks>,
     pub notify: Arc<dyn InboxService>,
     pub settings_ctx: Arc<dyn SettingsContext>,      // 校验上下文 + catalog + status 聚合（§6.3）
-    pub secrets: Arc<dyn SecretForwarder>,
+    pub secrets: Arc<dyn SecretSinks>,              // 按 core::Consumer 取 SecretSink；Egress 为跨进程适配器（secrets.md OQ-1）
 }
 
 impl ApiServer {
@@ -170,7 +170,7 @@ pub struct RouteSpec {
 | 28 | `POST /v1/approvals/{approval_id}/grant` | approver | — | 写 | **必** | `forge.refresh_pr`（PR 类）→ `policy.grant` | M1 |
 | 29 | `POST /v1/approvals/{approval_id}/deny` | approver | — | 写 | **必** | `policy.deny` | M1 |
 | 30 | `GET /v1/settings/{resource}` | operator | — | 读 | — | settings 编排 | M1 |
-| 31 | `PUT /v1/settings/{resource}` | operator* | — | 写 | 不适用 | settings 编排 + `policy.consume_internal` + `SecretForwarder` | M1（仅 `models`） |
+| 31 | `PUT /v1/settings/{resource}` | operator* | — | 写 | 不适用 | settings 编排 + `policy.consume_internal` + `SecretSink` | M1（仅 `models`） |
 | 32 | `GET /v1/projects/{project_id}/settings/{resource}` | operator | — | 读 | — | settings 编排 | M2 |
 | 33 | `PUT /v1/projects/{project_id}/settings/{resource}` | operator* | — | 写 | 不适用 | 同 #31 | M2 |
 | 34 | `DELETE /v1/projects/{project_id}/settings/{resource}` | operator* | — | 写 | 不适用 | 同 #31（`value: null`） | M2 |
@@ -206,14 +206,13 @@ pub struct RouteSpec {
     async fn status(&self) -> Result<SettingsStatus, ModuleError>;       // latest_seq + modules.<name>.{applied_seq, health, detail?, unresolved_secret_refs}
 }
 
-/// 凭据转交：两阶段，保证"settings.updated 与 secret 写入要么都成功要么都不成功"（config.md §2.4）
-#[async_trait] pub trait SecretForwarder: Send + Sync {
-    async fn exists(&self, owner: SecretOwner, r: &SecretRef) -> bool;
-    async fn stage(&self, owner: SecretOwner, r: &SecretRef, value: SecretString) -> Result<StagedSecret, SecretError>;  // 待生效版本，对消费者不可见
-    async fn activate(&self, staged: &StagedSecret) -> Result<u64 /* version */, SecretError>;                           // 在事件提交之后
-    async fn discard(&self, staged: &StagedSecret);
-}
-pub enum SecretOwner { Egress /* 模型 key、私有包仓库凭据 */, Forge /* App 私钥、webhook secret */ }
+/// 凭据转交：secrets.md 的 `SecretSink` 两阶段写入（stage → commit / abort），保证
+/// "settings.updated 与 secret 写入要么都成功要么都不成功"（config.md §2.4）。
+/// 本规格早先的占位名对照：SecretForwarder::{exists, stage, activate, discard} = SecretSink::{exists, stage, commit, abort}，
+/// SecretOwner = core::Consumer（api 只用其中的 Forge、Egress）。
+pub trait SecretSinks: Send + Sync { fn sink(&self, who: Consumer) -> Option<&dyn SecretSink>; }
+// SecretSink（secrets.md §6）：exists(&SecretName) -> bool；stage(&SecretName, SecretValue, Expect) -> StagedSecret；
+// commit(StagedSecret) -> SecretMeta（含 version）；abort(StagedSecret)；staged() -> Vec<StagedSecret>（启动对账用）
 ```
 
 下游错误（`ModuleError` 等）统一映射表见 §9。
@@ -329,9 +328,9 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 6. 角色：`device.role < required_role` → `403 forbidden_role`（附 `required_role`）。
 7. 签名：`requires_signature` 且缺 `Gantry-Approval` → `403 signature_required`（附 `signing`）。
 8. **同一写事务**内：`policy.consume_internal(tx, {approval_id, expected_action: settings_update, expected_target: {kind:"settings", scope, project_id?, resource, base_rev}, body_digest: signing::request_digest(body), rev_check})`（不通过 → `409 approval_mismatch` + `reason`，整事务回滚）→ 追加 `settings.updated`（`value` 已剥离 secret）。
-9. 提交成功后 `SecretForwarder.activate`；响应 `200`：新文档 + `warnings[]`，头 `ETag`（新 rev）与 `X-Event-Seq`。
+9. 提交成功后对每个暂存项 `SecretSink::commit`；响应 `200`：新文档 + `warnings[]`，头 `ETag`（新 rev）与 `X-Event-Seq`。
 
-**secret `value` 的处理**（config.md §2.4）：在步骤 4 之前，从请求体里取出所有 `SecretRef.value`（字符串 → 写入或轮换；缺省 → 保持不变；`null` → `422 secret_clear_in_use`；`present` 接受并忽略），按字段路径映射到 `SecretOwner`（`models.providers.*.credential`、`egress.injection.*.credential` → `Egress`；`github.app.*` → `Forge`），**立刻放入 `SecretString`（`zeroize`）**，之后的校验、摘要计算、事件都只见 `secret_ref`。`request_digest` 按**含 `value` 的原始请求体**计算（api.md §6.6：摘要覆盖整个请求体，服务端不保存请求体）。写入流程：先 `stage`（版本待生效，对消费者不可见）→ 事务提交 → `activate`；事务失败则 `discard`。`settings.updated.data.secret_changes[]` 记 `{ref, op, version}`，无值无哈希。**崩溃恢复**：启动时对账——比较最近 `settings.updated` 的 `secret_changes` 与密钥存储的已激活版本，补做 `activate`；超过 10 分钟仍无事件引用的暂存项 `discard`。
+**secret `value` 的处理**（config.md §2.4）：在步骤 4 之前，调用 `core::split_secret_values(resource, request_value)`——它把请求体里的 `SecretRef.value`（字符串 → 写入或轮换；缺省 → 保持不变；`null` → `422 secret_clear_in_use`；`present` 接受并忽略）剥出来，返回"可入事件的稀疏文档"与"待转存的值"两部分；值只出现在第二部分，且是 `SecretString`（`zeroize`）。待转存项带 `core::Consumer`（`models.providers.*.credential`、`egress.injection.*.credential` → `Egress`；`github.app.*` → `Forge`）。之后的校验、事件都只见 `secret_ref`；`core::find_secret_refs` 用于校验 `secret_ref_missing`（经 `SecretSink::exists`）。`signing::request_digest` 按**含 `value` 的原始请求体**计算（api.md §6.6：摘要覆盖整个请求体，服务端不保存请求体）。写入流程：对每个待转存项 `SecretSink::stage`（版本待生效，对消费者不可见）→ 追加 `settings.updated`（`secret_changes[]` 记 `{ref, op, version}`，无值无哈希）并提交事务 → `commit`；事务失败则 `abort`。**崩溃恢复**：启动时对账——`SecretSink::staged()` 报告的暂存项用 `EventLog::by_secret_change(name, version)` 反查：事件已提交的补做 `commit`，超过 10 分钟仍无事件引用的 `abort`（store.md §6.2、secrets.md §7.4）。
 
 **写入后的广播**：`settings.updated`（`subject = "settings"` 或 `prj_…`）由事件流按 §7.9 的门禁下发。
 
@@ -438,8 +437,8 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 失败 | 处理 |
 | --- | --- |
 | 处理中途崩溃（写事务已提交 / 未提交） | 事务原子：已提交则业务事件在、幂等完成记录可能丢——同 key 重试时 `dedup_key` 冲突，读取已存在事件重建响应；未提交则 `in_progress` 租约过期后接管重做 |
-| secret 已 `stage`、事件提交失败 | `discard`；启动对账兜底回收孤儿暂存 |
-| 事件已提交、`activate` 失败 | 响应 `500`（客户端用同一 key 重试 `PUT` 会因 `If-Match` 不符得 `412`；重新 `GET` 看 `present`）；启动对账与后台重试补做 `activate`；`status` 里该模块 `unresolved_secret_refs` 可见 |
+| secret 已 `stage`、事件提交失败 | `abort`；启动对账兜底回收孤儿暂存 |
+| 事件已提交、`commit` 失败 | 响应 `500`（客户端用同一 key 重试 `PUT` 会因 `If-Match` 不符得 `412`；重新 `GET` 看 `present`）；启动对账与后台重试补做 `commit`；`status` 里该模块 `unresolved_secret_refs` 可见 |
 | `forge.refresh_pr` 失败 / 限流 | 不阻塞 `grant`，退回投影快照；权威检查在消费点 |
 | 事件日志回放读失败 | 关闭该流（`close` 尽力）；客户端按退避重连 |
 | 数据库从备份恢复（head 变小） | 带旧游标的重连 → `409 cursor_ahead`，客户端丢缓存重拉（api.md §5.3） |
