@@ -196,7 +196,7 @@ pub struct TlsMaterial {
 ```rust
 pub struct RevocationNotifier(tokio::sync::broadcast::Sender<DeviceId>);
 impl RevocationNotifier { pub fn subscribe(&self) -> broadcast::Receiver<DeviceId>; }
-// revoke 的事务提交成功之后才发送（回滚不发）：通过调用方事务的提交后钩子（占位 `WriteTx::on_commit`，需 `store` 提供）注册发送。
+// 由本模块内部订阅 `device.revoked`（`EventLog::tail`，事件提交之后才可见，回滚不会触发）后广播，因此不需要调用方事务的提交钩子。
 // 接收方落后（Lagged）时必须退回"全量检查所有流的设备状态"。
 ```
 
@@ -343,7 +343,7 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 ### 7.6 吊销与断流
 
-- `revoke` 事务内：追加 `device.revoked`（`data`：`device_id`、`cert_serials[]`、`remaining_approvers`、可选 `via`；`store` 的 `devices` 投影据此置 `status = revoked`），并把该设备全部 `pki_device_certs.status` 置 `revoked`。提交成功后才广播 `RevocationNotifier`。
+- `revoke` 事务内：追加 `device.revoked`（`data`：`device_id`、`cert_serials[]`、`remaining_approvers`、可选 `via`；`store` 的 `devices` 投影据此置 `status = revoked`），并把该设备全部 `pki_device_certs.status` 置 `revoked`。事件提交之后由本模块订阅 `device.revoked` 并广播 `RevocationNotifier`。
 - **新握手**：下一次握手即被拒（§7.3 第 4 步，直接读库，没有缓存可过期）。**会话恢复与 0-RTT 会绕过握手时的证书检查**，所以 `api` 的 `ServerConfig` 必须关闭会话票据与会话缓存、`max_early_data_size = 0`（见 [modules/api.md §7.2](api.md)）；本模块的验收含一个"吊销后无法恢复会话"的联调测试。
 - **已建立的连接**：HTTP 请求在每个请求的步骤 2 复查 `Device.status`；事件流 M1 由 `api` 在每次心跳（15 s）读 `directory.get`，≤ 60 s 内断开（P-30）；M3 起 `api` 订阅 `RevocationNotifier` 即时断开，心跳检查保留为兜底。
 
@@ -474,7 +474,7 @@ pub trait PkiControl: Send + Sync {
 | 真实 `rcgen` / `rustls` / `rustls-webpki` | 本模块是被测方，**不用 `TestCA` 代替自己**；用真实 CA 材料跑真实 TLS 握手（`tokio-rustls` 的客户端 / 服务端对） |
 | `TestCA`（M0，`contract` 泳道） | 给 `api`、`fe-desktop` 用；本模块测试里用它构造"外部 CA 签发""过期""尚未生效""错误 EKU"等**反例证书**，并校验 `TestCA` 签出的叶子能通过本模块的 verifier（二者参数一致）。若 `TestCA` 缺 `issue_expired` / `issue_not_yet_valid` / `issue_from_foreign_ca` / `issue_server_auth_only` 等变体，提替身 PR |
 | `Store::open_in_memory` / `open_temp`（store.md §6.1）、`FakeClock`、`SeededEntropy` | 事务、时间、随机数可控；崩溃类测试在提交前注入失败 |
-| `MemorySecrets` | 实现 `SecretStore`，可注入"读不到"故障 |
+| `MemorySecrets`（secrets.md §6） | 实现 `SecretSink` / `SecretSource`，可注入"读不到""写失败"故障 |
 | 固定 CSR 夹具 | P-256、P-384、RSA-2048、Ed25519 各一份；带 `CA:TRUE` / 通配 SAN / `serverAuth` 请求扩展的恶意 CSR；签名被破坏的 CSR；超长 / 多块 PEM |
 
 ### 12.2 验收项

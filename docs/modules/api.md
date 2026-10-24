@@ -303,7 +303,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 指纹 | `SHA-256(method ‖ path ‖ JCS(body))`；无 body 按空串。键相同指纹不同 → `422 idempotency_key_reuse` |
 | 流程 | 步骤 11：原子 `INSERT … ON CONFLICT`：不存在则写 `state = in_progress`（`lease_until = now + 30 s` [建议]）；已 `done` 且指纹相同 → 原样返回首次状态码 + 正文，加 `Idempotent-Replayed: true`；`in_progress` 且租约未到期 → `409 idempotency_in_progress`；租约已过期（上次处理崩溃）→ 接管 |
 | 完成 | handler 返回后把 `status` / `headers` / `body` 写回并置 `done`；**首次响应是 5xx 不登记**（删除该行，允许同 key 重试）；`4xx` 登记并重放 |
-| 业务层去重 | 所有幂等 POST 追加的业务事件带 `dedup_key = "api:<device_id>:<key>:<n>"`（`n` 为该请求内第几条事件）；`store` 的唯一索引保证：即使 `api_idempotency` 的完成记录因崩溃丢失，同 key 重试也不会重复追加事件——handler 发现 `dedup` 冲突就读取已存在的事件重建响应 |
+| 业务层去重 | 所有幂等 POST 追加的业务事件带 `dedup_key = "api:<device_id>:<key>:<n>"`（`n` 为该请求内第几条事件）；`store` 的唯一索引保证：即使 `api_idempotency` 的完成记录因崩溃丢失，同 key 重试也不会重复追加事件——`append` 返回 `Appended::Duplicate { existing_seq }`，handler 据此读取已存在的事件重建响应（`EventLog::by_dedup_key`） |
 | 作用域 | `(device_id, key)`：不同设备的相同 key 互不影响 |
 | 不适用 | `GET` / `PUT` / `PATCH` / `DELETE` 与 `POST /v1/pair` |
 | 必带 | #12 #26 #28 #29 #42（契约 §3.3 只列了前四条，#42 见 §13 OQ-A2） |
@@ -338,15 +338,15 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 ### 7.9 SSE 事件流
 
-**入口检查**（在返回 `200` 之前，失败按普通 problem 响应）：并发上限（每设备 3，超出 `429` + `Retry-After`）→ 参数解析（`project_id` 可重复；`types` 逗号分隔，精确类型或 `前缀.*`；未知参数 / 格式错 `400 invalid_request`）→ 游标：`Last-Event-ID` 头优先于 `after=<seq>`，必须是十进制 `u64`，否则 `400 invalid_cursor`；`游标 > head()` → `409 cursor_ahead`；`游标 < 保留下界`（预留，当前下界为 0）→ `410 cursor_expired`。
+**入口检查**（在返回 `200` 之前，失败按普通 problem 响应）：并发上限（每设备 3，超出 `429` + `Retry-After`）→ 参数解析（`project_id` 可重复；`types` 逗号分隔，精确类型或 `前缀.*`；未知参数 / 格式错 `400 invalid_request`）→ 游标：`Last-Event-ID` 头优先于 `after=<seq>`，必须是十进制 `u64`，否则 `400 invalid_cursor`；`EventLog::check_cursor(after)`：游标 > head → `CursorAhead` → `409 cursor_ahead`；`游标 < 保留下界`（预留，当前下界为 0）→ `410 cursor_expired`。
 
-**流的生命周期**（一个连接一个任务）：
+**流的生命周期**（一个连接一个任务；回放与实时的无缝衔接由 `store` 的 `EventLog::tail` 提供，store.md §7.5，本模块不自己做"先订阅后回放"）：
 
 1. 响应头 `200`、`Content-Type: text/event-stream; charset=utf-8`、`Cache-Control: no-store`、`X-Accel-Buffering: no`；首帧 `retry: 3000`。
-2. **先订阅后回放**：`let rx = events.subscribe_live(); let head = events.head();`，再分批（如 500 条）读 `read_range(游标, head]` 回放，然后消费 `rx`，丢弃 `seq ≤ 已处理最大 seq` 的重复。无游标时 `scanned = head`，不回放，首帧是带当前 head 的 `heartbeat`。
-3. **过滤**（对每个事件，以**发送时刻**的设备角色与档案判定）：`project_id` 过滤（`project_id = null` 的全局事件始终通过项目过滤）；`types` 过滤；`mobile` 档案再与白名单取交集 `project.*`、`conversation.*`、`message.*`、`inbox.*`、`device.revoked`（请求了白名单外的类型不报错，只是收不到）；`settings.*` 仅在**桌面档案且角色 ≥ operator** 时下发。通过的事件发 `id: <seq>` / `event: <type>` / `data: <信封单行 JSON，原样>`；每处理一个事件（含被过滤的）更新 `scanned`。
-4. **心跳**：每 15 s 一帧 `event: heartbeat`、`id: <scanned>`、`data: {"seq":<scanned>,"ts":…}`（让过滤后的流也推进客户端游标）。**每次心跳同时检查**：设备 `status`（读 `pki.directory.get`；已吊销 → 发 `close{"reason":"device_revoked"}` 后关闭，M1 的吊销断流机制，通常 15 s 内、上限 60 s）、证书 `notAfter`（到期 → `close{"reason":"cert_expired"}`；并为 `notAfter` 单设定时器，不必等心跳）、关停信号（`server_shutdown`）。
-5. **慢消费者**：每连接的发送缓冲有界（事件数 / 字节数 [建议] 1024 条 / 4 MiB）；`rx` 报 `Lagged` 或写端阻塞超时（30 s）→ `close{"reason":"lagging"}` 后关闭（客户端可从日志续传，不丢事件）。
+2. 起点：有游标则 `after = 游标`；无游标则 `after = head()`，不回放，首帧是带当前 head 的 `heartbeat`。`stream = events.tail(after, filter)`，逐个取 `TailBatch { events, scanned_to }`，`scanned = scanned_to`。
+3. **过滤**：`EventFilter { project_ids, include, exclude }`——`project_ids`（`project_id = null` 的全局事件由 `store` 始终放行）；`include` = 请求的 `types`；`mobile` 档案把 `include` 与白名单 `project.*`、`conversation.*`、`message.*`、`inbox.*`、`device.revoked` 求交（请求了白名单外的类型不报错，只是收不到；请求为空时 `include` = 白名单）；`exclude` 含 `settings.*`，除非**桌面档案且角色 ≥ operator**（store.md §6.2 注明这两个用法）。因为角色可能在流的生命周期中变化，发送每个事件前再以**发送时刻**的设备角色与档案做一次最终判定（`settings.*` 只对桌面档案且角色 ≥ operator 的流发送）；每次心跳重新读取角色，越过 operator 边界时从当前 `scanned` 起用新的 `EventFilter` 重建 `tail`。通过的事件发 `id: <seq>` / `event: <type>` / `data: <信封单行 JSON，原样>`。
+4. **心跳**：每 15 s 一帧 `event: heartbeat`、`id: <scanned>`、`data: {"seq":<scanned>,"ts":…}`（`scanned` 含被过滤掉的事件，让过滤后的流也推进客户端游标）。**每次心跳同时检查**：设备 `status`（读 `pki.directory.get`；已吊销 → 发 `close{"reason":"device_revoked"}` 后关闭，M1 的吊销断流机制，通常 15 s 内、上限 60 s）、证书 `notAfter`（到期 → `close{"reason":"cert_expired"}`；并为 `notAfter` 单设定时器，不必等心跳）、关停信号（`server_shutdown`）。
+5. **慢消费者**：`tail` 没有每订阅者的内存队列，慢消费者只表现为"写得慢"（store.md §7.5）。本模块给发送端设有界缓冲（字节数 [建议] 4 MiB）和写超时（30 s）；缓冲写满且超时、或 `head - scanned` 超过落后上限 [建议] 100000 → `close{"reason":"lagging"}` 后关闭（客户端可从日志续传，不丢事件）。
 6. **M3**：订阅 `pki::RevocationNotifier`，收到本设备 id 立即 `close{"reason":"device_revoked"}`；`Lagged` 时对本进程所有流做一次全量设备状态检查；心跳检查保留。
 7. 连接结束（含错误）释放并发许可；`close` 帧发送失败不阻塞关闭。
 
@@ -456,8 +456,8 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | `api.listen` / `api.pair_listen` | `deploy` 定 | 端口不由契约固定；配对端口只在窗口内监听 |
 | `api.sse.heartbeat_interval` / `api.sse.client_idle_timeout` | 15 s / 45 s | 后者是契约给客户端的断线判据（45 s 无字节），服务端不使用 |
 | `api.sse.max_streams_per_device` | 3 | — |
-| `api.sse.buffer_events` / `api.sse.buffer_bytes` / `api.sse.write_timeout` | 1024 / 4 MiB / 30 s [建议] | 慢消费者判据 |
-| `api.sse.replay_batch` | 500 [建议] | — |
+| `api.sse.buffer_bytes` / `api.sse.write_timeout` / `api.sse.max_lag_events` | 4 MiB / 30 s / 100000 [建议] | 慢消费者判据（`tail` 本身无每订阅者队列） |
+| `api.sse.tail_batch` | 沿用 `store` 的 `tail_batch` | 回放分批由 `store` 决定 |
 | `api.page.default_limit` / `api.page.max_limit` | 50 / 200 | — |
 | `api.idempotency.retention` / `api.idempotency.lease` | 24 h / 30 s [建议] | — |
 | `api.approval.challenge_ttl` | 120 s | 不超过 `Approval.expires_at` |
@@ -493,7 +493,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | `TestCA`（M0）+ `TestDevice` | 签发有效 / 过期 / 尚未生效 / 外部 CA / 已吊销 / 未知序列号的设备证书；`TestDevice` 用 `rustls` 客户端 + `hyper` 发**真实 TLS** 请求，并能对 challenge 签名（`sign_approval`）。测试一律走真实握手，不绕过 TLS（`router_for_test` 只用于不涉及鉴权的路由级单元测试） |
 | 真实 `pki` + `policy` + `Store::open_in_memory` | 组件测试用真实实现（二者是本泳道产物）；需要隔离时用 `policy` 的 `ScriptedPolicy` |
 | `FakeForge`（M0） | 提供 PR 快照、`refresh_pr`、注入 `forge.pr_synchronized` 以触发 `stale_head` |
-| `FakeEngine`、`FakeConversation`、`FakeNotify`、`FakeRepo`（locks）、`FakeSettingsContext`、`FakeSecretForwarder` | 实现 §6.3 的 facade，可脚本化返回与注入故障（含 `activate` 失败、`stage` 后崩溃） |
+| `FakeEngine`、`FakeConversation`、`FakeNotify`、`FakeRepo`（locks）、`FakeSettingsContext`、`MemorySecrets`（secrets.md §6，带 `stage` 后崩溃 / 写失败注入） | 实现 §6.3 的 facade，可脚本化返回与注入故障（含 `commit` 失败、`stage` 后崩溃） |
 | `FakeClock`、`SeededEntropy` | 心跳、存活时间（TTL）、限流窗口、证书到期 |
 | **Mock API 服务**（M0，由 `openapi.yaml` 生成） | 契约一致性套件的另一个被测方：同一套测试对 Mock 与真实 `api` 各跑一遍 |
 | `schemas/openapi.yaml`、`schemas/events/*.json` | 响应与事件的 Schema 校验（`jsonschema`） |
@@ -525,7 +525,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - [ ] 角色立即生效：`PUT /v1/devices/{id}/role` 成功后该设备的**下一个请求**即按新角色判定（同一 TLS 连接，不重连）。
 - [ ] 设备在长连接上被吊销：同一连接的下一个请求 → `401 device_revoked`。
 - [ ] 步骤顺序用例：未知路径 `404`；已知路径错方法 `405` + `Allow`；限流先于 body 解析（超限请求不读 body）；`415` → `413` → `400` → `422` 的顺序各一例。
-- [ ] 角色 / 状态不缓存：用 `FakeStore` 计数断言每个请求恰好读一次 `by_cert_serial`。
+- [ ] 角色 / 状态不缓存：用包装了 `DeviceDirectory` 的计数替身断言每个请求恰好读一次 `by_cert_serial`。
 
 **统一错误 / 校验（M1）**
 
@@ -549,7 +549,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - [ ] 带 secret `value` 的 `PUT /v1/settings/models` 不带 `Gantry-Approval` → `403 signature_required`（附 `signing`）；operator 设备即使带有效审批也 `403 forbidden_role`；approver + 有效审批 → `200`。
 - [ ] 为内容 A 批准的审批提交内容 B → `409 approval_mismatch`（`digest_mismatch`）且**未写入**（库、密钥存储、事件日志均无变化）；同一审批第二次使用 → `consumed`；`base_rev` 与 `If-Match` 不符时 `412` 优先于 `approval_mismatch`。
 - [ ] 写入凭据后：`GET` 同一 resource、`settings.updated` 事件、访问日志、错误响应、`/status` 中**都没有 `value`**（用唯一探针字符串全量扫描响应、事件日志、日志输出）；`null` → `422 secret_clear_in_use`；`secret_ref` 不存在且未带 `value` → `422 secret_ref_missing`；形似密钥的内联字符串 → `422 inline_secret_detected`。
-- [ ] 两阶段：`stage` 后事务失败 → `discard` 被调用且配置未变；事件已提交而 `activate` 失败 → 启动对账补做；消费者在 `activate` 前读不到新值。
+- [ ] 两阶段：`stage` 后事务失败 → `abort` 被调用且配置未变；事件已提交而 `commit` 失败 → 启动对账（`SecretSink::staged()` + `EventLog::by_secret_change`）补做；消费者在 `commit` 前读不到新值。
 - [ ] M1 里对非 `models` 的 resource `PUT` → `404`；读取八个 resource 都 `200`；`catalog` / `status` 结构符合 config.md §2.8；`{resource}` 不会吞掉 `catalog` / `status`。
 - [ ] M2：项目范围 `PUT` 越界键 → `422`（`override_not_allowed` / `override_loosens_global`）；`notify` / `github` → `422 not_overridable`；`view=effective` 附 `clamped[]`；`DELETE` 回退全局；`?rev=N` 取历史。
 
@@ -569,7 +569,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 **事件流（M1；M3 即时断流）**
 
 - [ ] 断线续传：建立流 → 收到若干事件 → 断开 → 带 `Last-Event-ID` 重连 → 不丢、不重（`seq` 连续）；`after=` 与头同时给时头优先。
-- [ ] 回放与实时无缝：在回放进行中并发追加事件，客户端收到的序列无缺口无重复（用 `FakeStore` 控制交错）。
+- [ ] 回放与实时无缝：在回放进行中并发追加事件，客户端收到的序列无缺口无重复（用 `Store::open_in_memory` 加测试钩子控制交错）。
 - [ ] 无游标：首帧是带当前 head 的 `heartbeat`，不回放历史。
 - [ ] 过滤：`project_id` 过滤时全局事件（`project_id = null`）仍到达；`types` 精确与 `前缀.*`；过滤产生的 `seq` 空洞由 `heartbeat.id` 推进。
 - [ ] 手机档案：只收到 `project.*`、`conversation.*`、`message.*`、`inbox.*`、`device.revoked`；请求白名单外类型不报错但收不到。
@@ -582,7 +582,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - [ ] 慢消费者：不读取的客户端在缓冲超限后收到 / 触发 `lagging` 关闭，服务端内存不无限增长；重连续传无丢失。
 - [ ] 关停：`shutdown` 时所有流收到 `server_shutdown`。
 - [ ] **M3**：订阅 `RevocationNotifier` 后吊销在 1 s 内断流；`Lagged` 退回全量检查；心跳兜底仍有效。
-- [ ] **M3 密钥轮换**：对同名 `secret_ref` 写入新 `value`（approver + 签名）→ `settings.updated.data.secret_changes[]` 为 `{ref, op: "rotate", version: n+1}`；`activate` 之后消费者读到新版本、之前读到旧版本；全流程不出现明文 `value`；轮换失败（`stage` / `activate` 故障）时旧版本保持有效。
+- [ ] **M3 密钥轮换**：对同名 `secret_ref` 写入新 `value`（approver + 签名）→ `settings.updated.data.secret_changes[]` 为 `{ref, op: "rotate", version: n+1}`；`commit` 之后消费者读到新版本、之前读到旧版本；全流程不出现明文 `value`；轮换失败（`stage` / `commit` 故障）时旧版本保持有效。
 - [ ] 帧格式：`id` = `seq`、`event` = 类型、`data` = 信封单行 JSON 且与 `store` 里的信封**字节一致**；`retry: 3000` 在连接开头。
 
 **M1 退出标准中的 `sec` 项（集成）**
@@ -610,8 +610,8 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | OQ-A3 | 目标态已达成的内部动作（吊销已吊销的设备、角色未变）是否仍要求签名 / 消费审批 | 吊销已吊销设备原样 `200`，先于签名校验；改成相同角色按普通写入走完整校验并消费审批，不发事件 | api.md §4.10、`pki` |
 | OQ-A4 | `GET /v1/settings/status` 的字段：api.md §4.9 示例用 `applied_rev` / `healthy`（自称示意），config.md §2.8 定义为 `latest_seq` + `modules.<name>.{applied_seq, health, detail?, unresolved_secret_refs}` | 采用 config.md §2.8 | api.md 示例、`desktop-ui` |
 | OQ-A5 | 手机档案能否在消息里带 `level_cap`：api.md §2.3 允许（"可带 `level_cap`、`refs`"），但 P-35 / 原型要求"手机发出的消息固定使用项目默认上限，升档只在桌面" | 照 api.md：接受，不强制剥离 | api.md、P-35、`conversation` |
-| OQ-A6 | 密钥转交的真实通道：模型 key 属于 `egress`（独立进程、独立系统用户）、App 私钥属于 `secrets/`，`api` 如何把 `value` 交给另一进程并做两阶段激活；`secrets` 对"待生效版本"的支持 | §6.3 `SecretForwarder` 的 `stage / activate / discard` | `secrets`、`egress` 规格 |
-| OQ-A7 | `store` 的事务 / 订阅 / 去重 API（`WriteTx`、`read_range`、`subscribe_live`、`dedup_key`、跨进程事件感知）尚无规格；`engine`、`conversation`、`notify`、`repo`、`forge` 的 facade 同样未定 | §3、§6.3 的占位签名 | 各模块规格书 |
+| OQ-A6 | 密钥转交的真实通道：模型 key 属于 `egress`（独立进程、独立系统用户）、App 私钥属于 `secrets/`，`api` 如何把 `value` 交给另一进程并做两阶段提交（secrets.md OQ-1 同一问题）；`deploy` 在没有任何设备之前写初始凭据的入口（secrets.md OQ-4） | `Consumer::Egress` 用跨进程适配器实现 `SecretSink`；`Consumer::Forge` 用进程内 `ScopedSecrets` | `secrets`、`egress`、`deploy` 规格 |
+| OQ-A7 | 邻接规格与 §6.3 的对齐：`conversation.md` 的 `post_user_message` 用 `ActorCtx`（本文 `WriteCtx`）、`notify.md` 用 `DeviceActor`；`store.md` 的 `WriteTx` 是具体类型，§6.3 的写 facade 当前不接收调用方事务（靠 `dedup_key` 保证至多一次），而 `pki` / `policy` 的"同一事务"接口接收 `&mut WriteTx` | `WriteCtx { actor, request_id, dedup }` 作为各写 facade 的统一入参；内部动作的"消费 + 业务写"由本模块开 `WriteTx` 后传给 `policy` / `pki` | `conversation`、`notify`、`engine`、`repo` 规格 |
 | OQ-A8 | 事件保留期与 `410 cursor_expired`（api.md OQ-13）；`close` 帧 `reason` 的完整集合是否还需要 `revoked_other` 等 | 保留不限；`reason` 取契约的四个值 | `store` |
 | OQ-A9 | 证书续期路由缺失（api.md OQ-12，见 [pki.md OQ-K6](pki.md)）：路由一旦加入，其鉴权（旧证书在宽限内）、限流类、是否支持新密钥需契约定义 | 不实现 | api.md、`pki`、`desktop-shell` |
 | OQ-A10 | 未启用 / 未实现路由的响应：本规格用 `404 not_found`；是否应改为 `503 unavailable` 以便客户端区分"尚未上线" | `404` | 客户端行为 |
