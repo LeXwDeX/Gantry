@@ -21,12 +21,11 @@
 | 里程碑 | 交付 |
 | --- | --- |
 | M0 | 无交付。**消费**：`schemas/openapi.yaml` 生成的 TS 类型、Mock API 服务、IPC 类型（`desktop-shell` §6） |
-| M1 | 配对向导；顶栏（项目 tab 与徽标、角色、连接状态、"需要你 · n" 计数及**最小浮层**：平铺列表 + 打开 + 审批入口）；左栏（项目信息、进行中 Issue / PR / 工作树、排序与折叠、最近完成）；**对话**（收发、事件行与折叠、气泡边框与种类文字、计划卡 / 审批卡 / 升档卡 / 二选一卡、引用 chip、空态、自动滚动与分页、离线排队与"待发送"、只读设备禁用、⌘↵ / Ctrl+Enter 与输入法保护）；**检视器**（头部、需要你区、阶段条、当前阶段的节点列表、合并闸门清单、后台守护列表）；**审批单**（最小：动作 / 仓库 / PR / 完整 head SHA / 有效期 / 合并闸门 / 签名 / 拒绝，M1 的系统级确认是外壳原生确认框）；设置浮层框架 + **模型页**（含凭据写入的签名流程）；状态栏、断线横幅、证书 / 吊销提示；不可信内容渲染与 CSP 约束下的全部前端要求；无障碍基线 |
-| M2 | **关系地图**（自动列式布局）；**工作树视图**；**收件箱浮层完整版**（按项目分组、各 `kind` 的内联操作）；**完整审批单**（Touch ID / Windows Hello 文案、失效流程、策略命中展示——受 OQ-U3 限制）；**`@` 上下文选择器、档位上限选择器、上限冲突提示、在对话中引用、回复**；"从分支开始任务…"（受 OQ-U6 限制）；检视器 ⋯ 菜单（放弃交付；暂停 / 继续 / 重试受 OQ-U2 限制）；"上次查看"分隔线与离开期间摘要（受 OQ-U10 限制）；本机通知开关；设置页：**档位与预算、危险动作策略、后台守护**；项目页、设备与证书、外观建议此时交付（config.md 标"未排期"，OQ-U14） |
-| M3 | DAG 详情视图、图修订历史（`include_superseded`）、预算面板（`deliveries.budget`） |
+| M1 | 配对向导（C28）；顶栏（项目 tab 与徽标（`GET /v1/inbox/summary`，P-63）、角色、连接状态、"需要你 · n" 计数及**最小浮层**：平铺列表 + 打开 + 审批入口）；左栏（项目信息、进行中 Issue / PR / 工作树、排序与折叠、最近完成）；**对话**（收发、事件行与折叠、气泡边框与种类文字、计划卡 / 审批卡 / 升档卡 / 二选一卡、引用 chip、空态、自动滚动与分页、离线排队与"待发送"、只读设备禁用、⌘↵ / Ctrl+Enter 与输入法保护）；**档位上限选择器**（C28）；**检视器**（头部、需要你区、阶段条、当前阶段的节点列表、合并闸门清单、后台守护列表；⋯ 菜单：暂停 / 继续 / 重试失败节点 / 放弃，P-56）；**审批单**（最小：动作 / 仓库 / PR / 完整 40 位 head SHA / 有效期 / 合并闸门 / 签名 / 拒绝，系统级确认是 Touch ID / Windows Hello，P-47）；设置浮层框架 + **模型页**（含凭据写入的签名流程）+ **设备与证书页**（列表、改名、吊销，C28）；`log_epoch` 变化后的全量重同步（P-67）；状态栏、断线横幅、证书 / 吊销提示；不可信内容渲染与 CSP 约束下的全部前端要求；无障碍基线 |
+| M2 | **关系地图**（自动列式布局）；**工作树视图**；**收件箱浮层完整版**（按项目分组、各 `kind` 的内联操作）；**完整审批单**（补丁审批 `patch_apply_protected` 的差异展示、失效后的重新请求、策略命中展示——受 OQ-U3 限制）；**`@` 上下文选择器、上限冲突提示、在对话中引用、回复**；"从分支开始任务…"（受 OQ-U6 限制）；"上次查看"分隔线与离开期间摘要（受 OQ-U10 限制）；本机通知开关（外壳只对 `severity ≥ warn` 的 `inbox.raised` 弹窗，P-63）；设置页：**档位与预算、危险动作策略、后台守护**；项目页 |
+| M3 | DAG 详情视图、图修订历史（`include_superseded`）、预算面板（`deliveries.budget`）；设置页·**外观**（C28） |
 | M4 | 地图按父交付单元分组、显示 `depends_on` 依赖（Ultimate）；其余无（手机端是独立模块 [`mobile`](mobile.md)） |
 
-M1 的档位上限来源是个已知缺口（OQ-U12）：milestones 把档位选择器排在 M2，而 M1 退出标准要求"发起 Low 任务"。
 
 ## 2. 不负责
 
@@ -87,7 +86,7 @@ interface IpcAdapter {
   pairingConfirm(a: { matches: boolean }): Promise<IdentityStatus>;
   identityReset(): Promise<IdentityStatus>;
   connectionState(): Promise<ConnectionState>;
-  api<R extends RouteId>(r: R, a: RouteArgs[R]): Promise<ApiResult<RouteBody[R]>>;   // 32 条 UI 可调路由
+  api<R extends RouteId>(r: R, a: RouteArgs[R]): Promise<ApiResult<RouteBody[R]>>;   // 36 条 UI 可调路由（desktop-shell §6.4）
   eventsOpen(a: { afterSeq?: number }, onFrame: (f: StreamFrame) => void): Promise<void>;
   eventsAck(seq: number): Promise<void>;
   eventsClose(): Promise<void>;
@@ -144,15 +143,15 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
   | `a11y/`、`i18n/`、`theme/` | 键盘与焦点、文案目录（按 `code` 本地化错误）、设计令牌 |
 
 - **设计令牌**：颜色、记号、字号、间距取 prototype.md §1 与 §1.1，写成主题变量；`theme/` 预留浅色主题，M1 只交付深色（浅色未设计，OQ-U16）。字体随包（Inter、JetBrains Mono 与中文回退），**不引用远程字体**（原型引用 Google Fonts，生产禁止）。
-- **状态色映射**（`Tone`）：`run`（蓝）、`heal`（中性灰，"自愈中"）、`need`（黄，只用于"需要你"）、`ok`（绿）、`idle`（暗灰，空闲 / 暂停 / 放弃）、`warn`（橙，只用于"失败且无人处理""缺规格"）。**每个 `Tone` 必须与文字同现**（prototype.md §1.1），组件库的 `StatusDot` 不允许单独使用，必须带 `label`。
+- **状态色映射**（`Tone`）：`run`（蓝）、`heal`（中性灰，"自愈中"）、`need`（黄，只用于"需要你"）、`ok`（绿）、`idle`（暗灰，空闲 / 暂停 / 放弃）、`warn`（橙，只用于"失败且无人处理""缺规格"）。事件行的 `Message.tone`（`info` / `ok` / `run` / `warn`，C26）映射为：`info` → 中性、`ok` → `ok`、`run` → `run`、`warn` → `warn`；未知值 → 中性。**每个 `Tone` 必须与文字同现**（prototype.md §1.1），组件库的 `StatusDot` 不允许单独使用，必须带 `label`。
 - 平台相关文案（⌘↵ / Ctrl+Enter，Touch ID / Windows Hello）取自 `identity_status().device.platform`，不嗅探浏览器 UA。
 
 ### 7.2 数据流：水合、事件流与一致性
 
 **启动序列**（`identity_status = paired` 且 `ConnectionState` 非 `revoked` / `cert_expired`）：
 
-1. `me.get` → 角色、档案、`server.time`；`projects.list`（翻完所有页）。
-2. 并发（上限 4）为**当前项目**拉：`conversations.list` → `messages.list`（`limit=50`，`order=desc`）；`deliveries.list?project_id&active=true`；`deliveries.list?project_id&stage=closed&stage=abandoned&limit=10`（最近完成）；`worktrees.list?project_id`。为**每个项目**拉 `inbox.list?project_id&status=open`（顶栏计数与 tab 徽标）。operator 以上另拉 `project_settings.get`（`levels`，`view=effective`）取默认上限。
+1. `me.get` → 角色、档案、`server.time`、`server.log_epoch`；`projects.list`（翻完所有页）。
+2. 并发（上限 4）为**当前项目**拉：`conversations.list` → `messages.list`（`limit=50`，`order=desc`）；`deliveries.list?project_id&active=true`；`deliveries.list?project_id&stage=closed&stage=abandoned&limit=10`（最近完成）；`worktrees.list?project_id`。全局拉一次 `inbox.summary`（按项目的 open 计数，tab 徽标与顶栏计数，P-63）；当前项目另拉 `inbox.list?project_id&status=open`（各表面的具体项）。operator 以上另拉 `project_settings.get`（`levels`，`view=effective`）取默认上限。
 3. 取所有响应 `X-Event-Seq` 的**最小值** `S`，`eventsOpen({ afterSeq: S })`（api.md §5.3：一个客户端一条流，不按项目各开）。
 4. 其余项目在**首次切换**时才拉对话 / 交付 / 工作树；此前这些项目的事件只用于收件箱计数。
 5. 活动交付的工作流（状态点与检视器要用）：选中时拉 `workflows.list?stage=<当前阶段>` + `workflows.get`；后台对最近更新的 ≤ 20 个活动交付以并发 2 预取（OQ-U18）。
@@ -166,7 +165,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | `event` | `seq ≤ appliedSeq` 丢弃 → `EventApplier`（§7.5）→ `appliedSeq = seq` → `eventsAck(seq)` |
 | `heartbeat` | `appliedSeq = max(appliedSeq, seq)` → `eventsAck(seq)`（过滤流也靠它推进游标） |
 | `state` | 更新 `session.connection`；`epoch` 增加且 `phase = live` 时开始统计"补齐事件数"，到第一个 `heartbeat` 为止，若 > 0 显示"已补齐 n 件事件" |
-| `resync_required` | `resync()`：清空实体缓存（保留界面状态与待发送队列）→ 重走启动序列（不带旧游标） |
+| `resync_required` | `resync()`：清空实体缓存（保留界面状态与待发送队列）→ 重走启动序列（不带旧游标）。`reason = log_epoch_changed`（服务端从备份恢复，P-67）时另外清空所有水位线 `asOf`，并提示"服务端已从备份恢复，界面已重新同步" |
 
 **重新拉取调度器**：事件默认只把相应资源标记为"需刷新"，调度器按资源键合并（窗口 100 ms [建议值]）、去重在途请求、并发 ≤ 4、可见资源优先、`resync` 时中止全部；读限流 600/min（api.md §3.7）是硬上限，初始水合与事件风暴都经它节流。事件 `data` 若足以更新（由 `schemas/events` 保证）才直接打补丁，否则一律重新 GET。
 
@@ -212,11 +211,11 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 
 | ID | 规则 | 组件 | 状态 | 数据 / 调用 | M |
 | --- | --- | --- | --- | --- | --- |
-| R-04 | 项目 tab 切换；有待处理事项显示黄色数字徽标（§2.1） | `ProjectTabs`（`aria-current="page"`；徽标 `aria-label="需要你 n 项"`） | `currentProjectId` | `projects.list`；徽标 = `inbox.list?project_id&status=open` 的条数 + `inbox.*` 事件 | M1 |
+| R-04 | 项目 tab 切换；有待处理事项显示黄色数字徽标（§2.1） | `ProjectTabs`（`aria-current="page"`；徽标 `aria-label="需要你 n 项"`） | `currentProjectId` | `projects.list`；徽标 = `inbox.summary` 的按项目计数（P-63）+ `inbox.*` 事件本地增减 | M1 |
 | R-05 | "+" 添加项目 | `ProjectTabs` 末尾的禁用按钮，提示"项目在服务端绑定" | — | 无路由（api.md OQ-8；OQ-U17） | M1 |
 | R-06 | "示例数据"标记（原型） | `DevBadge`，**仅在连接 Mock 服务的构建标志下显示**，生产不显示 | `build.mockServer` | — | M1 |
 | R-07 | 本机·角色：审批设备 / 操作设备 / 只读设备（§2.1） | `RoleBadge` | `session.me.role/profile` | `me.get`；收到针对本机的 `device.updated` 时重新 `me.get` | M1 |
-| R-08 | 单一连接指示，合并 mTLS 与事件流（§2.1、§2.8） | `ConnectionBadge`（顶栏）+ `StatusBar` 的同一状态 | `session.connection.phase` | `connection_state` + `state` 帧。文案：`live` →"{主机} · 已连接"；`reconnecting`/`connecting` →"连接中断 · 重连中"（灰）；`handshake_failed` →"无法建立安全连接"；`cert_expiring` →"证书将过期（{日期}）"；`cert_expired` →"证书已过期"；`revoked` →"此设备已被吊销"。主机名取自 `identity_status().server_host` | M1 |
+| R-08 | 单一连接指示，合并 mTLS 与事件流（§2.1、§2.8） | `ConnectionBadge`（顶栏）+ `StatusBar` 的同一状态 | `session.connection.phase` | `connection_state` + `state` 帧。文案：`live` →"{主机} · 已连接"；`reconnecting`/`connecting` →"连接中断 · 重连中"（灰）；`handshake_failed` →"无法建立安全连接"；`cert_expiring` →"证书将过期（{日期}）"（外壳自动续期失败时才出现，P-64）；`cert_expired` →"证书已过期"；`revoked` →"此设备已被吊销"。主机名取自 `identity_status().server_host` | M1 |
 | R-09 | "需要你 · n" 是**全部项目**的 open 数；点击打开浮层，按项目列出，每项可直接操作或跳转（§2.1） | `NeedsYouButton`（`aria-expanded`）+ `InboxOverlay`（`role="dialog"`，Esc 关闭，焦点回到触发按钮） | `overlay.inbox` | `needsYou(state).total`；浮层行为见 §7.6 | M1 最小 / M2 完整 |
 | R-10 | 设置以全屏浮层打开，不卸载工作区；返回后草稿和选中项都在（§2.1） | `SettingsOverlay`（`position: fixed; inset: 0`，工作区组件保持挂载） | `overlay.settings` | — | M1 |
 
@@ -237,17 +236,17 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | --- | --- | --- | --- | --- | --- |
 | R-17 | 用户消息：右对齐蓝底；下方 `@上下文 · 上限 X · 时间`；离线附"待发送"（§2.3） | `UserBubble` + `PendingBadge` | — | `Message(role=user)`；`@` 标签由 `refs` 推出（空 → "全项目"）；上限：`level_cap` 非空 → "上限 X"，空 → "上限 项目默认"；待发送 / 失败来自 `outbox` | M1 |
 | R-18 | agent 消息：左对齐深底、2px 种类色边框；气泡内第一行种类文字；需要人时紧跟"! 需要你 · 类型"（§2.3、P-34） | `AgentBubble` | — | `agent_kind`：`planner` 大脑紫 / `worker` 干活青 / `utility` 打杂灰；**未知或 `null` → 中性灰边框 + 文字"agent"，不回退成大脑色**；药丸仅当本消息的 `cards` 引用了 open 的 `InboxItem`（`approval`→`payload.approval_id`，`escalation` / `choice`→`inbox_id`）。[conversation.md §7.7](conversation.md) 的临时约定：`decision_needed` →`choice`（带选项），`spec_needed` →`choice`（`options: []`，表示要自由文本答复），`escalation` / `budget_exhausted` / `security_finding` →`escalation`，所以这些消息都能挂药丸（OQ-U8） | M1 |
-| R-19 | 后台事件一行（圆点 + 时间 + 摘要）可点击在检视器打开；连续多条折叠为"后台处理了 n 件事 ▸"（§2.3） | `EventRow`、`EventGroup`（`aria-expanded`） | `ui.expandedGroups` | `Message(role=event)`；连续 ≥ 2 条且中间无其他类型消息即成组；点击 → `select(refs[0] 或 delivery_id 的主项)`。**事件行没有状态字段**，圆点统一为中性（OQ-U9） | M1 |
+| R-19 | 后台事件一行（圆点 + 时间 + 摘要）可点击在检视器打开；连续多条折叠为"后台处理了 n 件事 ▸"（§2.3） | `EventRow`、`EventGroup`（`aria-expanded`） | `ui.expandedGroups` | `Message(role=event)`；连续 ≥ 2 条且中间无其他类型消息即成组；点击 → `select(refs[0] 或 delivery_id 的主项)`。圆点颜色取 `Message.tone`（`info` / `ok` / `run` / `warn`，C26，§7.1 映射）；守护事件（`guardian.triaged` / `heal_requested` / `escalated`，P-60）同样以事件行呈现 | M1 |
 | R-20 | 黄色"上次查看 hh:mm 之后"分隔线，紧跟"离开期间摘要"卡，每项可点（§2.3） | `LastSeenDivider`、`AwayChangesCard` | `ui.lastViewed` | "上次查看"的定义与摘要来源都未定（OQ-U10）。M2 临时：本地记录离开时的最新消息 ID，回来后在其后插分隔线；摘要卡只展示本地可确定计数（离开期间新增的事件行数、当前 open 上报项数），每项可点 | M2 |
 | R-21 | 执行计划卡：标题 +"● 实时"，步骤随事件实时更新（§2.3） | `PlanCard` | — | `Card.plan` → `workflows.get(workflow_id)`；`node.*`、`workflow.*` 事件触发刷新；步骤 = 节点（`role` 的中文名 + `status` + `verdict`）；`summary` 当 `UntrustedText` | M1 |
-| R-22 | 审批卡：显示"合并 PR #9 @ a1b2c3d"和实时状态；只有待签名时才有"审阅并签名…"，它只打开审批单（§2.3、P-33） | `ApprovalCard` | `overlay.sheet` | `Card.approval` → `approvals.get`；`approval.*` 事件；动作名 + 目标 + `subject_digest` 前 8 位取自 `Approval`，状态文案见 §7.8 | M1 |
-| R-23 | 升档卡：原因 + [升到 X 并继续] [保持当前，缩小范围] [放弃]；处理后变为"已处理：…"（§2.3） | `ChoiceCard`（升档卡与二选一同一组件）；`Card.escalation` 另由 `EscalationCard` 渲染（原因 + 证据 `Ref`，§7.6） | — | [engine.md §7.11](engine.md) 的临时约定：升档是 `decision_needed`（`reason_code = level_cap_exceeded`，选项 `upgrade` / `keep_and_shrink` / `abandon`），由 `choice` 卡承载；界面不硬编码选项，按 `inbox.get` 的 `payload.options[]` 逐个渲染按钮（文案取服务端 `label`），点击 → `inbox.choose { option_id }`，`level_cap` 的修改由引擎在 `inbox.resolved` 后执行，界面不再调 `deliveries.patch`。处理后文案取 `inbox.resolved` 事件的 `data.option_id` 对应 `label`（conversation 会追加"已处理：{label}"事件行），快照里取不到时只显示"已处理"。按钮需 operator；手机档案不能做升档（P-35，OQ-U8） | M1 |
+| R-22 | 审批卡：显示"合并 PR #9 @ a1b2c3d"和实时状态；只有待签名时才有"审阅并签名…"，它只打开审批单（§2.3、P-33） | `ApprovalCard` | `overlay.sheet` | `Card.approval` → `approvals.get`；`approval.*` 事件；动作名 + 目标 + `subject_digest` 前 7 位（短 SHA 统一 7 位，C27）取自 `Approval`，状态文案见 §7.8 | M1 |
+| R-23 | 升档卡：原因 + [升到 X 并继续] [保持当前，缩小范围] [放弃]；处理后变为"已处理：…"（§2.3） | `EscalationCard`（原因 + 证据 `Ref` + 选项按钮，与 `ChoiceCard` 共用按钮组件） | — | 升档一律是 `escalation`（P-63；`reason_code = level_cap_exceeded`，[engine.md §7.11](engine.md) 的选项 `upgrade` / `keep_scope` / `abandon`）；界面不硬编码选项，按 `payload.options[]`（`{id, label, primary?}`）逐个渲染按钮（文案取服务端 `label`，`primary` 强调色），点击 → `inbox.choose { option_id }`，`level_cap` 的修改由引擎在 `inbox.resolved` 后执行，界面不再调 `deliveries.patch`。处理后文案取 `inbox.resolved` 事件的 `data.option_id` 对应 `label`（conversation 会追加"已处理：{label}"事件行），快照里取不到时只显示"已处理"。按钮需 operator；手机档案不能 `choose` `escalation`（P-35） | M1 |
 | R-24 | 二选一直接给按钮（如 [改为修复] [维持驳回]）（§2.3） | `ChoiceCard` | — | `Card.choice { inbox_id, options[] }`；`inbox.choose`（与收件箱同一个 `inbox_id`，P-40）；`options` 为空（`spec_needed`）时不渲染按钮，改为"回复补充…"（§7.6） | M1 |
 | R-25 | 引用 chip 点击只在检视器查看，**不改变**输入区上下文（§2.3、P-32） | `RefChip` | `ui.sel` | 只调用 `select(ref)`；`Ref` → 选中项的映射在 §7.9；chip 来自 `refs[]`，**不**从正文文字里解析 | M1 |
 | R-26 | "回复"：把上下文设为该消息所属交付并聚焦输入框（§2.3） | `AgentBubble` 右下角按钮 | `ui.ctx = {kind: delivery, id: message.delivery_id}`，`ui.view = chat`，`levelOverride = null` | 无 API；`delivery_id` 为空或设备只读时不显示 | M2 |
 | R-27 | `⌘↵` / `Ctrl+Enter` 发送；输入法组合中按回车不发送（§2.3） | `Composer` | `ui.draft` | 平台键位取自 `device.platform`；组合态判定 `event.isComposing \|\| keyCode === 229`；发送 → §7.7 | M1 |
 | R-28 | `@ 上下文 ▾`：全项目 + 进行中的 Issue / PR / 工作树，可用 × 清除；默认全项目，每次发送后复位（§2.3、P-32） | `ContextPicker`（`listbox`，选项为按钮） | `ui.ctx` | 选项来自缓存的活动交付；映射 `Ref`：issue → `{kind:"issue", repo, number}`，pr 同，worktree → `{kind:"worktree", id}`，回复 / 交付 → `{kind:"delivery", id}`。**客户端只发最小字段**（data-model §1.1） | M2 |
-| R-29 | 档位**上限**选择器：标签"上限"，旁显示"≤ X"；默认项目默认上限；`@` 已有交付时显示该交付上限；发送后复位；方向键移动；悬停说明各档；None 提示"只问答，不建交付"（§2.3） | `LevelCapPicker`（`radiogroup`，单一 Tab 停靠点，方向键漫游并选中） | `ui.levelOverride`；显示值 = `levelOverride ?? ctx 交付的 level_cap ?? 项目默认` | 项目默认 = `levels.default_level` 生效值（§7.2 步骤 2）。各档说明是随包的静态说明文字（对应 architecture §8 表），不属于服务端枚举 | M2 |
+| R-29 | 档位**上限**选择器（M1，C28）：标签"上限"，旁显示"≤ X"；默认项目默认上限；`@` 已有交付时显示该交付上限；发送后复位；方向键移动；悬停说明各档；None 提示"只问答，不建交付"（§2.3） | `LevelCapPicker`（`radiogroup`，单一 Tab 停靠点，方向键漫游并选中） | `ui.levelOverride`；显示值 = `levelOverride ?? ctx 交付的 level_cap ?? 项目默认` | 项目默认 = `levels.default_level` 生效值（§7.2 步骤 2）。各档说明是随包的静态说明文字（对应 architecture §8 表），不属于服务端枚举。实际档位 `level_effective` 由引擎在规格阶段按风险给出初值（≤ 上限），之后只在上限内升（P-57），选择器只设上限 | M1 |
 | R-30 | `@` 的交付已有上限而用户改了：提示"PR #7 上限 Max → High；已触发的闸门不撤销"；文字档位与选择器冲突以选择器为准，agent 回执复述实际生效上限（§2.3） | `LevelWarning` | 比较 `ctx` 交付的 `level_cap` 与 `levelOverride` | 仅比较与提示；**客户端不解析正文里的档位**。回执就是 agent 消息，原样显示 | M2 |
 | R-31 | 只读设备：输入与发送禁用，占位"此设备为只读"（§2.3） | `Composer` | `session.me.role === viewer` | 服务端同样 `403 forbidden_role`，界面不依赖它 | M1 |
 | R-32 | 离线时发送按钮变"稍后发送"（§2.3） | `Composer` + `OutboxFlusher` | `outbox[project]` | 恢复（`phase = live`）后按序 flush；§7.7 | M1 |
@@ -274,9 +273,9 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | ID | 规则 | 组件 | 状态 | 数据 / 调用 | M |
 | --- | --- | --- | --- | --- | --- |
 | R-40 | 头部：编号 / 类型 / 状态（需要你时黄色）/ 标题 /"上限 X · 实际 Y"及自动加码原因 / 关联链；refs 单独一行"相关"（§2.6、UX #11） | `InspectorHeader` | `ui.sel` → 所属 `Delivery` | `level_cap`、`level_effective`；原因取最近的 `delivery.level_changed` 事件 `data`（schema 未出，OQ-U9）；关联链 = 同一交付内 Issue → PR → 分支，**按交付计算，不跨交付**；"相关"行无数据（OQ-U7） | M1 |
-| R-41 | 操作：[在对话中引用]；[⋯] 暂停 / 继续、重试失败节点、放弃交付…（确认框写明关闭哪个 PR、保留哪个分支）（§2.6、P-37） | `InspectorActions`、`ActionMenu`（`role="menu"`）、`ConfirmAbandon`（`role="alertdialog"`） | 瞬时状态 | 引用：设 `ui.ctx` 为选中项的 `Ref`、切到对话、聚焦输入框。放弃：`deliveries.abandon`（带可选 `reason`）。暂停 / 继续 / 重试**没有路由**（OQ-U2）：菜单里不显示这三项。确认框的"关闭 PR、保留分支"依赖引擎对放弃的语义（OQ-U19） | M2 |
+| R-41 | 操作：[在对话中引用]；[⋯] 暂停 / 继续、重试失败节点、放弃交付…（确认框写明关闭哪个 PR、保留哪个分支）（§2.6、P-37） | `InspectorActions`、`ActionMenu`（`role="menu"`）、`ConfirmAbandon`（`role="alertdialog"`） | 瞬时状态 | 引用：设 `ui.ctx` 为选中项的 `Ref`、切到对话、聚焦输入框。放弃：`deliveries.abandon`（带可选 `reason`；任何非终态阶段可用，P-55）。暂停：`deliveries.pause`；继续：`deliveries.resume`（`stage_status = paused` 时才显示）；重试：节点列表里 `failed` 且未被替换的节点旁的"重试"→ `nodes.retry`（三者均为 operator、`Idempotency-Key` 必带，P-56）。界面只按响应与 `delivery.paused` / `delivery.resumed` / `node.retry_requested` 事件更新。确认框的"关闭 PR、保留分支"依赖引擎对放弃的语义（OQ-U19） | M1 |
 | R-42 | 需要你：该交付所有 open 的上报项，每项带操作按钮（§2.6） | `NeedsYouSection` + `InboxItemView`（与浮层同一组件） | — | `needsYou.byDelivery`；按钮见 §7.6 | M1 |
-| R-43 | 交付阶段 7 段：规格 / 计划 / 实现 / 提出 / 评审 / 合并 / 关闭；已完成绿、当前强调色、未到灰、跳过的阶段画斜纹并写"跳过"（§2.6） | `StageBar`（每段带文字，非仅颜色） | — | `Delivery.stage`；`abandoned` 时整条置灰并标"已放弃"；"跳过"：`level_effective = Low` 时 `plan` 为跳过（data-model §4.1）；有 `delivery.stage_changed` 历史时按实际未访问的阶段补充 | M1 |
+| R-43 | 交付阶段 7 段：规格 / 计划 / 实现 / 提出 / 评审 / 合并 / 关闭；已完成绿、当前强调色、未到灰、跳过的阶段画斜纹并写"跳过"（§2.6） | `StageBar`（每段带文字，非仅颜色）+ `StageStatus` | — | `Delivery.stage` 与 `stage_status`（`running` / `waiting_human` / `blocked` / `paused` / `done`，P-55；`paused` 显示"已暂停"，`Tone = idle`）；`abandoned` 时整条置灰并标"已放弃"；"跳过"：Low 档无计划阶段（`spec → implement`，P-55）；`REJECT` 后"重新规划"会回到计划段、PR 重新打开会回到评审段，按 `delivery.stage_changed` 历史显示 | M1 |
 | R-44 | 当前阶段的图：只列当前阶段的节点；合并阶段改为"合并闸门"清单（§2.6） | `StageGraph`、`MergeGates` | — | `workflows.list?stage=` 取 `graph_rev` 最大的 → `workflows.get`；节点显示 `role` 中文名、`status`、`verdict`；`review` 阶段 Low 档无图，显示"等待 CI"+ `checks`。合并闸门见 §7.8 | M1（M3 加详情） |
 | R-45 | 后台守护：守护处理过的事项与处置方式（§2.6） | `GuardianLog` | — | 该交付 `delivery_id` 的 `Message(role=event)`，最新 10 条（OQ-U9：没有结构化的"处置记录"） | M1 |
 | R-46 | 只读设备上，操作按钮禁用（§2.6） | 所有写操作控件统一经 `can(action)` | `session.me.role` | §7.13 角色矩阵 | M1 |
@@ -287,7 +286,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 
 | ID | 规则 | 组件 | 状态 | 数据 / 调用 | M |
 | --- | --- | --- | --- | --- | --- |
-| R-48 | 右侧抽屉，内容：动作、仓库、PR、完整 40 位 head SHA（等宽可复制）、改动（文件数 / 增删行 / 文件列表 / 策略命中 / GitHub diff 链接）、合并闸门、有效期、签名按钮（§2.7） | `ApprovalSheet`（`role="dialog" aria-modal="true"`，焦点陷阱，Esc 关闭，焦点回到触发处） | `overlay.sheet` | 全部"已签名区"字段来自 `ApprovalSheetModel.signed`；"未签名信息"区（PR 标题、闸门、改动）标注"未签名信息，仅供参考"并与已签名区视觉分离（api.md §6.5 规则 2）。有效期有三个不同的数（OQ-U20）：审批有效期 `Approval.expires_at`、本次确认窗口 `challenge_expires_at`，分别标注。**改动明细没有数据源**（OQ-U3）：先显示"服务端未提供改动明细"+ `open_github {kind: commit, sha}` 链接；合并方法（如 squash）不在签名载荷里，不得写进已签名区 | M1 |
+| R-48 | 右侧抽屉，内容：动作、仓库、PR、完整 40 位 head SHA（等宽可复制，C27；其他界面一律 7 位短 SHA）、改动（文件数 / 增删行 / 文件列表 / 策略命中 / GitHub diff 链接）、合并闸门、有效期、签名按钮（§2.7） | `ApprovalSheet`（`role="dialog" aria-modal="true"`，焦点陷阱，Esc 关闭，焦点回到触发处） | `overlay.sheet` | 全部"已签名区"字段来自 `ApprovalSheetModel.signed`；"未签名信息"区（PR 标题、闸门、改动）标注"未签名信息，仅供参考"并与已签名区视觉分离（api.md §6.5 规则 2）。有效期分两个数分别标注（C27）：审批有效期 `Approval.expires_at`（`policies.approval.ttl_s`，默认 24 小时）、本次确认窗口 `challenge_expires_at`（120 秒）。**改动明细没有数据源**（OQ-U3）：先显示"服务端未提供改动明细"+ `open_github {kind: commit, sha}` 链接；合并方法（如 squash）不在签名载荷里，不得写进已签名区 | M1 |
 | R-49 | 打开审批单时向服务端取最新状态；签名载荷使用审批单上显示的 SHA（§2.7） | 同上 | 同上 | 打开即 `approvalPrepare`（含 `GET approval` + `GET challenge` + 自检）。challenge 到期（默认 120 s）→ 面板顶部"已过期 · 重新载入"，重新 `prepare` 后**重新显示**，用户须重新核对 | M1 |
 | R-50 | 禁用签名并写明原因：连接中断；本机不是审批设备（提示去哪台设备）；GitHub 侧闸门未满足；审批已不在待签状态（§2.7、P-33） | `SignGate`（按钮 `disabled` + 原因文字 `role="status"`） | — | `signAvailability()`，§7.8 | M1 |
 | R-51 | 签名后审批卡依次显示：已签名 · 排队 merge → 已合并 → Issue 已关闭 · 交付完成；对话追加对应事件行（§2.7） | `ApprovalProgress`（卡 / 单 / 检视器共用） | — | `approvals.get` 状态 + `outbox.*` 事件 + `Delivery.pr.state` + `Delivery.stage`；**对话里的事件行是服务端消息，客户端不自行拼造** | M1 |
@@ -300,7 +299,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | --- | --- | --- | --- | --- | --- |
 | R-54 | 连接中断：顶栏与状态栏变灰"重连中"；对话上方横幅"界面可能不是最新；签名已禁用；新消息会在恢复后发送"；恢复后提示已补齐的事件数（§2.8） | `OfflineBanner`（`role="status"`） | `session.connection` | `state` 帧；补齐数见 §7.2 | M1 |
 | R-55 | 外部变化（GitHub 上合并 / 关闭、Outbox 失败、策略拒绝、对账偏差）以事件行呈现；相关上报项自动关闭并注明"已在 GitHub 上处理"（§2.8） | `EventRow`、`InboxItemView` | — | 事件行是服务端消息；上报项自动关闭来自 `inbox.resolved`；"已在 GitHub 上处理"的注明需要服务端在 `data` 或消息里给出原因（OQ-U9），否则显示"已关闭" | M1 |
-| R-56 | 证书将过期 / 已吊销：顶栏连接状态显示对应文字（§2.8） | `ConnectionBadge` | `ConnectionState` | `revoked` / `cert_expired` 时出现阻塞的配对向导（§7.12） | M1 |
+| R-56 | 证书将过期 / 已吊销：顶栏连接状态显示对应文字（§2.8） | `ConnectionBadge` | `ConnectionState` | 外壳在剩余 1/3 有效期时自动续期（P-64），只有续期失败才显示"证书将过期"；`revoked` / `cert_expired` 时出现阻塞的配对向导（§7.12） | M1 |
 | R-58 | 顶部"跳到输入框"跳转链接（§2.9） | `SkipLink` | — | 聚焦 `#composer` | M1 |
 | R-59 | 所有可点击元素都是真实按钮，有可见焦点框（§2.9） | 全局样式 + lint（禁止 `div onClick`） | — | — | M1 |
 | R-60 | 选中项 `aria-current`，视图 tab `aria-selected`，档位选择器单一 Tab 停靠点（§2.9） | `ViewTabs`（`role="tablist"`）、各列表项、`LevelCapPicker` | — | — | M1 / M2 |
@@ -311,12 +310,12 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | ID | 规则 | 组件 | 状态 | 数据 / 调用 | M |
 | --- | --- | --- | --- | --- | --- |
 | R-62 | 以全屏浮层打开，"返回工作区"回到原状态；有未保存改动时返回先确认（§3） | `SettingsOverlay`、`ConfirmLeaveBar`（`role="alertdialog"`） | `overlay.settings`、页内 `dirty` | `dirty` = 草稿与已加载文档的深度比较 | M1 |
-| R-63 | 分组导航：服务端（模型、档位与预算、GitHub App、沙盒与出网、危险动作策略、后台守护、通知）/ 项目（每个项目一页）/ 本机（设备与证书、外观）（§3，P-31） | `SettingsNav` | `overlay.settings.page` | 条目由 config.md §13 的里程碑决定：未交付的页显示"尚未提供"并链到 config.md；viewer 看不到设置入口（api.md §2.2） | M1 起 |
+| R-63 | 分组导航：服务端（模型、档位与预算、GitHub App、沙盒与出网、危险动作策略、后台守护、通知）/ 项目（每个项目一页）/ 本机（设备与证书、外观）（§3，P-31） | `SettingsNav` | `overlay.settings.page` | 条目按里程碑：M1 模型、设备与证书（C28）；M2 档位与预算、危险动作策略、后台守护、项目页；M3 外观（C28）；未交付的页显示"尚未提供"并链到 config.md；viewer 看不到设置入口（api.md §2.2） | M1 起 |
 | R-64 | 模型页：三张卡（大脑 / 干活 / 打杂），含用途说明、模型、推理深度；被项目覆盖时注明"被 n 个项目覆盖：…"（§3） | `SettingsModels`、`ModelTierCard`、`ProviderCredentialField` | 页内草稿 | `settings.get models` + `settings.catalog`。模型下拉 = `catalog.models.capabilities` 的键（`worker` / `planner` 过滤掉不支持工具调用的）；推理深度 = 所选模型的 `reasoning_efforts`，planner / worker 另有"随档位"（`by_level`）。"被 n 个项目覆盖"：对每个项目 `project_settings.get models`（n+1 请求，仅在该页打开时；OQ-U13）。凭据输入框只写不读，已设置显示 `present`（config.md §2.4） | M1 |
 | R-65 | "每个档位里三类模型各做什么"表，与 architecture 的角色表一致（§3） | `LevelModelTable` | — | 随包静态说明（来源 architecture §8、§9），带一个快照测试对比；`catalog` 不提供这张表（OQ-U13） | M1 |
-| R-66 | 保存：需要审批设备签名；保存后提示新配置从运行中节点的下一个节点开始生效（§3、Settings 原型） | `SaveBar` | 页内 `saving` / `lastSaved { rev }` | **以服务端为准**：`guardedWritePrepare` 返回的 `requires_signature` 决定是否出现"此改动需要审批设备签名"；中性 / 收紧类不签名（config.md §2.5，与 prototype.md §3 的"保存需要签名"字面不同，见 OQ-U13）。保存成功文案按 config.md §2.6：判定类键"下一次判定起"，worker 配置"下一个尝试起"；并用 `settings.status` 的 `applied_rev` 显示"某模块尚未应用 rev N" | M1 |
+| R-66 | 保存：只在凭据或放宽类改动时需要审批设备签名（C27）；保存后提示新配置从运行中节点的下一个节点开始生效（§3、Settings 原型） | `SaveBar` | 页内 `saving` / `lastSaved { rev }` | **以服务端为准**：`guardedWritePrepare` 返回的 `requires_signature` 决定是否出现"此改动需要审批设备签名"；中性 / 收紧类不签名（config.md §2.5，C27）。保存成功文案按 config.md §2.6：判定类键"下一次判定起"，worker 配置"下一个尝试起"；并用 `settings.status` 的 `applied_rev` 显示"某模块尚未应用 rev N" | M1 |
 | R-67 | 项目页：每个项目一页，只列可覆盖的键；继承全局 / 覆盖；安全相关的键标"只能收紧"（§3） | `SettingsProject` | 页内草稿 | 行集合来自 config.md §2.2 的覆盖矩阵（schema 注解 + `catalog`）；继承值 = `project_settings.get ?view=effective`（灰显，附 `clamped[]`）；覆盖 = `guardedWritePrepare{settings_put, scope: project}`；回到继承 = `settings_delete`。"只能收紧"的输入被约束在不宽于全局的范围，仍以服务端 `override_loosens_global` 为准 | M2 |
-| R-68 | 本机：设备与证书、外观（§3、config.md §13） | `SettingsDevices`、`SettingsAppearance` | — | 设备：`devices.list` / `devices.rename`；改角色 `guarded_write{device_role}`、吊销 `guarded_write{device_revoke}`；本机证书信息取 `identity_status()`；"配对令牌发放"无路由（OQ-U14）。外观：`prefs_set`（主题 / 密度 / 语言 / 通知开关 / 面板宽度），不含凭据与配置键 | M2（建议） |
+| R-68 | 本机：设备与证书、外观（§3、config.md §13） | `SettingsDevices`、`SettingsAppearance` | — | 设备（M1，C28）：`devices.list`（列表）/ `devices.rename`（改名）/ 吊销 `guarded_write{device_revoke}`；改角色 `guarded_write{device_role}`；本机证书信息（序列号、到期、下次自动续期时间、两把公钥指纹 `pubkey_fpr` / `approval_pubkey_fpr`）取 `identity_status()`；配对令牌由主机 `gantry pair` 产生，页面只说明（无路由）。外观（M3，C28）：`prefs_set`（主题 / 密度 / 语言 / 通知开关 / 面板宽度），不含凭据与配置键 | M1（设备）/ M3（外观） |
 
 ### 7.5 事件 → 状态更新
 
@@ -328,13 +327,15 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | `settings.updated` | 若设置浮层打开且 resource 相同：标记该页"已被修改"；`levels` 变化时重取默认上限；`settings.status` | 设置页冲突横幅；输入区默认上限 |
 | `conversation.created` | `conversations?project_id` | — |
 | `message.posted` | 事件含完整 `Message` 时直接合并，否则拉最新一页合并（按 `id` 去重，包括本机刚发的那条） | 对话；自动滚动；状态栏最近事件 |
-| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.abandoned` | `delivery:{id}`；`stage_changed` 同时刷新其当前阶段工作流 | 左栏、地图、检视器阶段条 |
+| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.paused` / `delivery.resumed` / `delivery.abandoned` | `delivery:{id}`；`stage_changed` 同时刷新其当前阶段工作流 | 左栏、地图、检视器阶段条与 ⋯ 菜单（暂停 / 继续） |
+| `node.retry_requested` | `workflow:{id}` | 检视器节点列表 |
+| `guardian.triaged` / `guardian.heal_requested` / `guardian.escalated` | 无（`conversation` 会生成事件行，P-60） | 后台守护区 |
 | `workflow.*`、`node.*`、`attempt.*` | `workflows:{correlation_id}` / `workflow:{id}` | 计划卡、检视器的图、"自愈中"状态 |
 | `attempt.progress` | 不刷新；若检视器正显示该尝试，更新进度文字 | 仅展示（data-model 注明不驱动状态机） |
 | `patch.validated` / `patch.rejected` / `policy.denied` | 无（服务端会同时发事件行消息） | — |
 | `sandbox.created` / `sandbox.destroyed` | 无 | 状态栏沙盒数不依赖它（OQ-U5） |
 | `worktree.*` | `worktree:{id}`、`worktrees:{project}` | 工作树列表 / 视图、写权列 |
-| `inbox.raised` / `inbox.resolved` / `inbox.dismissed` | `inbox_item:{id}`、`inbox:{project}` | 所有"需要你"表面（§7.6）；`resolved` 的 `data.option_id` 缓存，用于"已处理：…" |
+| `inbox.raised` / `inbox.resolved` / `inbox.dismissed` | `inbox_item:{id}`、`inbox:{project}`、`inbox.summary` 本地增减（漂移时重拉） | 所有"需要你"表面（§7.6）；`resolved` 的 `data.option_id` 缓存，用于"已处理：…" |
 | `approval.requested` / `granted` / `consumed` / `invalidated` / `expired` / `denied` | `approval:{id}` | 审批卡、收件箱、检视器、审批单；`invalidated` 使打开的审批单禁用并 `approvalDiscard` |
 | `outbox.*` | 无（用于审批进度："排队 merge"） | `ApprovalProgress` |
 | `forge.synced` / `forge.<kind>` / `forge.drift_detected` | `delivery:{correlation_id}`（PR 快照）、`approval`（若有待签） | 左栏 CI、检视器闸门、签名可用性 |
@@ -358,10 +359,10 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 
 | `kind` | 内容 | 操作（均需 operator，只读设备禁用） |
 | --- | --- | --- |
-| `approval_needed` | 动作 + 目标 + `subject_digest` 前 8 位（取自 `Approval`） | "审阅并签名…" → 打开审批单（**不直接签名**）；审批只经审批路由处理：`choose` 对它返回 `409`（api.md §4.8），界面也不提供 `dismiss` |
-| `decision_needed` | `payload.options[]`、`reason_code` | 每个选项一个按钮 → `inbox.choose { option_id }`（带 `Idempotency-Key`）；`primary` 选项强调色。升档、放弃 / 重新规划（gate `REJECT`）、GitHub 状态外部改变后的继续 / 放弃，都是这一类（engine.md §7.11） |
-| `escalation` | `reason_code`、证据 `Ref` 链接 | data-model 的 `escalation` payload 没有 `options[]`（engine.md 因此把"需要按钮"的情形都放进 `decision_needed`，OQ-U8）；若服务端仍带了 `options[]` 就同上渲染，否则只给"忽略"（`inbox.dismiss`，对阻塞项不解除暂停，界面文案写明"忽略不会继续任务"） |
-| `spec_needed` | `missing[] { aspect, question }` 逐条列出 | "回复补充…" → 切到该项目对话，`ctx = {kind: delivery, id: delivery_id}`，聚焦输入框（自由文本答复走发消息，api.md §4.8） |
+| `approval_needed` | 动作 + 目标 + `subject_digest` 前 7 位（取自 `Approval`，C27） | "审阅并签名…" → 打开审批单（**不直接签名**）；审批只经审批路由处理：`choose` 对它返回 `409`（api.md §4.8），界面也不提供 `dismiss` |
+| `decision_needed` | `payload.options[]`（`{id, label, primary?}`，P-63）、`reason_code` | 每个选项一个按钮 → `inbox.choose { option_id }`（带 `Idempotency-Key`）；`primary` 选项强调色。放弃 / 重新规划（gate `REJECT`，P-55）、GitHub 状态外部改变后的继续 / 放弃、workflow 补丁的手动应用（`payload.kind = manual_action`，附补丁，P-48）都是这一类（engine.md §7.11） |
+| `escalation` | `reason_code`、证据 `Ref` 链接、`payload.options[]`（P-63） | 升档一律是 `escalation`（`level_cap_exceeded`）；守护上报（`guardian.escalated`，含 `rework` 等选项）同属此类；按 `options[]` 渲染按钮（同上）；没有 `options[]` 时只给"忽略"（`inbox.dismiss`，对阻塞项不解除暂停，界面文案写明"忽略不会继续任务"） |
+| `spec_needed` | `missing[] { aspect, question }` 逐条列出；有 `options[]` 时同上渲染按钮 | "回复补充…" → 切到该项目对话，`ctx = {kind: delivery, id: delivery_id}`，聚焦输入框（自由文本答复走发消息，api.md §4.8） |
 | `budget_exhausted` | `dimension` / `limit` / `used` | "忽略"（没有追加预算的路由，config.md OQ-10） |
 | `security_finding` | `finding.severity` / `category` / `title`（`UntrustedText`）、来源 `Ref` | "查看"（选中来源）；"忽略…"需二次确认 |
 
@@ -385,8 +386,8 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | --- | --- |
 | `pending` | 待签名（`need`）；PR 类且 `Delivery.pr.head_sha ≠ subject_digest` 时：代码已更新（旧→新），等待服务端使其失效 / 重新评审（`idle`），不给按钮 |
 | `granted` | 已签名 · 排队 merge（`run`） |
-| `consumed` | `pr.state = merged` →"已合并 {sha8}"（`ok`）；Issue 全部关闭且 `stage = closed` →"Issue 已关闭 · 交付完成"（`ok`）；否则"已执行，等待 GitHub 确认"（`run`） |
-| `invalidated` | 已失效（{旧 sha8} → {新 sha8}），重新评审中（`idle`），按钮消失 |
+| `consumed` | `pr.state = merged` →"已合并 {sha7}"（`ok`）；Issue 全部关闭且 `stage = closed` →"Issue 已关闭 · 交付完成"（`ok`）；否则"已执行，等待 GitHub 确认"（`run`） |
+| `invalidated` | 已失效（{旧 sha7} → {新 sha7}），重新评审中（`idle`），按钮消失 |
 | `expired` | 已过期（`idle`） |
 | `denied` | 已拒绝，回到评审（`idle`） |
 
@@ -403,7 +404,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 
 **GitHub 闸门（M1 临时规则，OQ-U4）**：未满足 = `!checks.required_ok` 或 `mergeable_state ∈ {dirty, blocked, behind, draft, unknown}` 或 `pr.draft` 或 `pr.state ≠ open` 或 `review_state = changes_requested`；`clean` / `unstable` / `has_hooks` 视为满足。快照 `synced_at` 超过 10 分钟 [建议值] 时在闸门清单旁标"快照 hh:mm"，**不据此放行或阻止**（服务端在 `grant` 与消费时复核）。清单四行与原型一致：必需 checks @SHA、GitHub review（未 approve 时给"去 GitHub 上 approve ↗"，`open_github`）、merge queue（`Project.merge_queue_enabled` 与 `in_merge_queue`）、Gantry 签名（本审批状态）。
 
-**签名按钮**：文案 M1 为"签名批准（系统确认）"；M2 起"用 Touch ID 签名批准" / "用 Windows Hello 签名批准"（按平台）。点击只调用 `approvalSign({ preparedId })`；响应前按钮置为"等待系统确认…"并禁用；响应后**只按返回的 `Approval.status` 更新**（不做乐观显示）；`409 stale_head` 显示"代码在你确认期间已更新，审批已失效"。
+**签名按钮**：M1 起文案为"用 Touch ID 签名批准" / "用 Windows Hello 签名批准"（按平台；审批签名密钥要求用户在场，P-47）。点击只调用 `approvalSign({ preparedId })`；响应前按钮置为"等待系统确认…"并禁用；响应后**只按返回的 `Approval.status` 更新**（不做乐观显示）；`409 stale_head` 显示"代码在你确认期间已更新，审批已失效"。
 
 ### 7.9 检视器的数据来源与选中映射
 
@@ -428,8 +429,8 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 
 ### 7.12 配对向导与设备页
 
-- **配对向导**（原型未覆盖，prototype.md §5）：当 `identity_status.state ∈ {unpaired, revoked, cert_expired}` 阻塞整个工作区。步骤：① 粘贴服务端配对串 + 设备名 → `pairingBegin`；② 显示服务端地址、CA 指纹（分组显示）与大号 6 位确认码，提示核对服务端控制台，按钮"一致 / 不一致" → `pairingConfirm`；③ 完成后进入水合。`revoked` / `cert_expired` 文案不同："此设备已被吊销 / 证书已过期，需要重新配对"，附 `identityReset`。扫码入口不提供（OQ-S3）。
-- **设备页**（M2 建议）：`devices.list`（含已吊销）、重命名（operator）、改角色与吊销（approver + 签名；不能改自己，附 `409 self_role_change` 提示）、本机证书序列号与到期时间。
+- **配对向导**（M1，C28；原型未覆盖，prototype.md §5）：当 `identity_status.state ∈ {unpaired, revoked, cert_expired}` 阻塞整个工作区。步骤：① 粘贴服务端配对串 + 设备名 → `pairingBegin`（外壳生成两把密钥，期间可能弹一次系统授权以创建审批签名密钥，P-47）；② 显示服务端地址、离线根 CA 指纹（分组显示，P-64）与大号 6 位确认码，提示核对服务端控制台，按钮"一致 / 不一致" → `pairingConfirm`；③ 完成后进入水合。`revoked` / `cert_expired` 文案不同："此设备已被吊销 / 证书已过期，需要重新配对"，附 `identityReset`。扫码入口不提供（OQ-S3）。
+- **设备与证书页**（M1，C28）：`devices.list`（含已吊销）、重命名（operator）、吊销与改角色（approver + 签名；不能改自己的角色，附 `409 self_role_change` 提示）、本机证书序列号、到期时间与下次自动续期时间（P-64）。
 
 ### 7.13 角色门槛矩阵
 
@@ -438,7 +439,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | 动作 | 最低角色 | 禁用 / 隐藏表现 |
 | --- | --- | --- |
 | 浏览一切（含审批只读、设备列表） | viewer | — |
-| 发消息、`choose`、`dismiss`、放弃交付、人工锁、重命名设备 | operator | 按钮禁用，悬停说明"此设备为只读" |
+| 发消息、`choose`、`dismiss`、暂停 / 继续 / 重试节点、放弃交付、人工锁、重命名设备 | operator | 按钮禁用，悬停说明"此设备为只读" |
 | 读设置 | operator | viewer 隐藏设置入口与"默认上限"数值 |
 | 写设置（中性 / 收紧） | operator | — |
 | 写设置（放宽、仅 approver 键、带 secret `value`）、改角色、吊销、签名、拒绝审批 | approver + 桌面档案 | 保存 / 签名禁用并说明原因 |
@@ -503,7 +504,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | `payload_too_large` / `unsupported_media_type` / `idempotency_key_reuse` / `invalid_request` | 记日志，显示通用错误；不重试（后两者是 bug） |
 | `rate_limited` / `unavailable` | 按 `Retry-After` 退避；对话顶部提示"服务端繁忙，稍后自动重试" |
 | `internal` | 读：退避重试；写：同 key 重试 |
-| `cursor_ahead` / `cursor_expired`（经 `resync_required`） | `resync()`，保留界面状态与待发送队列，顶部提示"已重新同步" |
+| `cursor_ahead` / `cursor_expired` / `log_epoch` 变化（经 `resync_required`） | `resync()`，保留界面状态与待发送队列，顶部提示"已重新同步"（`log_epoch` 变化时写明"服务端已从备份恢复"，P-67） |
 | `device_revoked`（经外壳 `revoked`） | 阻塞的配对向导，清空内存缓存；待发送队列保留到重新配对后询问是否丢弃（旧服务端的项目 ID 可能不同，外壳在 `identity_reset` 时清除 `ui_state`） |
 | 事件应用抛错（未知形状、缺字段） | 该事件对应资源改为"重新 GET"；仍推进游标；记诊断计数。**绝不因单个事件让整个界面崩溃** |
 | 资源在选中后消失（交付被清理） | `sel` 置空，检视器提示 |
@@ -551,9 +552,10 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | M1 | 任务进行中关闭桌面端，任务继续；重新打开后事件流从游标续上，界面状态一致 | E2E-13、E2E-12 |
 | M1 | 写入模型凭据需要 approver 设备签名；没有签名的写入被拒绝 | E2E-15（外壳侧见 desktop-shell §12） |
 | M1 | 吊销设备后，其已建立的事件流在心跳间隔内断开 | E2E-14（外壳侧见 desktop-shell §12） |
-| M1 | 改动 workflow / 依赖清单 / lockfile 的补丁被策略拒绝并上报 | "策略拒绝上报"一项（界面侧：事件行 + 上报项正确呈现） |
+| M1 | 改动 workflow / 依赖清单 / lockfile 的补丁被策略拒绝并上报（workflow：`decision_needed` + `manual_action`，附补丁，P-48） | "策略拒绝上报"一项（界面侧：事件行 + 上报项正确呈现） |
 | M2 | 审批后出现新推送，审批自动失效并重新进入评审 | E2E-03 |
-| M2 | 改动 `.github/workflows/` 的补丁进入"需要审批"，签名批准后才提交推送 | "`push_branch` 补丁审批"一项 |
+| M2 | 改动 `.github/workflows/` 的补丁被拒绝并附补丁上报（P-48） | "策略拒绝上报"一项 |
+| M2 | 依赖清单 / lockfile 补丁需审批后才提交推送（P-11 / P-19） | "`patch_apply_protected` 补丁审批"一项 |
 | M2 | security 类 finding 被上报，不会被静默关闭 | "`security_finding` 呈现"一项 |
 | M3 | Max 档任务的每一轮评审都有 arbiter 的唯一裁决 | "DAG 详情"一项（界面侧：每轮显示 arbiter 的 verdict） |
 | M4 | 一个 Milestone 被拆成多个交付单元并行推进，依赖顺序正确 | "按 `parent_id` 分组"一项（界面侧：分组与依赖边） |
@@ -573,6 +575,7 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 - [ ] [M1] E2E-12 水位线：先到的事件 `seq ≤ asOf` 不改变缓存；后拉的快照不被旧事件回退。
 - [ ] [M1] 事件流中途断开再重连：Mock 重放 `(游标, head]`，界面无重复消息、无丢失；`events_ack` 序列单调；过滤流里仅心跳推进游标。
 - [ ] [M1] 重复帧、乱序帧（`seq` 回退）被丢弃；`409 cursor_ahead` → `resync_required` → 清缓存重水合，界面状态（草稿、`sel`、待发送队列）保留。
+- [ ] [M1] `resync_required(log_epoch_changed)`：Mock 切换纪元号并让 `seq` 回退 → 界面清空缓存与水位线、全量重水合，旧纪元的消息不残留；提示"服务端已从备份恢复"（P-67）。
 - [ ] [M1] E2E-13（M1 退出标准）：发起任务后关闭应用，Mock 里任务继续产生事件；重新打开 → 重新水合并续流，最终界面（消息、交付阶段、上报项、审批状态）与 Mock 的真值逐项一致。
 - [ ] [M1] 事件风暴（500 条 / s）下合并刷新：对同一资源的 GET 次数 ≤ 突发窗口数，且不超过读限流。
 - [ ] [M1] 恢复后第一个心跳到达时显示"已补齐 n 件事件"，n 等于重连后应用的事件数。
@@ -581,7 +584,7 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 
 - [ ] [M1] **E2E-01 选中项不改变发送上下文**：依次通过左栏、地图（M2）、引用 chip、事件行、检视器选中不同项；输入区仍显示"@ 全项目"；发送一条消息，Mock 收到的请求体 `refs` 为 `[]`，用户气泡元信息为"@全项目"。
 - [ ] [M2] **E2E-02 上下文仅显式改变**：`@` 选择器 / 回复 / 在对话中引用 各自设置 `ctx`（请求体 `refs` 为对应 `Ref`：issue、pr、worktree、delivery）；"×"清除；发送后 `ctx` 与 `levelOverride` 复位，`draft` 清空；其他项目的状态不受影响。
-- [ ] [M2] 档位选择器：默认显示项目默认；`ctx` 有交付时显示其上限；方向键漫游且只有一个 Tab 停靠点；None 档提示"只问答，不建交付"；用户未改动时请求体**不含** `level_cap`，改动后含；上限与交付不同时出现"PR #7 上限 Max → High；已触发的闸门不撤销"。
+- [ ] [M1] 档位选择器（C28）：默认显示项目默认；`ctx` 有交付时显示其上限；方向键漫游且只有一个 Tab 停靠点；None 档提示"只问答，不建交付"；用户未改动时请求体**不含** `level_cap`，改动后含；上限与交付不同时出现"PR #7 上限 Max → High；已触发的闸门不撤销"。
 - [ ] [M1] ⌘↵ / Ctrl+Enter 按平台发送；输入法组合态按回车不发送；普通回车换行。
 - [ ] [M1] **E2E-05 只读设备不能发消息**：设备角色 `viewer`：输入框与发送禁用、占位"此设备为只读，不能发消息"；"回复"、选择类按钮、放弃交付禁用；设置入口隐藏；通过测试钩子强行发送时 Mock 回 `403 forbidden_role`，界面显示失败而不崩溃。
 - [ ] [M1] **E2E-17 离线与幂等**：断开连接 → 发消息显示"待发送"、按钮"稍后发送"；恢复后自动发送且 Mock 只产生 1 条 `message.posted`；POST 响应丢失（Mock 吞掉响应）后重试沿用同一 `Idempotency-Key`，仍只有 1 条；`422` 失败项标 `failed`，可"编辑后重发"。
@@ -594,14 +597,15 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 **"需要你"一致性**
 
 - [ ] [M1] **E2E-18**：Mock 创建一个 open 的 `approval_needed`：tab 徽标、顶栏计数、左栏药丸、气泡药丸（卡片引用）、检视器"需要你"区同时出现；审批完成（或在 GitHub 上被外部合并 → `inbox.resolved`）后同时消失，没有残留。
-- [ ] [M1] 各 `kind` 的内联操作：`decision_needed`（含升档三选项）/ 带 `options` 的上报项调用 `inbox.choose`（带 `Idempotency-Key`） 且卡片与收件箱同步变为"已处理"；`spec_needed` "回复补充…" 切到对话并设 `ctx`；`approval_needed` 只有"审阅并签名…"；只读设备全部禁用。
+- [ ] [M1] tab 徽标与顶栏计数来自 `inbox.summary`，随 `inbox.*` 事件增减并与重新拉取一致（P-63）。
+- [ ] [M1] 各 `kind` 的内联操作：`escalation`（含升档三选项 `upgrade` / `keep_scope` / `abandon`）、`decision_needed` 及其他带 `options` 的上报项调用 `inbox.choose`（带 `Idempotency-Key`），按钮文案取 `label`、`primary` 强调，且卡片与收件箱同步变为"已处理"；`spec_needed` "回复补充…" 切到对话并设 `ctx`；`approval_needed` 只有"审阅并签名…"；只读设备全部禁用。
 - [ ] [M1] **E2E-19 外部变化**：GitHub 上直接合并 / 关闭（Mock 注入 `forge.*` + `inbox.resolved`）→ 出现事件行，上报项消失，审批卡显示最终状态而不是可点的按钮。
 
 **审批与签名**
 
 - [ ] [M1] **E2E-00 端到端（UI 侧）**：Mock 脚本化一条完整路径——用户发送 Low 任务消息 → agent 回复与计划卡 → 阶段依次推进 → PR 创建 → CI 通过 → 出现 `approval_needed` 与审批卡 → 用户在审批单签名 → 合并 → Issue 关闭、交付移入"最近完成"；全程界面状态与 Mock 真值一致，没有需要手动刷新的地方。
 - [ ] [M1] 策略拒绝上报：Mock 注入 `policy.denied` 事件、对应的事件行消息与一个上报项（改动 workflow 文件的补丁被拒）→ 左栏 / 检视器 / 浮层出现"需要你"，事件行可点开检视器；未知的 `reason_code` 不导致崩溃。
-- [ ] [M1] **E2E-08 签名成功流**：打开审批单 → 显示动作、仓库、PR、完整 40 位 head SHA（等宽、可复制）、闸门、倒计时 → 确认 → 审批卡依次显示"已签名 · 排队 merge"→"已合并 {sha8}"→"Issue 已关闭 · 交付完成"；按钮随状态消失；左栏该交付移入"最近完成"。
+- [ ] [M1] **E2E-08 签名成功流**：打开审批单 → 显示动作、仓库、PR、完整 40 位 head SHA（等宽、可复制）、闸门、倒计时 → 确认（Touch ID / Windows Hello，测试中由外壳替身通过）→ 审批卡依次显示"已签名 · 排队 merge"→"已合并 {sha7}"→"Issue 已关闭 · 交付完成"；审批单以外的 SHA 都是 7 位（C27）；按钮随状态消失；左栏该交付移入"最近完成"。
 - [ ] [M1] **E2E-03 新推送使审批单禁用**：审批单打开且待签时，Mock 注入新推送与 `approval.invalidated`（新 head）→ 审批单即时禁用签名并显示"已失效（旧 SHA → 新 SHA），重新评审中"；审批卡、收件箱项、检视器同时变为失效且**没有**可点击的签名按钮；`approvalDiscard` 被调用；之后在 Mock 侧直接 `grant` 会得到 `409 stale_head`。
 - [ ] [M1] **E2E-04 连接中断时签名禁用**：断开事件流 → 顶栏 / 状态栏变灰"重连中"、横幅出现、审批单签名按钮禁用并写"连接中断，暂不能签名。"；此期间对 `approvalSign` 的任何调用不会产生 `grant` 请求；恢复后按钮可用并提示"已补齐 n 件事件"。
 - [ ] [M1] **E2E-06 非审批设备**：角色 `operator`（及 `viewer`）打开审批单 → 只读展示，签名禁用并写"请在审批设备（{名}）上签名"；Mock 计数确认**没有**请求 challenge。
@@ -611,9 +615,9 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 - [ ] [M1] **E2E-09 不回传待签内容**：录制全部 IPC 调用，断言 `approvalSign` 的参数只有 `preparedId`，`guardedWriteSubmit` 只有 `pendingId`；没有任何调用携带 `signature`、`nonce`、`payload`、`subject_digest`。
 - [ ] [M1] **E2E-10 被注入的 WebView 越权尝试**（全栈）：在页面里执行脚本调用不在白名单的命令、给 `approval_sign` 加额外字段、`fetch` 外部地址、伪造 `prepared_id`、`window.open`、改 `location`——全部失败，且 Mock 的请求日志中没有对应请求、没有 `grant`。
 - [ ] [M1] 已签名区与未签名区：PR 标题含 HTML / 伪造文字时只出现在"未签名信息，仅供参考"区；已签名区字段全部来自 `ApprovalSheetModel.signed`。
-- [ ] [M2] `push_branch` 补丁审批：审批单已签名区显示 `target.branch`、`path_rules` 与补丁摘要（`sha256:`），签名流程与 `merge_pr` 相同；Mock 里签名前补丁变化 → 审批失效提示。
+- [ ] [M2] `patch_apply_protected` 补丁审批（P-54）：审批单已签名区显示 `target`（`repo`、`attempt_id`、`rules[]`、`paths[]`）与补丁摘要（`sha256:`），签名流程与 `merge_pr` 相同；Mock 里签名前补丁变化 → 审批失效提示。
 - [ ] [M2] `security_finding` 呈现：上报项显示 `finding.severity` / `category` / `title`（纯文本），"忽略…"需二次确认；确认前后各处"需要你"计数正确；未忽略前不会因为其他事件而消失。
-- [ ] [M2] 生物识别文案：按平台显示"用 Touch ID / Windows Hello 签名批准"；系统提示文案由外壳生成（`desktop-shell` 的测试覆盖）。
+- [ ] [M1] 生物识别文案：按平台显示"用 Touch ID / Windows Hello 签名批准"；系统提示文案由外壳生成（含 `subject_digest` 前 12 位，`desktop-shell` 的测试覆盖）。
 
 **设置**
 
@@ -627,15 +631,17 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 
 - [ ] [M1] **E2E-14 吊销**：Mock 吊销本机设备并关流 → 外壳转 `revoked` → 界面出现阻塞的配对向导、内存缓存被清空、无任何后续请求；用户重新配对后正常水合。
 - [ ] [M1] 配对向导：粘贴配对串 → 确认码显示 → 一致 → 进入工作区；不一致 → 回到起始；`pair_token_invalid` 的各种原因显示同一提示。
-- [ ] [M1] 证书将过期（Mock 设置近到期证书）：顶栏显示"证书将过期（日期）"；到期后 `cert_expired` 阻塞向导。
+- [ ] [M1] 证书将过期（Mock 让续期失败并设置近到期证书）：顶栏显示"证书将过期（日期）"；续期成功时不出现；到期后 `cert_expired` 阻塞向导。
+- [ ] [M1] 设备与证书页（C28）：列表含已吊销设备；改名（operator）；吊销需签名；本机证书信息与两把公钥指纹显示正确。
 
 **检视器、地图、工作树**
 
-- [ ] [M1] 阶段条：7 段都带文字；`level_effective = Low` 时"计划"画斜纹并写"跳过"；`abandoned` 整条置灰；合并阶段显示"合并闸门"清单（四行）。
+- [ ] [M1] 阶段条：7 段都带文字；Low 档"计划"画斜纹并写"跳过"；`stage_status = paused` 显示"已暂停"；`abandoned` 整条置灰；合并阶段显示"合并闸门"清单（四行）。
+- [ ] [M1] 检视器 ⋯（P-56）：暂停 → `deliveries.pause`（带 `Idempotency-Key`）、继续 → `deliveries.resume`、失败节点"重试"→ `nodes.retry`；界面只按响应与事件更新；只读设备禁用。
 - [ ] [M1] 关联链按交付计算，不跨交付；同一 PR 属于另一交付时不出现在链里。
 - [ ] [M2] 地图：节点 / 边由交付推导（closes、分支、尚未开 PR、缺规格）；选中只高亮所属交付，其余淡化；"只看需要你"过滤；图例有文字；键盘可操作；节点很多时布局不重叠（`layoutMap` 纯函数的属性测试：无节点重叠、边不穿过无关节点）。
 - [ ] [M2] 工作树表：列与映射符合 R-39；名称按钮可键盘聚焦；`lock.holder = human` 显示到期时间。
-- [ ] [M2] 检视器 ⋯：放弃交付显示确认框（写明将关闭哪个 PR、保留哪个分支）后调用 `deliveries.abandon`，之后交付移入"最近完成"；只读设备禁用；暂停 / 继续 / 重试不出现（OQ-U2）。
+- [ ] [M1] 检视器 ⋯：放弃交付显示确认框（写明将关闭哪个 PR、保留哪个分支）后调用 `deliveries.abandon`，之后交付移入"最近完成"；只读设备禁用。
 - [ ] [M3] DAG 详情视图（含被替换节点的修订历史）：每轮评审显示 arbiter 的唯一 `verdict`，`include_superseded=true` 时被替换节点以"已替换"标注；预算面板展示 `limits` / `used` 且无修改控件。
 - [ ] [M4] 地图按 `parent_id` 分组并显示 `depends_on`。
 
@@ -651,25 +657,25 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 | # | 问题 | 本文的临时处理 | 影响 |
 | --- | --- | --- | --- |
 | OQ-U1 | 前端框架与状态库未选（architecture §10 只写"TypeScript 前端"） | 状态层与渲染规则不依赖框架（§7.1） | 全模块 |
-| OQ-U2 | **暂停 / 继续 / 重试失败节点没有路由也没有事件**：P-37 与 prototype.md §2.6 要求这三项确定性控制，api.md §4.1 只有 `PATCH level_cap` 与 `abandon` | 检视器 ⋯ 菜单只显示"放弃交付…"；Mock 里按 `501` 处理 | api.md、`engine`、`conversation` |
+| OQ-U2 | **已决：见裁决 C10 / P-56**（新增 `POST /v1/deliveries/{delivery_id}/pause`、`/resume`、`POST /v1/nodes/{node_id}/retry`，operator，幂等键必带；事件 `delivery.paused`、`delivery.resumed`、`node.retry_requested`）。原问题：暂停 / 继续 / 重试失败节点没有路由也没有事件 | 已落实到 R-41、§7.5、§12 | — |
 | OQ-U3 | **审批单"改动"（文件列表、增删行、命中策略的文件与原因）没有数据源**：api.md 没有 PR 改动 / 补丁内容的路由，`Delivery` 里也没有 | 显示"服务端未提供改动明细"+ GitHub commit 链接；"策略命中"一栏不显示 | api.md、`policy`、`repo` |
 | OQ-U4 | 合并闸门所需字段不足：必需 review 数、分支保护状态、`main` 的最近 CI 不在 `Project` / `PullRequestRef` 里 | §7.8 的临时规则（`required_ok`、`mergeable_state`、`review_state`）；`main` 基线只显示分支名与工作树数 | data-model、`forge` |
 | OQ-U5 | **运行中沙盒数、工作树的沙盒列、写权持有者区分（前台 agent / 后台自愈 / 后台 review）没有数据源**：`Worktree.lock.holder` 只有 `engine` / `guardian` / `human` | 沙盒列留空；写权按 holder 映射；状态栏沙盒数取已加载工作流里运行中的沙盒节点（数据不全则不显示） | data-model、api.md |
 | OQ-U6 | **`Ref` 没有分支种类**，"@main"/"从分支开始任务…"无法表达；"从已有 Issue 开始"需要未绑定 Issue 的列表，没有路由 | 隐藏"从分支开始任务…"；空态的"从已有 Issue 开始"聚焦输入框并提示输入 `#编号` | data-model §1.1、api.md |
 | OQ-U7 | 跨交付的 `refs` 关系（"PR #8 refs #4"）、"相关："行、Milestone 分组没有数据源（`IssueRef` / `PullRequestRef` 不带关系类型，也没有 Milestone 实体） | 地图不画 refs 边，检视器不显示"相关"行；M4 以 `parent_id` 分组 | data-model、`forge` |
-| OQ-U8 | 上报项细节，几份规格各自提了临时方案但**契约没统一**：① data-model 的 `escalation` payload 没有 `options[]` 而 api.md §4.8 说可带——engine.md 绕开，"需要按钮"一律用 `decision_needed`（含升档，`reason_code = level_cap_exceeded`）；② 但 api.md §4.1 / P-35 靠 `InboxItem.kind` 区分手机能不能 `choose`（`escalation` 禁止、`decision_needed` 允许），升档若是 `decision_needed` 手机就能升档，与"升档只在桌面"冲突；③ `spec_needed` 用 `choice` 卡 + 空选项暂代（conversation.md OQ-6）；④ "创建 Issue 并关联"（原型的孤儿 PR 上报）没有 kind 也没有路由；⑤ "已处理：…"取不到所选项（`InboxItem` 不记录） | 界面按 `payload.options[]` 渲染、不按 `kind` 硬编码；空选项 ="回复补充…"；"创建 Issue 并关联"不渲染；已处理文案取 `inbox.resolved` 事件缓存，取不到显示"已处理" | data-model、api.md、`engine`、`conversation`；`mobile` 同受影响 |
-| OQ-U9 | 事件行没有状态字段（圆点颜色）；"后台守护"没有结构化处置记录；`level_effective` 自动加码的原因不在 `Delivery` 里；"已在 GitHub 上处理"的原因字段 | 事件行圆点中性；守护区列出该交付的事件行；加码原因取 `delivery.level_changed` 的 `data`（schema 出来后核对） | data-model、`schemas/events`、`guardian` |
-| OQ-U10 | "上次查看"的定义（何时记录、离开多久算离开）；"离开期间摘要"由谁生成（原型写"打杂 agent"，但 `Card.summary` 只有单个 `delivery_id` + 文本，装不下多项可点击摘要，也没有"用户回来了"的触发路由） | M2 临时：本地记录并只展示本地可确定的计数（§7.4 R-20）；"离开 ≥ 60 s 且有新消息才显示"[建议值] | `conversation`、api.md、手机端同样受影响 |
+| OQ-U8 | （①②⑤ **已决：见裁决 C17 / P-63**——`escalation` / `spec_needed` / `decision_needed` 的 `payload.options[]` 为 `{id, label, primary?}`；升档一律用 `escalation`，手机档案不可 `choose`；`inbox.resolved` 带 `option_id`）仍未决：③ `spec_needed` 卡片的 `Card.kind`（`choice` + 空选项暂代，conversation.md OQ-6）；④ "创建 Issue 并关联"（原型的孤儿 PR 上报）没有 kind 也没有路由 | 界面按 `payload.options[]` 渲染、不按 `kind` 硬编码；空选项 ="回复补充…"；"创建 Issue 并关联"不渲染 | `conversation`；`mobile` 同受影响 |
+| OQ-U9 | （事件行状态**已决：见裁决 C26**——`Message.tone` ∈ `info` / `ok` / `run` / `warn`；守护事件**已决：见裁决 C14 / P-60**——`guardian.triaged` / `heal_requested` / `escalated`）仍未决：`level_effective` 自动加码的原因不在 `Delivery` 里；"已在 GitHub 上处理"的原因字段 | 加码原因取 `delivery.level_changed` 的 `data`（schema 出来后核对）；守护区列出该交付的守护事件行 | data-model、`schemas/events` |
+| OQ-U10 | （`Card.summary` 改为 `items[]`、每项含 `text` 与 `ref`：**已决：见裁决 C26**，可承载多项可点击摘要）仍未决："上次查看"的定义（何时记录、离开多久算离开）；"离开期间摘要"由谁生成、由什么触发（没有"用户回来了"的触发路由） | M2 临时：本地记录并只展示本地可确定的计数（§7.4 R-20）；"离开 ≥ 60 s 且有新消息才显示"[建议值] | `conversation`、api.md、手机端同样受影响 |
 | OQ-U11 | `Message.level_cap` 发给已有交付时是否改变该交付的上限：prototype.md §2.3 的提示暗示会，api.md §4.5 只说"任务级上限"；[conversation.md §7.3](conversation.md) 临时采用"桌面档案会改（`set_level_cap`），手机档案忽略"，并自己标为 OQ-3 | 只在用户显式修改时才发送 `level_cap`；界面不预判结果，以 agent 回执为准 | `conversation`、api.md |
-| OQ-U12 | **M1 的档位上限来源**：milestones 把档位选择器放在 M2，但 M1 退出标准是 Low 档端到端 | M1 不显示选择器、不发送 `level_cap`，要求 M1 演练环境的 `levels.default_level` 为 `Low`（需 `ops` 或直接用 settings API 配置）；备选是把选择器提前到 M1 | milestones、`ops` |
-| OQ-U13 | 设置页：原型"保存需要审批设备签名"与 config.md §2.5（只有放宽 / 凭据 / 仅 approver 键需要）不一致；"测试连接"无路由；"每个档位里三类模型各做什么"表无服务端来源；"被 n 个项目覆盖"需要 n+1 请求；operator 设备发起 relax 的跨设备流程 | 以 `dry_run` 的 `requires_signature` 为准；不渲染"测试连接"；表用随包静态文字 + 快照测试；n+1 请求仅在该页打开时发；operator 遇到需签名改动时禁用保存 | prototype.md、config.md、api.md |
-| OQ-U14 | 设备与证书页：config.md §13.1 列了"配对令牌发放"，api.md 没有该路由（令牌由主机上的 `gantry pair` 产生）；页面里程碑"未排期"；证书续期 | 页面不提供令牌发放；建议 M2 交付设备列表 / 改名 / 改角色 / 吊销 | config.md、api.md、milestones |
+| OQ-U12 | **已决：见裁决 C28**（M1 `fe-desktop` 包含档位上限选择器）。原问题：M1 的档位上限来源 | 已落实到 §1.1、R-29 | — |
+| OQ-U13 | 设置页（签名口径**已决：见裁决 C27**——设置保存只在凭据或放宽类改动时需要签名，prototype.md 同步）仍未决："测试连接"无路由；"每个档位里三类模型各做什么"表无服务端来源；"被 n 个项目覆盖"需要 n+1 请求；operator 设备发起 relax 的跨设备流程 | 以 `dry_run` 的 `requires_signature` 为准；不渲染"测试连接"；表用随包静态文字 + 快照测试；n+1 请求仅在该页打开时发；operator 遇到需签名改动时禁用保存 | prototype.md、config.md、api.md |
+| OQ-U14 | **已决：见裁决 C28**（设备与证书页 M1：列表、改名、吊销；外观页 M3）与**裁决 C18 / P-64**（证书自动续期）。配对令牌仍只由主机 `gantry pair` 产生，页面不提供发放 | 已落实到 §1.1、R-63、R-68、§7.12 | — |
 | OQ-U15 | 界面状态跨重启的保留范围（草稿、`ctx`、`levelOverride`、待发送队列、`lastViewed`）；prototype.md 只要求"切换项目再切回恢复" | 会话内全部保留；跨重启持久化草稿、`view`、`needsOnly`、`lastViewed` 和待发送队列 [提议]，`sel` / `ctx` / `levelOverride` 不持久化 | `desktop-shell`（OQ-S6） |
 | OQ-U16 | 浅色主题、其他语言、最小窗口尺寸、高对比度模式未设计 | 令牌可切换，M1 只有深色 + `zh-CN` | 设计 |
 | OQ-U17 | 添加项目（"+"）：项目绑定由什么触发、有无路由（api.md OQ-8） | 禁用按钮 | api、`forge`、`deploy` |
 | OQ-U18 | 规模与 N+1：左栏状态点需要每个交付的工作流状态（自愈 / 暂停），目前每个交付要多发请求；`Delivery` 没有活动摘要字段。地图"只看需要你"是淡化还是隐藏 | 后台预取 ≤ 20 个、并发 2；淡化（沿用原型） | api.md、`engine` |
 | OQ-U19 | 放弃交付的确认文案依赖放弃的语义（关闭 PR 不合并、保留分支、Issue 保持打开）——引擎规格未写 | 按原型文案，待引擎规格核对后改 | `engine` |
-| OQ-U20 | 审批"有效期"：原型写 30 分钟，配置 `policies.approval.ttl_s` 默认 24 小时，challenge 默认 120 s，内部动作审批 300 s——审批单只能分别标注 | 审批单显示三者：审批有效期 `Approval.expires_at`、本次确认窗口 `challenge_expires_at` | prototype.md、config.md、api.md |
+| OQ-U20 | **已决：见裁决 C27**（审批有效期 `policies.approval.ttl_s` 默认 24 小时、含内部动作；challenge 有效期 120 秒；原型文案同步）。原问题：审批"有效期"的几个数不一致 | 审批单分别标注两者（R-48） | — |
 | OQ-U21 | 工作树人工锁（`worktrees.lock_put` / `lock_delete`）在工作区是否提供入口；prototype.md 没有 | 不提供入口，只显示持有者 | prototype.md |
 | OQ-U22 | 尝试结果（`result_ref`）读取路由未定（api.md OQ-11） | 检视器只显示尝试元数据 | api.md |
 | OQ-U23 | 系统通知点击后的导航需要外壳向 UI 发 `navigate` 帧（desktop-shell §6.2 已列为 M2），以及从通知定位到 `inbox_id` 的映射 | M2 实现时一并确认 | `desktop-shell` |

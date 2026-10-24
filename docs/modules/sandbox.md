@@ -17,7 +17,7 @@
 | S5 | **计时与终止**：墙钟超时、空闲超时、取消、SIGTERM → 宽限 → SIGKILL；"先记录者胜"；确认容器内全部进程已终止 | worker-protocol §3.4 |
 | S6 | **进度采集**：经运行时日志接口读 worker 的 stdout / stderr，严格校验、限速、去注入，写 `progress.jsonl`，转发采样节流后的 `attempt.progress` | worker-protocol §7 |
 | S7 | **产物提取（intake）**：进程停止后从 `out/` 取白名单四个文件，不跟随链接、不被 FIFO 阻塞、读到"上限 + 1"即判超限，落 CAS | worker-protocol §8.2（V2） |
-| S8 | **与 Egress 协作**：创建后经 `EgressControl::issue_job_token` 为本尝试申请 `job_token`（带白名单档案、token 上限、权重），把它写进沙盒环境（模型 base URL 路径与 `HTTPS_PROXY`）；`collect` 后 `revoke_job_token` 取最终计量并作废令牌 | worker-protocol §2.3（E1–E7）、§3.2；decisions P-16、P-49 |
+| S8 | **与 Egress 协作**：建容器前经 `EgressControl::issue_job_token` 为本尝试申请 `job_token`（带白名单档案、token 上限、权重），把它写进沙盒环境（模型 base URL 路径与 `HTTPS_PROXY`）；`collect` 后 `revoke_job_token` 取最终计量并作废令牌 | worker-protocol §2.3（E1–E7）、§3.2；decisions P-16、P-49 |
 | S9 | **并发与排队**：宿主机上同时存在的沙盒总数不超过 `max_concurrent_sandboxes`，超出排队不失败 | config §7 |
 | S10 | **巡检与恢复**：`gantryd` 重启后接管仍在运行的沙盒；销毁没有对应未终结 Attempt 的孤儿沙盒与残留 staging | worker-protocol §3.5 |
 | S11 | **预热池（M2）**、**`devcontainer.json` 安全子集（M2）**、**逃逸检测告警（M3）** | milestones M2 / M3 `exec` |
@@ -313,7 +313,7 @@ gVisor 的 `--runtime-flag`（如 `platform`、`network`、`file-access`、`over
 pub struct NetworkAttach { /* 渲染成 --network / --add-host 等参数：沙盒网段与到 Egress 的路由 */ }
 ```
 
-驱动建容器（未启动）后向 Egress `issue_job_token(...)`，把返回的 `model_base_urls` 与 `connect_proxy_url` 写入容器环境（见 [egress.md §6](egress.md#6-对外接口)）。**拿不到令牌就不启动**（失败闭合：`infra.egress`）。
+建容器之前先向 Egress `issue_job_token(...)`（环境变量只能在创建时设定），把返回的 `model_base_urls` 与 `connect_proxy_url` 经 `WorkerAdapter::env` 写入容器环境（见 [egress.md §6](egress.md#6-对外接口)）；后续任一步失败都 `revoke_job_token`。**拿不到令牌就不启动**（失败闭合：`infra.egress`）。
 
 ### 7.5 计时器、取消与终态判定
 
@@ -378,7 +378,7 @@ pub struct NetworkAttach { /* 渲染成 --network / --add-host 等参数：沙�
 ### 7.9 与 Egress 的协作
 
 ```
-submit → (排队) → create 容器（未启动）→ egress.issue_job_token(job_id, profile, groups, tokens_total, weights) → stage → start
+submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_total, weights) → create 容器（未启动，env 含令牌）→ stage → start
 ... → stop → collect → egress.revoke_job_token(job_id) → usage_metered → destroy
 ```
 
@@ -570,7 +570,7 @@ submit → (排队) → create 容器（未启动）→ egress.issue_job_token(j
 
 ### G. 与 Egress 协作（M1）
 
-- [ ] 顺序：`issue_job_token` 在 `start` 之前；`revoke_job_token` 在 `collect` 之后；两者在所有失败 / 取消 / 超时 / 恢复路径上都成对出现（用 `EgressStub` 的调用记录断言）。
+- [ ] 顺序：`issue_job_token` 在 `create` 之前；`revoke_job_token` 在 `collect` 之后；两者在所有失败 / 取消 / 超时 / 恢复路径上都成对出现（用 `EgressStub` 的调用记录断言）。
 - [ ] `revoke_job_token` 重复调用返回同一份用量（模拟 `collect` 与 `attempt.finished` 之间崩溃后重放）。
 - [ ] Egress 不健康 → 不启动，`Infra{Egress}`，容器已清理。
 - [ ] `[集成:egress]` Egress 重启后运行中的沙盒仍能被正确归属（依赖 egress 的令牌表持久化，egress.md §7.2）。

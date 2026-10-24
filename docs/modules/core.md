@@ -517,7 +517,7 @@ crates/gantry-core/
 | `implement` | `PlanInfeasible` | `plan` | 非 Low |
 | `implement` / `review` | `Replan` | `plan` | `REJECT` 后用户选择"重新规划"；非 Low |
 | `propose` | `PrCreated` | `review` | 含 Low（Low 的 review 只等 CI） |
-| `review` | `ReviewRevise` / `CiFailureNeedsCode` | `implement` | 守护的静默自愈不走这条边；只有需要改代码且超出自愈范围时（`guardian.escalated` 后由 `engine` 触发 `CiFailureNeedsCode`）才走（P-60） |
+| `review` | `ReviewRevise` / `CiFailureNeedsCode` | `implement` | 守护的静默自愈不走这条边；只有需要改代码且超出自愈范围时（用户在守护上报项上选择 `rework` 后由 `engine` 触发 `CiFailureNeedsCode`）才走（P-60） |
 | `review` | `ReviewAcceptCiGreen` | `merge` | |
 | `merge` | `ApprovalInvalidated` / `BaseAdvanced` | `review` | 同一条边 |
 | `merge` | `MergedAndIssuesClosed` | `closed` | |

@@ -250,7 +250,7 @@ pub trait ApprovalService: Send + Sync {
 
     // ---- 内部动作的审批（客户端经 POST /v1/approvals）----
     /// action 必须是 InternalAction，否则 PolicyError::NotInternalAction（api 映射 422）。
-    /// 有效期固定 300 s（api.md §3.7）；同 (action, target, digest) 已有 pending 则返回它。
+    /// 有效期 policies.approval.ttl_s（含内部动作，api.md §3.7，C27）；同 (action, target, digest) 已有 pending 则返回它。
     async fn create_internal(&self, spec: InternalApprovalSpec, creator: Actor) -> Result<Approval, PolicyError>;
 
     // ---- challenge / grant / deny（api.md §6.2–§6.4）----
@@ -460,7 +460,7 @@ stateDiagram-v2
 | 并发 grant | 多个 approver 设备并发：先提交者赢，其余 `NotPending` |
 | 懒过期 | 任何读 / 转移入口先比较 `now ≥ expires_at`，是则先 CAS 到 `expired` 再返回，不依赖清扫任务及时运行 |
 | `granted` 后规则变 deny | 消费时重判（config.md §2.6）：被阻止，审批状态**不变**，`GateError::ApprovalInvalid`；不自动 `invalidated`（契约只把"绑定 head 变化"定义为失效原因） |
-| 有效期 | Forge 动作：`created_at + approval.ttl_s`（默认 86400 s，创建时固化）；内部动作：300 s（api.md §3.7）；挑战的存活时间（TTL）120 s 且不超过审批的 `expires_at` |
+| 有效期 | 所有动作（含内部动作）：`created_at + approval.ttl_s`（默认 86400 s，创建时固化，api.md §3.7，C27）；挑战的存活时间（TTL）120 s 且不超过审批的 `expires_at` |
 
 ### 7.6 challenge 与验签
 
@@ -561,9 +561,9 @@ stateDiagram-v2
 | `policies.unlisted_action` | `approve` | 兜底；不能 `auto` |
 | `policies.allow_globs` | `["**"]` | 仅全局、approver 键 |
 | `policies.paths.<id>` | `workflows`、`dependency_manifests`、`lockfiles`、`sensitive_files`、`repo_meta`（config.md §5.2） | M1 内置、不可改；M2 可配；`sensitive_files` 与 `workflows` 的 `deny` 不可降（P-48） |
-| `policies.approval.ttl_s` | 86400（即 24 小时，60–604800）[建议值，待调优] | 审批有效期（`pending → expired`，C27）；内部动作固定 300 s（api.md §3.7）；challenge 有效期 120 s |
+| `policies.approval.ttl_s` | 86400（即 24 小时，60–604800）[建议值，待调优] | 审批有效期（`pending → expired`，含内部动作，C27、api.md §3.7）；challenge 有效期 120 s |
 | `policies.patch.max_files` / `max_bytes` / `max_changed_lines` / `max_file_bytes` | 200 / 5,000,000 / 10,000 / 1,000,000 [建议值，待调优] | 不超过 `core` 硬上限 |
-| 引导常量（不是设置） | challenge TTL 120 s；内部动作审批 300 s；过期清扫间隔 30 s [建议]；`policy.denied` 去重窗口随 `config_rev` | 实现为 crate 内常量，集中在一个 `consts` 模块，不散落（对照 api.md §3.7 的做法） |
+| 引导常量（不是设置） | challenge TTL 120 s；过期清扫间隔 30 s [建议]；`policy.denied` 去重窗口随 `config_rev` | 实现为 crate 内常量，集中在一个 `consts` 模块，不散落（对照 api.md §3.7 的做法） |
 
 ## 11. 可观测性
 
@@ -693,7 +693,7 @@ stateDiagram-v2
 | OQ-P5 | 契约没规定的细则：① force 与非前缀同时成立时用哪个 id；force 与路径审批同时需要时怎么办；② P6 权限位变更的 reason 码（`failure_detail` 词表是封闭的）与伪规则 id；③ 命中 `sensitive_files` 用 `policy.secret` 还是 `policy.path_denied`；④ config.md §5.2 的 `repo_meta` 默认 `approve` 但没有"M1 同上"，P-19 只点名 workflows / 依赖清单 / lockfile | ① `force_push` 优先；同时需要两类审批 → `Deny(MultipleApprovalsRequired)`；② 沿用 `policy.path_protected`，伪规则 id `file_mode_change`；③ `policy.secret`；④ M1 对**所有** `approve` 规则一律 deny（更保守） | worker-protocol §9、config.md §5.2、P-19 |
 | OQ-P6 | `core` 定义的硬上限（`approval.ttl_s`、`patch.*`）的具体数值未给 | 取 config.md 的范围上限（ttl 604800）；`patch.*` 硬上限待 `core` 规格 | `core`、config.md V15 |
 | OQ-P7 | api.md OQ-6：challenge / nonce 的存放位置与是否进事件日志；放行（`Allow`）决策是否也要记事件（现有目录只有 `policy.denied`） | nonce 存 `policy_challenges` 表、不进事件日志；`Allow` 不记事件；`approval.granted` 记 `payload_sha256` 与 `pubkey_fpr` | data-model §5.2、`store`、审计完整性 |
-| OQ-P8 | 审计日志的读取路径：契约的 42 条路由里没有审计读取；保留期未定（config.md OQ-21） | 仅内部 `AuditLog` trait，事件永久保留 | api.md、config.md OQ-21 |
+| OQ-P8 | 审计日志的读取路径：契约的 47 条路由里没有审计读取；保留期未定（config.md OQ-21） | 仅内部 `AuditLog` trait，事件永久保留 | api.md、config.md OQ-21 |
 | OQ-P9 | `forge.base_advanced` 使 `merge` 阶段回到评审重验时，已 `granted` 的 `merge_pr` 审批（head 未变）是否仍有效、是否需重新签名 | 不因 base 前移而失效（契约只定义 head 变化失效） | engine、UI 文案、I3 的解读 |
 | OQ-P10 | 守护"已审批 PR 上不得静默推送"由 `guardian` 锁定类强制，`policy` 是否在 `decide_action(push_branch)` 里再做一道（PR 上有活跃的 granted 审批时拒绝非 engine 来源的推送） | 只提供 `live_approvals_for_pr`，不额外拒绝 | guardian、config.md §5.5 |
 | OQ-P11 | M1 的 policy v0 不读 `policies` 设置；契约列出的 `policies` resource 在 M1 能不能被写入（写了却不生效会误导用户） | 依 [modules/api.md §1.1、§7.8](api.md) 的建议，M1 只开放 `models` 的写入，`policies` 写入从 M2 开放；`status` 显示 `builtin_v0` | api、desktop-ui、milestones |

@@ -2,20 +2,21 @@
 
 > 状态：设计 v0.1 · 里程碑：M1（鉴权、路由骨架、事件流、统一签名原语、settings·模型）→ M2 → M3（即时断流）→ M4（手机档案验收）· 泳道：`sec`（双向 TLS 即 mTLS、鉴权、签名、事件流）+ `be-engine`（资源路由的业务对接，[interfaces/api.md](../interfaces/api.md) 头部分工）· crate / 目录：`crates/gantry-api`
 
-`api` 是服务端对客户端的唯一网络面：一个强制客户端证书的 HTTPS 监听器（mTLS API + 服务端发送事件（Server-Sent Events, SSE）事件流）和一个只含一条路由的单向 TLS 配对监听器。它负责把"握手通过的证书"变成"带角色与档案的设备"，把 42 条契约路由接到各模块，并保证客户端看到的错误、分页、幂等、并发控制、事件游标、审批签名流程都与 [interfaces/api.md](../interfaces/api.md) 逐字一致。它不做业务判断：业务归各模块，放行归 `policy`，证书归 `pki`。
+`api` 是服务端对客户端的唯一网络面：一个强制客户端证书的 HTTPS 监听器（mTLS API + 服务端发送事件（Server-Sent Events, SSE）事件流）和一个只含一条路由的单向 TLS 配对监听器。它负责把"握手通过的证书"变成"带角色与档案的设备"，把 47 条契约路由接到各模块，并保证客户端看到的错误、分页、幂等、并发控制、事件游标、审批签名流程都与 [interfaces/api.md](../interfaces/api.md) 逐字一致。它不做业务判断：业务归各模块，放行归 `policy`，证书归 `pki`。
 
 ## 1. 职责
 
 1. **mTLS 终止**：用 `pki` 提供的客户端证书校验器与服务端证书解析器构造 `rustls::ServerConfig`；仅 TLS 1.3，强制客户端证书，握手失败不产生任何 HTTP 响应（[api.md §1.2](../interfaces/api.md)）；关闭会话票据（session ticket）/ 会话缓存与零往返数据（0-RTT）（§7.2）。
-2. **配对监听器**：独立端口、单向 TLS、只路由 `POST /v1/pair`，其余路径一律 404；只在 `pki` 给出的配对窗口内监听；业务委托 `pki::PairingService::redeem`（api.md §1.3）。
+2. **配对监听器**：独立端口、单向 TLS、只路由 `POST /v1/pair`，其余路径一律 404；只在 `pki` 给出的配对窗口内监听；业务委托 `pki::PairingService::redeem`（请求同时携带 CSR 与审批签名公钥 `approval_pubkey`，P-47；响应链 `[叶子, 中间 CA, 根]`，P-64；api.md §1.3）。
 3. **设备鉴权与角色**：每个请求按 api.md §2.1 的判定链——握手 → `cert_serial` 映射 Device 且 `active` → 角色（**实时查库，不缓存**）→ 客户端档案（`desktop` / `mobile`）→ 限流 → 处理；写操作的事件 `actor` 记为 `{kind: "device", id}`。
-4. **路由实现**：契约 §4.1 的全部 42 条路由（41 条 mTLS + 1 条配对）；读类走 `store` 投影，写类委托所属模块；请求体严格校验（未知字段 → `422 unknown_field`，I7）。
+4. **路由实现**：契约 §4.1 的全部 47 条路由（46 条 mTLS + 1 条配对；含控制路由 #43–#45、收件箱计数 #46、证书续期 #47）；读类走 `store` 投影，写类委托所属模块；请求体严格校验（未知字段 → `422 unknown_field`，I7）。
 5. **统一错误**：`application/problem+json`（RFC 9457），30 个稳定 `code`（api.md §3.1），`X-Request-Id`。
-6. **分页、幂等键、实体标签（ETag）/ If-Match 条件请求、限流、读一致性**：键集（keyset）游标分页；`Idempotency-Key` 去重与重放；settings 的 ETag 条件请求；按设备令牌桶（token bucket）与 `RateLimit-*` 头；每个成功响应带 `X-Event-Seq`（api.md §3.2–§3.6）。
-7. **SSE 事件流**：先回放 `(游标, head]` 再切到实时，不丢不重；过滤（`project_id`、`types`、手机白名单、`settings.*` 门禁）；15 s 心跳推进游标；心跳内检查设备吊销与证书到期；`close` 帧；慢消费者断开；每设备并发 ≤ 3（api.md §5）。
-8. **统一签名原语的服务端部分**：审批资源路由（列表 / 详情 / 挑战 challenge / grant / deny）、内部动作的发起审批与"带 `Gantry-Approval` 头重发"流程（`settings_update`、`device_role_change`、`device_revoke`）。验签、状态机、摘要一致性在 `policy`，本模块负责 HTTP 外壳、前置对账、事务编排与错误映射（api.md §6）。
+6. **分页、幂等键、实体标签（ETag）/ If-Match 条件请求、限流、读一致性**：键集（keyset）游标分页；`Idempotency-Key` 去重与重放；settings 的 ETag 条件请求；按设备令牌桶（token bucket）与 `RateLimit-*` 头；每个成功响应带 `X-Event-Seq`；**每个响应**（含错误与事件流响应头）带 `X-Log-Epoch`（P-67）（api.md §3.2–§3.6）。
+7. **SSE 事件流**：先回放 `(游标, head]` 再切到实时，不丢不重；过滤（`project_id`、`types`、手机白名单、`settings.*` 门禁）；15 s 心跳推进游标并携带 `log_epoch`（P-67）；心跳内检查设备吊销与证书到期；`close` 帧；慢消费者断开；每设备并发 ≤ 3（api.md §5）。
+8. **统一签名原语的服务端部分**：审批资源路由（列表 / 详情 / 挑战 challenge / grant / deny）、内部动作的发起审批与"带 `Gantry-Approval` 头重发"流程（`settings_update`、`device_role_change`、`device_revoke`）。验签（用设备登记的审批签名公钥 `approval_pubkey`，P-47）、状态机、摘要一致性在 `policy`，本模块负责 HTTP 外壳、前置对账、事务编排与错误映射（api.md §6）。
 9. **settings 路由编排**：合并 / 校验（调 `core` 校验器并提供上下文）、`dry_run`、角色与签名判定、secret `value` 的剥离与转存、`settings.updated` 事件写入、`catalog` 与 `status` 聚合（api.md §4.9，config.md §2）。
-10. **I6 / I7 的落点**：没有任何接收代码、命令、补丁的路由；响应、事件、日志里没有任何凭据；工作路由拒绝配置字段（api.md §8）。
+10. **证书续期**：`POST /v1/devices/self/renew`（#47，mTLS，所有档案）委托 `pki::DeviceAdmin::renew`，把本次握手出示的证书序列号一并传入（P-64）。
+11. **I6 / I7 的落点**：没有任何接收代码、命令、补丁的路由；响应、事件、日志里没有任何凭据；工作路由拒绝配置字段（api.md §8）。
 
 ### 1.1 各里程碑交付
 
@@ -24,23 +25,23 @@
 | 里程碑 | 交付 |
 | --- | --- |
 | M0 | 不交付实现。依赖 M0：`schemas/openapi.yaml`、`schemas/events/*.json`、Mock API 服务、`TestCA`。**契约一致性测试套件**（§12）在 M0 以 Mock API 为被测方先跑通，之后同一套件对真实 `api` 跑 |
-| M1 | 两个监听器与 TLS 加固；设备鉴权链、角色、档案表（`ios` → `mobile` 子集一并落地，失败即关闭）；统一错误、分页、幂等键、限流、`X-Event-Seq`；SSE 事件流（含游标回放、心跳内吊销检查、`cursor_ahead`）；审批全流程路由 #24–#29 与内部动作签名写入；settings #30 #31（**写入只开放 `models`**）#35 #36；设备 #37–#40；配对 #1；业务路由 #2–#6、#10–#12、#17–#22 对接投影 / `conversation` |
-| M2 | 工作树 #13–#16；交付单元控制 #7 #8 与预算只读 #9；收件箱 #23 #42；项目范围 settings #32–#34；settings 的 `levels` / `policies` / `guardian` 等 resource 开放写入（随各设置页，config.md §13）；`settings.*` 事件门禁的完整验收；审批的重新请求路径（与 `policy`、`engine` 配合） |
+| M1 | 两个监听器与 TLS 加固；设备鉴权链、角色、档案表（`ios` → `mobile` 子集一并落地，失败即关闭）；统一错误、分页、幂等键、限流、`X-Event-Seq`、`X-Log-Epoch`；SSE 事件流（含游标回放、心跳内吊销检查、心跳 `log_epoch`、`cursor_ahead`）；审批全流程路由 #24–#29 与内部动作签名写入；settings #30 #31（**写入只开放 `models`**）#35 #36；设备 #37–#40 与证书续期 #47（P-64）；配对 #1（CSR + `approval_pubkey`）；业务路由 #2–#6、#10–#12、#17–#22 对接投影 / `conversation`；收件箱计数 #46（P-63）；控制路由 #43–#45（暂停 / 继续 / 重试，引擎 M1 交付，P-56） |
+| M2 | 工作树 #13–#16；交付单元控制 #7 #8 与预算只读 #9；收件箱 #23 #42（M1 的上报项还没有可选项可选，`choose` 随 `spec_needed` / `escalation` 的选项上线）；项目范围 settings #32–#34；settings 的 `levels` / `policies` / `guardian` 等 resource 开放写入（随各设置页，config.md §13）；`settings.*` 事件门禁的完整验收；审批的重新请求路径（与 `policy`、`engine` 配合） |
 | M3 | 进程内即时断流（订阅 `pki::RevocationNotifier`，心跳检查保留为兜底）；预算面板所需的读取验收；密钥轮换对 settings secret 流程的联动验收（同名 `secret_ref` 写入新 `value` 的轮换路径） |
-| M4 | 手机档案的端到端验收（10 条路由、事件白名单、审批路由 `403 forbidden_profile`、`choose` 的 `spec_needed` / `decision_needed` 限制）；`ios` 配对联调 |
+| M4 | 手机档案的端到端验收（12 条路由、事件白名单、审批路由 `403 forbidden_profile`、`choose` 的 `spec_needed` / `decision_needed` 限制、发消息时忽略 `level_cap`）；`ios` 配对联调 |
 
 ## 2. 不负责
 
 | 事 | 归谁 |
 | --- | --- |
-| 证书签发、令牌、证书签名请求（CSR）校验、设备注册表、握手时的吊销检查、`gantry pair` / `gantry device recover` | `pki` |
+| 证书签发与续期、令牌、证书签名请求（CSR）与 `approval_pubkey` 校验、设备注册表、握手时的吊销检查、`revocations.journal`、`gantry pair` / `gantry device recover` | `pki` |
 | 放行判定、审批状态机、验签、挑战 / 一次性随机数（nonce）、`subject_digest` 一致性、`stale_head` 的状态转移 | `policy`；本模块只转发并映射错误 |
-| 业务状态机：交付单元阶段、对话意图解析、收件箱语义、工作树锁语义 | `engine` / `conversation` / `notify` / `repo` |
-| 事件日志的追加与投影本身、事件游标的分配 | `store` |
+| 业务状态机：交付单元阶段（含暂停 / 继续 / 重试节点）、对话意图解析、收件箱语义、工作树锁语义 | `engine` / `conversation` / `notify` / `repo` |
+| 事件日志的追加与投影本身、事件游标的分配、`log_epoch` 的维护 | `store` |
 | GitHub 任何读写、PR head 的对账 | `forge`（本模块只在 `grant` 前请求一次强制对账） |
 | Webhook 入口（独立监听、HMAC、隧道） | `forge` / `deploy`；API 监听器对 `/webhook` 返回 404 |
 | 沙盒面向的任何端点 | 不存在（P-15） |
-| 模型 / 包仓库凭据的保存 | `egress`（模型 key、私有包仓库凭据）与 `secrets/`（App 私钥、webhook secret）；本模块只"转交、不留存" |
+| 模型 / 包仓库凭据的保存 | `egress`（模型 key、私有包仓库凭据，经控制面 `EgressControl` 写入，只写不读，P-50）与 `secrets/`（App 私钥、webhook secret）；本模块只"转交、不留存" |
 | 设置键的定义、合并 / clamp / 校验规则、JSON Schema | `core` + [config.md](../interfaces/config.md) |
 | 客户端的重连、游标持久化、签名界面一致性（api.md §6.5） | `desktop-shell` / `mobile` |
 | 限流参数的修改（静态配置，**不经 API**，不是 settings） | `deploy` |
@@ -50,20 +51,20 @@
 
 本文中不带路径的 `api.md`、`config.md`、`forge-actions`、`worker-protocol` 均指 `docs/interfaces/` 下的契约；模块规格写作 `modules/<id>.md`，本规格自身称"本文"。
 
-`api` 依赖"全部服务端模块 + `pki`"（architecture §4）。下表只列用到什么；各模块的 trait 以其自己的规格书为准。`engine` / `conversation` / `notify` / `repo` / `forge` 的规格书已经成稿，其中 `engine.md`、`forge.md` 直接采用了 §6.3 的 `DeliveryControl`、`PrRefresher`、`WriteCtx`；`conversation.md` 用 `ActorCtx`，`notify.md` 用 `DeviceActor`，与 `WriteCtx` 的对齐见 OQ-A7。
+`api` 依赖"全部服务端模块 + `pki`"（architecture §4）。下表只列用到什么；各模块的 trait 以其自己的规格书为准。`engine` / `conversation` / `notify` / `repo` / `forge` 的规格书已经成稿，其中 `engine.md`、`forge.md` 直接采用了 §6.3 的 `DeliveryControl`、`PrRefresher`、`WriteCtx`；收件箱直接用 `core::ports::InboxPort`（P-51）；`conversation.md` 用 `ActorCtx`，`notify.md` 用 `DeviceActor`，与 `WriteCtx` 的对齐见 OQ-A7。
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
-| `pki` | `TlsMaterial`（客户端证书校验器、服务端证书解析器、根证书）；`DeviceDirectory`（`by_cert_serial`、`get`、`list`、`verifying_key`、`touch_last_seen`）；`DeviceAdmin`（`rename`、`set_role`、`revoke`）；`PairingService`（`window`、`redeem`）；`RevocationNotifier`（M3） | [modules/pki.md §6](pki.md)；api.md §1.3、§2、§4.10 |
-| `policy` | `ApprovalService`（`get`、`list`、`create_internal`、`challenge`、`grant`、`deny`、`consume_internal`）与 `signing::request_digest` | [modules/policy.md §6.4、§6.7](policy.md)；api.md §6 |
-| `store` | `Store::snapshot()` → `ReadSnapshot`（`ProjectionRead` 全部读取、`settings_current` / `settings_at_rev` / `config_rev`、`head_seq`）；`Store::begin_write()` → `WriteTx`（`append` 返回 `Appended::{New, Duplicate}`、`module_conn("api")`）；`EventLog::{head, check_cursor, tail, scan}` 与 `EventFilter`；`ModuleSpec { module: "api" }` 注册 `api_idempotency` | [store.md §6、§7.4、§7.5、§7.10](store.md)；data-model §5；config.md §2.3 |
+| `pki` | `TlsMaterial`（客户端证书校验器、服务端证书解析器、根证书）；`DeviceDirectory`（`by_cert_serial`、`get`、`list`、`verifying_key`（返回审批签名公钥 `approval_pubkey`，P-47）、`touch_last_seen`）；`DeviceAdmin`（`rename`、`set_role`、`revoke`、`renew`）；`PairingService`（`window`、`redeem`）；`RevocationNotifier`（M3） | [modules/pki.md §6](pki.md)；api.md §1.3、§2、§4.10 |
+| `policy` | `ApprovalService`（`get`、`list`、`create_internal`、`challenge`、`grant`、`deny`、`consume_internal`）与 `signing::request_digest`；`DeviceKey.verifying_key` 填审批签名公钥 | [modules/policy.md §6.4、§6.7](policy.md)；api.md §6 |
+| `store` | `Store::snapshot()` → `ReadSnapshot`（`ProjectionRead` 全部读取，含 `inbox_summary`；`settings_current` / `settings_at_rev` / `config_rev`、`head_seq`）；`Store::log_identity()` → `LogIdentity { log_id, log_epoch }`（P-67）；`Store::begin_write()` → `WriteTx`（`append` 返回 `Appended::{New, Duplicate}`、`module_conn("api")`）；`EventLog::{head, check_cursor, tail, scan}` 与 `EventFilter`；`ModuleSpec { module: "api" }` 注册 `api_idempotency` | [store.md §6、§7.4、§7.5、§7.10](store.md)；data-model §5；config.md §2.3 |
 | `core` | 领域类型、`Device`、`DeviceRole`、`DevicePlatform`、`Level`、`Ref`、`Card`、`UntrustedText`、`Actor`、`Clock`、`Entropy`、`Ulid`（`request_id`）；settings 的 `effective` / `merge_patch` / `diff_relaxes` / `required_authority` / `split_secret_values` / `find_secret_refs` 与校验器；`jcs` / `jcs_digest` | [core.md §6.1–§6.7](core.md)；config.md §2.1、§2.5、§11 |
-| `forge` | `PrRefresher::refresh_pr(repo, number)`：`grant` 前对 PR 强制对账一次 | [forge.md §6](forge.md)；api.md §6.4 第 5 步 |
-| `engine` | `DeliveryControl`：`set_level_cap`、`abandon` | [engine.md §6](engine.md)；api.md §4.4 |
+| `forge` | `PrRefresher::refresh_pr(repo, number)`（= `ForgeReader::reconcile_now(Pr)` 后读快照）：`grant` 前对 PR 强制对账一次 | [forge.md §6](forge.md)；api.md §6.4 第 5 步 |
+| `engine` | `DeliveryControl`：`set_level_cap`、`abandon`、`pause`、`resume`、`retry_node`（P-56） | [engine.md §6](engine.md)；api.md §4.4、§4.7 |
 | `conversation` | `post_user_message`（持久化用户消息并写 `message.posted`） | [conversation.md §6](conversation.md)；api.md §4.5 |
 | `repo` | `WorktreeLocks`：`acquire_human` / `release_human` | [repo.md](repo.md)；api.md §4.6 |
-| `notify` | `InboxService`：`dismiss`、`choose` | [notify.md §6](notify.md)；api.md §4.8；decisions P-40 |
-| `secrets` / `egress` | 按 `core::Consumer` 取 `SecretSink`（`exists` / `stage` / `commit` / `abort`）；`Consumer::Egress` 的实现是跨进程适配器（secrets.md OQ-1）；各模块的 `ModuleStatus` 与 `catalog` 供给 | [secrets.md §6](secrets.md)；config.md §2.4、§2.8 |
+| `notify` | `core::ports::InboxPort`：`dismiss`、`choose`、`summary`（P-51、P-63） | [notify.md §6](notify.md)；api.md §4.8；decisions P-40、P-63 |
+| `secrets` / `egress` | `Consumer::Forge`：进程内 `ScopedSecrets`（`SecretSink`：`present` / `stage` / `commit` / `abort` / `staged`）；`Consumer::Egress`：`core::ports::EgressControl` 的 `secret_present` / `stage_secret` / `activate_secret` / `discard_secret` / `staged_secrets`，经控制面 `/run/gantry/egress.sock`（P-50）；各模块的 `ModuleStatus` 与 `catalog` 供给 | [secrets.md §6](secrets.md)；[egress.md §6.2](egress.md)；config.md §2.4、§2.8 |
 | 外部 crate（建议） | `tokio`、`axum` + `hyper` + `hyper-util`（HTTP/1.1 与 h2）、`tokio-rustls`、`rustls`、`serde` + `serde_json`、`jsonschema`（一致性测试）、`subtle`、`zeroize`、`tracing`、`arc-swap`、`dashmap` | architecture §10 |
 
 ## 4. 输入
@@ -71,7 +72,7 @@
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
 | mTLS 请求（握手 + HTTP） | 桌面端 `desktop-shell` / `mobile` | api.md 全文 | 握手由 `pki` 校验后，身份可信；**请求内容一律不可信**（严格校验） |
-| 配对请求 `POST /v1/pair` | 未配对设备（单向 TLS） | api.md §1.3 | **完全不可信**；只做最小解析后委托 `pki` |
+| 配对请求 `POST /v1/pair`（`token`、`csr`、`approval_pubkey`、`device`） | 未配对设备（单向 TLS） | api.md §1.3 | **完全不可信**；只做最小解析后委托 `pki` |
 | 事件日志 | `store` | data-model §5.1 信封 | 可信（服务端自产）；其中的 GitHub 文本字段原样转发，由客户端按不可信渲染（I5） |
 | 投影读 | `store` | data-model §3 | 可信 |
 | 各模块的返回值 | `pki`、`policy`、`engine` 等 | §6.3 | 可信 |
@@ -83,11 +84,11 @@
 
 | 输出 | 去向 | 格式 / 契约 |
 | --- | --- | --- |
-| HTTP 响应（JSON / problem+json） | 客户端 | api.md 全文；响应头 `X-Request-Id`、`X-Event-Seq`、`RateLimit-*`、`ETag`（settings）、`Idempotent-Replayed` |
+| HTTP 响应（JSON / problem+json） | 客户端 | api.md 全文；响应头 `X-Request-Id`、`X-Event-Seq`、`X-Log-Epoch`、`RateLimit-*`、`ETag`（settings）、`Idempotent-Replayed` |
 | SSE 帧 | 客户端 | api.md §5.1 |
 | 事件 `settings.updated`（`secret_changes[]` 只含 `{ref, op, version}`，无值无哈希） | `store` | data-model §5.2；config.md §2.3。**这是本模块唯一自己追加的事件**，其余事件由所属模块追加（`message.posted` 归 `conversation`、`device.*` 归 `pki`、`approval.*` 归 `policy`、`worktree.*` 归 `repo`、`inbox.*` 归 `notify`、`delivery.*` 归 `engine`） |
 | 对下游模块的调用 | 各模块 | §6.3；写调用携带 `dedup_key = (device_id, Idempotency-Key, 序号)` |
-| 秘密转交 | `egress` / `secrets` | `SecretSink`（secrets.md §6） |
+| 秘密转交 | `egress` / `secrets` | `EgressControl` 的 secret 写入（egress.md §6.2）/ `SecretSink`（secrets.md §6） |
 | 指标、结构化日志 | 运维 | §11 |
 
 ## 6. 对外接口
@@ -106,9 +107,9 @@ pub struct Services {
     pub engine: Arc<dyn DeliveryControl>,
     pub conversation: Arc<dyn ConversationService>,
     pub repo: Arc<dyn WorktreeLocks>,
-    pub notify: Arc<dyn InboxService>,
+    pub notify: Arc<dyn InboxPort>,                  // core::ports（P-51）：dismiss / choose / summary
     pub settings_ctx: Arc<dyn SettingsContext>,      // 校验上下文 + catalog + status 聚合（§6.3）
-    pub secrets: Arc<dyn SecretSinks>,              // 按 core::Consumer 取 SecretSink；Egress 为跨进程适配器（secrets.md OQ-1）
+    pub secrets: SecretTargets,                      // Forge → ScopedSecrets；Egress → EgressControl（P-50，§6.3）
 }
 
 impl ApiServer {
@@ -140,7 +141,7 @@ pub struct RouteSpec {
 
 | # | 路由 | 最低角色 | 手机 | 限流类 | 幂等键 | 委托 | 起 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `POST /v1/pair`（配对监听器） | —（令牌） | — | 源 IP 5/min | 不适用 | `pki.pairing.redeem` | M1 |
+| 1 | `POST /v1/pair`（配对监听器；CSR + `approval_pubkey`） | —（令牌） | — | 源 IP 5/min | 不适用 | `pki.pairing.redeem` | M1 |
 | 2 | `GET /v1/me` | viewer | ✓ | 读 | — | `pki.directory` + 构建信息 | M1 |
 | 3 | `GET /v1/projects` | viewer | ✓ | 读 | — | 投影 | M1 |
 | 4 | `GET /v1/projects/{project_id}` | viewer | ✓ | 读 | — | 投影 | M1 |
@@ -162,7 +163,7 @@ pub struct RouteSpec {
 | 20 | `GET /v1/attempts/{attempt_id}` | viewer | — | 读 | — | 投影 | M1 |
 | 21 | `GET /v1/inbox` | viewer | ✓ | 读 | — | 投影 | M1 |
 | 22 | `GET /v1/inbox/{inbox_id}` | viewer | ✓ | 读 | — | 投影 | M1 |
-| 23 | `POST /v1/inbox/{inbox_id}/dismiss` | operator | — | 写 | 可带 | `notify.dismiss` | M2 |
+| 23 | `POST /v1/inbox/{inbox_id}/dismiss` | operator | — | 写 | 可带 | `InboxPort::dismiss` | M2 |
 | 24 | `GET /v1/approvals` | viewer | — | 读 | — | `policy.list` | M1 |
 | 25 | `GET /v1/approvals/{approval_id}` | viewer | — | 读 | — | `policy.get` | M1 |
 | 26 | `POST /v1/approvals` | operator | — | 签名类 30/min | **必** | `policy.create_internal` | M1 |
@@ -181,9 +182,14 @@ pub struct RouteSpec {
 | 39 | `PUT /v1/devices/{device_id}/role` | approver | — | 写 | 不适用 | `policy.consume_internal` + `pki.admin.set_role`（同一事务） | M1 |
 | 40 | `POST /v1/devices/{device_id}/revoke` | approver | — | 写 | 可带 | `policy.consume_internal` + `pki.admin.revoke`（同一事务） | M1 |
 | 41 | `GET /v1/events` | viewer | ✓ | 读 + 并发 ≤ 3 | — | `EventHub` | M1 |
-| 42 | `POST /v1/inbox/{inbox_id}/choose` | operator | ✓* | 写 | **必** | `notify.choose` | M2 |
+| 42 | `POST /v1/inbox/{inbox_id}/choose` | operator | ✓* | 写 | **必** | `InboxPort::choose` | M2 |
+| 43 | `POST /v1/deliveries/{delivery_id}/pause` | operator | — | 写 | **必** | `engine.pause` | M1 |
+| 44 | `POST /v1/deliveries/{delivery_id}/resume` | operator | — | 写 | **必** | `engine.resume` | M1 |
+| 45 | `POST /v1/nodes/{node_id}/retry` | operator | — | 写 | **必** | `engine.retry_node` | M1 |
+| 46 | `GET /v1/inbox/summary` | viewer | ✓ | 读 | — | 投影（`inbox_summary`） | M1 |
+| 47 | `POST /v1/devices/self/renew` | viewer | ✓ | 写 | 可带 | `pki.admin.renew`（传入握手出示的 `cert_serial`） | M1 |
 
-`*`：#31 #33 #34 的最低角色是路由下限，实际角色与是否需要签名按改动内容判定（§7.8）；#42 的手机限制：只能选 `spec_needed` 与 `decision_needed`，`escalation` 与 `approval_needed` → `403 forbidden_profile`（P-35）。其余格式遵循契约；方法错误 → `405 method_not_allowed` + `Allow`。
+`*`：#31 #33 #34 的最低角色是路由下限，实际角色与是否需要签名按改动内容判定（§7.8）；#42 的手机限制：只能选 `spec_needed` 与 `decision_needed`，`escalation`（升档一律走 `escalation`，P-63）与 `approval_needed` → `403 forbidden_profile`（P-35）。`/v1/inbox/summary` 与 `/v1/devices/self/renew` 是字面路径，优先于 `/v1/inbox/{inbox_id}`、`/v1/devices/{device_id}` 匹配。合计 47 条：mTLS 46 条 + 配对 1 条；手机档案 12 条。其余格式遵循契约；方法错误 → `405 method_not_allowed` + `Allow`。
 
 ### 6.3 对其他模块的需求（facade，占位签名）
 
@@ -192,11 +198,15 @@ pub struct RouteSpec {
 ```rust
 #[async_trait] pub trait ConversationService { async fn post_user_message(&self, ctx: WriteCtx, conv: ConversationId, msg: NewUserMessage) -> Result<Message, ModuleError>; }
 #[async_trait] pub trait DeliveryControl     { async fn set_level_cap(&self, ctx: WriteCtx, id: DeliveryId, cap: Level) -> Result<Delivery, ModuleError>;
-                                               async fn abandon(&self, ctx: WriteCtx, id: DeliveryId, reason: Option<String>) -> Result<Delivery, ModuleError>; }
+                                               async fn abandon(&self, ctx: WriteCtx, id: DeliveryId, reason: Option<String>) -> Result<Delivery, ModuleError>;
+                                               // P-56：控制路由 #43–#45；引擎按目标状态幂等，API 层另有必带的 Idempotency-Key
+                                               async fn pause(&self, ctx: WriteCtx, id: DeliveryId) -> Result<Delivery, ModuleError>;
+                                               async fn resume(&self, ctx: WriteCtx, id: DeliveryId) -> Result<Delivery, ModuleError>;
+                                               async fn retry_node(&self, ctx: WriteCtx, id: NodeId) -> Result<Node, ModuleError>; }
 #[async_trait] pub trait WorktreeLocks       { async fn acquire_human(&self, ctx: WriteCtx, id: WorktreeId, lease: Duration) -> Result<Worktree, LockError>;
                                                async fn release_human(&self, ctx: WriteCtx, id: WorktreeId) -> Result<Worktree, LockError>; }
-#[async_trait] pub trait InboxService        { async fn dismiss(&self, ctx: WriteCtx, id: InboxId, note: Option<String>) -> Result<InboxItem, ModuleError>;
-                                               async fn choose(&self, ctx: WriteCtx, id: InboxId, option_id: &str, note: Option<String>) -> Result<InboxItem, ModuleError>; }
+// 收件箱不再有 api 专用 facade：直接用 core::ports::InboxPort（notify.md §6）的 dismiss / choose / summary；
+// WriteCtx → DeviceActor 的转换见 OQ-A7。
 #[async_trait] pub trait PrRefresher         { async fn refresh_pr(&self, repo: &RepoSlug, number: u64) -> Result<PrHead, ModuleError>; }  // 失败 → 退回投影快照
 
 /// settings 编排需要的上下文（来源见 config.md §11 开头）与聚合
@@ -206,13 +216,13 @@ pub struct RouteSpec {
     async fn status(&self) -> Result<SettingsStatus, ModuleError>;       // latest_seq + modules.<name>.{applied_rev, health, detail?, unresolved_secret_refs}
 }
 
-/// 凭据转交：secrets.md 的 `SecretSink` 两阶段写入（stage → commit / abort），保证
-/// "settings.updated 与 secret 写入要么都成功要么都不成功"（config.md §2.4）。
-/// 本规格早先的占位名对照：SecretForwarder::{exists, stage, activate, discard} = SecretSink::{exists, stage, commit, abort}，
-/// SecretOwner = core::Consumer（api 只用其中的 Forge、Egress）。
-pub trait SecretSinks: Send + Sync { fn sink(&self, who: Consumer) -> Option<&dyn SecretSink>; }
-// SecretSink（secrets.md §6）：exists(&SecretName) -> bool；stage(&SecretName, SecretValue, Expect) -> StagedSecret；
-// commit(StagedSecret) -> SecretMeta（含 version）；abort(StagedSecret)；staged() -> Vec<StagedSecret>（启动对账用）
+/// 凭据转交：两阶段写入（stage → commit / abort），保证
+/// "settings.updated 与 secret 写入要么都成功要么都不成功"（config.md §2.4）。按 core::Consumer 分两条通道：
+///   Consumer::Forge  → 进程内 ScopedSecrets（secrets.md §6 的 SecretSink：present / stage / commit / abort / staged）
+///   Consumer::Egress → core::ports::EgressControl（egress.md §6.2，经 /run/gantry/egress.sock，只写不读，P-50）：
+///                      secret_present / stage_secret / activate_secret / discard_secret / staged_secrets
+/// 两条通道对 api 呈现同一组语义（present、stage、commit、abort、staged），由 SecretTargets 适配。
+pub struct SecretTargets { pub forge: Arc<dyn SecretSink>, pub egress: Arc<dyn EgressControl> }
 ```
 
 下游错误（`ModuleError` 等）统一映射表见 §9。
@@ -255,7 +265,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 11 | 幂等登记（§7.6）：重放 / 冲突 / 进行中 | 原样重放 + `Idempotent-Replayed: true` / `422 idempotency_key_reuse` / `409 idempotency_in_progress` |
 | 12 | 请求体 schema 校验（`deny_unknown_fields`、类型、枚举、范围）；结果 `4xx` 也被幂等登记（只有 5xx 不登记） | `422 validation_failed` + `errors[]` |
 | 13 | 处理：调用所属模块 / 投影读 | 业务错误按 §9 映射 |
-| 14 | 响应：`X-Request-Id`、`X-Event-Seq`（成功响应）、`RateLimit-*`（步骤 2 之后的所有响应；步骤 6 之前的错误响应取该设备读类桶的当前状态，只读不扣）、`Cache-Control: no-store`（settings 例外）、`X-Content-Type-Options: nosniff`；不带 `Server` 版本、不带任何 CORS 头 | — |
+| 14 | 响应：`X-Request-Id`、`X-Log-Epoch`（**所有**响应，含错误与事件流响应头，取自 `Store::log_identity()`，P-67）、`X-Event-Seq`（成功响应）、`RateLimit-*`（步骤 2 之后的所有响应；步骤 6 之前的错误响应取该设备读类桶的当前状态，只读不扣）、`Cache-Control: no-store`（settings 例外）、`X-Content-Type-Options: nosniff`；不带 `Server` 版本、不带任何 CORS 头 | — |
 
 `touch_last_seen` 在步骤 2 成功后异步调用（节流在 `pki`）。`OPTIONS` 一律 `405`（无 CORS，api.md §1.2）。
 
@@ -290,7 +300,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 ### 7.5 请求校验（I7 的执行点）
 
-- 每个请求体类型 `#[serde(deny_unknown_fields)]`；`POST …/messages` 只允许 `text`（必填，≤ 16 KiB）、`level_cap`、`refs`（≤ 20 条）。**带 `model`、预算、策略等字段 → `422`，`errors[].code = unknown_field`**，绝不静默忽略。
+- 每个请求体类型 `#[serde(deny_unknown_fields)]`；`POST …/messages` 只允许 `text`（必填，≤ 16 KiB）、`level_cap`、`refs`（≤ 20 条）。**手机档案**带的 `level_cap` 被接受但忽略：转交 `conversation` 前置为 `None`，由其使用项目默认上限（C26、P-35）。控制路由 #43–#45 的请求体只允许 `{}`。**带 `model`、预算、策略等字段 → `422`，`errors[].code = unknown_field`**，绝不静默忽略。
 - `refs` 只接受最小字段（`issue` / `pr`: `repo` + `number`；`worktree` / `delivery`: `id`）；服务端解析不到 → `422`。
 - 整数 ≤ 2^53−1；时间 RFC 3339 毫秒 `Z`。
 - 校验失败的 `errors` 按字段指针逐条列出，最多 50 条 [建议]。
@@ -306,7 +316,8 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 业务层去重 | 所有幂等 POST 追加的业务事件带 `dedup_key = "api:<device_id>:<key>:<n>"`（`n` 为该请求内第几条事件）；`store` 的唯一索引保证：即使 `api_idempotency` 的完成记录因崩溃丢失，同 key 重试也不会重复追加事件——`append` 返回 `Appended::Duplicate { existing_seq }`，handler 据此读取已存在的事件重建响应（`EventLog::by_dedup_key`） |
 | 作用域 | `(device_id, key)`：不同设备的相同 key 互不影响 |
 | 不适用 | `GET` / `PUT` / `PATCH` / `DELETE` 与 `POST /v1/pair` |
-| 必带 | #12 #26 #28 #29 #42（契约 §3.3 只列了前四条，#42 见 §13 OQ-A2） |
+| 必带 | #12 #26 #28 #29 #42 #43 #44 #45（契约 §3.3，C26、P-56） |
+| 可带 | 其余 `POST`（#8 #23 #40 #47），按目标状态幂等 |
 
 ### 7.7 分页、ETag、读一致性
 
@@ -334,7 +345,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 **写入后的广播**：`settings.updated`（`subject = "settings"` 或 `prj_…`）由事件流按 §7.9 的门禁下发。
 
-**`catalog` / `status`**：字段结构以 config.md §2.8 为准（`status` 为 `latest_seq` + `modules.<name>.{applied_rev, health, detail?, unresolved_secret_refs}`；api.md §4.9 示例里的 `applied_rev` / `healthy` 只是示意，见 OQ-A4）。聚合不到的模块报 `health: unhealthy`，不报错。
+**`catalog` / `status`**：字段结构以 config.md §2.8 为准（`status` 为 `latest_seq` + `modules.<name>.{applied_rev, health, detail?, unresolved_secret_refs}`；字段名统一为 `applied_rev`，C26）。聚合不到的模块报 `health: unhealthy`，不报错。
 
 ### 7.9 SSE 事件流
 
@@ -345,7 +356,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 1. 响应头 `200`、`Content-Type: text/event-stream; charset=utf-8`、`Cache-Control: no-store`、`X-Accel-Buffering: no`；首帧 `retry: 3000`。
 2. 起点：有游标则 `after = 游标`；无游标则 `after = head()`，不回放，首帧是带当前 head 的 `heartbeat`。`stream = events.tail(after, filter)`，逐个取 `TailBatch { events, scanned_to }`，`scanned = scanned_to`。
 3. **过滤**：`EventFilter { project_ids, include, exclude }`——`project_ids`（`project_id = null` 的全局事件由 `store` 始终放行）；`include` = 请求的 `types`；`mobile` 档案把 `include` 与白名单 `project.*`、`conversation.*`、`message.*`、`inbox.*`、`device.revoked` 求交（请求了白名单外的类型不报错，只是收不到；请求为空时 `include` = 白名单）；`exclude` 含 `settings.*`，除非**桌面档案且角色 ≥ operator**（store.md §6.2 注明这两个用法）。因为角色可能在流的生命周期中变化，发送每个事件前再以**发送时刻**的设备角色与档案做一次最终判定（`settings.*` 只对桌面档案且角色 ≥ operator 的流发送）；每次心跳重新读取角色，越过 operator 边界时从当前 `scanned` 起用新的 `EventFilter` 重建 `tail`。通过的事件发 `id: <seq>` / `event: <type>` / `data: <信封单行 JSON，原样>`。
-4. **心跳**：每 15 s 一帧 `event: heartbeat`、`id: <scanned>`、`data: {"seq":<scanned>,"ts":…}`（`scanned` 含被过滤掉的事件，让过滤后的流也推进客户端游标）。**每次心跳同时检查**：设备 `status`（读 `pki.directory.get`；已吊销 → 发 `close{"reason":"device_revoked"}` 后关闭，M1 的吊销断流机制，通常 15 s 内、上限 60 s）、证书 `notAfter`（到期 → `close{"reason":"cert_expired"}`；并为 `notAfter` 单设定时器，不必等心跳）、关停信号（`server_shutdown`）。
+4. **心跳**：每 15 s 一帧 `event: heartbeat`、`id: <scanned>`、`data: {"seq":<scanned>,"ts":…,"log_epoch":<n>}`（`scanned` 含被过滤掉的事件，让过滤后的流也推进客户端游标；`log_epoch` 取自 `Store::log_identity()`，客户端发现变化就断开并全量重同步，P-67）。**每次心跳同时检查**：设备 `status`（读 `pki.directory.get`；已吊销 → 发 `close{"reason":"device_revoked"}` 后关闭，M1 的吊销断流机制，通常 15 s 内、上限 60 s）、证书 `notAfter`（到期 → `close{"reason":"cert_expired"}`；并为 `notAfter` 单设定时器，不必等心跳）、关停信号（`server_shutdown`）。
 5. **慢消费者**：`tail` 没有每订阅者的内存队列，慢消费者只表现为"写得慢"（store.md §7.5）。本模块给发送端设有界缓冲（字节数 [建议] 4 MiB）和写超时（30 s）；缓冲写满且超时、或 `head - scanned` 超过落后上限 [建议] 100000 → `close{"reason":"lagging"}` 后关闭（客户端可从日志续传，不丢事件）。
 6. **M3**：订阅 `pki::RevocationNotifier`，收到本设备 id 立即 `close{"reason":"device_revoked"}`；`Lagged` 时对本进程所有流做一次全量设备状态检查；心跳检查保留。
 7. 连接结束（含错误）释放并发许可；`close` 帧发送失败不阻塞关闭。
@@ -361,7 +372,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 **grant**（#28）：幂等键必带；请求体只有 `{nonce, signature}`（`deny_unknown_fields`——**客户端不能提交 payload**）；步骤：
 
 1. 鉴权链已保证 approver + 桌面档案（`policy.grant` 仍会复查）。
-2. `device_key = DeviceKey { device_id, role, profile, status, pubkey_fpr, verifying_key }`，其中 `verifying_key` 来自 `pki.directory.verifying_key`（实时读）。
+2. `device_key = DeviceKey { device_id, role, profile, status, approval_pubkey_fpr, verifying_key }`，其中 `verifying_key` 是配对时登记的审批签名公钥 `approval_pubkey`，来自 `pki.directory.verifying_key`（实时读，P-47）；mTLS 证书里的公钥不参与验签。
 3. 审批是 PR 类（`merge_pr` 等）时：`forge.refresh_pr(repo, number)` 强制对账一次，得到的 head 作为 `CurrentSubject` 传入；`forge` 不可用 / 被限流则不传（`policy` 退回投影快照，权威检查在消费点）。
 4. `policy.grant(...)`；错误映射见 §9：`StaleHead` → `409 stale_head`（审批**已**落盘为 `invalidated`，响应带 `current_head_sha` 与 `approval_status`）。
 5. `200 Approval`（`granted`）。`200` 不代表已合并；合并由 Outbox 异步执行，进展经 `outbox.*` / `forge.*` 事件到达。
@@ -370,7 +381,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 | 步 | 本模块做什么 |
 | --- | --- |
-| 发起（#26） | 请求体 = `signing`（`{action, target, subject_digest}`）；`action` 必须是 `settings_update` / `device_role_change` / `device_revoke`（Forge 动作 → `422`，客户端不能创建）；`target` 形状与 `action` 对应、设备目标须存在（否则 `404`）；`subject_digest` 须是 `sha256:` + 64 位小写十六进制 → `policy.create_internal`（有效期 300 s）→ `201 Approval`（`delivery_id: null`） |
+| 发起（#26） | 请求体 = `signing`（`{action, target, subject_digest}`）；`action` 必须是 `settings_update` / `device_role_change` / `device_revoke`（Forge 动作、条件伪动作 `force_push` / `push_outside_prefix` / `resolve_review_thread_human`、补丁闸门 `patch_apply_protected` → `422`，客户端不能创建，P-54）；`target` 形状与 `action` 对应、设备目标须存在（否则 `404`）；`subject_digest` 须是 `sha256:` + 64 位小写十六进制 → `policy.create_internal`（有效期 `policies.approval.ttl_s`，默认 24 小时，C27）→ `201 Approval`（`delivery_id: null`） |
 | 签名 | 同 challenge / grant（第 5 步主体一致性不适用） |
 | 重发（#31/#33/#34/#39/#40） | 带 `Gantry-Approval: apr_…`；先做 §7.8 的前置检查，再在**同一写事务**里 `policy.consume_internal` + 业务写（`settings.updated` / `pki.admin.set_role` / `pki.admin.revoke`）+ 业务事件；任一失败整体回滚，审批保持 `granted` |
 
@@ -397,7 +408,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 | 不变式 / 要求 | 本模块如何保证 |
 | --- | --- |
-| **I6 客户端不执行、不持凭据**（核心） | ① 路由集合只有六类写入（发消息、settings、审批签名 / 拒绝、状态流转、工作树人工锁、设备管理）；注册表中没有任何接收代码、命令、补丁、脚本的路由，也没有"让服务端替客户端运行某物"的路由——一致性测试对注册表做白名单断言，新增路由必须同步契约。② 响应、事件、日志、错误 `detail` 中不出现 installation token、App 私钥、webhook secret、模型 key；`SecretRef` 读回只有 `secret_ref` 与 `present`；请求体里的 `value` 立即进入 `SecretString`、不入日志、转交后清零。③ 客户端不调用 GitHub：PR / Issue 信息来自服务端快照，跳转链接由 `repo` + `number` 拼出。④ 客户端只持有设备私钥（不可导出）、服务端 CA 指纹、设备证书；签名内容里没有任何凭据 |
+| **I6 客户端不执行、不持凭据**（核心） | ① 路由集合只有六类写入（发消息、settings、审批签名 / 拒绝、状态流转、工作树人工锁、设备管理）；注册表中没有任何接收代码、命令、补丁、脚本的路由，也没有"让服务端替客户端运行某物"的路由——一致性测试对注册表做白名单断言，新增路由必须同步契约。② 响应、事件、日志、错误 `detail` 中不出现 installation token、App 私钥、webhook secret、模型 key；`SecretRef` 读回只有 `secret_ref` 与 `present`；请求体里的 `value` 立即进入 `SecretString`、不入日志、转交后清零。③ 客户端不调用 GitHub：PR / Issue 信息来自服务端快照，跳转链接由 `repo` + `number` 拼出。④ 客户端只持有两把设备私钥（mTLS 客户端密钥、审批签名密钥，均不可导出，P-47）、离线根 CA 指纹、设备证书；签名内容里没有任何凭据 |
 | **I7 配置与工作分离**（核心） | 配置读写只有 `/v1/settings/{resource}` 与 `/v1/projects/{id}/settings/{resource}`（及只读 `catalog`、`status`），operator 起、手机档案不可用、viewer 不可读；所有工作路由请求体 `deny_unknown_fields`，消息里带 `model` / 预算 / 策略字段 → `422 unknown_field`；`Project.settings_override` 不在 `Project` 表示里返回；`Message.level_cap`、`PATCH /deliveries` 的 `level_cap` 是任务级上限，不是配置 |
 | **I3 放行唯一决策点** | 本模块不判定放行：审批只经 `policy`；`grant` 请求不带 payload，服务端用自存 challenge 重建；内部动作的"消费 + 业务写"同事务；Forge 动作的审批客户端不能创建 |
 | **I4 事实源** | 交付类快照带 `synced_at` 原样返回，不在 API 层缓存或修正；`grant` 前强制对账只是提前失败 |
@@ -405,7 +416,8 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | **I2** | 本模块不写 GitHub，不持有 token |
 | **I1** | 沙盒面没有任何端点；`/webhook` 在 API 监听器上是 404 |
 | 威胁：未认证访问 | API 监听器握手即拒；配对监听器仅一条路由、窗口外关闭、限流 + 最小体积 + 连接上限 |
-| 威胁：吊销被绕过 | 无会话恢复、无 0-RTT；每请求复查设备状态；事件流心跳复查；M3 即时断流 |
+| 威胁：吊销被绕过 | 无会话恢复、无 0-RTT；每请求复查设备状态；事件流心跳复查；M3 即时断流；备份恢复后由 `pki` 重放 `revocations.journal`（P-67） |
+| 威胁：后台 mTLS 密钥被盗用来审批 | 审批只认 `approval_pubkey` 签名（必须用户在场的独立密钥，P-47）；`grant` 用 mTLS 密钥签名 → `403 signature_invalid` |
 | 威胁：角色缓存导致提权残留 | 角色 / 状态每请求实时读库，进程内不缓存 |
 | 威胁：重放 / 重复提交 | `Idempotency-Key` + 业务事件 `dedup_key`；nonce 单次；`If-Match` 防覆盖 |
 | 威胁：信息泄露 | 401/403/404 的 `detail` 不区分内部原因（`pair_token_invalid` 统一）；握手失败原因只记日志；`X-Request-Id` 供支持排查；无 `Server` 版本头 |
@@ -429,7 +441,11 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 状态冲突（放弃已关闭的交付等） | `409 conflict` | `reason: "invalid_state"` |
 | `LockError::Held` | `409 worktree_locked` | `lock` |
 | `PairError::TokenInvalid` | `401 pair_token_invalid` | — |
-| `PairError::Validation` | `422 validation_failed` | `errors[]` |
+| `PairError::Validation` | `422 validation_failed` | `errors[]`（含 `/approval_pubkey`） |
+| `RenewError::Validation` | `422 validation_failed` | `errors[]`（`/csr`） |
+| `RenewError::Revoked` | `401 device_revoked` | — |
+| `DeliveryControl` 目标不在可转移状态（暂停终态交付、重试非 `failed` 节点等） | `409 conflict` | `reason: "invalid_state"` |
+| `pki::DeviceAdmin::revoke` 写 `revocations.journal` 失败 | `503 unavailable` + `Retry-After` | —（审批保持 `granted`） |
 | settings 校验 | `422 validation_failed` | `errors[]`（含 config.md §11 语义码） |
 | `store` 忙 / 不可用 | `503 unavailable` + `Retry-After` | — |
 | 其余 | `500 internal` | — |
@@ -441,7 +457,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | 事件已提交、`commit` 失败 | 响应 `500`（客户端用同一 key 重试 `PUT` 会因 `If-Match` 不符得 `412`；重新 `GET` 看 `present`）；启动对账与后台重试补做 `commit`；`status` 里该模块 `unresolved_secret_refs` 可见 |
 | `forge.refresh_pr` 失败 / 限流 | 不阻塞 `grant`，退回投影快照；权威检查在消费点 |
 | 事件日志回放读失败 | 关闭该流（`close` 尽力）；客户端按退避重连 |
-| 数据库从备份恢复（head 变小） | 带旧游标的重连 → `409 cursor_ahead`，客户端丢缓存重拉（api.md §5.3） |
+| 数据库从备份恢复（head 变小） | `log_epoch` 已加一：所有响应的 `X-Log-Epoch` 与心跳的 `log_epoch` 变化，客户端丢缓存全量重同步（P-67）；游标越过 head 的仍得 `409 cursor_ahead`（api.md §5.3） |
 | 配对窗口监听器启动失败（端口占用） | `gantry pair` 的 CLI 报错；API 监听器不受影响 |
 | TLS 证书热替换失败 | 保留旧证书、告警（`pki` 负责续签结果） |
 | 未知路由 / 未启用路由 | `404 not_found`（不泄露"该路由在后续里程碑才有"） |
@@ -460,8 +476,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | `api.sse.tail_batch` | 沿用 `store` 的 `tail_batch` | 回放分批由 `store` 决定 |
 | `api.page.default_limit` / `api.page.max_limit` | 50 / 200 | — |
 | `api.idempotency.retention` / `api.idempotency.lease` | 24 h / 30 s [建议] | — |
-| `api.approval.challenge_ttl` | 120 s | 不超过 `Approval.expires_at` |
-| `api.approval.internal_ttl` | 300 s | 内部动作审批有效期（交给 `policy` 使用） |
+| `api.approval.challenge_ttl` | 120 s | 不超过 `Approval.expires_at`（C27） |
 | `api.worktree_lock.default` / `api.worktree_lock.max` | 1800 s / 14400 s | 交给 `repo` 校验 |
 | `api.body.max` / `api.body.max_settings` | 64 KiB / 256 KiB | — |
 | `api.message.max_text` / `api.message.max_refs` | 16 KiB / 20 | — |
@@ -482,7 +497,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - **访问日志**（结构化）：`request_id`、`device_id`、`route_id`（契约序号）、方法、状态码、耗时、响应字节数、`rate_class`；**不记请求体和响应体**（settings、grant 尤其）；`Gantry-Approval` 头只记审批 id。
 - **指标**：`api_requests_total{route_id,status}`、`api_request_seconds{route_id}`（直方图）、`api_rate_limited_total{class}`、`api_idempotent_replays_total`、`api_idempotency_conflicts_total{kind}`、`api_sse_streams`（仪表）、`api_sse_events_total{type}`、`api_sse_closes_total{reason}`、`api_sse_replay_events_total`、`api_sse_lag_seconds`、`api_signature_failures_total{code}`（`signature_invalid` / `challenge_invalid` / `stale_head` / `approval_mismatch`，突增是安全信号）、`api_pair_requests_total{result}`、`api_handshake_failures_total{reason}`（来自 `pki` 校验器回调）、`api_auth_failures_total{code}`。
 - **追踪**：每请求一个 span，贯穿到下游模块调用；`request_id` 写入响应头与 problem 体。
-- **健康**：`api` 自身不是 settings 的消费方，不出现在 `status.modules` 里；运维健康检查端点由 `deploy` 另定（不属于 42 条客户端路由）。
+- **健康**：`api` 自身不是 settings 的消费方，不出现在 `status.modules` 里；运维健康检查端点由 `deploy` 另定（不属于 47 条客户端路由）。
 
 ## 12. 测试与验收
 
@@ -490,10 +505,10 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 | 替身 / 夹具 | 用途 |
 | --- | --- |
-| `TestCA`（M0）+ `TestDevice` | 签发有效 / 过期 / 尚未生效 / 外部 CA / 已吊销 / 未知序列号的设备证书；`TestDevice` 用 `rustls` 客户端 + `hyper` 发**真实 TLS** 请求，并能对 challenge 签名（`sign_approval`）。测试一律走真实握手，不绕过 TLS（`router_for_test` 只用于不涉及鉴权的路由级单元测试） |
-| 真实 `pki` + `policy` + `Store::open_in_memory` | 组件测试用真实实现（二者是本泳道产物）；需要隔离时用 `policy` 的 `ScriptedPolicy` |
+| `TestCA`（M0）+ `TestDevice` | 签发有效 / 过期 / 尚未生效 / 外部 CA / 已吊销 / 未知序列号的设备证书；`TestDevice` 持两把密钥（mTLS 客户端密钥、审批签名密钥，P-47），用 `rustls` 客户端 + `hyper` 发**真实 TLS** 请求，并能用审批签名密钥对 challenge 签名（`sign_approval`）。测试一律走真实握手，不绕过 TLS（`router_for_test` 只用于不涉及鉴权的路由级单元测试） |
+| 真实 `pki` + `policy` + `Store::open_in_memory` | 组件测试用真实实现（二者是本泳道产物）；需要隔离时用 `FakePolicy`（`gantry-fakes`，P-51） |
 | `FakeForge`（M0） | 提供 PR 快照、`refresh_pr`、注入 `forge.pr_synchronized` 以触发 `stale_head` |
-| `FakeEngine`、`FakeConversation`、`FakeNotify`、`FakeRepo`（locks）、`FakeSettingsContext`、`MemorySecrets`（secrets.md §6，带 `stage` 后崩溃 / 写失败注入） | 实现 §6.3 的 facade，可脚本化返回与注入故障（含 `commit` 失败、`stage` 后崩溃） |
+| `FakeEngine`（含 `pause` / `resume` / `retry_node`）、`FakeConversation`、`FakeInbox`（`gantry-fakes`，P-51）、`FakeRepo`（locks）、`FakeSettingsContext`、`MemorySecrets`（secrets.md §6，带 `stage` 后崩溃 / 写失败注入）、`EgressStub`（`EgressControl` 的 secret 通道，P-51） | 实现 §6.3 的 facade 与端口，可脚本化返回与注入故障（含 `commit` / `activate_secret` 失败、`stage` 后崩溃） |
 | `FakeClock`、`SeededEntropy` | 心跳、存活时间（TTL）、限流窗口、证书到期 |
 | **Mock API 服务**（M0，由 `openapi.yaml` 生成） | 契约一致性套件的另一个被测方：同一套测试对 Mock 与真实 `api` 各跑一遍 |
 | `schemas/openapi.yaml`、`schemas/events/*.json` | 响应与事件的 Schema 校验（`jsonschema`） |
@@ -503,8 +518,9 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 **契约一致性（M0 起，M1 对真实实现）**
 
-- [ ] 注册表的 `(id, method, pattern, min_role, mobile)` 与 `schemas/openapi.yaml`、api.md §4.1 **逐行相等**（41 + 1 条）；OpenAPI 里有而注册表没有、反之亦然，均失败。
-- [ ] 手机子集恰好是 api.md §2.3 / §4.1 列出的 10 条路由（#2 #3 #4 #10 #11 #12 #21 #22 #41 #42）；契约文本里"9 条"与"10 条"的出入见 OQ-A1。
+- [ ] 注册表的 `(id, method, pattern, min_role, mobile)` 与 `schemas/openapi.yaml`、api.md §4.1 **逐行相等**（46 + 1 条）；OpenAPI 里有而注册表没有、反之亦然，均失败。
+- [ ] 手机子集恰好是 api.md §2.3 / §4.1 列出的 12 条路由（#2 #3 #4 #10 #11 #12 #21 #22 #41 #42 #46 #47，C26）。
+- [ ] `X-Log-Epoch`：每个响应（含 `404`、`429`、`5xx`、事件流响应头）都带，值等于 `Store::log_identity().log_epoch`；`restore_from` 后重启，值加一（P-67）。
 - [ ] 每个成功响应都通过 `openapi.yaml` 的 Schema 校验；每个非 2xx 响应都是 `application/problem+json`，`type = urn:gantry:problem:<code>`，`code` ∈ 契约的 30 个；`X-Request-Id` 与 body 的 `request_id` 相同。
 - [ ] 路由白名单：注册表里没有任何接收代码 / 命令 / 补丁 / 脚本的路由；新增路由而未更新白名单测试 → 失败（I6）。
 - [ ] 所有 api.md §7 "路由与错误对照"表中的 19 行各转成一个测试，全部通过（下列用例是其展开）。
@@ -516,7 +532,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - [ ] 吊销后用旧会话信息尝试恢复 / 0-RTT 重连被拒（rustls 客户端实测）。
 - [ ] 在 API 端口请求 `/v1/pair`、在配对端口请求 `/v1/me`、API 端口请求 `/webhook` → `404 not_found`（problem+json）。
 - [ ] 配对端口：窗口外拒绝连接；窗口内只接受 `POST /v1/pair`；超过连接并发上限 / 超大 body / 慢速读头被断开；窗口随 `open_session`、兑换、作废、过期在 1 s 内开关。
-- [ ] 配对端到端：`TestDevice` 用令牌配对 → 取得证书 → 对 mTLS 端口 `GET /v1/me` 成功；第一台设备 `role = approver`，第二台 `operator`；令牌无效 / 已用 / 过期 / 作废的 `401` 响应逐字节相同。
+- [ ] 配对端到端：`TestDevice` 用令牌 + CSR + `approval_pubkey` 配对 → 取得链 `[叶子, 中间 CA, 根]`（根指纹 = 配对串固定值）→ 对 mTLS 端口 `GET /v1/me` 成功，`device.approval_pubkey_fpr` 正确；缺 `approval_pubkey` 或与 CSR 同钥 → `422`；第一台设备 `role = approver`，第二台 `operator`；令牌无效 / 已用 / 过期 / 作废的 `401` 响应逐字节相同。
 
 **鉴权链（M1）**
 
@@ -526,6 +542,15 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - [ ] 设备在长连接上被吊销：同一连接的下一个请求 → `401 device_revoked`。
 - [ ] 步骤顺序用例：未知路径 `404`；已知路径错方法 `405` + `Allow`；限流先于 body 解析（超限请求不读 body）；`415` → `413` → `400` → `422` 的顺序各一例。
 - [ ] 角色 / 状态不缓存：用包装了 `DeviceDirectory` 的计数替身断言每个请求恰好读一次 `by_cert_serial`。
+
+**证书续期（M1，P-64）**
+
+- [ ] `POST /v1/devices/self/renew`：桌面与手机档案、viewer 起均可用；响应链根指纹不变；新证书立即可握手，旧证书到期前仍可握手；`approval_pubkey_fpr` 不变；非法 CSR → `422`；已吊销设备 → 握手失败；请求按写类限流。
+
+**控制路由与收件箱计数（M1，P-56、P-63）**
+
+- [ ] #43 #44 #45 缺 `Idempotency-Key` → `400 idempotency_key_required`；viewer → `403 forbidden_role`；手机档案 → `403 forbidden_profile`；暂停后再暂停 → `200`（目标状态幂等）；终态交付 / 非 `failed` 节点 → `409 conflict`；成功响应的 `X-Event-Seq` 指向 `delivery.paused` / `delivery.resumed` / `node.retry_requested`。
+- [ ] #46 `GET /v1/inbox/summary` 只数 `open`，按 `project_id` 分组（全局项为 `null`）；手机档案可用；`/v1/inbox/summary` 不被 `/v1/inbox/{inbox_id}` 吞掉。
 
 **统一错误 / 校验（M1）**
 
@@ -561,9 +586,10 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - [ ] 签名后 PR 有新推送（`FakeForge` 注入）再 `grant` → `409 stale_head`，`current_head_sha` 正确，之后 `GET /v1/approvals/{id}` 为 `invalidated`，事件流出现 `approval.invalidated`。
 - [ ] 两个 approver 设备并发 `grant` → 一个 `200`，一个 `409 approval_not_pending`。
 - [ ] `deny`：approver、不需要签名、幂等键必带；非 pending → `409 approval_not_pending`。
-- [ ] 内部动作：operator `POST /v1/approvals`（`device_revoke` 等）→ `201`、`delivery_id: null`、300 s 有效；`action` 为 `merge_pr` 等 Forge 动作 → `422`；approver 设备批准后，operator 设备带 `Gantry-Approval` 重发吊销 → 仍须 `required_role` 满足，否则 `403`。
+- [ ] 内部动作：operator `POST /v1/approvals`（`device_revoke` 等）→ `201`、`delivery_id: null`、有效期 = `policies.approval.ttl_s`（C27）；`action` 为 `merge_pr` 等 Forge 动作、条件伪动作或 `patch_apply_protected` → `422`；approver 设备批准后，operator 设备带 `Gantry-Approval` 重发吊销 → 仍须 `required_role` 满足，否则 `403`。
 - [ ] 改角色 / 吊销不带 `Gantry-Approval` → `403 signature_required`；改自己的角色 → `409 conflict`（`self_role_change`）且**审批未被消费**；吊销已吊销设备 → 原样 `200`；吊销提交失败时审批仍 `granted`（同事务回滚）。
-- [ ] 测试向量（api.md §6.3）：用文中公钥与签名走 `grant` 的验签路径（`policy` 夹具设备），通过；canonical 字节的 SHA-256 吻合。
+- [ ] 测试向量（api.md §6.3）：用文中审批签名公钥与签名走 `grant` 的验签路径（`policy` 夹具设备），通过；canonical 字节的 SHA-256 吻合。
+- [ ] 用 mTLS 客户端私钥（而非审批签名私钥）对 challenge 签名 → `403 signature_invalid`（P-47）。
 - [ ] 手机档案设备（即使 approver）调 challenge / grant / deny → `403 forbidden_profile`。
 
 **事件流（M1；M3 即时断流）**
@@ -576,7 +602,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 - [ ] `settings.*`：viewer 与手机档案的流里没有；operator 桌面设备有；运行中把设备降到 viewer，之后的 `settings.*` 不再下发（发送时刻判定）。
 - [ ] `Last-Event-ID` 大于 head → `409 cursor_ahead`（普通 problem，不开流）；非数字 → `400 invalid_cursor`。
 - [ ] 每设备第 4 条并发流 → `429`；关闭一条后可再开。
-- [ ] 心跳：`FakeClock` 每 15 s 一帧；`id` 为已扫描最大 seq（含被过滤）。
+- [ ] 心跳：`FakeClock` 每 15 s 一帧；`id` 为已扫描最大 seq（含被过滤）；`data.log_epoch` 等于当前纪元（P-67）。
 - [ ] **吊销断流（M1 退出标准）**：`pki.revoke` 后，该设备已建立的事件流在下一次心跳检查时收到 `close{"reason":"device_revoked"}` 并关闭，用 `FakeClock` 断言 ≤ 60 s（通常 ≤ 15 s）；新握手被拒；其他设备的流不受影响。
 - [ ] 证书到期：到 `cert_not_after` 时流关闭并带 `cert_expired`。
 - [ ] 慢消费者：不读取的客户端在缓冲超限后收到 / 触发 `lagging` 关闭，服务端内存不无限增长；重连续传无丢失。
@@ -594,7 +620,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 **M4（手机档案）**
 
-- [ ] 手机端能配对（`ios`）、发消息、读收件箱、`choose` 一个 `spec_needed` / `decision_needed` 选项；对 `escalation` / `approval_needed` 的 `choose` → `403 forbidden_profile`；设置、审批、设备管理、交付单元、工作树、工作流、预算路由全部 `403 forbidden_profile`。
+- [ ] 手机端能配对（`ios`）、发消息（带 `level_cap` 被忽略，交付单元的上限是项目默认值，C26）、读收件箱与 `GET /v1/inbox/summary`、续期证书、`choose` 一个 `spec_needed` / `decision_needed` 选项；对 `escalation` / `approval_needed` 的 `choose` → `403 forbidden_profile`；设置、审批、设备管理、交付单元、工作树、工作流、预算路由全部 `403 forbidden_profile`。
 
 **模糊测试（fuzzing）/ 属性测试（property-based testing）（建议）**
 
@@ -605,17 +631,17 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 | # | 问题 | 本文的临时处理（不构成决定） | 影响 |
 | --- | --- | --- | --- |
-| OQ-A1 | api.md §2.3 写"仅下表 9 条"，实际表中是 10 条路由（§4.1 注记也是 10 条） | 按 10 条实现并测试 | api.md、`fe-mobile` |
-| OQ-A2 | api.md §3.3 的"必带 `Idempotency-Key`"清单没有 #42 `choose`，而 §4.1 路由表标"必" | 按 §4.1：必带 | api.md |
+| OQ-A1 | **已决：见裁决 C26**（契约 §2.3 的手机路由数改为实际数；加入 #46 #47 后为 12 条）。原问题：手机路由数文字与表格不一致 | 已落实到 §6.2、§12.2 | — |
+| OQ-A2 | **已决：见裁决 C26 / P-56**（必带清单加入 `choose` 与控制路由 #43–#45）。原问题：§3.3 必带清单缺 `choose` | 已落实到 §7.6 | — |
 | OQ-A3 | 目标态已达成的内部动作（吊销已吊销的设备、角色未变）是否仍要求签名 / 消费审批 | 吊销已吊销设备原样 `200`，先于签名校验；改成相同角色按普通写入走完整校验并消费审批，不发事件 | api.md §4.10、`pki` |
-| OQ-A4 | `GET /v1/settings/status` 的字段：api.md §4.9 示例用 `applied_rev` / `healthy`（自称示意），config.md §2.8 定义为 `latest_seq` + `modules.<name>.{applied_rev, health, detail?, unresolved_secret_refs}` | 采用 config.md §2.8 | api.md 示例、`desktop-ui` |
-| OQ-A5 | 手机档案能否在消息里带 `level_cap`：api.md §2.3 允许（"可带 `level_cap`、`refs`"），但 P-35 / 原型要求"手机发出的消息固定使用项目默认上限，升档只在桌面" | 照 api.md：接受，不强制剥离 | api.md、P-35、`conversation` |
-| OQ-A6 | 密钥转交的真实通道：模型 key 属于 `egress`（独立进程、独立系统用户）、App 私钥属于 `secrets/`，`api` 如何把 `value` 交给另一进程并做两阶段提交（secrets.md OQ-1 同一问题）；`deploy` 在没有任何设备之前写初始凭据的入口（secrets.md OQ-4） | `Consumer::Egress` 用跨进程适配器实现 `SecretSink`；`Consumer::Forge` 用进程内 `ScopedSecrets` | `secrets`、`egress`、`deploy` 规格 |
+| OQ-A4 | **已决：见裁决 C26**（设置状态字段统一为 `applied_rev`，结构以 config.md §2.8 为准）。原问题：契约示例与 config 的状态字段不一致 | 已落实到 §7.8 | — |
+| OQ-A5 | **已决：见裁决 C26**（手机档案发消息时服务端忽略 `level_cap`，使用项目默认上限，P-35）。原问题：手机能否带 `level_cap` | 已落实到 §7.5 | — |
+| OQ-A6 | **已决：见裁决 C4 / P-50**（模型 key 经 Egress 控制面 `/run/gantry/egress.sock` 两段式写入，只写不读）与**裁决 C20 / P-66**（第一台设备配对前由主机命令写入并记审计事件）。原问题：密钥转交的跨进程通道与引导期写入入口 | 已落实到 §3、§6.3（`SecretTargets`） | — |
 | OQ-A7 | 邻接规格与 §6.3 的对齐：`conversation.md` 的 `post_user_message` 用 `ActorCtx`（本文 `WriteCtx`）、`notify.md` 用 `DeviceActor`；`store.md` 的 `WriteTx` 是具体类型，§6.3 的写 facade 当前不接收调用方事务（靠 `dedup_key` 保证至多一次），而 `pki` / `policy` 的"同一事务"接口接收 `&mut WriteTx` | `WriteCtx { actor, request_id, dedup }` 作为各写 facade 的统一入参；内部动作的"消费 + 业务写"由本模块开 `WriteTx` 后传给 `policy` / `pki` | `conversation`、`notify`、`engine`、`repo` 规格 |
 | OQ-A8 | 事件保留期与 `410 cursor_expired`（api.md OQ-13）；`close` 帧 `reason` 的完整集合是否还需要 `revoked_other` 等 | 保留不限；`reason` 取契约的四个值 | `store` |
-| OQ-A9 | 证书续期路由缺失（api.md OQ-12，见 [pki.md OQ-K6](pki.md)）：路由一旦加入，其鉴权（旧证书在宽限内）、限流类、是否支持新密钥需契约定义 | 不实现 | api.md、`pki`、`desktop-shell` |
+| OQ-A9 | **已决：见裁决 C18 / P-64**（`POST /v1/devices/self/renew`，M1，mTLS + 新 CSR，可换 mTLS 密钥，审批密钥不变）。原问题：证书续期路由缺失 | 已落实到 §6.2 #47、§12.2 | — |
 | OQ-A10 | 未启用 / 未实现路由的响应：本规格用 `404 not_found`；是否应改为 `503 unavailable` 以便客户端区分"尚未上线" | `404` | 客户端行为 |
 | OQ-A11 | 审计日志的读取路由（契约无）；`policy` 的 `AuditLog` 如何向客户端暴露 | 不实现；事件流中的 `policy.denied` / `approval.*` 即客户端可见的审计 | api.md、`desktop-ui` |
-| OQ-A12 | 配对监听器的源 IP 在内网 / 反向代理 / 隧道后的可信取法（`X-Forwarded-For` 是否可信） | 只用 TCP 对端地址；配对端口不经隧道（隧道只转发 `/webhook`，P-13） | 限流有效性、`deploy` |
+| OQ-A12 | 配对监听器的源 IP 在内网 / 反向代理 / 隧道后的可信取法（`X-Forwarded-For` 是否可信） | 只用 TCP 对端地址；配对端口不经隧道（反向代理 / 隧道只转发 `/webhook` 与 `/setup/github/callback`，P-65） | 限流有效性、`deploy` |
 | OQ-A13 | 工作路由的 `deny_unknown_fields` 在 v1 内新增可选请求字段时的兼容策略（客户端新于服务端时会被 `422`） | 严格拒绝；新字段随服务端先发布 | api.md §1.4 |
 | OQ-A14 | M1 settings 的写入范围：契约列八个 resource，M1 设置页只有"模型"（config.md §13）；M1 是否开放其余 resource 的 `PUT`（尤其 `policies`，policy v0 在 M1 不读取它，见 [policy.md OQ-P11](policy.md)） | M1 只开放 `models` 写入（其余 `PUT` 返回 `404`），读取全开；M2 起随各设置页开放 | api.md §4.9、config.md §13、`desktop-ui` |

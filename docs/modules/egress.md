@@ -105,7 +105,7 @@ pub trait EgressControl: Send + Sync {
     async fn endpoints(&self) -> Result<EgressEndpoints, EgressError>;
 
     // ---- job_token（P-49）----
-    /// 为一个 Attempt 签发 job_token。幂等：同 job_id 重复调用返回同一枚令牌（尚未吊销时）。沙盒创建后、启动前调用。
+    /// 为一个 Attempt 签发 job_token。幂等：同 job_id 重复调用返回同一枚令牌（尚未吊销时）。建沙盒容器之前调用（环境变量在创建时设定）。
     async fn issue_job_token(&self, req: IssueJobToken) -> Result<JobTokenGrant, EgressError>;
     /// 当前计量快照（不吊销）。展示 / 预警用。
     async fn job_usage(&self, job_id: &AttemptId) -> Result<JobUsage, EgressError>;
@@ -174,7 +174,7 @@ pub struct EgressStatus { pub applied_rev: Seq, pub health: Health /* ok | degra
 
 `status()` 的形状对应 [config §2.8](../interfaces/config.md#28-catalog-与-status-的响应结构)；设置状态字段统一为 `applied_rev`（C26）。
 
-**调用顺序**（与 worker-protocol §3.2 一致）：建容器 → `issue_job_token`（令牌经 `ExecSpec.env` 写入沙盒）→ `stage` → 启动 → …… → `collect` → `revoke_job_token` → 销毁；`attempt.finished` 落库后 `forget_job`。
+**调用顺序**（与 worker-protocol §3.2 一致）：`issue_job_token` → 建容器（令牌经 `ExecSpec.env` 写入沙盒）→ `stage` → 启动 → …… → `collect` → `revoke_job_token` → 销毁；`attempt.finished` 落库后 `forget_job`。
 
 ### 6.3 `models` 的直接调用约定（P-50）
 
@@ -236,7 +236,7 @@ struct JobState {
 - 存储：`<data_dir>/egress.db`（SQLite，WAL）：`job_tokens`（令牌哈希与 job 元数据）、`usage_jobs`、`usage_calls`、`final_usage`、`inflight`、`secret_versions`（元数据，值在 `secrets`）、`applied_config`（最后一次已应用的视图，**不含任何值**）。
 - 用量在每个请求**完成时**同步提交（一次 WAL 提交）；请求**开始**时先在 `inflight` 写一行，完成后删除。重启时遗留的 `inflight` 行让对应 job 置 `incomplete = true`——用量是下界，**绝不静默丢失**。
 - 重启后：载入 `job_tokens` 与最后一次 `applied_config`，继续服务（`svc_token` 轮换，`models` 经 `service_token()` 重取）；运行中的沙盒不受影响，归属不变。`gantryd` 重连后若自己的 config rev 更新则重发 `apply_config`。
-- `final_usage` 在 `revoke_job` 时写入，`forget_job` 或 TTL 后删除，保证 `collect` 与 `attempt.finished` 之间崩溃的重放得到同一份数字。
+- `final_usage` 在 `revoke_job_token` 时写入，`forget_job` 或 TTL 后删除，保证 `collect` 与 `attempt.finished` 之间崩溃的重放得到同一份数字。
 
 ### 7.3 模型 API 反向代理流水线
 

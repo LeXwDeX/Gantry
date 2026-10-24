@@ -24,8 +24,8 @@
 | --- | --- |
 | M0 | 无实现。冻结 `AgentAdapter` / `WorkerAdapter` trait 与 `schemas/worker/` 的对应关系；`FakeAgent` 的脚本格式（与 `contract` 泳道的 `schemas/worker/fixtures/` 对齐） |
 | M1 | K1–K7 的 Low 档子集：角色 `single`（实现 + 自检）端到端，同时实现共用同一套代码的 `build` / `heal`（`structured_output.kind = build`）；proposals 词表 `open_pr`、`escalate`；Claude Code 适配（pin 版本、冒烟）；`changes.patch` / `report.md` / `proposals.json` / `result.json`；全部退出码与信号；`FakeAgent` 一致性套件；镜像与 `selftest` |
-| M2 | Medium / High 的角色：`plan`（`sandbox_ro`）、`verify`、`review:<视角>`、`answer`；`sandbox_ro` 的只读工作区行为（`GIT_OPTIONAL_LOCKS=0`、不写 index）；`heal` 接入守护；`READY` 等待逻辑在预热池下的验证；`devcontainer` 环境下工具链可用性（与 `sandbox` 协作，OQ-S5 / OQ-S7） |
-| M3 | `reasoner`、`arbiter` 角色及其 schema；proposals 词表扩展 `reply_review_thread`、`resolve_review_thread`（与 `forge` 动作同里程碑）；`flags.suspected_injection` 的评审类使用 |
+| M2 | Medium / High 的角色：`plan`（`sandbox_ro`）、`verify`、`review:<视角>`、`answer`（None 档挂在会话上的临时图同样适用，P-58）；proposals 词表扩展 `reply_review_thread`（与 `forge` 动作同里程碑，P-60）；`sandbox_ro` 的只读工作区行为（`GIT_OPTIONAL_LOCKS=0`、不写 index）；`heal` 接入守护；`READY` 等待逻辑在预热池下的验证；`devcontainer` 环境下工具链可用性（与 `sandbox` 协作，OQ-S5 / OQ-S7） |
+| M3 | `reasoner`（结构化输出没有 `verdict`，C25）、`arbiter` 角色及其 schema；proposals 词表扩展 `resolve_review_thread`（与 `forge` 动作同里程碑）；`flags.suspected_injection` 的评审类使用 |
 | M4 | 无新增接口。Codex 等第二个适配的预研（接口不变性验证）是否排期待定（OQ-W9） |
 
 ## 2. 不负责
@@ -35,7 +35,7 @@
 | 沙盒的创建、挂载、计时器、取消信号、产物提取、销毁 | `sandbox`（`worker` 只响应信号、写 `out/`） |
 | 准备工作区副本、校验与应用补丁、生成提交 | `repo`（`worker` 在沙盒内只产出补丁文件，且对自己沙盒里的 `.git` 也不信任） |
 | 解析 tier → 模型名、预留预算、生成 JobSpec 的可信部分、消费结果、重试 | `engine`（`worker` 不得自行更换模型） |
-| 模型 key、白名单、token 计量与封顶 | `egress`（`worker` 只带占位 key 与 base URL） |
+| 模型 key、白名单、token 计量与封顶 | `egress`（`worker` 只带占位 key 与含 `job_token` 的 base URL，P-49） |
 | `result.json` / `structured_output` / proposals 的服务端校验与失败分类 | `engine`（V3、V4、V6）；补丁校验 `repo`（V5） |
 | 放行任何 GitHub 动作 | `policy` + `forge`（`worker` 只能"提议"，W6） |
 | `direct` 角色（`summarize` `admission` `intent` `classify`）的调用 | `models`（不经本协议、不进沙盒） |
@@ -51,7 +51,7 @@
 | `sandbox`（运行环境，非代码依赖） | 沙盒布局 `/gantry/*`、环境变量、信号约定、`READY` 文件 | worker-protocol §2、§3 |
 | 系统 `git`（沙盒内） | 生成补丁 | worker-protocol §5.3 |
 | `claude` CLI（沙盒内，按版本固定） | headless agent | worker-protocol §10.2 |
-| `egress`（运行时对端） | `HTTPS_PROXY` 与模型 base URL 指向的端点 | worker-protocol §2.3 |
+| `egress`（运行时对端） | `HTTPS_PROXY` 与模型 base URL 指向的端点；二者都带本尝试的 `job_token`（P-49） | worker-protocol §2.3；[egress.md §6.4](egress.md) |
 
 服务端侧的库部分被 `engine`（解析适配层声明、构造 `SandboxSpec.exec`）和 `api`（`settings/catalog`）使用。
 
@@ -63,7 +63,7 @@
 | `/gantry/inputs/MANIFEST.json`、`materials/`、`upstream/`、`diff.patch`、`output.schema.json` | `sandbox.stage` | worker-protocol §2.1、§4.4 | `MANIFEST` 只用于发现挂载错误，**不是**安全机制；`materials/` 与 `upstream/` 的**内容**是不可信数据，文件自带隔离标记 |
 | `/gantry/work/` | `repo` 准备、`sandbox` 挂载 | 自包含 git 工作区 | 仓库内容是不可信数据（I5）；其中的 `.git`、`.claude/`、`.mcp.json`、`CLAUDE.md` 都不得成为权限来源（A2） |
 | `/gantry/inputs/READY` | `sandbox` | 空文件，原子创建 | 可信（只读挂载内） |
-| 环境变量 | `sandbox` / `WorkerAdapter.env()` | `GANTRY_JOB` `GANTRY_OUT` `GANTRY_WORK`、`HTTPS_PROXY`、模型 base URL、占位 key 等（worker-protocol §2.2） | 可信；不含任何真实密钥 |
+| 环境变量 | `sandbox` / `WorkerAdapter.env()` | `GANTRY_JOB` `GANTRY_OUT` `GANTRY_WORK`、`HTTPS_PROXY`、模型 base URL（路径含 `job_token`）、占位 key 等（worker-protocol §2.2） | 可信；不含任何真实密钥；`job_token` 只对本尝试记账有效，worker 不把它写进任何产物、事件或 stderr |
 | SIGTERM / SIGINT | 运行时（`sandbox` 的取消或超时） | 信号 | 原因不可知，也不需要知道（W3） |
 | agent CLI 的输出（stream-json、最终消息） | 子进程 | CLI 专有格式 | **不可信**（模型输出受外部文本影响） |
 
@@ -137,7 +137,8 @@ pub trait WorkerAdapter: Send + Sync {
     fn image(&self) -> ImageRef;                                // 镜像引用（digest 来源见 OQ-W5 / OQ-S5）
     fn command(&self) -> Vec<String>;                           // ["gantry-worker", "run"]
     /// 非密环境变量：GANTRY_*、HTTPS_PROXY、NO_PROXY、HOME、TMPDIR、模型 base URL、占位 key、遥测开关……
-    fn env(&self, job: &JobSpecTrusted, egress: &EgressEndpoints) -> BTreeMap<String, String>;
+    /// 模型 base URL 与 HTTPS_PROXY 取自本尝试的 JobTokenGrant（含 job_token，P-49；sandbox 在建容器前向 Egress 申请）。
+    fn env(&self, job: &JobSpecTrusted, egress: &JobTokenGrant) -> BTreeMap<String, String>;
     fn capabilities(&self) -> AdapterCaps;                      // { provider_kinds: ["anthropic"], supports_fallback: false,
                                                                 //   supports_tools: true, reasoning_efforts: [...] } → config catalog `models.adapters`
     /// 只能收紧，不得放宽 constraints；未知键一律拒绝 [提议]。
@@ -164,7 +165,7 @@ pub trait WorkerAdapter: Send + Sync {
 | `execution.agent_options` | 白名单字段，只能收紧 |
 | 项目级配置 | `--setting-sources user`（只加载适配层写入 `HOME` 的用户级配置）、`--strict-mcp-config --mcp-config '{"mcpServers":{}}'`；禁用项目级 hooks / MCP / 插件。`CLAUDE.md` / `AGENTS.md` 是否自动载入见 OQ-W2 |
 | 权限模式 | `--permission-mode <MODE>`：无人值守需要预先批准的工具集合，具体模式取值 **需核实**（OQ-W4）；**不使用**"跳过全部权限检查"类标志 |
-| 认证 | `ANTHROPIC_API_KEY=gantry-egress-managed`（占位，**不是密钥**）；`ANTHROPIC_BASE_URL` 指向 Egress 的反向代理端点，Egress 丢弃占位 key 并注入真实 key（E3） |
+| 认证 | `ANTHROPIC_API_KEY=gantry-egress-managed`（占位，**不是密钥**）；`ANTHROPIC_BASE_URL = http://<egress>/j/<job_token>/anthropic`，Egress 凭路径中的 `job_token` 把用量记到本尝试，丢弃占位 key 并注入真实 key（E3、P-49） |
 | 遥测 / 自动更新 / 反馈 | 环境变量关闭（如 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`、`DISABLE_AUTOUPDATER`、`DISABLE_TELEMETRY`）；这些流量本来也会被白名单挡掉，关闭是为了避免启动重试拖慢 |
 | 会话持久化 | 写入 `/gantry/home`（tmpfs）；一个 job 一个会话；A6 的修复轮用同会话续接 |
 | 子 agent / 并行工具 | 共用同一代理与 token 封顶；无额外处理 |
@@ -248,13 +249,13 @@ git -c core.fsmonitor=false diff --cached --no-color --no-ext-diff --no-textconv
 环境：`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_TERMINAL_PROMPT=0`；每条命令有墙钟超时（默认 60 s [建议值，待调优]）。适配层对自己沙盒里的 `.git` 也不信任（最坏结果只是产出一份无效补丁，服务端会拒绝）。
 
 - 比较的是 index 与 `base_sha` 的树，所以 agent 自己 `git commit` / `reset` / 改写历史都不影响结果。
-- 无 `--binary`：二进制变更在服务端校验时被拒（P7）；适配层检测到二进制或 gitlink（模式 `160000`）时发 `warn`，不自行丢弃。
+- 无 `--binary`：补丁中的二进制文件与符号链接由 `repo` 一律机械拒绝（P-68）；适配层检测到二进制、符号链接或 gitlink（模式 `160000`）时发 `warn`，不自行丢弃。
 - 空补丁：不产生文件，`artifacts.patch = null`；`build` 类须在 `structured_output.no_change_reason` 说明。
 - `output.patch = forbidden`（`sandbox_ro` 角色）：不执行任何写入 index 的 git 命令。
 - 写入 `result.json.artifacts.patch`：`path`、`sha256`、`bytes`、`base_sha`（必须等于 JobSpec）、自报 `files_changed`（来自 `git diff --cached --numstat`）。服务端会重算，不符即整份无效。
 - 适配层不检查 `constraints.patch.max_*`：超限由服务端拒收；可发 `warn(patch_too_large)` 供展示。
 
-**report.md**（≤ 256 KiB）与 **proposals.json**（≤ 256 KiB、≤ 20 条）的内容来自 agent 的最终产出（形状见 OQ-W1）。proposals 在写出前先在本地过滤：`kind` 必须在 `output.proposals.allowed_kinds` 内，总数 ≤ `max`，`target` 必须是 `JobSpec.targets[].handle` 之一；不合规的丢弃并发 `warn(proposal_dropped)`——这只是减少服务端拒收，不替代服务端校验。词表是**封闭**的（`open_pr`、`reply_review_thread`、`resolve_review_thread`、`escalate`），类型层面不存在 merge / force push / 改 workflow 等变体（W6）。
+**report.md**（≤ 256 KiB）与 **proposals.json**（≤ 256 KiB、≤ 20 条）的内容来自 agent 的最终产出（形状见 OQ-W1）。proposals 在写出前先在本地过滤：`kind` 必须在 `output.proposals.allowed_kinds` 内，总数 ≤ `max`，`target` 必须是 `JobSpec.targets[].handle` 之一；不合规的丢弃并发 `warn(proposal_dropped)`——这只是减少服务端拒收，不替代服务端校验。词表是**封闭**的（`open_pr`、`reply_review_thread`、`resolve_review_thread`、`escalate`），类型层面不存在 merge / force push / 改 workflow 等变体（W6；Gantry 不修改 `.github/workflows/`，P-48）。
 
 **result.json**：先写 `result.json.tmp`、`fsync`、再 `rename`；`protocol` `job_id` `job_sha256` 与 JobSpec 一致；`summary` ≤ 1000 字符纯文本；`error` 在 `failed` / `cancelled` 时必填（`kind` ∈ `task_failed` `agent_error` `max_turns` `budget` `output_invalid` `bad_job` `aborted` `internal`，`message` ≤ 1000）；`usage_reported` 与 `agent`（`kind` `version` `model`）取自 CLI；`started_at` / `ended_at` 自报。`structured_output.kind` 必须与 `node.role` 对应（`review:<视角>` 对应 `review`）。
 
@@ -320,7 +321,7 @@ worker 自身不重试任何事：重试是 `engine` 在新 Attempt 里的决定
 | `models.worker.max_turns`（默认 60） | `constraints.limits.max_turns` |
 | `models.worker.attempt_wall_s` ∧ `sandbox.limits.wall_time_s` ∧ 预算剩余 | `constraints.limits.wall_time_s` |
 | `sandbox.idle_timeout_s` | `constraints.limits.idle_timeout_s` |
-| `models.worker.adapter`（默认 `claude_code`） | 选择 `WorkerAdapter` 实现与 `execution.agent`；设置里是 `claude_code`，协议里是 `claude-code`，由 `engine` 做映射（models.md OQ-9，OQ-W12） |
+| `models.worker.adapter`（默认 `claude-code`） | 选择 `WorkerAdapter` 实现与 `execution.agent`；设置与协议统一为 `claude-code`（C26），不再需要映射 |
 | `policies.*` 快照 | `constraints.paths`、`constraints.patch` |
 
 适配层内部常量（编译期 / 镜像内，非设置）**[建议值，待调优]**：
@@ -397,7 +398,8 @@ worker 自身不重试任何事：重试是 `engine` 在新 Attempt 里的决定
 ### F. 网络与凭据（A8 / I1，M1）
 
 - [ ] 在只有 `MockProxy` 与 `MockModelServer` 可达的网络命名空间里运行全流程：所有出站连接都发往这两个地址；没有直接 DNS 查询、没有其他目标。
-- [ ] 环境变量集合恰等于 `WorkerAdapter.env()` 的输出加运行时固有项；其中唯一"形似密钥"的是占位 `gantry-egress-managed`；`env()` 单元测试断言没有 `GITHUB_TOKEN` 与任何真实 key 形态。
+- [ ] 环境变量集合恰等于 `WorkerAdapter.env()` 的输出加运行时固有项；其中唯一"形似密钥"的是占位 `gantry-egress-managed`，`job_token` 只出现在模型 base URL 与 `HTTPS_PROXY` 两个值里（P-49）；`env()` 单元测试断言没有 `GITHUB_TOKEN` 与任何真实 key 形态。
+- [ ] `job_token` 不出现在 `report.md`、事件、stderr、`result.json` 中（用哨兵令牌验证）。
 - [ ] 遥测 / 自动更新 / 反馈开关已设置（`stub-claude` 记录的环境）。
 - [ ] worker 不在 `report.md`、事件、stderr 中输出环境变量（用含哨兵值的自定义环境变量验证）。
 - [ ] worker 不创建监听 socket、不创建 Unix socket 文件（运行结束后检查 `/gantry`、`/tmp` 与 `ss -xl` 无新增）。
@@ -420,7 +422,7 @@ worker 自身不重试任何事：重试是 `engine` 在新 Attempt 里的决定
 
 ### I. 服务端侧 `WorkerAdapter`（M1）
 
-- [ ] `protocol_versions()`、`agent_id()` 与 JobSpec 的取值一致；`capabilities()` 与 `GET /v1/settings/catalog` 的 `models.adapters.claude_code` 形状一致（`provider_kinds: ["anthropic"]`、`supports_fallback: false`）。
+- [ ] `protocol_versions()`、`agent_id()` 与 JobSpec 的取值一致；`capabilities()` 与 `GET /v1/settings/catalog` 的 `models.adapters.claude-code` 形状一致（`provider_kinds: ["anthropic"]`、`supports_fallback: false`）。
 - [ ] `validate_agent_options`：空对象通过；任何未知键拒绝；试图放宽 `constraints`（如 `tools.shell` 由 `false` 改 `true`）拒绝。
 - [ ] `command()` 为 `["gantry-worker","run"]`；`env()` 不含密钥（正则 + 熵扫描，占位 key 豁免）。
 
@@ -442,11 +444,11 @@ worker 自身不重试任何事：重试是 `engine` 在新 Attempt 里的决定
 | OQ-W2 | 仓库内 `CLAUDE.md` / `AGENTS.md` 是否自动载入（worker-protocol OQ-17）；Claude Code 是否有可靠的开关，**需核实** | prompt 组装、I5 | 不赋予其任何权限；是否载入待决 |
 | OQ-W3 | `reasoning_effort` → 思考预算的取值表放在哪里：worker-protocol 说"各档对应的预算在 worker 配置表里"，但 config.md 没有这个键 | 推理深度的可调性 | 适配层内的编译期常量表，不进设置 |
 | OQ-W4 | 无人值守所需的 `--permission-mode` 与允许工具集合的具体取值与语法（**需核实**）；"全部放行"类模式下 deny 规则是否仍生效 | 权限规则的实际约束力 | 预批准明确列出的工具集合 + deny 规则；不使用跳过权限检查的标志 |
-| OQ-W5 | 镜像组成与归属：基础镜像 vs worker 镜像（`sandbox.base_image` 只有一个）；项目语言工具链如何进入沙盒；`claude` CLI 的安装来源 / 版本固定 / 升级节奏；谁构建、发布、预拉取 | `worker`、`sandbox`、`deploy` | 见 sandbox.md OQ-S5 |
+| OQ-W5 | （`sandbox.base_image` 默认值**已决：见裁决 C20 / P-66**——随版本发布、固定摘要的官方 worker 镜像；项目工具链与 CLI 升级节奏仍未决）镜像组成与归属：基础镜像 vs worker 镜像（`sandbox.base_image` 只有一个）；项目语言工具链如何进入沙盒；`claude` CLI 的安装来源 / 版本固定 / 升级节奏；谁构建、发布、预拉取 | `worker`、`sandbox`、`deploy` | 见 sandbox.md OQ-S5 |
 | OQ-W6 | `execution.agent_options` 白名单的内容（骨架只说"白名单、只能收紧"） | `validate_agent_options` | M1 只接受空对象 |
 | OQ-W7 | `answer` 角色的 `structured_output` 字段（worker-protocol 标 **[提议]**）；`intent` 等 `direct` 角色不在本模块 | M2 | 采用 worker-protocol §6.2 的提议 |
 | OQ-W8 | `stage` 的推断规则（哪些工具算 `explore` / `edit` / `test` / `package`）；`stage` 词表本身是 **[提议]** | 仅展示 | 按工具类别粗分 |
 | OQ-W9 | Codex 等第二个适配何时验证"接口不变"；若只支持订阅登录则不能无人值守（Q-03） | 协议的 agent 无关性是否经得起检验 | 仅保证 trait 与协议无 agent 专有字段 |
 | OQ-W10 | `upstream/` 内联进 prompt 时的包装格式：worker-protocol 说"用同一 nonce 包装"，但 `materials` 的标记行只允许 `owner/repo#N` 形式的 `source`，上游产物没有这种来源 | I5 的实现细节 | 适配层用 `kind=upstream_output`、`source` 取工作区仓库加固定占位项，标记行仍不含自由文本；待契约确认 |
 | OQ-W11 | 终止宽限：JobSpec 里没有 `kill_grace_s`，worker 不知道服务端的宽限 | 取消时能否来得及写 `cancelled` 的结果 | 保守常量 5 s |
-| OQ-W12 | 适配器标识不一致：config.md §3.2 的 `models.worker.adapter` 取 `claude_code`，worker-protocol 的 `execution.agent` 与本文 `WorkerAdapter::agent_id()` 取 `claude-code` | 映射位置、校验（V06） | 映射由 `engine` 做；`agent_id()` 取协议里的写法 |
+| OQ-W12 | **已决：见裁决 C26**（适配器标识统一为 `claude-code`，设置、catalog、JobSpec 同名）。原问题：config 的适配器取值与协议的 `execution.agent` 写法不一致 | 映射位置、校验（V06） | 已落实到 §10、§12.I |
