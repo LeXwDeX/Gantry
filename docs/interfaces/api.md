@@ -9,7 +9,7 @@
 - 实体字段以 [data-model.md](../data-model.md) 为准，本文不新增实体字段；响应里 data-model 没给出线上形态的类型（`Ref`、`Card`、`UntrustedText`、`CheckSummary` 等）按本文示例的形态，并登记在 [§10 开放问题](#10-开放问题) OQ-10，待回写 data-model。
 - 标注 **[提议]** 的是骨架没定、本文给的默认值；全部数值默认值集中在 [§3.7](#37-默认参数)；骨架没定又无法给默认的，写在 §10，**不要自行拍板**。
 - 所有实体表示都含 `id`、`created_at`、`updated_at`（data-model §3 省略了，示例为节省篇幅也省略）。
-- 本文提到但尚未存在的文档：`interfaces/config.md`（同批编写，只按名称引用）、`interfaces/forge-actions.md`、`interfaces/worker-protocol.md`、`modules/pki.md`、`schemas/events/*.json`。
+- 同批编写的配套契约：[config.md](config.md)（settings 的 resource、键、取值、合并 / 收紧、校验、角色细则；**settings 的 HTTP 形状以本文为准**）、[forge-actions.md](forge-actions.md)（审批里 `action` 的取值）、[worker-protocol.md](worker-protocol.md)（与客户端无关，仅界定 Worker 端点不属于本 API）。尚未存在：`modules/pki.md`、`schemas/events/*.json`。
 - 桌面端的 HTTP 请求**只由 `desktop-shell` 发出**（它持有 mTLS 密钥与证书，architecture §4）；`desktop-ui` 经 IPC 调用，不直连服务端。下文"客户端"指 shell 的网络层或 `mobile` 的网络层。
 
 ---
@@ -76,7 +76,7 @@
     "name": "Susan 的 MacBook",
     "platform": "macos",
     "cert_serial": "5f3a9c01d27be4468a1c",
-    "pubkey_fpr": "sha256:d68ad09049b74df40a10963d521f56884993b73bb19ddce607f42a476805e51f",
+    "pubkey_fpr": "sha256:9fe698148e3e8234105e25bf598c9689640aba943b8275348470152799f1dd42",
     "role": "approver",
     "status": "active",
     "last_seen": null
@@ -91,7 +91,7 @@
 }
 ```
 
-- 客户端本地生成密钥对，**私钥不出设备**；CSR 的 subject 由服务端忽略并重写（`CN = device.id`），密钥算法要求见 modules/pki.md（本文按 ECDSA P-256，OQ-6）。
+- `token` 是不透明字符串（示例仅为示意）。客户端本地生成密钥对，**私钥不出设备**；CSR 的 subject 由服务端忽略并重写（`CN = device.id`），密钥算法要求见 modules/pki.md（本文按 ECDSA P-256，OQ-6）。
 - `certificate_chain` 为 `[叶子, 中间 CA]`；客户端必须验证链到配对串里的 CA 指纹，再存入系统钥匙串 / 凭据存储。
 - `confirmation_code`（6 位）与服务端控制台显示的一致，由用户人工核对（architecture §7.1 步骤 5）。核对失败的处置、设备在核对前是否已 `active`：OQ-12。
 - token 无效、已用、过期、被作废**统一**返回 `401 pair_token_invalid`，不区分原因（不给枚举 oracle）。响应丢失后 token 已被消耗，只能重新生成 token 再配对（本端点不支持 `Idempotency-Key`）。
@@ -142,8 +142,8 @@
 | 角色 | 可以做 |
 | --- | --- |
 | `viewer` | 读取除 settings 之外的所有资源；订阅事件流 |
-| `operator` | viewer + 发消息、调档 / 放弃交付单元、解除收件箱项、工作树人工锁、**读写 settings**、重命名设备 |
-| `approver` | operator + 获取审批 challenge 并签名 / 拒绝审批、改设备角色、吊销设备 |
+| `operator` | viewer + 发消息、调档 / 放弃交付单元、解除收件箱项、工作树人工锁、**读 settings 并写其中的中性 / 收紧类改动**、重命名设备 |
+| `approver` | operator + 获取审批 challenge 并签名 / 拒绝审批、放宽类、"仅 approver 键"与带 secret `value` 的 settings 写入（config.md §2.5，[提议]）、改设备角色、吊销设备 |
 
 > 骨架只给了角色名；语义取自 design.md"只读 / 控制 / 可审批危险动作"，该文档是历史记录，不是规格。OQ-1。
 
@@ -203,7 +203,7 @@
 | `detail` | 面向日志的英文说明，不展示给用户 |
 | `request_id` | 同时出现在响应头 `X-Request-Id` |
 | 扩展成员 | 按 `code` 附加（如 `required_role`、`errors`、`current_head_sha`、`lock`），见下表 |
-| `errors` | 仅 `validation_failed`：`[{ "pointer": "/refs/0/number", "code": "required \| type \| enum \| range \| unknown_field", "message": "…" }]`，`pointer` 为 JSON Pointer（相对请求体；settings 相对 `value`） |
+| `errors` | 仅 `validation_failed`：`[{ "pointer": "/refs/0/number", "code": "required \| type \| enum \| range \| unknown_field", "message": "…" }]`；`pointer` 为 JSON Pointer（相对请求体；settings 相对 `value`，跨 resource 校验的错误指向本次写入的 resource）。settings 的 `code` 在上述之外追加 config.md §11 的语义码（如 `secret_ref_missing`、`override_loosens_global`） |
 
 | HTTP | `code` | 触发 | 客户端动作 |
 | --- | --- | --- | --- |
@@ -215,6 +215,7 @@
 | 403 | `forbidden_role` | 角色不足；附 `required_role` | 隐藏 / 禁用入口，提示需要的角色 |
 | 403 | `forbidden_profile` | 路由不在客户端档案子集内 | 客户端 bug，不重试 |
 | 403 | `signature_invalid` | 审批签名验证失败 | 重新取 challenge，重签；反复失败则报告 |
+| 403 | `signature_required` | 写入需要设备签名但未提供（settings，OQ-16） | 按 `dry_run` 的 `requires_signature` 先走签名 |
 | 404 | `not_found` | 资源不存在，或路由不存在 | 刷新列表 |
 | 405 | `method_not_allowed` | 路径存在但方法不对；附 `Allow` 头 | 客户端 bug |
 | 409 | `conflict` | 状态冲突；附 `reason`（如 `self_role_change`、`invalid_state`） | 刷新后让用户重新决定 |
@@ -229,8 +230,8 @@
 | 413 | `payload_too_large` | 超过 §3.7 的体积上限 | 不重试 |
 | 415 | `unsupported_media_type` | 非 `application/json` | 客户端 bug |
 | 422 | `validation_failed` | 语义 / schema 校验失败，含未知字段；附 `errors` | 在表单上标出 |
+| 422 | `not_overridable` | 项目级覆盖了 config.md 标为不可覆盖的 resource（`notify`、`github`） | 禁用该入口 |
 | 422 | `idempotency_key_reuse` | 同一 key 配了不同的请求内容 | 客户端 bug：换新 key |
-| 422 | `not_overridable` | 项目级覆盖了 config.md 未声明可覆盖的 resource | 禁用该入口 |
 | 428 | `precondition_required` | 写 settings 缺 `If-Match` | 客户端 bug |
 | 429 | `rate_limited` | 超限；`Retry-After` 秒数 | 按 `Retry-After` 退避，不要立即重试 |
 | 500 | `internal` | 服务端未预期错误 | 退避重试（读）；写操作用同一 `Idempotency-Key` 重试 |
@@ -262,7 +263,7 @@
 
 ### 3.4 并发控制：ETag / If-Match（settings）
 
-- 每个 `(scope, resource)` 有独立的修订号；`GET` 响应头 `ETag: "<opaque>"`，客户端视为不透明。尚不存在的项目级覆盖，ETag 为 `"0"`。
+- 每个 `(scope, resource)` 独立：ETag 是引号包裹的修订号 `"<rev>"`，`rev` = 该 `(scope, resource)` 最近一次 `settings.updated` 事件的 `seq`，从未写过为 `0`（config.md §2.3）。`GET` 响应头返回；客户端视为不透明。写响应的头 `X-Event-Seq` 等于新 `rev`。
 - `PUT` / `DELETE` 必须带 `If-Match: "<etag>"`：缺失 → `428 precondition_required`；不符 → `412 precondition_failed`（响应头带当前 ETag）。成功响应头带新 ETag。
 - `GET` 支持 `If-None-Match`，命中返回 `304`。
 - settings 以外的资源不用 ETag：状态由服务端状态机串行化，冲突以 `409` 表达。
@@ -334,20 +335,24 @@
 | 24 | GET | `/v1/approvals` | viewer | — | 审批列表 | §6.1 |
 | 25 | GET | `/v1/approvals/{approval_id}` | viewer | — | 审批详情 | §6.1 |
 | 26 | GET | `/v1/approvals/{approval_id}/challenge` | approver | — | 取签名 challenge | §6.2 |
-| 27 | POST | `/v1/approvals/{approval_id}/grant` | approver | — | 提交签名放行（幂等键：必） | §6.3 |
+| 27 | POST | `/v1/approvals/{approval_id}/grant` | approver | — | 提交签名放行（幂等键：必） | §6.4 |
 | 28 | POST | `/v1/approvals/{approval_id}/deny` | approver | — | 拒绝（幂等键：必） | §6.1 |
-| 29 | GET | `/v1/settings/{resource}` | operator | — | 读全局设置 | §4.9 |
-| 30 | PUT | `/v1/settings/{resource}` | operator | — | 写全局设置（If-Match） | §4.9 |
+| 29 | GET | `/v1/settings/{resource}` | operator | — | 读全局设置（`?rev=N`） | §4.9 |
+| 30 | PUT | `/v1/settings/{resource}` | operator* | — | 写全局设置（If-Match；`?dry_run`） | §4.9 |
 | 31 | GET | `/v1/projects/{project_id}/settings/{resource}` | operator | — | 读项目覆盖 / 生效值 | §4.9 |
-| 32 | PUT | `/v1/projects/{project_id}/settings/{resource}` | operator | — | 写项目覆盖（If-Match） | §4.9 |
-| 33 | DELETE | `/v1/projects/{project_id}/settings/{resource}` | operator | — | 清除项目覆盖（If-Match） | §4.9 |
-| 34 | GET | `/v1/devices` | viewer | — | 设备列表 | §4.10 |
-| 35 | PATCH | `/v1/devices/{device_id}` | operator | — | 重命名 | §4.10 |
-| 36 | PUT | `/v1/devices/{device_id}/role` | approver | — | 改角色 | §4.10 |
-| 37 | POST | `/v1/devices/{device_id}/revoke` | approver | — | 吊销 | §4.10 |
-| 38 | GET | `/v1/events` | viewer | ✓ | SSE 事件流 | §5 |
+| 32 | PUT | `/v1/projects/{project_id}/settings/{resource}` | operator* | — | 写项目覆盖（If-Match；`?dry_run`） | §4.9 |
+| 33 | DELETE | `/v1/projects/{project_id}/settings/{resource}` | operator* | — | 清除项目覆盖（If-Match） | §4.9 |
+| 34 | GET | `/v1/settings/catalog` | operator | — | 设置页表单目录 | §4.9 |
+| 35 | GET | `/v1/settings/status` | operator | — | 各模块已应用的 rev 与健康 | §4.9 |
+| 36 | GET | `/v1/devices` | viewer | — | 设备列表 | §4.10 |
+| 37 | PATCH | `/v1/devices/{device_id}` | operator | — | 重命名 | §4.10 |
+| 38 | PUT | `/v1/devices/{device_id}/role` | approver | — | 改角色 | §4.10 |
+| 39 | POST | `/v1/devices/{device_id}/revoke` | approver | — | 吊销 | §4.10 |
+| 40 | GET | `/v1/events` | viewer | ✓ | SSE 事件流 | §5 |
 
-合计 **38 条**：mTLS API 37 条 + 配对 1 条；手机档案 9 条（#2 #3 #4 #10 #11 #12 #21 #22 #38）。
+合计 **40 条**：mTLS API 39 条 + 配对 1 条；手机档案 9 条（#2 #3 #4 #10 #11 #12 #21 #22 #40）。
+
+`*` settings 的"最低角色"是**路由下限**：服务端按改动**内容**判定实际所需角色（config.md §2.5：中性 / 收紧 → operator；放宽、"仅 approver 键"、任何带 secret `value` 的写入 → approver，放宽类另需设备签名 [提议]），`dry_run` 先告知 `required_role` / `requires_signature`（§4.9）。读类 settings 路由 operator 起，viewer 不能读 settings。
 
 > 补充项：#9（预算只读）不在原清单里，但 milestones M3 的"预算面板"需要它；项目与交付单元没有"创建"路由——项目绑定见 OQ-8，交付单元只由对话 / 引擎创建。
 
@@ -360,7 +365,7 @@
     "name": "Susan 的 MacBook",
     "platform": "macos",
     "cert_serial": "5f3a9c01d27be4468a1c",
-    "pubkey_fpr": "sha256:d68ad09049b74df40a10963d521f56884993b73bb19ddce607f42a476805e51f",
+    "pubkey_fpr": "sha256:9fe698148e3e8234105e25bf598c9689640aba943b8275348470152799f1dd42",
     "role": "approver",
     "status": "active",
     "last_seen": "2026-10-24T12:41:03.120Z"
@@ -386,7 +391,7 @@
 
 - `GET /v1/projects` → `{ "items": [Project…], "next_cursor": null }`。
 - `GET /v1/projects/{project_id}` → `Project`。
-- `default_level` 在此只读；它是配置，修改入口在 settings（落在哪个 resource 由 config.md 定，OQ-3）。
+- `default_level` 在此只读，是 `levels.default_level` 的投影（config.md 诉求 A9，data-model 需同步，OQ-3）；要改就 `PUT` `levels` resource。`settings_override` 的读写走 §4.9。
 
 ### 4.4 deliveries
 
@@ -439,7 +444,7 @@
 | `POST /v1/deliveries/{delivery_id}/abandon` | `{ "reason": "不做了" }`（`reason` 可选，≤ 500 字符） | `200 Delivery`（`stage: abandoned`）；产生 `delivery.abandoned` |
 | `GET /v1/deliveries/{delivery_id}/budget` | — | `BudgetLedger` |
 
-`BudgetLedger`（只读的运行状态；改预算只能走 settings，I7）：
+`BudgetLedger`（只读的运行状态；改预算只能走 settings，且只对之后创建的交付单元生效——config.md §2.6：创建时固化，I7）：
 
 ```json
 {
@@ -655,47 +660,154 @@
 
 ### 4.9 settings
 
-**唯一的配置读写入口**（I7）。`{resource}` ∈ `models` | `levels` | `policies`；`value` 的结构、校验规则、哪些 resource 允许项目覆盖，**全部由 [interfaces/config.md](config.md)（及 `schemas/config/*.json`）定义，本文不重复**。
+**唯一的配置读写入口**（I7）。HTTP 形状（路径、方法、头、响应外壳、错误）以本文为准；设置**文档的内容**——有哪些 resource、键、取值、默认、合并 / 收紧规则、校验规则 V01–V22、谁能改什么、热加载——以 [interfaces/config.md](config.md)（及 `schemas/config/*.json`）为准，本文不重复。`{resource}` 是 config.md 的顶层键，目前八个：`models`、`levels`、`policies`、`guardian`、`sandbox`、`egress`、`notify`、`github`（任务清单只点名了前三个）。读写粒度是**整个 resource**。下面示例里的 `value` 只截取个别键示意。
 
 | 路由 | 请求 | 响应 |
 | --- | --- | --- |
-| `GET /v1/settings/{resource}` | — | `200` 设置文档，头 `ETag` |
-| `PUT /v1/settings/{resource}` | 头 `If-Match`；体 `{ "value": … }`（整体替换） | `200` 新文档，头新 `ETag` |
-| `GET /v1/projects/{project_id}/settings/{resource}` | 可选 `?view=effective` | `200`；默认返回该项目的**覆盖**（无覆盖则 `value: null`，ETag `"0"`）；`view=effective` 返回全局与覆盖合并后的生效值（`scope: "effective"`，只读，其 ETag 仅供缓存，不可用于 `If-Match`） |
-| `PUT /v1/projects/{project_id}/settings/{resource}` | 同全局 | `200`；resource 不可覆盖 → `422 not_overridable` |
+| `GET /v1/settings/{resource}[?rev=N]` | — | `200` 全局文档，头 `ETag: "<rev>"`；`?rev=N` 取该 resource 在历史 rev 时的文档（可追溯；"回滚"= 读旧版再 `PUT` 回去，没有专门的回滚路由） |
+| `PUT /v1/settings/{resource}[?dry_run=true]` | 头 `If-Match`；体 `{ "value": … }`，整体替换 | `200` 新文档 + `warnings[]`，头新 `ETag` 与 `X-Event-Seq`；`dry_run=true` 只校验、不落库、不发事件，返回 `{valid, errors[], warnings[], relaxes[], required_role, requires_signature}` |
+| `GET /v1/projects/{project_id}/settings/{resource}[?rev=N][&view=effective]` | — | `200`；默认返回该项目的**覆盖**（无覆盖则 `value: null`，ETag `"0"`）；`view=effective` 返回逐 resource 合并并经收紧约束后的生效值，附 `clamped[]`（只读，其 ETag 不可用于 `If-Match`） |
+| `PUT /v1/projects/{project_id}/settings/{resource}[?dry_run=true]` | 同全局 | 同全局；`notify`、`github` 不可覆盖 → `422 not_overridable`；越界键 → `422 validation_failed`（`override_not_allowed` / `override_loosens_global`） |
 | `DELETE /v1/projects/{project_id}/settings/{resource}` | 头 `If-Match` | `200`，`value: null`（回退到全局） |
+| `GET /v1/settings/catalog` | — | 设置页表单所需的目录（模型能力、图模板名、动作 id、分流类含锁定标记、各键所需角色），结构由 config.md 定 |
+| `GET /v1/settings/status` | — | 各模块 `applied_rev` 与健康，供"某模块尚未应用 rev N"的提示 |
 
-全局设置文档（`GET /v1/settings/models` 响应，`ETag: "12"`；`value` 内部结构见 config.md）：
+`catalog` 与 `status` 是字面路径，不会被 `{resource}` 吞掉（`{resource}` 只取上述八个）。
+
+`GET /v1/settings/levels` 响应（`ETag: "18102"`）：
 
 ```json
-{ "resource": "models", "scope": "global", "value": {} }
+{
+  "resource": "levels",
+  "scope": "global",
+  "rev": 18102,
+  "value": { "high": { "budget": { "nodes": 30 } } }
+}
 ```
 
-项目覆盖文档：
+`PUT /v1/settings/levels`（头 `If-Match: "18102"`）把 `high` 档的节点预算从 30 收紧到 20：
+
+```json
+{ "value": { "high": { "budget": { "nodes": 20 } } } }
+```
+
+响应 `200`（头 `ETag: "18236"`、`X-Event-Seq: 18236`；`rev` 与 ETag 一致）：
+
+```json
+{
+  "resource": "levels",
+  "scope": "global",
+  "rev": 18236,
+  "value": { "high": { "budget": { "nodes": 20 } } },
+  "warnings": []
+}
+```
+
+`PUT …?dry_run=true` 响应：
+
+```json
+{
+  "valid": true,
+  "errors": [],
+  "warnings": [],
+  "relaxes": [],
+  "required_role": "operator",
+  "requires_signature": false
+}
+```
+
+写入模型凭据：`PUT /v1/settings/models` 请求体里的凭据字段是 `SecretRef` 对象，`value` 只写；响应里同一字段只剩 `secret_ref` 与只读的 `present`：
+
+```json
+{
+  "value": {
+    "providers": {
+      "anthropic": {
+        "credential": {
+          "type": "api_key",
+          "secret_ref": "model.anthropic.main",
+          "value": "example-value-not-a-real-key"
+        }
+      }
+    }
+  }
+}
+```
 
 ```json
 {
   "resource": "models",
+  "scope": "global",
+  "rev": 18240,
+  "value": {
+    "providers": {
+      "anthropic": {
+        "credential": { "type": "api_key", "secret_ref": "model.anthropic.main", "present": true }
+      }
+    }
+  },
+  "warnings": []
+}
+```
+
+校验失败（`422`；`pointer` 相对 `value`）：
+
+```json
+{
+  "type": "urn:gantry:problem:validation_failed",
+  "title": "Settings validation failed",
+  "status": 422,
+  "code": "validation_failed",
+  "request_id": "01JB7PA2M5R8T3X6N1Q4V9WZYB",
+  "errors": [
+    {
+      "pointer": "/providers/anthropic/credential/secret_ref",
+      "code": "secret_ref_missing",
+      "message": "secret_ref \"model.anthropic.main\" does not exist and no value was supplied"
+    }
+  ]
+}
+```
+
+项目范围：该项目尚无覆盖（`ETag: "0"`），以及生效值视图（`?view=effective`）：
+
+```json
+{
+  "resource": "levels",
   "scope": "project",
   "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+  "rev": 0,
   "value": null
 }
 ```
 
-写入请求（`PUT /v1/settings/levels`，头 `If-Match: "12"`）：
+```json
+{
+  "resource": "levels",
+  "scope": "effective",
+  "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+  "rev": 18236,
+  "value": { "high": { "budget": { "nodes": 20 } } },
+  "clamped": []
+}
+```
+
+`GET /v1/settings/status` 响应（字段名为示意，config.md 只写"各模块 applied_rev 与健康"）：
 
 ```json
-{ "value": {} }
+{ "modules": { "egress": { "applied_rev": 18102, "healthy": true } } }
 ```
 
 | 规则 | 说明 |
 | --- | --- |
-| 整体替换 | `PUT` 替换整个 `value`，不做合并；客户端先 `GET` 再改再 `PUT` |
-| 校验 | 先按 `schemas/config/*.json` 做 schema 校验，再由所属模块做语义校验；失败 → `422 validation_failed`，`errors[].pointer` 相对 `value` |
-| 凭据字段 | 模型提供方的 API key 等凭据：**只写不读**。`GET` 响应里该字段不出现（或为 config.md 约定的 redacted 占位）；`PUT` 里该字段**省略 = 保持不变**，字符串 = 替换，`null` = 清除。客户端提交后不得持久化、不得写日志。哪些字段是凭据由 config.md 标注（建议用 schema 注解 `x-gantry-secret: true`，OQ-3） |
-| 生效时机 | 服务端写入成功即对新创建的任务生效；对**进行中**的交付单元是否生效见 OQ-3 |
-| 事件 | 项目覆盖变更发 `project.updated`；**全局设置变更没有对应事件类型**（OQ-4），在补上之前其他客户端靠 `412` 或重新进入设置页发现变化 |
-| 角色 | `operator` 起；手机档案不可用。`policies` 含危险动作放行策略，写入是否要更高权限见 OQ-5 |
+| 整体替换 | `PUT` 替换整个 resource 的 `value`，不合并；先 `GET` 再改再 `PUT`。全局 `PUT {"value": {}}` 回到内置默认；项目覆盖用 `DELETE` 清除。存储是稀疏的、合并与"仅收紧"约束见 config.md §2.1–§2.2 |
+| 并发 | `rev` / `ETag` / `If-Match` 见 §3.4；两个设置页同时保存同一 resource，后到者得到 `412`，重新 `GET` 后在新值上重做 |
+| 角色与签名 | 路由下限 operator；服务端按内容判定实际所需角色（config.md §2.5）。不足 → `403 forbidden_role`（附 `required_role`）；提交前用 `dry_run` 取得 `required_role` / `requires_signature`。需要签名而未带 → `403 signature_required`。**签名的载体与规范化两份文档都没定义（OQ-16）：在此之前，需要签名的写入（含 `models.providers` 与全部带 `value` 的凭据写入）无法实现，而 M1 的"设置页·模型"要用到它** |
+| 凭据字段 | 以 config.md §2.4 为准：凭据字段是 `SecretRef`（`secret_ref`、只读的 `present`、只写的 `value`）。`GET` 永不返回 `value`；`PUT` 里 `value` 省略 = 保持不变，字符串 = 写入或轮换，`null` 一律 `422`（`secret_clear_in_use`）；`present` 被接受并忽略。值与 `settings.updated` 原子写入。客户端发送后立即清除内存、不得持久化或记日志 |
+| 校验 | 先 schema 再语义；失败 → `422 validation_failed`，`errors[].code` 取 `required` / `type` / `enum` / `range` / `unknown_field` 与 config.md §11 的语义码；`warning` 不阻止写入，随 `200` / `dry_run` 返回 |
+| 事件 | `settings.updated`（config.md §2.3 提议，须回写 data-model §5.2）：`subject` 为字面量 `settings`（全局）或 `prj_…`（项目覆盖）；**项目覆盖变更也发 `settings.updated`，不再发 `project.updated`**；只下发给桌面档案且角色 ≥ operator 的事件流（§5.4）。客户端收到后重新 `GET` 该 resource |
+| 生效时机 | 判定类键下一次判定起生效；`levels.*` 只对之后创建的交付单元生效；以 `status` 查看各模块是否已应用（config.md §2.6） |
+| 不在 settings 里的 | 设备与证书（§4.10）、本机外观（`desktop-shell` 本地存储）、任务级参数（`Message.level_cap`） |
 
 ### 4.10 devices
 
@@ -774,6 +886,7 @@ data: {"seq":18240,"ts":"2026-10-24T12:41:18.000Z"}
 | `project_id` | 可重复；只下发这些项目的事件。**没有 `project_id` 的全局事件**（如 `device.*`）始终下发（信封里该字段对全局事件为 `null`，OQ-13） |
 | `types` | 逗号分隔，精确类型或 `前缀.*`（如 `message.*`）；缺省 = 全部 |
 | 手机档案 | 服务端再与白名单取交集：`project.*`、`message.*`、`inbox.*`、`device.revoked` [提议]；请求了白名单外的类型不报错，只是收不到 |
+| `settings.*` | 只下发给**桌面档案且角色 ≥ operator** 的流（事件 `data` 含设置内容；config.md 诉求 A7）[提议]；按**发送时刻**的角色判定 |
 
 ### 5.5 吊销、过期与连接上限
 
@@ -782,7 +895,7 @@ data: {"seq":18240,"ts":"2026-10-24T12:41:18.000Z"}
 | 设备被吊销 | 服务端在**同一进程内**按 `device_id` 找到该设备全部事件流，不再下发任何事件，尽力发 `close`（`device_revoked`）后立即关闭；后续新连接在握手时被拒。兜底：每次心跳检查 `Device.status`，因此**最迟 15 s，上限 60 s**（M3 退出标准）。客户端收到 `close(device_revoked)` 或随后的握手失败，按 §3.1 `device_revoked` 处理 |
 | 证书到期 | 流在证书 `notAfter` 时关闭（`cert_expired`）；客户端应在到期前续期（路由见 OQ-12） |
 | 并发上限 | 每设备 3 条；超出 → `429 rate_limited`（`Retry-After`） |
-| 角色变化 | 不断流；事件可见范围不随角色（viewer 起都能订阅）变化，只受档案白名单影响 |
+| 角色变化 | 不断流；除 `settings.*` 外，事件可见范围不随角色变化（viewer 起都能订阅），只受档案白名单影响；降到 viewer 后不再下发 `settings.*` |
 
 > milestones 把"吊销对已建立事件流连接生效"放在 M3，而配对与吊销本身在 M1；本契约要求 M1 的 `api` 就实现心跳兜底，M3 做进程内即时断开的优化（OQ-13）。
 
@@ -800,7 +913,7 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 {
   "id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
   "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
-  "action": "merge",
+  "action": "merge_pr",
   "target": { "kind": "pr", "repo": "acme/web", "number": 12 },
   "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
   "device_id": null,
@@ -811,7 +924,7 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 ```
 
 - `status`：`pending` / `granted` / `invalidated` / `expired` / `denied`（data-model §3；§4.4 还有 `consumed`，两处不一致，OQ-6）。
-- `action` 的取值集合以 interfaces/forge-actions.md 的 `ForgeActionKind` 为准；architecture §7.4 列的危险动作类别：merge、改 workflow 文件、force push、删分支、发 release、改仓库设置。`target` 的结构随动作类别变化，本文示例只给 `merge` / PR（OQ-6）。
+- `action`、`target`、`head_sha` 的取值以 [forge-actions.md §2.5](forge-actions.md) 为准：`merge_pr` → `target = {kind:"pr", repo, number}`，`head_sha` = PR 的 head；`force_push` / `push_branch` → `target = {kind:"branch", repo, branch, …}`，`head_sha` = 将要推送的提交。`delete_branch` / `publish_release` / `change_repo_settings` 预留，无 head 的动作如何绑定 SHA 未定（OQ-6）。本文示例用 `merge_pr`。
 - `GET /v1/approvals`：查询 `status`、`delivery_id`、分页；`GET /v1/approvals/{approval_id}`：`Approval`。viewer 起可读。
 - `POST /v1/approvals/{approval_id}/deny`：`{ "reason": "先别合" }`（可选），`Idempotency-Key` 必带，`approver` 起，**不需要签名**（拒绝不授予任何权限，OQ-6）→ `200 Approval`（`denied`），发 `approval.denied`。非 `pending` → `409 approval_not_pending`。
 - 审批请求由 `policy` / 引擎创建（`approval.requested`），客户端经事件、收件箱（`approval_needed`）和消息卡片得知；**客户端不能创建审批**。
@@ -824,7 +937,7 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 {
   "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
   "payload": {
-    "action": "merge",
+    "action": "merge_pr",
     "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
     "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
     "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
@@ -867,10 +980,10 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 
 | 项 | 值 |
 | --- | --- |
-| 公钥（P-256 未压缩点，base64url） | `BNIUJ7OV-VyRptNJ0bwgR_o0zg9iSE4f5y8UMZTJkfc23CgsiGZjzUjp8FbNPyTQuvWOvJlpzAaLRgOR_jdrEd8` |
-| `canonical(payload)`（即上面 §6.2 的 `payload`，单行） | `{"action":"merge","approval_id":"apr_01JB7P4M8T2X6N9R3Q5K1V7WZK","delivery_id":"dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB","device_id":"dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM","expires_at":"2026-10-24T12:52:00.000Z","head_sha":"9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345","nonce":"lIXSmI8Oxz4mQbtZkKkIguvXjQtExu3PzyWZHQSw7js","target":{"kind":"pr","number":12,"repo":"acme/web"},"v":1}` |
-| 待签字节的 SHA-256（hex） | `3a91fdc1857064dff4fbd891e63646db546c8b893acd027e8008292096940220` |
-| 一个有效签名（base64url） | `-yt7ZSiURU_Fd0AzMLuKzFo7xt_f9RJYysFpOSTdYAZs3LWL17NTHo8TtLudEqspgrOtnwVLfNihAgFfRh9_dg` |
+| 公钥（P-256 未压缩点，base64url） | `BNn_Gz6KrjbLH0rq59xX_HvHW9bNbotAo2XP8VhMcelALHKuuyz5Ni_97g5sqgb5amxT-Q_FOhS7DbwENKfdR34` |
+| `canonical(payload)`（即上面 §6.2 的 `payload`，单行） | `{"action":"merge_pr","approval_id":"apr_01JB7P4M8T2X6N9R3Q5K1V7WZK","delivery_id":"dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB","device_id":"dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM","expires_at":"2026-10-24T12:52:00.000Z","head_sha":"9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345","nonce":"lIXSmI8Oxz4mQbtZkKkIguvXjQtExu3PzyWZHQSw7js","target":{"kind":"pr","number":12,"repo":"acme/web"},"v":1}` |
+| 待签字节的 SHA-256（hex） | `1324554867b4194bfdbc33b49f5156d9b4384883a0e2a97ff736ca3cf628e36c` |
+| 一个有效签名（base64url） | `UoCqGyJjlVc45Yz6uIAdkg6iT9Xyh8wuXoOILCNq1TGr-fTHTvziH2DdtZyIrcsMxa6Te-kWzAHuwwJYzkwdmQ` |
 
 验签通过 = 用上述公钥验证"有效签名"对"待签字节"成立。ECDSA 签名不确定，所以不同实现各自签出的值会不同；canonical 字节与它的 SHA-256 必须逐字节一致。
 
@@ -881,7 +994,7 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 ```json
 {
   "nonce": "lIXSmI8Oxz4mQbtZkKkIguvXjQtExu3PzyWZHQSw7js",
-  "signature": "-yt7ZSiURU_Fd0AzMLuKzFo7xt_f9RJYysFpOSTdYAZs3LWL17NTHo8TtLudEqspgrOtnwVLfNihAgFfRh9_dg"
+  "signature": "UoCqGyJjlVc45Yz6uIAdkg6iT9Xyh8wuXoOILCNq1TGr-fTHTvziH2DdtZyIrcsMxa6Te-kWzAHuwwJYzkwdmQ"
 }
 ```
 
@@ -891,11 +1004,11 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 {
   "id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
   "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
-  "action": "merge",
+  "action": "merge_pr",
   "target": { "kind": "pr", "repo": "acme/web", "number": 12 },
   "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
   "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
-  "signature": "-yt7ZSiURU_Fd0AzMLuKzFo7xt_f9RJYysFpOSTdYAZs3LWL17NTHo8TtLudEqspgrOtnwVLfNihAgFfRh9_dg",
+  "signature": "UoCqGyJjlVc45Yz6uIAdkg6iT9Xyh8wuXoOILCNq1TGr-fTHTvziH2DdtZyIrcsMxa6Te-kWzAHuwwJYzkwdmQ",
   "status": "granted",
   "expires_at": "2026-10-24T14:41:00.000Z"
 }
@@ -953,6 +1066,8 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 | `ios` 设备调 `GET /v1/deliveries` | `403 forbidden_profile`（即使是 approver） |
 | 同一 `Idempotency-Key` 重放 `POST …/messages` | 只产生 1 条 `message.posted`，第二次响应带 `Idempotent-Replayed: true` |
 | `PUT /v1/settings/models` 缺 `If-Match` / 旧 `If-Match` | `428` / `412`（带当前 `ETag`） |
+| 带 `credential.value` 写入后，`GET` 同一 resource / 读 `settings.updated` 事件 / 查日志 | 都没有 `value`，只有 `secret_ref` 与 `present: true` |
+| viewer 或 `ios` 设备读任意 settings 路由；viewer 订阅事件流 | `403 forbidden_role` / `403 forbidden_profile`；流里没有 `settings.*` |
 | 事件流断开后带 `Last-Event-ID` 重连 | 不丢、不重；过滤流的游标由 `heartbeat` 推进 |
 | `Last-Event-ID` 大于 head | `409 cursor_ahead` |
 | 吊销设备 | 其事件流 ≤ 60 s 关闭（目标立即），新握手被拒 |
@@ -972,7 +1087,7 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 | --- | --- |
 | 客户端不执行 | 全部写路由只有六类：发消息（数据）、改配置（settings）、审批签名 / 拒绝、状态流转（调档 / 放弃 / dismiss）、工作树人工锁、设备管理。**没有任何路由接收代码、命令、补丁、脚本，也没有"让服务端替客户端运行某物"的路由**；执行只发生在服务端 → 引擎 → 沙盒，GitHub 写只经 Outbox（I1、I2） |
 | 不持 GitHub 凭据 | 没有任何响应包含 installation token、App 私钥、webhook secret；客户端不调用 GitHub API，PR / Issue 信息来自服务端快照，跳转链接由 `repo` + `number` 拼出并在系统浏览器打开 |
-| 不持模型凭据 | 模型凭据只在 settings 写入且**只写不读**（§4.9）；客户端提交后不得持久化、不得写日志；任何读路由都不回显 |
+| 不持模型凭据 | 模型凭据只作为 `SecretRef.value` 经 `PUT /v1/settings/{resource}` 写入且**只写不读**，设置文档里只有 `secret_ref`（§4.9）；客户端提交后不得持久化、不得写日志；任何读路由、事件、日志都不含值 |
 | 客户端持有的只有 | 设备私钥（不可导出，只用于 mTLS 与审批签名）、服务端 CA 指纹、设备证书。签名内容里没有任何凭据 |
 | 同时的相关不变式 | I3：审批只由 `policy` 放行，API 只转交签名并重建 payload 验签（§6.4）；I4：快照带 `synced_at`，界面可标注新鲜度，事实以 GitHub 为准；I5：§1.5 渲染规则 |
 
@@ -980,12 +1095,12 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 
 | 做法 | 说明 |
 | --- | --- |
-| 入口唯一 | 模型、档位预算、策略的读写只有 §4.9 的 5 条路由（全局 3 + 项目覆盖 3 共享 `{resource}`），均需 operator 起，手机档案不可用 |
+| 入口唯一 | 模型、档位预算、策略等配置的读写只有 §4.9 的 `/v1/settings/{resource}` 与 `/v1/projects/{project_id}/settings/{resource}`（另有只读的 `catalog`、`status`），均 operator 起（放宽类 / 凭据写入 approver），手机档案不可用 |
 | 工作路由拒绝配置字段 | 所有非 settings 路由的请求体 `additionalProperties: false`（§1.4）：消息里带 `model`、预算、策略字段 → `422`，而不是静默忽略 |
 | 工作路由只出运行状态 | `Delivery.level_cap` / `level_effective`、`BudgetLedger.used`、节点状态都是运行态；`BudgetLedger.limits` 只读展示，改预算只能经 settings |
 | 任务级档位不是配置 | `Message.level_cap`、`PATCH /deliveries` 的 `level_cap` 是**单个任务的上限**，由 architecture §7.2 / §8 明确允许在工作界面设置；与"档位模板的预算数值"（配置）区分 |
-| 项目字段 | `Project.settings_override` 不在 Project 表示里返回，`default_level` 在 Project 里只读，修改走 settings（OQ-3） |
-| 凭据 | 只写不读（§4.9），保证配置页以外无处暴露 |
+| 项目字段 | `Project.settings_override` 不在 Project 表示里返回，读写走 `/v1/projects/{project_id}/settings/{resource}`；`default_level` 在 Project 里只读，是 `levels.default_level` 的投影（OQ-3） |
+| 凭据 | 只写不读（§4.9），配置页以外无处暴露，设置文档里也只有 `secret_ref` / `present` |
 
 ---
 
@@ -1011,10 +1126,10 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 | --- | --- | --- | --- |
 | OQ-1 | 角色边界与新设备的初始角色：谁、如何指定（`gantry pair` 参数？首台设备是否自动 `approver`？）；各路由最低角色是本文按 design.md 推出的 | §2.2 表；`POST /v1/pair` 响应里直接给 `role` | modules/pki.md、全部路由的权限 |
 | OQ-2 | 手机端：角色无法表达"只做对话"，本文另设"客户端档案"；`platform` 取值集合；M4"默认不可审批"是否暗示可配置（与 D-11 的"只发消息"关系）；APNs 推送令牌的注册路由未定义 | 档案由 `platform=ios` 推出，固定 9 条路由；默认角色 `operator`；无推送令牌路由 | fe-mobile、notify、data-model Device |
-| OQ-3 | settings：`interfaces/config.md` 的 resource 划分、哪些可项目覆盖、凭据字段如何标注；`Project.default_level` 属于哪个 resource；改预算对**进行中**的交付单元是否生效 | resource 暂定 `models` / `levels` / `policies`；凭据只写不读，省略 = 保持；`value` 不展开 | config.md、engine、desktop-ui 设置页 |
-| OQ-4 | 事件目录缺口：全局设置变更（只有项目级的 `project.updated`）、设备改名 / 改角色、`approval.expired` / `consumed`、`inbox` 被 dismiss（只有 `inbox.resolved`）、对话创建 | 客户端靠 `412` / 重新拉取发现变化；改角色"产生事件"一栏标了缺口 | data-model §5.2、多客户端一致性 |
-| OQ-5 | 高权限写入是否要更高门槛：`policies` 可被 operator 改写，等于能放宽 I3 的放行策略；改设备角色、吊销设备是否也应当带设备签名（防会话劫持） | 按任务要求 `policies` 为 operator 起；改角色 / 吊销为 approver 起、不签名 | I3、policy、pki |
-| OQ-6 | 审批：`Approval.status` 缺 `consumed`（§4.4 有）；challenge / nonce 的存放位置与是否进事件日志；`action` 枚举（forge-actions.md）与各类 `target` 结构；无 head 的动作（改仓库设置等）`head_sha` 取什么；设备密钥算法（本文按 ES256）与"签名密钥 = TLS 密钥"；`deny` 是否也要签名；审批有效期默认值 | §6 全部按 ES256 + `merge` / PR 示例；`deny` 不签名；challenge 存放不规定 | policy、pki、forge-actions.md、data-model |
+| OQ-3 | settings 与 config.md 的衔接：config.md 的诉求 A1–A9 已在本文采纳（八个 resource、`dry_run`、`?rev=N`、语义错误码、`catalog` / `status`、`SecretRef` 语义、`settings.updated` 及其可见范围、写权限按内容判定、`default_level` 投影）。仍待定：(a) `Project.default_level` 改为 `levels.default_level` 的只读投影需要回写 data-model；(b) `catalog`、`status` 的响应结构由 config.md 补全；(c) resource 从任务清单点名的三个扩到八个，是否接受；(d) 没有专门的回滚 / 历史列表路由（读 `?rev=N` 再 `PUT`），设置页的"历史"如何列出版本 | 照 config.md 当前文本实现；(d) 暂以事件流中的 `settings.updated` 作历史来源 | config.md、data-model、desktop-ui 设置页 |
+| OQ-4 | 事件目录缺口：`settings.updated`（config.md §2.3 提议，须回写 data-model §5.2）；设备改名 / 改角色；`approval.expired` / `consumed`（forge-actions.md §14 也提出）；`inbox` 被 dismiss（只有 `inbox.resolved`）；对话创建 | 设置事件按 config.md 提议；其余缺口客户端靠重新拉取发现；改角色路由（§4.10）处标了缺口 | data-model §5.2、多客户端一致性 |
+| OQ-5 | 改设备角色、吊销设备是否也应带设备签名（防会话劫持）；settings 的放宽类写入已按 config.md §2.5 由内容判定为 approver（本文的路由下限仍是任务要求的 operator） | 改角色 / 吊销为 approver 起、不签名 | I3、policy、pki |
+| OQ-6 | 审批：`Approval.status` 缺 `consumed`（§4.4 有）；challenge / nonce 的存放位置与是否进事件日志；无 head 的预留动作（删分支、发 release、改仓库设置）`head_sha` 取什么（`merge_pr` 等已由 forge-actions.md §2.5 定义）；设备密钥算法（本文按 ES256）与"签名密钥 = TLS 密钥"；`deny` 是否也要签名；审批有效期默认值 | §6 全部按 ES256 + `merge_pr` / PR 示例；`deny` 不签名；challenge 存放不规定 | policy、pki、forge-actions.md、data-model |
 | OQ-7 | Conversation：ER 图是 Project 1:n Conversation，D-10 暗示每项目一个主对话；谁创建、有无"主对话"标记、`Conversation` 字段 | 只提供列表路由，对话由服务端在项目绑定时创建；表示里只有 `id` / `project_id` | conversation、桌面端项目 tab |
 | OQ-8 | 项目绑定 / 解绑（`project.added`）由什么触发：GitHub App 安装回调还是 API；Delivery 的调档 / 放弃是否应直达 API，还是只经对话意图 | 无绑定路由；调档、放弃提供直达路由（#7 #8） | forge、deploy、conversation |
 | OQ-9 | InboxItem：`payload` 按 `kind` 的结构、`severity` 枚举、需要用户做选择的 `decision_needed` 的选项如何表达、是否需要显式 resolve 路由 | 只有 dismiss；`payload` 与 `severity` 示例是示意 | notify、desktop-ui 收件箱 |
@@ -1024,3 +1139,4 @@ Gantry 审批（architecture §7.4）：用户用**设备私钥**对"动作 + �
 | OQ-13 | 事件：保留期与 `410 cursor_expired`；全局事件信封里 `project_id` 是否为 `null`；吊销断流 M1（心跳兜底）与 M3（即时）的拆分 | `project_id` 对全局事件为 `null`；保留不限 | store、api、milestones |
 | OQ-14 | §3.7 全部数值默认值（心跳、限流、TTL、体积上限、幂等保留） | 照表 | api 实现与限流配置 |
 | OQ-15 | Q-01（个人 / 团队）：骨架没有"用户"实体，主体就是 Device；若将来做团队，`actor`、角色、审计都要重做 | 主体 = Device | 全局 |
+| OQ-16 | **settings 写入的设备签名**：config.md §2.5 [提议] 放宽类写入需设备签名，带 secret `value` 的写入归 approver，是否也要签名未明；但签名放在哪个头 / 字段、签什么（`scope + resource + base_rev + 内容哈希`？）、规范化与域分隔前缀、首次写入（`base_rev = 0`）与凭据轮换如何防重放，两份文档都没定。M1 的"设置页·模型"要配置 provider 与凭据，所以这是 **M1 阻塞项** | 只定义了 `dry_run` 的 `requires_signature` 与 `403 signature_required`；不规定载体 | pki、policy、desktop-shell、config.md §2.5 |
