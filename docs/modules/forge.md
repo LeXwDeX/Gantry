@@ -274,7 +274,7 @@ flowchart LR
 
 ### 7.3 持久化
 
-`outbox` 表由 `store` 定义（字段见 data-model [OutboxAction](../data-model.md#outboxaction)），`forge` 经 `store` 的 Outbox 接口读写。下列为 `forge` 私有表，与事件日志同在一个 SQLite 数据库，**必须能与事件追加放进同一个事务**（`store` 提供事务句柄，F-OQ-3）。迁移文件放 `crates/gantry-forge/migrations/`。
+`outbox` 表由 `store` 定义（字段见 data-model [OutboxAction](../data-model.md#outboxaction)、store.md §7.2），`forge` 经 `OutboxTx` 读写。下列为 `forge` 私有表：通过 `forge::module_spec()` 向 `Store::open` 注册迁移（表名前缀 `forge_`，迁移文件放 `crates/gantry-forge/migrations/`），在 `WriteTx` 里经 `module_conn("forge")` 与事件追加、`outbox()` 放进**同一个事务**（store.md §7.10，OQ-4 的"提议"机制；未定稿前以 store.md 为准，F-OQ-3）。
 
 ```sql
 CREATE TABLE forge_webhook_inbox (
@@ -320,6 +320,8 @@ CREATE TABLE forge_project_state (
 - `dedup_key` 的唯一索引在 `store` 的事件表上（G1 兜底，F-OQ-3）。
 - `forge_webhook_inbox.body` 保留 `payload_retention`（7 天），`delivery_id` 保留 `dedupe_retention`（30 天）[自选]，到期只删载荷（FA §5.3）。
 - 内存中不持久的只有：令牌、读闸 / 写闸的瞬时计数、邮箱队列（可由 inbox 与快照重建）。
+- **大载荷**：store 只有一个写连接（FIFO），把最大 25 MB 的 `body` 直接放进写事务会拖慢所有写者（包括 `engine`）。载荷超过 `forge.webhook.inline_max_bytes`（默认 262144 [自选]）时，先 `Cas::put` 再在行里存摘要（`CasKind` 需要一个 webhook 载荷类别，F-OQ-3）；写事务内只做一次 `INSERT … ON CONFLICT DO NOTHING`。
+- **与 store 的恢复交互**：`Store::restore_from` 把 `restore_epoch` 加一（store.md §7.8）；恢复后 `forge` 启动全量对账（§7.13），`head_epoch` 按上条重建。
 
 ### 7.4 Webhook 接收流水线
 
@@ -334,6 +336,8 @@ CREATE TABLE forge_project_state (
 | 落盘 | `INSERT … ON CONFLICT(delivery_id) DO NOTHING`；`rows_affected = 1` → 202；`= 0` → 200（重复）；写盘失败 → 503（GitHub 不重试，靠对账与投递恢复补）|
 | 异步 | 落盘提交后才发响应；随后 `Notify` 唤醒分发器。**绝不**在响应前做回读 |
 | 路由提示 | 从载荷取 `installation.id`、`repository.full_name`、目标编号，仅用于选邮箱；`installation.id` 不属于任何 Project 且事件不是 `installation*` → 丢弃并计数 |
+
+落盘事务使用 `Store::begin_write()`（单写者、FIFO），必须极短（`write_tx_max_hold_ms` 内）：不在事务里解析 JSON、不做网络。写队列拥塞时 p99 < 1 s 的目标靠"事务短"保证，超时返回 503（FA §5.1 步骤 6）。
 
 分发器启动时扫描 `status ∈ {received, processing}` 与 `retry_at <= now` 的 `parked` / `failed` 行重新入邮箱（崩溃安全）。
 
@@ -422,35 +426,28 @@ stateDiagram-v2
   executing --> succeeded: probe 命中 / apply 成功
   executing --> queued: 可重试失败或限流（设 not_before；限流不计尝试）
   executing --> failed: 终态失败（追加 outbox.failed）
-  queued --> cancelled: cancel / 前置失败 / superseded / 预算停取
+  queued --> cancelled: cancel / 前置失败 / superseded（coalesce）
   executing --> cancelled: 执行前复核失败（approval_invalid）
   succeeded --> [*]
   failed --> [*]
   cancelled --> [*]
 ```
 
-**执行循环**（每个安装一个写任务）：
+**执行循环**（每个安装一个写任务；方法名取自 store.md §6.3 的 `OutboxTx`，每个方法在 `WriteTx` 里完成，事务内不做外部 IO）：
 
-1. `claim`：原子 `UPDATE … WHERE status='queued'`，取 `(priority, enqueued_at)` 最靠前、`not_before <= now`、`depends_on` 全部 `succeeded` 的一行；该行的 delivery 已 `budget.exhausted` → 跳过（保持 `queued`，不取，FA §2.7）。任一前置终态失败 → 本行 `cancelled`。设 `lease_until = now + lease`，执行中每 `lease/4` 续租。
-2. **前置检查**（任一失败不发网络请求）：权限仍满足（FA §9.5）；审批复核（FA §2.5 的 4 项，下表）；出站净化与密钥扫描（§7.11）；按交付单元的令牌桶与安装闸放行（§7.9，不放行则放回 `queued` 并设 `not_before`）。
-3. **probe**（存在性检查，每个 `kind` 的规则见 FA §3.2）：命中 → 补记 `github_ref`，直接 `succeeded`；`Conflict` → 终态 `precondition_failed(子码)`；未命中 → 继续。
-4. **预写预期效果**：把 `expected_effects` 写入动作行并同事务写 `forge_effect_index`（write-ahead，早于变更调用）。
+1. `claim(ClaimOpts{ lease, exclude_deliveries })`：store 在一个事务里选出 `(priority, enqueued_seq)` 最靠前、`not_before <= now`、`depends_on` 全部 `succeeded` 的一行（或租约已过期的 `executing` 行，`replay = true`），置 `executing`、写租约、`attempts += 1`（重放不加）、追加 `outbox.executing`。`exclude_deliveries` 由 `forge` 传入已 `budget.exhausted` 的交付单元（其行保持 `queued`，FA §2.7）。`claim` 前 store 自动 `cancel_blocked`（前置终态失败 → `cancelled(dependency_failed)`）。执行中每 `lease/4` 调 `renew_lease`。
+2. **前置检查**（任一失败不发网络请求）：权限仍满足（FA §9.5）；审批复核（见下文"执行点审批复核"，委托 `ApprovalGate::check_for_execution`）；出站净化与密钥扫描（§7.11）；按交付单元的令牌桶与安装闸放行（§7.9，不放行则 `requeue(not_before, refund_attempt = true)`）。
+3. **probe**（存在性检查，每个 `kind` 的规则见 FA §3.2）：命中 → 跳到第 6 步（补记 `github_ref`）；`Conflict` → 终态 `fail(Terminal)` 并带 `precondition_failed` 子码；未命中 → 继续。
+4. **预写预期效果**：`record_effects(id, effects)`（write-ahead，早于变更调用），**同一 `WriteTx`** 里经 `module_conn("forge")` 写 `forge_effect_index`。
 5. **apply**：变更调用，多步动作逐步各自 probe。
-6. **记录**（同一事务）：`github_ref` + `status=succeeded` + `forge_effect_index` 补对象 ID + 追加 `outbox.succeeded`。事务提交**之后**才调用 `ApprovalPort::consume`（幂等）；启动时扫描"已 `succeeded`、带 `requires_approval`、审批仍是 `granted`"的动作补做 `consume`（崩溃在两者之间的窗口）。
-7. 错误按 FA §2.6 分类；`transient` **先 probe 再重试**（超时意味着"结果未知"）；`token_expired` 换令牌立即重试一次；限流等待不消耗尝试次数（有 `rate_limit_max_waits` 上限）；终态失败追加 `outbox.failed` 且**不自行补救**。
+6. **消费审批，然后记录**：若 `requires_approval`，先 `ApprovalGate::mark_consumed(permit, act_id)`（幂等；崩溃在 apply 与此之间 → 重放时 `check_for_execution` 仍是 `granted`、probe 命中、补做消费；崩溃在消费与记录之间 → 重放时得到 `AlreadyConsumedBy(本动作)`，不被误取消，policy.md §6.5）；再 `complete(id, github_ref)`（`succeeded` + `outbox.succeeded` 同事务），同一 `WriteTx` 补写 `forge_effect_index` 的对象 ID。
+7. 错误按 FA §2.6 分类并映射到 `fail(id, err, AfterFailure::Terminal | Retry{not_before})`：`transient` **先 probe 再重试**（超时意味着"结果未知"）；`token_expired` 换令牌立即重试一次；限流等待用 `requeue(.., refund_attempt = true)`，不消耗尝试次数（有 `rate_limit_max_waits` 上限）；终态失败追加 `outbox.failed` 且**不自行补救**。
 
-**执行点审批复核**（FA §2.5，`requires_approval` 非空时每次尝试前做；`forge` 不验签）：
+**执行点审批复核**（FA §2.5；`forge` 不验签，`requires_approval` 非空时每次尝试前做）：`forge` 取得 GitHub 实时值后构造 `ExecutionCheck`，调用 `ApprovalGate::check_for_execution`——它核对 FA §2.5 的 4 项（审批 `granted` 且未过期；`action` / `target` 与 payload 一致；`merge_pr` 的 `subject_digest == expected_head_sha == live_head_sha`；`push_branch` 的分支、强推的摘要与 `expected_remote_oid`、路径审批的 `validation_ref`），并按**当前**规则重判（新规则为 `deny` 则阻止）。结果映射：`GateError::ApprovalInvalid` → `approval_invalid`（动作 `cancelled`）；`GateError::HeadChanged` → `precondition_failed(head_changed)`；`ExecutionPermit::AlreadyConsumedBy(.., 本动作)` → 视为通过（继续 probe）。
 
-| # | 复核项 | 不通过 |
-| --- | --- | --- |
-| 1 | Approval 存在、`status = granted`、未过期 | `approval_invalid`，动作 `cancelled` |
-| 2 | `approval.action` 与动作 `kind` 匹配，`target` 与 payload 一致 | 同上 |
-| 3 | `merge_pr`：`approval.subject_digest == payload.expected_head_sha == GitHub 实时 head`（执行前 `GET` PR） | `precondition_failed(head_changed)` |
-| 4 | `push_branch`：`target.branch == payload.branch`；`force=true` 时摘要与 `expected_remote_oid` 相符；命中需审批路径时 `subject_digest == payload.validation_ref` | `approval_invalid` |
+**I8 机械复核**（`push_branch` 执行点，**不论是否带审批**）：`RepoService::provenance(project, local_head_oid)` 必须返回 `CommitRecord`（即该提交只可能由 `repo.commit_patch` 在 `allow` 或已批准的 `needs_approval` 补丁上生成），且 `tree_oid == payload.expected_tree_oid`、`patch_sha256 == payload.validation_ref`（后者带 `sha256:` 前缀，比较前规范化）；非强推时 `parent == payload.expected_remote_oid`（首次推送为分支基线）。不符 → `fail(Terminal)` 带 `precondition_failed`，不推送。这使 `forge` 不必解释 `policies.*` 也能保证"推送的就是被校验过的那个对象"；"该不该推、要不要审批"由 `policy::decide_action` 在入队前判定（policy.md §6.1、§7.2 的 I8 前置）。
 
-**I8 机械复核**（`push_branch` 执行点，**不论是否带审批**）：`MirrorPort::commit_info(local_head_oid)` 的 tree 等于 `payload.expected_tree_oid`，且等于 `patch.validated`（`validation_ref`）记录的 `result_tree`；该记录的 `verdict` 为 `allow`，或为 `needs_approval` 且带匹配的 `granted` 审批；非强推时 parent 等于 `expected_remote_oid`。不符 → `precondition_failed`（不推送）。这使 `forge` 不必解释 `policies.*` 也能保证"推送的就是被校验过的那个对象"。
-
-**入队时的机械校验**（`enqueue`）：payload schema；`merge_pr` 必带 `requires_approval`；`push_branch` 的 `force=true` 或分支不以 `forge.push.branch_prefix` 开头必带 `requires_approval`；`add_labels` / `create_issue` 的标签前缀（`forge.labels.allowed_prefix`）；预留动作 → `UnsupportedKind`；动作所需权限缺失 → `PermissionMissing`。
+**入队时的机械校验**（`enqueue_in` / `enqueue`）：payload schema（core 的 payload 类型 `deny_unknown_fields`）；`merge_pr` 必带 `requires_approval`；`push_branch` 的 `force=true` 或分支不以 `forge.push.branch_prefix` 开头必带 `requires_approval`；`add_labels` / `create_issue` 的标签前缀（`forge.labels.allowed_prefix`）；预留动作（`delete_branch` `publish_release` `change_repo_settings`）在 `ActionPayload` 里没有对应类型，经字符串入口提交会在反序列化时失败；动作所需权限缺失 → `PermissionMissing`。
 
 **`upsert_status_comment` 渲染**：`forge` 把 `items[]` 渲染成 Markdown 勾选清单（`passed` → `- [x]`；其余状态 → `- [ ]` 加文字后缀"（进行中）""（失败）""（受阻）""（跳过）"，颜色 / 图标不得是唯一信息），标题取 `title`，末行追加 marker（`slot`）。渲染是纯函数，有黄金文件测试；`render_digest` = 渲染后正文（不含 marker）的哈希。
 
@@ -498,11 +495,11 @@ struct InstallationGate {
 
 ### 7.10 推送与镜像仓
 
-**`git` 传输**（默认，`forge.push.transport = git`）：
+**`git` 传输**（默认，`forge.push.transport = git`；先 `mirror_access(project, Push)` 取得守卫，要推送的提交在 `refs/gantry/*` 之下，对象在同一个 `git_dir`）：
 
 ```
 env: GIT_TERMINAL_PROMPT=0  GIT_CONFIG_NOSYSTEM=1  HOME=<空临时目录>  GIT_ASKPASS=<helper>  GANTRY_PUSH_TOKEN=<令牌>
-git -C <mirror> -c core.hooksPath=/dev/null push --porcelain [--force-with-lease=refs/heads/<b>:<expected>]
+git -C <guard.git_dir> -c core.hooksPath=/dev/null push --porcelain [--force-with-lease=refs/heads/<b>:<expected>]
     https://github.com/<owner>/<repo>.git  <local_head_oid>:refs/heads/<branch>
 ```
 
@@ -515,7 +512,9 @@ git -C <mirror> -c core.hooksPath=/dev/null push --porcelain [--force-with-lease
 
 **Workflows 权限**：App 不申请 `Workflows`（FA §9.2）。GitHub 会拒绝没有该权限的 App 令牌创建 / 更新 `.github/workflows/**` 的推送（需核实原文），因此"经 M2 审批后推送 workflow 改动"在当前权限设计下**无法成功**，推送会以 `permission_denied` 失败。这与 milestones M2 退出标准冲突，见 §13 F-OQ-1，**需用户决定后才能实现该路径**。
 
-**镜像仓拉取**（`mirror::sync`）：`MirrorPort::begin_fetch` 取得保护后，对镜像仓执行 `git fetch`（同样的环境变量注入，`core.hooksPath=/dev/null`），触发点：启动；`base_advanced`；`pr_opened` / `pr_synchronized`（含自己的推送，使 `repo` 能为 review / heal 准备候选 head）；`repo` 经 `Forge` 的显式请求（草案：`ForgeReader` 之外的 `request_mirror_sync`，F-OQ-4）。refspec 命名空间（`refs/heads/*` 还是 `refs/remotes/origin/*`、是否拉 `refs/pull/N/head`）由 `repo` 规格书定，本模块只执行（F-OQ-4）。拉取失败退避重试，**不阻塞** webhook 处理。
+**镜像仓拉取**（`mirror::sync`）：初次 clone 与之后的 fetch 都由 `forge` 执行（它持有令牌；`repo` 不联网，repo.md R1）。流程：`ensure_mirror`（幂等，建好布局）→ `mirror_access(project, Fetch)` 取得 `MirrorGuard`（共享锁，`repo` 的 `gc` / 重建持独占锁，拿不到就等）→ 在 `guard.git_dir` 上执行 `git fetch --prune <https url> <guard.fetch_refspecs>`（repo.md 草案 refspec 为 `+refs/heads/*:refs/mirror/heads/*`；同样的环境变量注入，`core.hooksPath=/dev/null`，`fetch.fsckObjects=true` 由镜像仓配置继承）→ 释放守卫。本地工作在 `refs/gantry/*`，上游快照在 `refs/mirror/*`，互不覆盖，所以 `--prune` 不会删未推送的本地提交。`check_mirror` 报 `NeedsRebuild` → `forge` 重新 clone。
+
+触发点：启动；`base_advanced`；`pr_opened` / `pr_synchronized`（含自己的推送，使 `repo` 能为 review / heal 准备候选 head）；`Forge::sync_mirror`（`engine` 因 `BaseNotInMirror` 请求，repo.md §9）。本项目不接收 fork PR（P-09），所以只拉 `refs/heads/*`，不需要 `refs/pull/N/head`。拉取失败退避重试，**不阻塞** webhook 处理。
 
 ### 7.11 出站文本净化与标记
 
@@ -584,7 +583,7 @@ pub trait TokenProvider {
 | `405` | `not_mergeable`；`mergeable` 仍在计算时短重试最多 3 次 × 2 s [自选] |
 | `422` | `validation_failed`（且 probe 证明对象不存在） |
 | 推送被签名规则拒绝 | 降级 `api` 传输，重试一次；仍失败 → `signature_required` 终态 |
-| 进程崩溃 | FA §2.3 矩阵：`executing` 行租约过期后重放，probe 命中则补记，不重复创建；inbox 行重放；未 `consume` 的审批补 `consume` |
+| 进程崩溃 | FA §2.3 矩阵：`executing` 行租约过期后由 `claim` 返回 `replay = true`，probe 命中则补记，不重复创建；inbox 行重放；审批消费靠 `mark_consumed` 幂等与 `AlreadyConsumedBy` |
 | 审批在执行前失效 | `approval_invalid`，动作 `cancelled` |
 | 安装被挂起 / 删除 / 仓库不可访问 | `installation_unreachable` drift + `installation_changed`；停该 Project 写路径，`unhealthy` |
 | 出现高危权限 / 缺权限 | 拒绝写路径并上报 / 关闭对应动作并上报，`installation.new_permissions_accepted` 后自动恢复 |
@@ -632,7 +631,7 @@ pub trait TokenProvider {
 
 ## 12. 测试与验收
 
-**替身**：`FakeGitHub`（本模块自建的 HTTP 级替身，见下）、`FakeRepo`（M0，镜像仓与提交）、`FakePolicy`（Approval 行与 `patch.validated` 记录）、`FakeSecrets`、`TestClock`（可拨快的时钟）、`MemStore`（`store` 的内存实现，F-OQ-14）、故障注入点（`fail` crate 或等价物）。`FakeForge`（M0）不用于测试本模块，而是**被**本模块的一致性测试约束（D 组）。
+**替身**：`FakeGitHub`（本模块自建的 HTTP 级替身，见下）、`FakeRepo`（M0，镜像仓与提交；`provenance` 可脚本化）、`ScriptedPolicy`（policy.md 的 `testing` feature：脚本化 `ApprovalGate` 与审批状态）、`FakeInbox`（notify.md M0 提议）、`FakeSecrets`、`TestClock`（可拨快的时钟）、`Store::open_temp`（崩溃类测试，子进程 + `SIGKILL`）/ `Store::open_in_memory`（其余，store.md §6.1；二者是 `be-engine` 在 M1 的交付，F-OQ-14）、故障注入点（`fail` crate 或等价物）。`FakeForge`（M0）不用于测试本模块，而是**被**本模块的一致性测试约束（D 组）。
 
 **`FakeGitHub`**：进程内 axum 服务，实现被测路径所需的 REST / GraphQL / git-http 子集，状态在内存里（仓库、分支、PR、评论、review、check、Issue、合并队列）；可注入：投递 webhook（自动签名，可重复、乱序、丢弃）、响应丢失（变更成功但连接断开）、`403 + retry-after`、`401`、`5xx`、延迟、"要求签名提交"规则、权限集合。milestones 的 M0 替身清单里没有它（F-OQ-14），由本模块在 M1 交付。
 
@@ -649,8 +648,8 @@ pub trait TokenProvider {
 - [ ] 丢弃一个 `pull_request.closed` 投递 → 巡检补发 `pr_merged(source=reconcile)` 并追加 `forge.synced`；`dedup_key` 与 webhook 路径一致（再投递原 webhook 不产生第二个事件）。
 - [ ] 人在 GitHub 上推了一个提交 → `forge.drift_detected(head_diverged)` + `pr_synchronized(origin=external)`。
 - [ ] 默认分支 `push` → `base_advanced`（含 `affected_prs`）；`gantry/` 分支的 `push` 在落盘前被丢弃。
-- [ ] `merge_pr`：审批 `subject_digest`、`payload.expected_head_sha`、GitHub 实时 head 任一不一致 → `precondition_failed(head_changed)`，**不发出变更请求**；审批已失效 → `approval_invalid` 且动作 `cancelled`；成功后才 `consume`，崩溃在两者之间 → 启动补 `consume`。
-- [ ] `push_branch` I8 机械复核：`local_head_oid` 的 tree 与 `patch.validated.result_tree` 不一致 → 不推送；`force=true` 或非 `gantry/` 前缀缺审批 → 入队被拒（`ApprovalRequired`）。
+- [ ] `merge_pr`：审批 `subject_digest`、`payload.expected_head_sha`、GitHub 实时 head 任一不一致 → `precondition_failed(head_changed)`，**不发出变更请求**；审批已失效 → `approval_invalid` 且动作 `cancelled`；GitHub 成功后才 `mark_consumed`；崩溃在"apply 之后、`mark_consumed` 之前"和"`mark_consumed` 之后、`complete` 之前"各注入一次 → 重放不重复合并，审批恰好被消费一次，动作终态 `succeeded`。
+- [ ] `push_branch` I8 机械复核：`provenance(local_head_oid)` 缺失、或其 `tree_oid` / `patch_sha256` 与 payload 的 `expected_tree_oid` / `validation_ref` 不一致 → 不推送；`force=true` 或非 `gantry/` 前缀缺审批 → 入队被拒（`ApprovalRequired`）。
 - [ ] webhook 先于 `github_ref` 记录到达 → 停放后正确归因为 `self`，不误判 `external`；`github_ref` 丢失但 `sender == bot` → `self_unattributed` + `orphan_effect`。
 - [ ] 注入二级限流 `403 + retry-after` → 该安装零请求直到到期，动作回 `queued` 且尝试次数不增；重启后仍在惩罚期内（持久化）。
 - [ ] 安装出现 `workflows` 权限 → 启动自检拒绝该 Project 写路径并上报；缺权限的动作入队即 `PermissionMissing`。
@@ -679,7 +678,7 @@ pub trait TokenProvider {
 
 ### D. 一致性测试（`FakeForge` 与真实 `Forge` 共用）
 
-- [ ] 同一套 `Forge` trait 一致性用例（幂等入队、`epoch`、`cancel` 语义、`upsert_status_comment` 合并、`reconcile_now` single-flight）分别跑在 `FakeForge` 与"真实 `Forge` + `FakeGitHub`"上，结果相同。
+- [ ] 同一套 `Forge` trait 一致性用例（`enqueue_in` 与调用方事务同提交 / 同回滚、幂等入队、`epoch`、`cancel` 语义、`upsert_status_comment` 合并、`reconcile_now` single-flight、`refresh_pr`）分别跑在 `FakeForge` 与"真实 `Forge` + `FakeGitHub`"上，结果相同。
 
 ## 13. 开放问题
 
@@ -689,18 +688,18 @@ pub trait TokenProvider {
 | --- | --- | --- | --- |
 | F-OQ-1 | **冲突**：milestones M2 退出标准要求"改动 `.github/workflows/` 的补丁签名批准后才提交推送"，但 FA §9.2 / §9.5 规定 App **不申请** `Workflows` 权限（出现即拒绝启动），而没有该权限的 App 令牌无法推送 workflow 文件改动（需核实）。需用户决定：给 App 加 `Workflows: write`（并改 FA §9.2 / §9.5 与审批类别）、改由人手动推送、或改 M2 退出标准 | `push_branch` 的 M2 审批路径、`policy` 路径规则审批 | 不实现该路径；推送会 `permission_denied` |
 | F-OQ-2 | GitHub 行为的"需核实"项汇总在 FA §13；本文新增的待核实点：GraphQL 在安装令牌下的字段可用性、`x-access-token` 用户名、Actions 日志下载的重定向与鉴权头、`GET /app/installations/{id}` 的返回结构、`refs/pull/N/head` 拉取、`merge_queue_enabled` 的探测方式 | M1–M2 | 均标"需核实"，spike 后定 |
-| F-OQ-3 | `store` 的事务接口：`forge` 私有表、事件追加、`outbox` 表能否在同一事务；事件表 `dedup_key` 唯一索引；原子 claim；事件订阅游标。`store` 规格书未成稿 | 崩溃点矩阵、G1 | 假定 `store` 提供事务句柄与上述能力 |
-| F-OQ-4 | `repo` 端口：`MirrorPort` 形状、拉取与 `repo` 的 gc / 清理如何协调、refspec 命名空间、`repo` 如何请求"现在拉取一次"、`commit_info` | 镜像、`push_branch` 复核 | §6 草案 |
-| F-OQ-5 | 依赖图缺口：`forge` 还依赖 `policy`（读审批、`consume`、读补丁校验记录）；`approval.consumed` 由 `forge` 通知 `policy` 追加还是 `forge` 直接追加；成功与 `consume` 无法同事务 | 模块地图、审批一致性 | 事务后 `consume`，启动补做 |
+| F-OQ-3 | `store` 的私有表 / 同事务 / `dedup_key` 唯一索引 / Outbox 原语已由 store.md 覆盖（§6.1、§6.3、§7.10），但其"模块私有表与投影器注册"标为 [提议]（store.md OQ-2、OQ-4）；仍缺：webhook 大载荷的 CAS 类别（`CasKind` 只有 `ResultBundle` `Artifact` `Progress` `Quarantine`）；单写者下落盘事务的排队延迟能否满足 p99 < 1 s | 崩溃点矩阵、G1、webhook 时延 | 按 store.md 实现；载荷超限入 CAS |
+| F-OQ-4 | `repo` 端口已由 repo.md §6.1 覆盖（`mirror_access`、`MirrorGuard`、`provenance`）。仍待定：`MirrorGuard` 的 refspec 是否包含 `refs/pull/*`（本文取不需要，P-09）；`engine` 因 `BaseNotInMirror` 请求拉取的入口（本文新增 `Forge::sync_mirror`）；repo OQ-R2（提交 OID 记录在哪个事件，`push_branch.local_head_oid` 的来源）| 镜像、`push_branch` | 如 §7.10 |
+| F-OQ-5 | 依赖图缺口：`forge` 还用 `policy` 的 `ApprovalGate`、`notify` 的 `Inbox`；policy.md 主张 `ApprovalGate` 放进 `core` 的端口模块（OQ-P2），core.md 尚未列出；审批消费由 `forge` 调 `mark_consumed` 完成，`approval.consumed` 由 `policy` 追加 | 模块地图、装配 | 经端口注入，无 crate 依赖 |
 | F-OQ-6 | FA 没有定义**读接口**（CI 日志、PR 改动文件、线程详情、check 注解、评论者权限）；`guardian` 需要前四项 | `guardian` M2 | §6 `ForgeReader` 草案，需契约 PR 写入 FA |
 | F-OQ-7 | `forge.synced` 的 `data` 形状（data-model 只有一句话） | `guardian` 对合并状态变化的响应 | §7.5 第 6 点提议 |
 | F-OQ-8 | **幂等键与状态评论**：`upsert_status_comment` 的 `intent` 只含 `render_digest`，状态 A→B→A 回到先前取值时同键命中旧的已成功行，评论会停在 B。调用方必须用单调递增的 `epoch` 区分（guardian 已采用），建议 FA §3.2 明示 | 状态评论正确性 | 调用方负责 `epoch` |
 | F-OQ-9 | `head_epoch` 是 forge 本地计数器且进入 `dedup_key`，但 architecture §6 说 PR 快照"不需要备份、可重建"：重建若从 0 开始会与历史事件撞键 | 备份恢复 | 重建取日志最大值（§7.3） |
 | F-OQ-10 | config.md §1.3 / FA §11 A 写 `forge` 读取 `policies.actions/paths` 以决定 `requires_approval`，与 I3、FA §1（"判断该不该做不归 forge"）有出入 | I3 的落点 | `forge` 不解释 `policies.*`，由 `engine` 向 `policy` 取判定；`forge` 做机械复核（§7.8） |
-| F-OQ-11 | `BudgetLedger.used.forge_writes` 由谁记账（FA §2.7 写"forge 记一笔"，但台账归 `engine`）；预算耗尽后哪些动作豁免（例如状态评论的最终更新）；`forge_writes_per_hour` 对运行中交付单元按当前值执行是否与 config §2.6"创建时固化"一致 | 预算 | `forge` 只发 `outbox.succeeded`，由 `engine` 记账；耗尽后一律不取 |
-| F-OQ-12 | 项目绑定（`project.added`）由谁触发（api.md OQ-8）；`bot_user_id` 如何取得；`forge` 的权限 / 健康问题经哪条路径上报（模块地图没有 `forge → notify` / 收件箱） | 部署、上报 | 假定 `forge` 追加 `inbox.raised`（`escalation`，`delivery_id=null`）并置模块健康 |
-| F-OQ-13 | 密钥扫描器归属（FA §2.4 / worker-protocol P9 称"同一扫描器"，未说明在哪个 crate） | 依赖方向 | 假定 `policy` 导出，`forge` 调用 |
-| F-OQ-14 | 测试替身缺口：M0 清单没有 HTTP 级的 `FakeGitHub`、也没有 `store` 的内存实现；本泳道与 `be-engine` 并行开发，缺 `MemStore` 无法独立测试 | 并行度 | 本模块自建 `FakeGitHub`；`MemStore` 请 `contract` / `be-engine` 在 M0 补 |
+| F-OQ-11 | 预算耗尽后哪些动作豁免（例如状态评论的最终更新）；`forge_writes_per_hour` 对运行中交付单元按当前值执行是否与 config §2.6"创建时固化"一致。（`BudgetLedger.used.forge_writes` 由 `engine` 观察 `outbox.succeeded` 后 +1，engine.md §7.4 表，已决）| 预算 | 耗尽后一律不取；按小时速率读当前值 |
+| F-OQ-12 | 项目绑定（`project.added`）由谁触发（api.md OQ-8）；`bot_user_id` 如何取得；`forge` 的权限 / 不可达问题经 `Inbox::raise`（notify.md 的调用方清单含 `forge`）上报，`kind = escalation`、`delivery_id = null`、`dedupe_key` 形如 `esc:{project}:forge_permission:{perm}`，是否合适 | 部署、上报 | 如左 |
+| F-OQ-13 | 密钥扫描器归属：FA §2.4 / worker-protocol P9 称"同一扫描器"；repo.md OQ-R8 假定 `policy.scan_text`，policy.md OQ-P3 假定放 `core`，二者未对齐 | 依赖方向 | 经 `core` 或 `policy` 导出，`forge` 调用 |
+| F-OQ-14 | 测试替身缺口：M0 替身清单没有 HTTP 级的 `FakeGitHub`；`Store::open_in_memory` / `open_temp`（store.md）与 `ScriptedPolicy`（policy.md）都不在 M0 清单里，且 `store` 属 `be-engine` 的 M1 交付，与本泳道并行，M1 初期可能取不到 | 并行度 | 本模块自建 `FakeGitHub`；其余建议并入 M0 清单 |
 | F-OQ-15 | data-model §4.3 把 `failed` 同时当"可重试"和终态（FA §14.1 已记）；`outbox.failed` 事件是否包含可重试失败 | 事件消费方 | 仅终态发 `outbox.failed`；重试只更新 `last_error` / `attempts` |
 | F-OQ-16 | `review_state` 在仓库没有"必需 review"规则时 `reviewDecision` 为空；`required_ok` 在 required 信息不可得时的口径 | `guardian` 的"已审批"判定、合并闸门 | §7.5 第 1、7 点的保守口径 |
 | F-OQ-17 | FA §4.2 示例里 `expected_effects[].matched_delivery_ids` 装的是 `X-GitHub-Delivery` 的 GUID，名字易与 `dlv_` 混淆 | 命名 | 实现中改用 `matched_webhook_guids`，契约 PR 再对齐 |

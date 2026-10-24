@@ -14,7 +14,7 @@
 - **自触发循环防护**：忽略 `origin = self | self_unattributed` 的事件，按指纹与预算限制"推送 → CI 失败 → 修复 → 推送"。
 - **已审批 PR 不得静默推送**：以 `PushGate` 为唯一出入口，冻结期内任何需要推送的问题一律上报（`push_after_approval`）。
 - **单条可编辑的状态清单评论**：根据结构化事实渲染数据，经 `upsert_status_comment`（`slot = delivery_status`）维护 PR 上唯一一条清单，节流到 `guardian.status_checklist.min_update_interval_s`。
-- **上报**：构造 InboxItem（`security_finding` / `escalation` / `budget_exhausted`）与对话事件行；不重复上报同一问题。
+- **上报**：经 `notify` 的 `Inbox::raise` 写 InboxItem（`security_finding` / `escalation` / `budget_exhausted`），按去重键不重复上报同一问题；对话里的事件行与卡片由 `conversation` 据 `inbox.raised` 与审计事件渲染，守护不直接写对话。
 - **审计**：每个非平凡处置落一条可回放的记录（§7.10），"静默"不等于"不可追溯"。
 - **善后**：消费自己动作的失败与 drift（如状态评论被删、推送因 head 移动被拒），转为重新评估而不是重试。
 
@@ -48,13 +48,14 @@
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
 | `forge` | 经 `store` 订阅 `forge.*`（含 `forge.synced`、`forge.drift_detected`）；`Forge::enqueue` / `cancel`；`ForgeReader::{ci_log, changed_files, review_thread, check_annotations}` | FA §6、§2、§3；forge.md §6（读接口草案，FA 未定义，forge.md F-OQ-6） |
-| `engine` | `HealRunner`（派发 `heal`、取结果、取消）、`ClassifyRunner`（派发 `classify` 节点，计入预算）、台账与交付单元事实 | architecture §8–§9；worker-protocol §4.3、§6.2、§8；本文 §6（端口草案，G-OQ-2） |
-| `policy` | `PathRules`（对一组路径求值 `policies.paths`，是路径规则的唯一实现）、Approval 状态读取、补丁校验结论 | config.md §5.2；api.md §6；data-model §4.4 |
-| `store`（**地图未列**） | 事件订阅与游标、投影读（Delivery / PullRequestRef / BudgetLedger / Approval / InboxItem / Worktree）、追加 `guardian.*` / `inbox.raised` / `message.posted`、事务 | data-model §3、§5；architecture §4 |
-| `core`（**地图未列**） | ID、`ForgeEvent`、`Level`、`UntrustedText`、`Ref`、`EffectiveSettings`；纯函数共享类型 | data-model §1 |
+| `engine` | `EngineApi::request_heal(HealRequest) -> HealTicket`（派发 `heal` 节点；`rounds` + 1、写权锁持有者记为 `guardian`、不改 `stage`、不自动推送）；取愈合结果与取消（engine.md 未定义，G-OQ-2）；`classify` 辅助调用的入口（engine.md §7.9 称辅助调用不是图节点、不占 `nodes`，但 `EngineApi` 没有对外入口，G-OQ-2）| [engine.md §6、§7.9、OQ-16](engine.md)；worker-protocol §4.3、§6.2、§8；本文 §6 |
+| `policy` | `ActionPolicy::decide_action`（每次入队前判定 `push_branch` / `reply_review_thread` / `resolve_review_thread`，返回 `Allow{approval?}` / `NeedsApproval` / `Deny`）、`live_approvals_for_pr`（冻结判定的审批来源）、`PatchPolicy::path_rules_snapshot` + 导出的 `PathMatcher`（对一组路径求值 `policies.paths`，路径规则的唯一实现）| [policy.md §6.1、§6.2、§7.2](policy.md)；config.md §5.2；api.md §6；data-model §4.4 |
+| `notify` | `Inbox::raise`（`RaiseRequest{ kind, severity, summary: SafeSummary, payload, dedupe_key, supersedes, actor }`）与 `Inbox::resolve`（M4 前不用）；去重键模板见 notify.md §7.2 | [notify.md §6.1、§7.2](notify.md) |
+| `store`（**地图未列**）| 事件订阅与游标（`Cursors`）、投影读（Delivery / PullRequestRef / BudgetLedger / InboxItem / Worktree）、追加 `guardian.*`（经 `WriteTx::append`）、`ModuleSpec{module: "guardian", migrations, projector}` 注册自己的 `guardian_pr_state` 投影器 | [store.md §6.1、§7.10](store.md)；data-model §3、§5；architecture §4 |
+| `core`（**地图未列**） | ID、`ForgeEventEnvelope` / `ForgeEventKind`、`Level`、`UntrustedText`、`Ref`、`EffectiveSettings`；纯函数共享类型 | data-model §1；[core.md §6.6](core.md) |
 | 设置 | `guardian.triage.*`、`guardian.no_progress.*`、`guardian.status_checklist.*`、`policies.paths`（只读；热加载，config.md §2.6） | config.md §6、§5.2 |
 
-`models` 不直接依赖：`classify` 经 `engine` 作为 `classify` 节点运行（architecture §9 角色表、Node.role 含 `classify`），因而计入交付单元预算。`notify` 不直接依赖：上报写成事件，由 `notify` 消费。以上与 [architecture §4](../architecture.md#4-模块地图) 的"guardian 依赖 engine, forge, policy"有出入，见 G-OQ-18。
+`models` 不直接依赖：`classify` 是 `engine` 的"辅助调用"（经 `models.invoke_direct`，用量记 `budget.charged`，`source = aux`，engine.md §7.9），守护只经 `engine` 使用。`conversation` 不被调用：它订阅 `guardian.triaged` / `inbox.raised` 生成事件行与卡片（conversation.md §7.7，注册表需新增 guardian 行，G-OQ-13）。以上与 [architecture §4](../architecture.md#4-模块地图) 的"guardian 依赖 engine, forge, policy"有出入（多了 `store`、`core`、`notify`），见 G-OQ-18。
 
 ## 4. 输入
 
@@ -77,10 +78,10 @@
 | 输出 | 去向 | 格式 / 契约 |
 | --- | --- | --- |
 | `HealRequest` | `engine` | §6；幂等于 `round_id` |
-| Outbox 入队 | `forge` | `push_branch`（FA §3.3 ①）、`upsert_status_comment`（④）、`reply_review_thread`（⑥）、`resolve_review_thread`（⑦）；`enqueued_by = {module: "guardian", causation_id}`；**不**入队 `merge_pr`、`create_comment`（见 G-OQ-8 的 `rerun_failed_jobs`） |
-| 取消 | `forge` / `engine` | `Forge::cancel`（排队中的守护推送）；`HealRunner::cancel`（进行中的愈合轮） |
-| `inbox.raised` | `store` → `notify` / `api` | InboxItem（`security_finding` / `escalation` / `budget_exhausted`），payload 见 data-model [InboxItem](../data-model.md#inboxitem--approval)；`reason_code` 取 §7.9 |
-| `message.posted`（`role = event`） | 项目主对话 | 折叠显示的后台事件行；文案用模板 + `Ref`，**不内联外部文本** |
+| Outbox 入队 | `forge` | `Forge::enqueue`（自开事务，守护没有要与入队原子绑定的其他状态变化；审计事件另在 `guardian_pr_state` 事务里追加）：`push_branch`（FA §3.3 ①）、`upsert_status_comment`（④）、`reply_review_thread`（⑥）、`resolve_review_thread`（⑦）；`enqueued_by = {module: "guardian", causation_id}`；入队前先 `ActionPolicy::decide_action`；**不**入队 `merge_pr`、`create_comment`（`rerun_failed_jobs` 见 G-OQ-8）|
+| 取消 | `forge` / `engine` | `Forge::cancel`（排队中的守护推送）；`HealPort::cancel`（进行中的愈合轮） |
+| 上报项 | `notify`（`Inbox::raise` 追加 `inbox.raised`）| InboxItem（`security_finding` / `escalation` / `budget_exhausted`），payload 见 data-model [InboxItem](../data-model.md#inboxitem--approval)；`reason_code` 取 §7.9 |
+| 对话事件行 | 不由守护写：`conversation` 订阅 `guardian.triaged` 渲染（模板 + `Ref`，**不内联外部文本**）| conversation.md §7.7 |
 | `guardian.triaged` / `guardian.round_started` / `guardian.round_finished` | `store` | **本文提议的审计事件**，尚不在 data-model §5.2 目录（G-OQ-1），形状见 §7.10 |
 | 指标与日志 | 运维 | §11 |
 
@@ -144,22 +145,27 @@ pub struct TriageInput<'a> {
 pub enum Classification { Ci(CiClassification), Finding(FindingTriage) }
 pub enum Progress { Improved, Stalled, Done /* 失败集合为空 */ }
 
-// ---------- 守护需要其他模块提供的端口 ----------
-#[async_trait] pub trait HealRunner: Send + Sync {            // engine 实现
-    async fn start_heal(&self, req: HealRequest) -> Result<HealHandle, HealStartError>; // 幂等于 req.round_id
-    async fn outcome(&self, round: &RoundId) -> Result<Option<HealOutcome>, HealError>;
-    async fn cancel(&self, round: &RoundId, why: CancelWhy) -> Result<(), HealError>;
+// ---------- 守护使用的外部端口 ----------
+// 已在对方规格书里定义的（此处不重新定义）：
+//   Forge / ForgeReader     forge.md §6（enqueue、cancel、reader().ci_log / changed_files / review_thread / check_annotations）
+//   ActionPolicy            policy.md §6.1（decide_action、live_approvals_for_pr）
+//   Inbox                   notify.md §6.1（raise、resolve）
+//   Store / WriteTx         store.md §6.1（事件订阅、guardian_pr_state 投影器、guardian.* 追加）
+// 需要对方补充的（G-OQ-2）：
+#[async_trait] pub trait HealPort: Send + Sync {              // engine 实现
+    /// = EngineApi::request_heal（engine.md §6）。幂等于 req.round_id；预算（rounds + 1）、JobSpec、
+    /// 工作树写权锁（holder = guardian）、终结管线归 engine；不自动入队 push_branch / proposals。
+    async fn request_heal(&self, req: HealRequest) -> Result<HealTicket, EngineError>;
+    /// engine.md 未定义：取已终结的愈合结果（聚合 attempt.finished、patch.validated / rejected、proposals 判定）。
+    async fn outcome(&self, ticket: &HealTicket) -> Result<Option<HealOutcome>, EngineError>;
+    async fn cancel(&self, ticket: &HealTicket, why: CancelWhy) -> Result<(), EngineError>;
 }
-#[async_trait] pub trait ClassifyRunner: Send + Sync {        // engine 实现（classify 节点，计入预算）
+#[async_trait] pub trait ClassifyPort: Send + Sync {          // engine 实现（辅助调用，经 models.invoke_direct）
     async fn classify_ci(&self, req: CiClassifyRequest) -> Result<CiClassification, ClassifyError>;
     async fn classify_finding(&self, req: FindingClassifyRequest) -> Result<FindingTriage, ClassifyError>;
 }
-#[async_trait] pub trait FactsSource: Send + Sync {           // store 投影实现
+#[async_trait] pub trait FactsSource: Send + Sync {           // store 投影 + policy::live_approvals_for_pr
     async fn delivery_facts(&self, id: &DeliveryId) -> Result<DeliveryFacts, FactsError>;
-}
-#[async_trait] pub trait Reporter: Send + Sync {              // store 实现，追加事件
-    async fn raise_inbox(&self, r: RaiseRequest) -> Result<InboxId, ReportError>;   // 幂等于 r.dedupe_key
-    async fn post_event_line(&self, project: &ProjectId, delivery: &DeliveryId, line: EventLine) -> Result<(), ReportError>;
 }
 ```
 
@@ -188,7 +194,7 @@ pub enum HealOutcome {
 }
 ```
 
-约定：`HealRunner` 返回**已校验**的结果后，由 `guardian` 决定是否入队推送与回复——`engine` 不为 `heal` 节点自动入队 `push_branch` / proposals（否则无法在推送前做冻结复核）。
+约定：`HealPort::outcome` 返回**已校验**的结果后，由 `guardian` 决定是否入队推送与回复——`engine` 不为 `heal` 节点自动入队 `push_branch` / proposals（否则无法在推送前做冻结复核；engine.md `request_heal` 的注释与 OQ-16 同此）。`HealRequest.head_sha` 必须等于该交付单元工作树分支头，否则 `repo` 报 `BaseMoved`（P10）；外部推送后分支头与 GitHub 的对齐（`repo.advance_head`，repo.md OQ-R10）由 `engine` 在 `request_heal` 内完成还是守护先调用，见 G-OQ-10。`materials`（CI 日志、评论文本）由守护经 `ForgeReader` 取得后随请求交给 `engine`——engine 不依赖 `forge` 的读接口（engine.md §3、OQ-10）。
 
 ## 7. 内部设计
 
@@ -198,10 +204,10 @@ pub enum HealOutcome {
 flowchart LR
   ST[("store<br/>forge.* · approval.* · outbox.* …")] --> DSP["dispatcher<br/>按 delivery_id 路由 · 游标"]
   DSP --> A["PrActor（每 PR 一个）<br/>F 过滤 → triage → 入场闸"]
-  A --> CL["ClassifyRunner<br/>(engine)"]
-  A --> HR["HealRunner<br/>(engine → sandbox → repo → policy)"]
+  A --> CL["ClassifyPort<br/>(engine → models)"]
+  A --> HR["HealPort<br/>(engine → sandbox → repo → policy)"]
   A -- "push_branch · upsert_status_comment<br/>reply/resolve" --> FG["Forge::enqueue"]
-  A -- "inbox.raised · message.posted<br/>guardian.*" --> ST
+  A -- "Inbox::raise → inbox.raised<br/>guardian.*" --> ST
   FG --> GH["GitHub"]
   GH -- "webhook / 对账" --> FO["forge"]
   FO --> ST
@@ -220,7 +226,7 @@ sequenceDiagram
   G->>E: classify_ci（日志经 ForgeReader.ci_log）
   E-->>G: ci_failure_in_scope（in_pr_scope, confidence≥medium）
   G->>G: 入场闸 A1–A6 通过 → 落盘 guardian.round_started
-  G->>E: start_heal(round_id, head, scope_allow, 材料)
+  G->>E: request_heal(round_id, head, scope_allow, 材料)
   E-->>G: Patched(allow, commit, patch_sha256)
   G->>G: PushGate 复核（仍 Open）
   G->>OB: push_branch(expected_remote_oid = 轮基线 head) + upsert_status_comment
@@ -234,12 +240,12 @@ sequenceDiagram
 - **dispatcher**：一个任务，从 `store` 按游标顺序读事件，按 `delivery_id` 路由到该交付单元的 actor 邮箱；游标与该事件引起的 `guardian.*` 事件在同一事务推进（至少一次投递 + `dedup_key` 幂等，FA §6.1 G5）。无 `delivery_id` 的事件（如 `installation_changed`）广播给该项目的全部 actor。
 - **PrActor**：每个"有 PR 的非终态交付单元"一个 tokio 任务，邮箱串行处理，因此同一 PR 同一时刻只有一个愈合轮；不同 PR 之间并行，全局并发由 `engine` 的预算与沙盒调度限制，守护自己不设全局锁。
 - **定时器**：结算窗口、状态清单节流、`awaiting_ci_max_wait`，都在 actor 内以 `tokio::time` 驱动，时钟可注入（测试）。
-- **崩溃恢复**：actor 状态可由 `guardian.*` 事件与投影重建（§7.10）。启动时对每个 `guardian.round_started` 而无 `round_finished` 的轮：查 `engine`（`outcome`）→ 已有结果则继续决策；尚未开始则幂等地 `start_heal`；基线 head 已变则作废。
-- **顺序约束**：先落盘（`guardian.triaged` / `round_started` + 游标），**后**产生副作用；所有副作用幂等（`start_heal` 幂等于 `round_id`；Outbox 幂等键由确定性 intent 派生）。
+- **崩溃恢复**：actor 状态可由 `guardian.*` 事件与投影重建（§7.10）。启动时对每个 `guardian.round_started` 而无 `round_finished` 的轮：查 `engine`（`outcome`）→ 已有结果则继续决策；尚未开始则幂等地 `request_heal`；基线 head 已变则作废。
+- **顺序约束**：先落盘（`guardian.triaged` / `round_started` + 游标），**后**产生副作用；所有副作用幂等（`request_heal` 幂等于 `round_id`；Outbox 幂等键由确定性 intent 派生）。
 
 ### 7.3 分流决策表
 
-**求值方式**：每个事件先过 §7.3.2 的前置过滤（有序，首个命中即止），再在 §7.3.3 的有序规则表里取**首个命中**的规则；规则内"条件"是全部满足。凡同时满足上报类与静默类的情形，表中**上报规则排在前面**（"上报优先于静默"）；落入 `silent_fix` / `silent_reply` 候选的，必须再通过 §7.3.5 的入场闸才真正开始，闸不通过则按闸的类上报或延后。表中所有**上报**一律写 InboxItem + 事件行 + 审计记录（`engine` / `policy` 已为同一事项写过 InboxItem 的情形，如 H-05、T-07，只记录、不重复写）；所有**静默**处置一律写事件行 + 审计记录。
+**求值方式**：每个事件先过 §7.3.2 的前置过滤（有序，首个命中即止），再在 §7.3.3 的有序规则表里取**首个命中**的规则；规则内"条件"是全部满足。凡同时满足上报类与静默类的情形，表中**上报规则排在前面**（"上报优先于静默"）；落入 `silent_fix` / `silent_reply` 候选的，必须再通过 §7.3.5 的入场闸才真正开始，闸不通过则按闸的类上报或延后。表中所有**上报**一律 `Inbox::raise` 写 InboxItem + 审计事件（`engine` / `policy` 已为同一事项写过 InboxItem 的情形，如 H-05、T-07，只审计、不重复写；`notify` 的 `dedupe_key` 兜底）；所有**静默**处置一律写审计事件。对话里的事件行由 `conversation` 渲染。
 
 #### 7.3.1 谓词
 
@@ -381,7 +387,7 @@ K-06..K-13 的求值有成本顺序：K-06/K-07/K-08/K-09 只用结构化字段�
 
 | 规则 | 触发 | 条件 | 处置 |
 | --- | --- | --- | --- |
-| T-01 | `approval.granted` | 目标为本 PR（`merge_pr`，或本分支的 `push_branch`） | 重算 `PushGate` → `Frozen`；`Forge::cancel` 本守护排队中的 `push_branch`；`HealRunner::cancel` 进行中的轮（`superseded: frozen`）。已在 `executing` 的推送无法取消，其残余风险由 I3 的执行点复核兜底（§8）|
+| T-01 | `approval.granted` | 目标为本 PR（`merge_pr`，或本分支的 `push_branch`） | 重算 `PushGate` → `Frozen`；`Forge::cancel` 本守护排队中的 `push_branch`；`HealPort::cancel` 进行中的轮（`superseded: frozen`）。已在 `executing` 的推送无法取消，其残余风险由 I3 的执行点复核兜底（§8）|
 | T-02 | `approval.invalidated` / `expired` / `denied` / `consumed` | — | 重算 `PushGate`；若转为 `Open`，重新评估被延后 / 被上报抑制的问题 |
 | T-03 | `delivery.stage_changed` | 进入 `review` | 建立 / 恢复守护 |
 | T-04 | `delivery.stage_changed` | 进入 `merge` | `Frozen`（阶段即冻结）|
@@ -402,7 +408,7 @@ K-06..K-13 的求值有成本顺序：K-06/K-07/K-08/K-09 只用结构化字段�
 | 闸 | 条件（不通过） | 结果 |
 | --- | --- | --- |
 | A1 | `push_gate = Frozen` | `escalate` `push_after_approval` |
-| A2 | 预算不足：`used.rounds ≥ limits.rounds`，或 worker 层 token / `nodes` / `wall_time` / `forge_writes` 已耗尽（读 `BudgetLedger`，含本轮预计要新增的 `classify` + `heal` 两个节点）| `escalate` `budget_exhausted`（InboxItem `budget_exhausted`，`{dimension, limit, used}`；`engine` 已写则不重复）|
+| A2 | 预算不足：`used.rounds ≥ limits.rounds`，或 worker 层 token / `nodes` / `wall_time` / `forge_writes` 已耗尽（读 `BudgetLedger`，含本轮预计新增的一个 `heal` 节点；`classify` 是辅助调用，不占 `nodes`）| `escalate` `budget_exhausted`（InboxItem `budget_exhausted`，`{dimension, limit, used}`；`engine` 已写则不重复）|
 | A3 | 重复：任一待愈合指纹 `attempts[fp] ≥ same_class_repeats − 1`；或无进展：`stalled_rounds ≥ no_progress.stalled_rounds` | `escalate` `repeated_or_no_progress`（`guardian.repeated_problem` / `guardian.no_progress`）|
 | A4 | 交付单元暂停，或 `stage_status ∈ {waiting_human, blocked}` | `defer(paused)`；状态变化后重评 |
 | A5 | 该 PR 分支的工作树写锁被 `human` 或 `engine` 持有 | `defer(lock_held)`；`worktree.unlocked` 后重评 |
@@ -430,6 +436,8 @@ K-06..K-13 的求值有成本顺序：K-06/K-07/K-08/K-09 只用结构化字段�
 | H-14 | `Failed{其他}`（`engine` 重试耗尽后） | `unknown` | `escalate` `guardian.heal_failed`，并计一次无进展轮 |
 | H-15 | `Cancelled` / `Superseded` | — | 丢弃，重新评估 |
 
+**入队前的策略判定**：H-02、H-03、H-09 里的每一个入队动作（`push_branch`、`reply_review_thread`、`resolve_review_thread`、`upsert_status_comment`）之前，守护先用 `ActionPolicy::decide_action` 取判定：`Allow{approval}` → 把 `approval` 填进 `requires_approval` 再入队；`NeedsApproval` → 不入队，`escalate`（已有 `pending` 审批则只审计）；`Deny` → 不入队，`unknown` → `escalate`，`reason_code = guardian.action_denied`（附 `DenyReason`）。这是 I3 的要求：放行只由 `policy` 判定，守护不自行放行。
+
 ### 7.4 愈合轮（round）状态机
 
 ```mermaid
@@ -440,7 +448,7 @@ stateDiagram-v2
   Admitting --> Escalated: 闸 A1–A3 不通过
   Admitting --> Deferred: 闸 A4–A6
   Deferred --> Admitting: 状态变化（恢复 / 解锁 / 轮结束）
-  Admitting --> Healing: 落盘 round_started，HealRunner.start_heal
+  Admitting --> Healing: 落盘 round_started，HealPort.request_heal
   Healing --> Deciding: HealOutcome
   Deciding --> Escalated: H 规则判上报
   Deciding --> Pushing: Patched(Allow) 且 Open 且 cfg 允许
@@ -455,7 +463,7 @@ stateDiagram-v2
 ```
 
 - **一个 PR 同一时刻至多一个轮**（A6）。轮期间到达的新问题并入待处理集合（去重指纹），轮结束后统一评估。
-- **批（batch）**：`nit` 与 F-06 进入 `batch`，只在**下一次愈合轮**随任务一并交给 `heal`（`HealTask::NitBatch` 部分）；守护不为 nit 单独开轮。PR 终态时仍留在批里的 nit 写入收尾事件行，不再处理。无后续推送时的冲刷时机见【G-OQ-11】。
+- **批（batch）**：`nit` 与 F-06 进入 `batch`，只在**下一次愈合轮**随任务一并交给 `heal`（`HealTask::NitBatch` 部分）；守护不为 nit 单独开轮。PR 终态时仍留在批里的 nit 记入收尾的审计事件，不再处理。无后续推送时的冲刷时机见【G-OQ-11】。
 - **推送的比较并交换（CAS）**：`push_branch.expected_remote_oid` = 轮基线 head，`local_head_oid` = `HealOutcome.commit`，`force = false`。远端已被他人推进 → `forge` 返回 `precondition_failed(remote_diverged)` → T-10，不覆盖对方。
 - **材料**：CI 日志经 `ForgeReader::ci_log` 取得（`UntrustedText`，有大小上限并标 `truncated`），与评论 / 线程文本一起以 `Material` 交 `engine`，由 `sandbox.stage` 按 worker-protocol §4.4 加隔离标记写入沙盒；守护自己**不**把外部文本拼进任何 prompt。
 - **范围**：`scope_allow` = PR 的改动文件集合（`ForgeReader::changed_files`，对 base 的 diff），映射到 JobSpec 的 `constraints.paths.allow`；补丁越界由 `policy` P8 拒绝（`policy.path_outside_allow`），守护把它映射为 `scope_expanding_fix`（H-07）。"范围"的度量是否过严见【G-OQ-9】。
@@ -469,7 +477,7 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 
 `Frozen` 当且仅当以下任一成立（【G-OQ-5】：架构只说"已审批"，本文取保守的并集）：
 
-1. 存在本交付单元的 Approval（目标为本 PR 或其分支）`status = granted`；
+1. `ActionPolicy::live_approvals_for_pr(repo, number)` 返回的审批里存在 `status = granted` 者（目标为本 PR 或其分支）；
 2. `PullRequestRef.review_state = approved`（forge.md §7.5 第 7 点的保守口径，任何人的 approve 都算）；
 3. `Delivery.stage = merge`（`review → merge` 意味着评审通过且 CI 通过，随后请求 Gantry 审批，`pending` 也落在这里）；
 4. `PullRequestRef.in_merge_queue = true`。
@@ -502,7 +510,7 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 5. **单轮串行**：A6 保证同一 PR 同时只有一个轮；轮期间的新问题不另开轮。
 6. **回复只发一次**：同一 `(thread, fingerprint)` 至多一次 `reply_review_thread`（键含指纹；`bot_finding_invalid` 的 bot 再次发同类 finding → 指纹重复 → 上报，而不是再回复）。
 7. **状态评论不触发自己**：清单更新是 `origin = self` 的 `issue_comment`，被 PF-5 吞掉；人编辑了清单评论是 `external` 的 `issue_comment`（C-02，`noop`），守护下次渲染覆盖它；节流（`min_update_interval_s`）与 `forge` 的"正文哈希相同则空操作"共同避免编辑风暴。
-8. **文本零回流**：守护写出的任何文本（清单、事件行、回复模板）都由结构化事实生成，不含外部原文（I5）；`forge` 另有出站净化，兜底再挡 `/gantry` 之类命令串（FA §2.4）。
+8. **文本零回流**：守护写出的任何文本（清单、回复模板、`InboxItem.summary`）都由结构化事实生成，不含外部原文（I5）；`forge` 另有出站净化，兜底再挡 `/gantry` 之类命令串（FA §2.4）。
 
 ### 7.8 状态清单评论
 
@@ -533,7 +541,8 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 
 - `severity` 的取值是本文提议（data-model 只给了枚举）。`summary` 由模板生成，不含外部文本；外部字符串（check 名、评论标题）只放在 `UntrustedText` 字段里。
 - **去重**：同一去重键在已有 `open` 的 InboxItem 时不再新建，只在审计里记一次"抑制重复"；`resolved` / `dismissed` 之后再出现则重新上报。写入前查 open 的 InboxItem 投影，避免与 `engine` / `policy` 已写的项（如 `approval_needed`、`budget_exhausted`）重复。
-- 每次上报同时写一条 `message.posted`（`role = event`，模板文案 + `Ref`）。自动 resolve 已消除条件的项【G-OQ-14】：默认不做，由用户 dismiss。
+- **去重键**取 notify.md §7.2 的模板：`escalation` → `esc:{delivery_id}:{reason_code}:{target}`（`target` 为 PR、检查 / 线程的稳定标识或补丁 sha256，不含行号）；`security_finding` → `sec:{repo}:{finding 来源 Ref}:{category}:{标题哈希}`；`budget_exhausted` → `budget:{delivery_id}:{dimension}`。同一键已有 `open` 项时 `Inbox::raise` 返回 `Deduped`，不产生事件、不重复通知；守护据此只记一次"抑制重复"。`summary` 只用模板构造的 `SafeSummary`（notify.md §8），不拼外部文本。
+- 对话里的事件行与卡片不由守护写：`conversation` 订阅 `inbox.raised`（转卡片）与 `guardian.triaged`（转事件行，需在其渲染注册表加行，G-OQ-13）。已消除条件的项是否自动 `Inbox::resolve`【G-OQ-14】：默认不做，由用户 dismiss；PR 终态时 notify 的 R2 规则会关闭该交付单元全部 open 项。
 
 `reason_code` 词表（`guardian.` 前缀；同一 `class` 可有多个）：
 
@@ -549,7 +558,7 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 | `guardian.design_or_api_change` | `design_or_api_change` |
 | `guardian.mechanical_conflict` | `mechanical_conflict` |
 | `guardian.ci_failure_escalated`、`guardian.nit_escalated`、`guardian.bot_finding_escalated` | 对应可配置类（`cfg = escalate`）|
-| `guardian.ci_out_of_scope`、`guardian.ci_low_confidence`、`guardian.ci_startup_failure`、`guardian.ci_timeout`、`guardian.scope_unknown`、`guardian.finding_low_confidence`、`guardian.human_feedback`、`guardian.dequeued`、`guardian.heal_failed`、`guardian.heal_no_change`、`guardian.patch_denied`、`guardian.github_write_failed`、`guardian.unknown_event` | `unknown` |
+| `guardian.ci_out_of_scope`、`guardian.ci_low_confidence`、`guardian.ci_startup_failure`、`guardian.ci_timeout`、`guardian.scope_unknown`、`guardian.finding_low_confidence`、`guardian.human_feedback`、`guardian.dequeued`、`guardian.heal_failed`、`guardian.heal_no_change`、`guardian.patch_denied`、`guardian.github_write_failed`、`guardian.action_denied`、`guardian.unknown_event` | `unknown` |
 
 ### 7.10 持久化与审计事件
 
@@ -567,13 +576,13 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 
 ### 7.11 分类与不可信文本
 
-- 两类分类请求（经 `ClassifyRunner`，即 `engine` 的 `classify` 节点）：
+- 两类分类请求（经 `ClassifyPort`，即 `engine` 的 `classify` 辅助调用，不占 `nodes`）：
   - `classify_ci`：worker-protocol §6.2 已有的 `ci_classification` → `{category ∈ lint|type|test|build|infra|flaky|unknown, in_pr_scope, confidence}`；
   - `classify_finding`：**契约里没有对应 `target`**（现有枚举：`ci_classification` `event_line` `status_answer` `commit_message` `status_checklist` `notification`），本文提议新增 `finding_triage`，输出 `{security: bool, design_or_api: bool, severity ∈ blocker|major|minor|nit, category（沿用 Finding.category）, actionable: bool, confidence}`（G-OQ-3，需契约 PR）。
 - **分类输出不可信**：只接受 schema 内的枚举与布尔；文本字段不参与任何判定；解析失败 / 越界 / 超时按 `low_conf` 处理（上报）。
 - **只能更严**：外部文本触发的规则只能提高审视，不得降低档位或放宽处置（config §5.3 / I5）；模型说"不是安全问题"不能取消来自 `security_source` 的 F-01，模型说"不可操作"（F-04）只在高置信度时才 `noop`。
 - **安全来源**【G-OQ-4】：内置名单（需核实各扫描应用的 slug，如 GitHub 代码扫描）+ `security` 标签 / 类别；没有对应的设置键，建议契约 PR 增加 `guardian.security_sources`。
-- **成本**：每个 bot 评论 / CI 失败各一次分类，计入 `tokens_by_tier.utility` 与 `nodes`（Low 档 `nodes` 默认只有 4，容易先于其他预算耗尽，G-OQ-15）。
+- **成本**：每个 bot 评论 / CI 失败各一次分类，计入 `tokens_by_tier.utility`（辅助调用不占 `nodes`）；每个愈合轮的 `heal` 节点占 `nodes` 与 `rounds`（Low 档 `nodes` 默认只有 4，容易先于其他预算耗尽，G-OQ-15）。
 
 ### 7.12 配置读取
 
@@ -600,7 +609,7 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 | 失败 | 处理 |
 | --- | --- |
 | `classify` 失败 / 超时 / 预算不足 | 视为 `low_conf`，上报（`guardian.ci_low_confidence` / `finding_low_confidence`）；不重试到静默 |
-| `HealRunner::start_heal` 失败 | 可重试错误退避重试（幂等于 `round_id`）；不可重试 → H-14 |
+| `HealPort::request_heal` 失败 | 可重试错误退避重试（幂等于 `round_id`）；不可重试 → H-14 |
 | `HealOutcome::Failed`（`engine` 已按 worker-protocol §9 重试） | H-14：上报并计无进展 |
 | 愈合期间 head 被推进 / 审批落下 | 补丁基线作废（P10）→ 丢弃，`superseded`，重新评估（H-15 / P-06 / T-01）|
 | `push_branch` 失败 | `precondition_failed(head_changed \| remote_diverged \| stale_head)` → T-10 重评；`permission_denied` 等终态 → T-11 上报；`rate_limited` / `transient` 由 `forge` 重试 |
@@ -646,20 +655,20 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 
 ## 11. 可观测性
 
-- **事件**（data-model §5.2）：`inbox.raised`、`message.posted`（`role = event`）、`outbox.enqueued`（经 `forge`）；**提议新增** `guardian.triaged`、`guardian.round_started`、`guardian.round_finished`（§7.10）。`actor.kind = "guardian"`。
+- **事件**（data-model §5.2）：`inbox.raised`（经 `notify`）、`outbox.enqueued`（经 `forge`）；**提议新增** `guardian.triaged`、`guardian.round_started`、`guardian.round_finished`（§7.10）。`actor.kind = "guardian"`。
 - **日志**（结构化，字段：`delivery_id`、`pr`、`rule`、`class`、`disposition`、`round_id`、`fingerprint`、`config_rev`）：每个规则命中、每道闸的结论、`defer` 原因、冻结原因与解冻。不记录外部文本原文（只记长度与哈希）。
 - **指标**（草案）：`guardian_triage_total{rule,class,disposition}`、`guardian_events_skipped_total{reason}`（`self` / `stale` / `duplicate` / `unbound` / `terminal`）、`guardian_rounds_total{outcome}`、`guardian_round_seconds`、`guardian_frozen_prs`、`guardian_escalations_total{class,reason}`、`guardian_suppressed_duplicates_total`、`guardian_batch_depth`、`guardian_checklist_updates_total{result}`、`guardian_classify_total{target,result}`、`guardian_defer_total{reason}`。
-- **健康**：`modules.guardian.health`（config §2.8）：`ok`；`degraded`（`ClassifyRunner` / `HealRunner` 连续失败、游标落后过多）；`unhealthy`（无法读 `store` 投影）。
+- **健康**：`modules.guardian.health`（config §2.8）：`ok`；`degraded`（`ClassifyPort` / `HealPort` 连续失败、游标落后过多）；`unhealthy`（无法读 `store` 投影）。
 
 ## 12. 测试与验收
 
-**替身**：`FakeForge`（M0，注入 `forge.*` 事件、记录 `enqueue` / `cancel`、回放 `outbox.*` 与 `pr_synchronized(self)`）、`ScriptedEngine`（本模块自建：脚本化实现 `HealRunner` / `ClassifyRunner` / `FactsSource` / `Reporter`，按规则返回 `HealOutcome` 与分类；M0 替身清单没有它，G-OQ-2）、`FakePolicy`（Approval 状态与 `PathRules`）、`MemStore`（事件日志 + 投影 + 订阅，F-OQ-14）、`TestClock`。守护的单元测试不依赖 `forge` / `engine` 真实实现。
+**替身**：`FakeForge`（M0，注入 `forge.*` 事件、记录 `enqueue` / `cancel`、回放 `outbox.*` 与 `pr_synchronized(self)`）、`ScriptedEngine`（本模块自建：脚本化实现 `HealPort` / `ClassifyPort` / `FactsSource`，按规则返回 `HealOutcome` 与分类；M0 替身清单没有 `engine` 的替身，G-OQ-2）、`ScriptedPolicy`（policy.md `testing` feature：脚本化 `decide_action` / `live_approvals_for_pr` / 路径规则）、`FakeInbox`（notify.md M0 提议：记录 `raise`，并按 `dedupe_key` 去重）、`Store::open_in_memory`（store.md §6.1，含 `guardian_pr_state` 投影器；`be-engine` 的 M1 交付，forge.md F-OQ-14）、`TestClock`。守护的单元测试不依赖 `forge` / `engine` 真实实现。
 
 ### A. M2 退出标准（本泳道的守护部分）
 
 - [ ] **本 PR 范围内的 CI 失败被自愈，全程不产生上报**：`FakeForge` 注入 `check_suite_completed(failure, external)` → `ScriptedEngine` 分类为 `ci_in_scope`、愈合返回 `Patched{Allow}` → `FakeForge` 收到 `push_branch`（`expected_remote_oid` = 基线 head）→ 回流 `pr_synchronized(self)` → `check_suite_completed(success)` → 事件日志中**没有** `inbox.raised`，有 `guardian.triaged(silent_fix)` 与 `round_finished(progress=done)`，状态清单更新。
-- [ ] **security 类 finding 被上报，不会被静默关闭**：bot 的 `review_comment` 分类为 `security`（以及仅凭来源名单命中、分类说"非安全"的两种）→ `inbox.raised(kind=security_finding)`；`enqueue` 记录里**没有**任何 `reply_review_thread` / `resolve_review_thread`；`HealRunner` 未被调用。
-- [ ] **已审批 PR 不静默推送**：`approval.granted` 之后注入 CI 失败 → 不调用 `start_heal`、无 `push_branch` 入队，`inbox.raised(escalation, guardian.push_after_approval)`；愈合进行中收到 `approval.granted` → 取消轮，已返回的补丁不推送（H-01）；`approval.invalidated` 后恢复静默处理。
+- [ ] **security 类 finding 被上报，不会被静默关闭**：bot 的 `review_comment` 分类为 `security`（以及仅凭来源名单命中、分类说"非安全"的两种）→ `inbox.raised(kind=security_finding)`；`enqueue` 记录里**没有**任何 `reply_review_thread` / `resolve_review_thread`；`HealPort::request_heal` 未被调用。
+- [ ] **已审批 PR 不静默推送**：`approval.granted` 之后注入 CI 失败 → 不调用 `request_heal`、无 `push_branch` 入队，`inbox.raised(escalation, guardian.push_after_approval)`；愈合进行中收到 `approval.granted` → 取消轮，已返回的补丁不推送（H-01）；`approval.invalidated` 后恢复静默处理。
 - [ ] **审批后出现新推送，审批自动失效并重新进入评审**（本模块侧）：外部 `pr_synchronized` → 取消进行中的轮与排队中的守护推送，`PushGate` 随 `approval.invalidated` 重算，重新评估问题。
 - [ ] **改动 `.github/workflows/` 的补丁进入"需要审批"**（本模块侧）：`Patched{NeedsApproval}` → 不入队 `push_branch`，`escalate(touches_protected_path)`，且不重复写 `approval_needed`；`Denied{policy.path_protected}`（M1 语义）→ 同样上报；K-07 预检在不启动愈合的情况下上报。
 - [ ] **守护不会被自己的评论、推送触发循环**：`FakeForge` 把守护每个动作回流成 `origin=self` 的事件（含 `issue_comment`、`pr_synchronized`、`review_comment`）→ 这些事件不产生任何新轮 / 新入队；模拟 1000 个"推送→CI 失败→修复"周期，入队总数被 `limits.rounds`、`same_class_repeats`、`stalled_rounds` 约束，循环终止于上报。
@@ -681,7 +690,7 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 - [ ] **CAS 推送**：`push_branch.expected_remote_oid` = 轮基线 head；`FakeForge` 返回 `precondition_failed(remote_diverged)` → 轮 `superseded`，无强推、无重试。
 - [ ] **指纹稳定**：同一失败只变行号 / 时间戳 / 哈希的日志得到同一指纹；不同失败得到不同指纹（黄金文件）。
 - [ ] **状态清单**：关闭 `enabled` → 不入队；A→B→A 状态序列使用递增 `epoch`，`FakeForge` 上评论最终是 A；节流窗口内的多次变化只发最后一版；终态发终版后不再更新；渲染结果不含任何外部文本（用含注入文本的 PR 标题 / check 名做模糊测试）。
-- [ ] **崩溃恢复**：在"`round_started` 已落盘、`start_heal` 之前"和"`Patched` 已返回、`push_branch` 入队之前"各注入崩溃 → 重启后不重复开轮、不重复入队（同一 `round_id` / 同一 Outbox 键）。
+- [ ] **崩溃恢复**：在"`round_started` 已落盘、`request_heal` 之前"和"`Patched` 已返回、`push_branch` 入队之前"各注入崩溃 → 重启后不重复开轮、不重复入队（同一 `round_id` / 同一 Outbox 键）。
 - [ ] **事件重放幂等**：同一批事件按游标重放两次 → 审计事件与入队结果相同。
 - [ ] **上报去重**：同一去重键已有 `open` 的 InboxItem → 不新建；`dismissed` 后再出现 → 新建；`engine` 已写 `budget_exhausted` → 不重复。
 - [ ] **终态收尾**：`pr_merged` / `pr_closed` → 取消进行中的轮与排队动作，发终版清单，actor 摘除；之后到达的该 PR 事件被 PF-3 忽略。
@@ -694,20 +703,20 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 | # | 问题 | 影响 | 本文暂用 |
 | --- | --- | --- | --- |
 | G-OQ-1 | **阻塞**：data-model §5.2 没有 `guardian.*` 事件，而"静默可审计"要求落事件；`forge.synced` 的 `data` 形状也未定义（forge.md F-OQ-7）| 审计、崩溃恢复、检视器 | 提议三种事件（§7.10），需契约 PR |
-| G-OQ-2 | **阻塞**：`engine` 端口——`HealRunner` / `ClassifyRunner` / `FactsSource`；`heal` 的推送与 proposals 由 `guardian` 还是 `engine` 入队（本文取 `guardian`，以便推送前做冻结复核）；"暂停"如何暴露；`BudgetLedger.used.rounds` 谁在何时 +1（本文假定 `engine` 在开轮时）。milestones M2 的 `be-engine` 范围**没有列** `heal` 节点执行，`be-forge` 却列了"自愈循环（`heal`）"；M0 替身清单没有 `engine` 的替身 | M2 并行开发 | §6 草案；本模块自建 `ScriptedEngine` |
+| G-OQ-2 | **阻塞**：`engine` 端口。engine.md §6 有 `request_heal(HealRequest) -> HealTicket` 但**未定义** `HealRequest` 的字段（本文 §6 提议）、愈合结果如何取回（本文提议 `HealPort::outcome`，由 engine 聚合 `attempt.finished` / `patch.validated` / proposals 判定）、`classify` 辅助调用的对外入口（`EngineApi` 没有）；`heal` 的推送与 proposals 由 `guardian` 入队（engine.md 同此，OQ-16）；`heal` 挂在每轮单独的 `stage = review` Workflow（engine.md OQ-11，不改 `stage`）；"暂停"如何暴露给守护（`Workflow.status = paused`，engine.md OQ-8）。milestones.md M2 的 `be-engine` 范围**没有列** `heal`（engine.md M2 行列了 `request_heal`），M0 替身清单没有 `engine` 的替身 | M2 并行开发 | §6 草案；本模块自建 `ScriptedEngine` |
 | G-OQ-3 | `classify` 的 `target` 枚举没有"bot finding 分诊"（`finding_triage`）；CI 失败指纹的 `signature` 由确定性算法还是模型返回（`ci_classification` 无此字段） | F 组、§7.6 | 提议新增 `finding_triage`；指纹用确定性算法 |
 | G-OQ-4 | "安全来源"（security 扫描 bot、`security` 标签）的判定名单与设置键；官方 app slug 需核实 | F-01 / K-06 的漏报风险 | 内置名单 + 模型分类；建议新增 `guardian.security_sources` |
-| G-OQ-5 | "已审批"的精确定义：本文取并集（`granted` 审批 / GitHub `approved` / `merge` 阶段 / 在队列中）；`pending` 的审批是否冻结；GitHub 审批在未开启"提交后撤销过期审批"时是否应冻结 | `PushGate`、打扰频率 | §7.5 的保守并集 |
+| G-OQ-5 | "已审批"的精确定义：本文取并集（`granted` 审批 / GitHub `approved` / `merge` 阶段 / 在队列中）；`pending` 的审批是否冻结；GitHub 审批在未开启"提交后撤销过期审批"时是否应冻结；`policy` 是否在 `decide_action(push_branch)` 里再拦一道（policy.md OQ-P10，现只提供 `live_approvals_for_pr`）| `PushGate`、打扰频率 | §7.5 的保守并集 |
 | G-OQ-6 | architecture §7.3"不在规则表里的事件一律上报"与"没有问题不打扰（CI 通过、approve 等）"的关系：本文把"规则表"解释为含 `noop` / `ignore` 行的完整表，兜底只管表外情形；§7.3 的静默清单也没有"属实的 bot finding 静默修复""机械冲突"（config §6.1 有）| U-01 的范围 | 如 §7.3.3 |
 | G-OQ-7 | **人类**评审意见 / 评论怎么处理：§7.3 与 config §6.1 都没有对应类。本文：`changes_requested` / 人类 `review_comment` / 人重开线程 → `unknown` 上报；人类对话区评论 → `noop`（不据文本行动）。design 评审曾建议"有写权限的人的明确修改要求可静默修复"，未被采纳 | R-02/03/08/10、C-02；可能很吵或漏事 | 全部上报或记录 |
 | G-OQ-8 | 范围外 / flaky / infra 的 CI 失败：上报，还是先 `rerun_failed_jobs`（`forge.rerun.max_per_run`，M2）再上报；`cancelled` / `action_required` 的处置 | K-03/04/11；FA 里 `rerun_failed_jobs` 无人使用 | 上报；`cancelled` 记录不处理 |
 | G-OQ-9 | "本 PR 范围"的度量：本文取"补丁路径 ⊆ PR 改动文件"，可能过严（PR 改了函数签名，调用方测试在未改动文件里）；备选：同目录 / 测试文件映射 / 模型判定 | `scope_expanding_fix` 的命中率、自愈价值 | 严格子集 |
-| G-OQ-10 | 外部推送（人 / 其他工具）后是否暂停守护、是否需要"人工接管 / 交还"；与工作树 `human` 写锁的关系（design 评审的待决）| P-06、A5 | 不暂停，靠 CAS 与基线作废；锁被 `human` 持有则延后 |
+| G-OQ-10 | 外部推送（人 / 其他工具）后是否暂停守护、是否需要"人工接管 / 交还"；与工作树 `human` 写锁的关系（design 评审的待决）；工作树分支头与 GitHub 的对齐由谁调 `repo.advance_head`（repo.md OQ-R10：仅快进；engine 在 `request_heal` 内做，还是守护先做）| P-06、A5 | 不暂停，靠 CAS 与基线作废；锁被 `human` 持有则延后；分支头对齐按 engine 负责 |
 | G-OQ-11 | `nit` 批在没有后续推送时的冲刷时机（审批请求前先清空？）、是否转 follow-up Issue（`create_issue`）| 批会长期积压 | 只随下一次愈合轮；终态时写入事件行 |
 | G-OQ-12 | `mechanical_conflict = silent_fix` 的执行者与方式（合并 base，不 rebase、不强推；`repo` 是否支持"合并 base 生成提交"）；`design_or_api_change` 是否有路径级判据（如 `schemas/**`、OpenAPI 文件）；`pr_dequeued` 的处置 | M-03、F-02、M-06 | 默认 `escalate`；仅模型判据；`pr_dequeued` 上报 |
-| G-OQ-13 | 状态清单：`slot` 的所有权（FA §3.3 的示例含 `build` / `merge` 等 `engine` 概念，本文约定由 `guardian` 独占该 slot、`engine` 不写）；被删后重建次数；文案语言；检视器"后台守护"区块的数据路由（api.md 无）| §7.8、Y-04 | 独占；重建 1 次；中文模板 |
-| G-OQ-14 | 上报项的可选处置（如"同意扩大范围""升档""放弃"）与 `choose` 之后由谁执行；已消除条件的项是否自动 `resolve`（`api.md` 只说"服务端 resolve"）| InboxItem 用法 | 无选项的 `escalation`；不自动 resolve |
-| G-OQ-15 | `classify` 与 `heal` 都是节点，计入 `nodes` 预算（Low 默认 4）与 `rounds`；每个 bot 评论各一次分类的频率 / 成本无上限；`settle_max_wait` 等内部常量的取值 | 预算过早耗尽 | 如实计入；常量见 §10 |
+| G-OQ-13 | 状态清单：`slot` 的所有权（FA §3.3 的示例含 `build` / `merge` 等 `engine` 概念，本文约定由 `guardian` 独占该 slot、`engine` 不写）；被删后重建次数；文案语言；对话事件行由 `conversation` 渲染（其注册表 conversation.md §7.7 没有 `guardian.*` 行）；检视器"后台守护"区块的数据路由（api.md 无）| §7.8、Y-04 | 独占；重建 1 次；中文模板；`conversation` 加行 |
+| G-OQ-14 | 上报项的可选处置（如"同意扩大范围""升档""放弃"）与 `choose` 之后由谁执行（notify.md：订阅 `inbox.resolved` 的 `engine` / 创建者）；已消除条件的项是否自动 `resolve`；`reason_code` 词表归属（engine.md §7.11 的码无前缀，本文带 `guardian.` 前缀以免冲突，engine OQ-13 待统一）| InboxItem 用法 | 无选项的 `escalation`；不自动 resolve |
+| G-OQ-15 | `heal` 节点计入 `nodes` 与 `rounds`（Low 默认 `nodes = 4`）；`classify` 是辅助调用，不占 `nodes` 但占 `tokens_by_tier.utility`（engine.md OQ-9(e) 未决：是否应建模为节点、utility 层耗尽是否阻塞）；每个 bot 评论各一次分类的频率 / 成本无上限；`settle_max_wait` 等内部常量的取值 | 预算过早耗尽 | 如实计入；常量见 §10 |
 | G-OQ-16 | `bot_finding_invalid` 的静默回复要 `reply_review_thread`，FA §3.1 把它标为 **M3**，而 architecture §7.3 与 milestones M2 的守护范围含"回复理由" | M2 范围 | 随 M3；M2 期间 `bot_finding_invalid` 实际按 `escalate` 处理（需用户确认或把该动作提前到 M2，二者同属 `be-forge` 泳道）|
 | G-OQ-17 | 暂停 / `waiting_human` / `blocked` 时守护的行为；状态机边 `review → implement`（"CI 失败需改代码"）与守护"静默自愈、不改阶段"的关系：谁处理 `review` 阶段的 CI 失败（本文：守护；阶段不变，`engine` 不对 CI 失败直接回退）| A4、阶段机 | 守护处理，不改 `stage` |
-| G-OQ-18 | 模块地图依赖缺口：`guardian` 还依赖 `store`、`core`（订阅、投影、写事件），`models` 经 `engine`，`notify` 经事件 | architecture §4 | 如 §3 |
+| G-OQ-18 | 模块地图依赖缺口：`guardian` 还依赖 `store`、`core`（订阅、投影、写事件）、`notify`（`Inbox`）；`models` 经 `engine`；`conversation` 经事件 | architecture §4 | 如 §3 |
