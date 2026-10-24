@@ -60,7 +60,7 @@
 外部库约束（`Cargo.toml` 用 `cargo deny` 或等价检查强制）：
 
 - **允许**：`serde`、`serde_json`、`schemars`、`thiserror`、`sha2`、`zeroize` / `secrecy`、`regex`（或等价的纯 Rust 实现）、纯计算的时间历法库。
-- **禁止**：`tokio`、`sqlx`、`reqwest`、`std::fs` / `std::net` / `std::process` 的任何使用、`SystemTime::now`、`getrandom`（`testing` feature 之外）、`unsafe`。
+- **禁止**：`tokio`、`sqlx`、`reqwest`、`std::fs` / `std::net` / `std::process` 的任何使用、`SystemTime::now`、`getrandom`（`testing` feature 之外）；本 crate 自身代码不使用 `unsafe`（依赖库内部除外）。
 - 必须能在 Linux、macOS、Windows 上编译（architecture §4 把 `core` 的位置写成"共享 crate"，`desktop-shell` 可能依赖它，OQ-2）。
 
 ## 4. 输入
@@ -207,10 +207,11 @@ impl ApprovalPayload {
 | Rust 类型 | data-model | 线上形态要点 |
 | --- | --- | --- |
 | `Project` | §3 Project | 不含 `settings_override`（api.md §4.3、§8.2：它只经 settings 路由读写，由 `SettingsDoc` 承载） |
-| `Delivery`、`Stage`、`StageStatus`、`Origin` | §3 Delivery、§4.1 | `Stage`：`spec` / `plan` / `implement` / `propose` / `review` / `merge` / `closed` / `abandoned`；`StageStatus`：`running` / `waiting_human` / `blocked` / `done` |
+| `Delivery`、`Stage`、`StageStatus`、`DeliveryOrigin` | §3 Delivery、§4.1 | `Stage`：`spec` / `plan` / `implement` / `propose` / `review` / `merge` / `closed` / `abandoned`；`StageStatus`：`running` / `waiting_human` / `blocked` / `done`；`DeliveryOrigin`：`conversation` / `github_label` / `github_command`（与 `ForgeOrigin` 不是同一个东西） |
 | `IssueRef`、`PullRequestRef`、`CheckSummary` | §3、§1.1 | `title` 是 `UntrustedText`；`mergeable_state` 保存 GitHub 原值字符串，不枚举；`PullRequestRef.state` 为 `open` / `closed` / `merged` |
 | `Workflow`、`WorkflowStatus` | §3 | `status`：`running` / `paused` / `succeeded` / `failed` / `cancelled`（api.md §4.7 示例的 `finished` 不在此集合，见 OQ-6） |
 | `Node`、`Role`、`Tier`、`Exec`、`Verdict` | §3、architecture §9 | `Role::Review(String)` 序列化为 `review:<视角>`，视角匹配 `[a-z][a-z0-9_-]*`；`Verdict` 大写 `ACCEPT` / `REVISE` / `REJECT` / `BLOCKED`；`Tier`：`utility` / `planner` / `worker`；`Exec`：`sandbox` / `sandbox_ro` / `direct`；`role`、`tier`、`exec` 的固定搭配由 `fn role_profile(Role) -> (Tier, Exec)` 给出，构造 `Node` 时校验 |
+| `Effort`、`EffortSetting` | config.md §3.2、worker-protocol §4.2 | `Effort`：`none` / `low` / `medium` / `high` / `max`（`JobSpec.execution.reasoning_effort`）；`EffortSetting`：`Fixed(Effort)` 或 `ByLevel`（配置里 `reasoning_effort` 的取值，只允许 planner / worker） |
 | `Attempt`、`AttemptStatus`、`FailureClass`、`TokenUsage` | §3 | `FailureClass`：`timeout` / `exec_failed` / `verdict_fail` / `policy_denied` / `cancelled` / `budget_exhausted` / `infra_error`；`failure_detail` 为 `FailureDetail(String)`，形如 `timeout.wall`，已知子码常量取自 worker-protocol §9，但不做封闭枚举（协议会增长）；`TokenUsage = {input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, requests}` |
 | `Worktree`、`WorktreeLock`、`LockHolder` | §3 | `holder`：`engine` / `guardian` / `human` |
 | `Sandbox`、`SandboxStatus`、`SandboxTrust`、`SandboxLimits`、`WorktreeSnapshot` | §3 | `status`：`created` / `running` / `stopped` / `destroyed` / `lost` |
@@ -221,6 +222,19 @@ impl ApprovalPayload {
 | `Device`、`DevicePlatform`、`DeviceRole`、`DeviceStatus` | §3 | `role`：`viewer` / `operator` / `approver`，实现 `Ord`（`approver > operator > viewer`） |
 | `BudgetLedger`、`BudgetLimits`、`BudgetUsed` | §3、BudgetLedger 口径 | 台账另需记 `config_rev`（config.md §2.6），data-model 未列此字段，见 OQ-8 |
 | `Event`、`Actor`、`ActorKind`、`Seq` | §5.1 | `ActorKind`：`engine` / `guardian` / `user` / `device` / `forge` / `system`；`Seq` 为 ≥ 1 的整数，构造时检查 ≤ 2^53−1 |
+
+**其他规格书对 `core` 类型的引用名与本文的对应**（它们是占位性质的写法，以本文为准；名字冲突的在这里消解）：
+
+| 其他规格书的写法 | 本文 | 说明 |
+| --- | --- | --- |
+| `Role`（`pki`、`api`：设备角色） | `DeviceRole` | `Role` 在本文里专指节点角色（`plan` / `build` / …，`engine`、`models` 的用法） |
+| `Platform` | `DevicePlatform` | |
+| `Usage` | `TokenUsage` | |
+| `Oid` | `GitOid` | |
+| `Sha256`、`CasRef` | `Sha256Digest` | `Attempt.result_ref` 的类型 |
+| `Origin`（`forge`、`guardian`：`self` / `external`） | `ForgeOrigin` | 交付单元的 `origin` 是 `DeliveryOrigin` |
+| `ForgeEvent` | `ForgeEventEnvelope`（`Event<ForgeEventEnvelope>` 即日志中的 `forge.<kind>` 事件） | |
+| `Rng`（`pki`） | 不在 `core`；`core` 只有 `Entropy`（用于 ID 生成） | |
 
 ### 6.4 状态机
 
@@ -319,6 +333,7 @@ impl IdempotencyKey {
 }
 pub enum ForgeEventKind { /* forge-actions §6.3 的 23 个 kind：pr_opened … repo_changed */ }
 pub struct ForgeEventEnvelope { /* forge-actions §6.2 信封；写入事件日志时作为 forge.<kind> 的 data */ }
+pub enum ForgeOrigin { Own, OwnUnattributed, External }   // serde："self" / "self_unattributed" / "external"（forge-actions §4）；与 DeliveryOrigin 无关
 ```
 
 14 个动作的 payload 类型（`PushBranchPayload`、`CreatePrPayload`…）与 [forge-actions §3.3](../interfaces/forge-actions.md#33-payload-示例) 的示例一一对应，`deny_unknown_fields`。
@@ -343,8 +358,19 @@ pub const SETTINGS_SCHEMA_VERSION: u32;
 
 pub fn builtin_defaults(r: Resource) -> serde_json::Value;                  // 随二进制；models.*.model 等无默认的键保持缺失
 pub fn merge_patch(base: &Value, patch: &Value) -> Value;                   // RFC 7386；数组整体替换；存储文档不含 null
-pub struct Effective { pub value: Value, pub clamped: Vec<Clamp> }
+pub struct Effective { pub value: Value, pub clamped: Vec<Clamp> }          // 单个 resource 的生效值
 pub fn effective(r: Resource, builtin: &Value, global: &Value, project: Option<&Value>) -> Effective;
+
+/// 类型化的聚合视图（config.md §1.3 的 Settings / EffectiveSettings）。各模块在两次操作之间原子切换到新的 EffectiveSettings（config.md §2.6）。
+/// models.*.model 等"无默认"的键在未配置时为 None，由调用方（engine）据此拒绝创建交付单元，core 不替它决定。
+pub struct EffectiveSettings {
+    pub config_rev: Seq,
+    pub models: ModelsSettings, pub levels: LevelsSettings, pub policies: PoliciesSettings, pub guardian: GuardianSettings,
+    pub sandbox: SandboxSettings, pub egress: EgressSettings, pub notify: NotifySettings, pub github: GithubSettings,
+}
+impl EffectiveSettings {
+    pub fn from_effective(config_rev: Seq, parts: &EffectiveParts) -> Result<Self, ValidationReport>;  // 由各 resource 的 Effective.value 反序列化
+}
 pub fn diff_relaxes(r: Resource, scope: &Scope, old: &Value, new: &Value) -> Vec<KeyPath>;  // config.md §2.5 的 relaxes[]
 pub struct Authority { pub required_role: DeviceRole, pub requires_signature: bool }
 pub fn required_authority(r: Resource, relaxes: &[KeyPath], new_doc: &Value, writes: &[SecretWriteIntent]) -> Authority;
@@ -530,7 +556,7 @@ pub enum RelaxCmp {
 | I6 客户端不持凭据 | 实体与事件类型里没有任何承载密钥值的字段；`SecretRefView` 只有 `present`；`SecretWrite` 不实现 `Serialize` / `Clone`，`Debug` 脱敏，所以密钥值无法被序列化进响应、事件或日志 |
 | I7 配置与工作分离 | settings 类型与"工作请求"类型分开；消息请求体 `deny_unknown_fields`，`model` / 预算字段被拒（api.md §7）；`levels` 的键集合在类型上排除 `none`；"仅收紧"规则表是 settings 唯一的放宽判据 |
 | I8 先验后推 | `ValidatedPatch` 是 `repo` 校验结论的唯一类型，`push_branch` payload 的 `validation_ref` / `expected_tree_oid` 与它对应；`core` 不提供"绕过校验"的构造路径 |
-| 其他 | 无 `unsafe`；无全局可变状态；所有解析器对畸形输入返回错误而不是 panic（模糊测试覆盖，§12.3）；`jcs` 对重复键 / 非法数字 fail-closed |
+| 其他 | 本 crate 自身代码无 `unsafe`；无全局可变状态；所有解析器对畸形输入返回错误而不是 panic（模糊测试覆盖，§12.3）；`jcs` 对重复键 / 非法数字 fail-closed |
 
 ## 9. 错误与恢复
 

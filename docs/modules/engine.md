@@ -14,10 +14,10 @@
 6. **预算**：交付单元创建时按 `level_cap` 固化预算台账（BudgetLedger）；预留、记账、检查、耗尽（`budget.exhausted`）。
 7. **自动加码**：在 `level_cap` 之内按 `policies.escalation` 抬高 `level_effective`；超过上限则上报并暂停等人；降档不撤销已触发的闸门。
 8. **上报**：创建与关闭引擎产生的上报项（InboxItem），并保持"阶段状态（`stage_status`）与未决上报项"一致。
-9. **出站队列（Outbox）入队**：`push_branch`、`create_pr`、`update_issue`、`close_issue`、`merge_pr`、`update_pr`、评审摘要评论等；只入队，不执行（I2）。
+9. **出站队列（Outbox）入队**：经 `Forge::enqueue`（[forge.md §6](forge.md)）入队 `push_branch`、`create_pr`、`update_issue`、`close_issue`、`merge_pr`、`update_pr`、评审摘要评论等；只入队，不执行（I2）。
 10. **审批流程**：合并前向 `policy` 请求 Gantry 审批（Approval），审批授予后入队 `merge_pr`；审批失效即回评审（I3）。
 11. **崩溃恢复**：重启后从事件日志重建状态，接管未终结的尝试，保证不重复入队、不重复提交。
-12. **对外控制面**：为 `conversation` / `api` / `guardian` 提供创建交付单元、调档、放弃、补规格、代码问答、自愈派发的入口（§6）。
+12. **对外控制面**：为 `conversation` 提供创建 / 定位交付单元、补规格、代码问答；为 `api` 实现 `DeliveryControl`（调档、放弃，[api.md §6.3](api.md)）；为 `guardian` 实现 `HealRunner` / `ClassifyRunner`（端口定义在 [guardian.md §6](guardian.md)）（§6）。
 13. **配置热加载**：按 [config.md §2.6](../interfaces/config.md) 的求值时点切换 `EffectiveSettings`。
 
 ### 1.1 各里程碑交付
@@ -26,7 +26,7 @@
 | --- | --- |
 | M0 | 无引擎代码。引擎依赖的 `core` 类型 / 状态机 / 事件枚举、`schemas/events/*.json`、`schemas/worker/*.json`、`schemas/forge/*.json` 与四个替身（`FakeForge`、`FakeSandboxDriver`、`FakeRepo`、`FakeModelProvider`）由 `contract` 泳道交付；本规格在 M0 末与契约一起评审 |
 | M1 | `low.single` 模板；完整阶段机骨架（含 `merge` 阶段审批、`forge.base_advanced` 重验、`closed` / `abandoned`）；终结管线；Outbox 入队；`levels.low` 预算固化与最小记账（tokens / nodes / wall_time / forge_writes，用于 JobSpec 限额与熔断，本规格的划分，milestones 未逐项点名）；受保护路径拒绝的上报；放弃；崩溃恢复；设置热加载 |
-| M2 | Medium / High 模板族；`admission` 准入与 `spec_needed`；`REJECT` / `BLOCKED` 上报；预算全维度与耗尽上报；自动加码；`needs_approval` 补丁挂起与补丁审批；评审摘要入队；`request_heal` 给守护；有界迭代机制（通用，见 OQ-19） |
+| M2 | Medium / High 模板族；`admission` 准入与 `spec_needed`；`REJECT` / `BLOCKED` 上报；预算全维度与耗尽上报；自动加码；`needs_approval` 补丁挂起与补丁审批；评审摘要入队；`HealRunner` / `ClassifyRunner` 给守护（milestones 的 M2 `be-engine` 范围没有点名，guardian.md G-OQ-2 要求，本规格排入 M2）；有界迭代机制（通用，见 OQ-19） |
 | M3 | Max 模板族：`reasoner` 预演、对抗 review、`arbiter` 唯一裁决；多轮有界迭代与图修订历史；无进展检测 |
 | M4 | Ultimate：父交付单元按 Milestone 拆子交付单元、依赖调度、受 GitHub 配额约束的并发；台账汇总（OQ-18） |
 
@@ -35,11 +35,11 @@
 - **意图解析、消息 → 交付单元或查询、对话与卡片**：归 [`conversation`](conversation.md)。引擎只接收其调用。
 - **放行判定、审批验签、路径规则、补丁规则表**：归 `policy`（I3）。引擎只请求判定、持有结果。
 - **GitHub 读写、webhook、对账、幂等执行**：归 `forge`。引擎不持有 token、不调用 GitHub（I2）；交付事实只读事件日志与快照。
-- **补丁应用 / 校验 / 提交、镜像仓、工作树、写权锁实现**：归 `repo`。引擎不解析 patch，也不在沙盒产出的 `.git` 上运行 git（I8、W4）。
+- **补丁应用 / 校验 / 提交、镜像仓、工作树、沙盒工作区准备（由 `sandbox` 调 `repo`）、写权锁实现**：归 `repo`。引擎不解析 patch，也不在沙盒产出的 `.git` 上运行 git（I8、W4）。
 - **沙盒创建 / 注入 / 提取 / 销毁、资源限制**：归 `sandbox`（`SandboxDriver`）。
 - **模型调用、模型解析、用量折算**：归 [`models`](models.md)。引擎不直接发模型请求。
-- **PR 事件分流、CI 失败自愈的决策、无进展的守护侧判定、状态清单评论**：归 `guardian`。引擎只提供 `request_heal`。
-- **推送通知**：归 `notify`（订阅 `inbox.raised`）。
+- **PR 事件分流、CI 失败自愈的决策、无进展的守护侧判定、状态清单评论、愈合轮的推送与回复**：归 `guardian`。引擎只实现 `HealRunner` / `ClassifyRunner`，**不**为 `heal` 节点自动入队 `push_branch` 或 proposals（guardian 要在推送前做冻结复核，guardian.md §6）。
+- **上报项的存储、去重、自动关闭规则、推送通知**：归 `notify`（`Inbox` 服务，[notify.md §6](notify.md)）；引擎只决定"何时上报、上报什么、选项与 `reason_code`"。
 - **事件存储、投影、游标**：归 `store`。
 - **安全相关的配置写入**：引擎不写任何设置（I7）；也不把自然语言解析成设置变更。
 
@@ -47,16 +47,21 @@
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
-| `core` | 领域类型（`Level`、`Stage`、`StageStatus`、`Role`、`Tier`、`Exec`、`Verdict`、ID）、事件枚举、阶段机转移表、`EffectiveSettings` 合并 / 收紧、Outbox 幂等键派生、JSON Schema 校验器 | [data-model §1–§5](../data-model.md)、[forge-actions §2.2](../interfaces/forge-actions.md) |
-| `store` | 批量追加事件（带按 subject 的乐观并发守卫，可与 Outbox 入队同事务）、按游标订阅、读投影、消费者游标持久化、读 CAS 对象 | [architecture §4、§6](../architecture.md) |
-| `models` | `resolve`（档位 / 层级 → 具体模型与推理深度）、`invoke_direct`（`admission`、`summarize`、`classify`）、用量折算 | [models.md](models.md)、[config.md §3](../interfaces/config.md) |
-| `sandbox` | `SandboxDriver`：create / stage / start / cancel / collect / destroy / 按 `job_id` 重新接管；回传 `RawArtifacts`、运行时事实、出网代理（Egress）的计量 | [worker-protocol §3](../interfaces/worker-protocol.md) |
-| `repo` | 确保工作树、写权锁、准备沙盒工作区、在干净检出上校验补丁并（经 `policy`）出结论、幂等地生成本地提交、生成 `diff.patch` | [worker-protocol §8.3](../interfaces/worker-protocol.md) |
-| `policy` | 动作判定（`auto` / `approve` / `deny`）、请求 Gantry 审批、路径规则快照、proposals 判定、审批状态 | [config.md §5](../interfaces/config.md)、[api.md §6](../interfaces/api.md)、[forge-actions §2.5](../interfaces/forge-actions.md) |
+| `core` | 领域类型（`Level`、`Stage`、`StageStatus`、`Role`、`Tier`、`Exec`、`Verdict`、ID）、阶段机转移表与触发器（[core.md §7.4](core.md)）、事件枚举、`EffectiveSettings` 合并 / 收紧、Outbox 幂等键派生、JSON Schema 校验器 | [data-model §1–§5](../data-model.md)、[forge-actions §2.2](../interfaces/forge-actions.md) |
+| `store` | `WriteTx`（单写者事务：`tx.read()` 读投影、`append`、`advance_cursor`，[store.md §6.1](store.md)）、`ReadSnapshot`、`events().tail` 订阅、`Cursors`、CAS（读结果对象） | architecture §4、§6 |
+| `models` | `ModelRouter`：`resolve`（档位 / 层级 → 具体模型与推理深度）、`invoke_direct`（`admission`、`summarize`、`classify`，用量由 `models` 记账） | [models.md](models.md)、[config.md §3](../interfaces/config.md) |
+| `sandbox` | `SandboxService`：`submit`（受理即返回，内部负责创建 / 注入工作区 / 启动 / 监督 / 提取）、`cancel`、`release`（`attempt.finished` 落库后）、`recover`、`sweep_orphans`、`capacity` | [sandbox.md §6.1](sandbox.md)、[worker-protocol §3](../interfaces/worker-protocol.md) |
+| `repo` | `RepoService`：`create_worktree`、`acquire_lock` / `renew_lock` / `release_lock`、`resolve`（默认分支头）、`validate_patch`、`commit_patch`、`advance_head`、`remove_worktree`。沙盒工作区由 `sandbox` 调 `prepare_workspace`，引擎不调 | [repo.md §6](repo.md)、[worker-protocol §8.3](../interfaces/worker-protocol.md) |
+| `policy` | `ActionPolicy`（`decide_action`、`request_approval`、`invalidate`）、`ProposalPolicy::decide_proposals`、`PatchPolicy::path_rules_snapshot`（填 JobSpec 路径约束）、`ApprovalService::get`（读审批状态） | [policy.md §6](policy.md)、[config.md §5](../interfaces/config.md)、[api.md §6](../interfaces/api.md) |
+| `forge` | `Forge::enqueue` / `cancel` / `reconcile_now`；`ForgeReader` 的本地快照读（`pull_request`、`issue`、`project_snapshot`） | [forge.md §6](forge.md)、[forge-actions §2–§3](../interfaces/forge-actions.md) |
+| `notify` | `Inbox::raise`（可并入引擎事务）、`Inbox::resolve` | [notify.md §6.1](notify.md)、[data-model InboxItem](../data-model.md) |
+| `worker` | `WorkerAdapter`：镜像、启动命令、非密环境变量，用于组装 `SandboxSpec.exec`；`capabilities()` | [worker.md §6.3](worker.md) |
 
-间接关系（不是代码依赖）：`forge` 通过事件日志与 Outbox 表与引擎交互；`notify`、`conversation`、`guardian` 订阅引擎事件。architecture §4 没有把 `forge` 列为引擎依赖，因此引擎**不能**调用 `Forge` trait 的读接口；但准备 `materials` 需要 Issue / PR / 评论 / CI 日志的原文（worker-protocol §4.4 步骤 1），data-model 快照又只有标题，见 OQ-10。
+architecture §4 给引擎的依赖列表是 `core, store, models, sandbox, repo, policy`，没有 `forge`、`notify`、`worker`；各模块规格实际都按上表调用它们（OQ-20）。事件日志与 Outbox 表之外的间接关系：`conversation`、`guardian` 订阅引擎事件。
 
-引擎在实现里使用的端口名（`Store`、`ModelRouter`、`SandboxDriver`、`Repo`、`Policy`）以对应模块规格为准；本文只写引擎需要的语义，不重新定义对方接口。
+Issue / PR / 评论 / CI 日志的**原文**（准备 `materials` 需要，worker-protocol §4.4 步骤 1）没有任何模块提供：data-model 快照只有标题，`ForgeReader` 只提供快照和 CI 日志等少数实时读，没有 Issue 正文与评论，见 OQ-10。
+
+引擎在实现里使用的端口名以对应模块规格为准；本文只写引擎需要的语义，不重新定义对方接口。
 
 ## 4. 输入
 
@@ -66,7 +71,7 @@
 | ForgeEvent（`forge.<kind>`）与 `forge.synced` | `store` 订阅 | [forge-actions §6](../interfaces/forge-actions.md) | 结构字段可信（`forge` 已回读对账）；文本字段（标题、正文、评论、check 输出）是 `UntrustedText` |
 | Outbox 结果（`outbox.succeeded` / `failed` / `cancelled`） | `store` 订阅 | [forge-actions §2.3、§2.6](../interfaces/forge-actions.md) | 可信（`forge` 写入） |
 | 审批事件（`approval.granted` / `consumed` / `invalidated` / `expired` / `denied`） | `store` 订阅 | [api.md §6](../interfaces/api.md) | 可信（`policy` 验签后写入） |
-| 上报项事件（`inbox.resolved` 含 `option_id`、`inbox.dismissed`） | `store` 订阅 | [api.md §4.8](../interfaces/api.md) | 选项经 `api` 校验属于 `payload.options`；`note` 是用户文字 |
+| 上报项事件（`inbox.resolved` 含 `resolution`、`option_id`，`inbox.dismissed`） | `store` 订阅 | [notify.md §7.3](notify.md) | 选项经 `notify.choose` 校验属于 `payload.options`；`note` 是用户文字 |
 | `settings.updated` | `store` 订阅 | [config.md §2.3](../interfaces/config.md) | 可信 |
 | 沙盒回传：`RawArtifacts`（四个白名单文件）、stdout 进度、运行时事实、Egress 计量 | `sandbox` | [worker-protocol §5、§7](../interfaces/worker-protocol.md) | **不可信**（W2）。只有运行时事实与 Egress 计量可作决策依据（W3） |
 | 直接调用结果（`admission`、`summarize`、`classify`） | `models` | 与 worker-protocol §6 同一套 schema | schema 已校验，但内容由模型据不可信输入产出，当数据对待 |
@@ -78,12 +83,12 @@
 
 | 输出 | 去向 | 格式 / 契约 |
 | --- | --- | --- |
-| 事件：`delivery.created` / `stage_changed` / `level_changed` / `abandoned`，`workflow.created` / `revised` / `finished`，`node.queued` / `started` / `finished` / `superseded`，`attempt.started` / `finished` / `progress`，`budget.charged` / `exhausted`，`inbox.raised` / `resolved` | `store` | [data-model §5](../data-model.md)；`actor = {kind: "engine", id: "engine"}`，用户触发的写入沿用调用方 `Actor`；`data` 字段以 `schemas/events/<type>.json` 为准，§11 列出引擎需要的最小字段 |
-| Outbox 动作（`push_branch`、`create_pr`、`update_issue`、`close_issue`、`merge_pr`、`update_pr`、`create_comment` / `upsert_status_comment`） | `store` 的 `outbox` 表，由 `forge` 执行 | [forge-actions §2–§3](../interfaces/forge-actions.md)；幂等键（idempotency key）由 `core` 派生，引擎只给 `intent` 字段与 `epoch` |
-| `SandboxSpec` + JobSpec 可信部分 + 待包装材料 | `sandbox` | [worker-protocol §3.2、§4](../interfaces/worker-protocol.md) |
+| 事件：`delivery.created` / `stage_changed` / `level_changed` / `abandoned`，`workflow.created` / `revised` / `finished`，`node.queued` / `started` / `finished` / `superseded`，`attempt.started` / `finished` / `progress`，`budget.charged`（沙盒尝试、`rounds`、`nodes`、`wall_time`、`forge_writes`）/ `budget.exhausted` | `store` | [data-model §5](../data-model.md)；`actor = {kind: "engine", id: "engine"}`，用户触发的写入沿用调用方 `Actor`；`data` 字段以 `schemas/events/<type>.json` 为准，§11 列出引擎需要的最小字段 |
+| Outbox 动作（`push_branch`、`create_pr`、`update_issue`、`close_issue`、`merge_pr`、`update_pr`、`create_comment` / `upsert_status_comment`） | `Forge::enqueue` → `outbox` 表，由 `forge` 执行 | [forge-actions §2–§3](../interfaces/forge-actions.md)；幂等键（idempotency key）由 `core` 派生，引擎只给 `intent` 字段与 `epoch` |
+| `SandboxSpec`（JobSpec 可信部分、原始材料、上游产物引用、`ExecSpec`、限额、Egress 请求） | `SandboxService::submit` | [sandbox.md §6.1](sandbox.md)、[worker-protocol §3.2、§4](../interfaces/worker-protocol.md) |
 | 直接调用请求 | `models` | `DirectCall`（[models.md](models.md)） |
-| 审批请求（`merge_pr`；M2 起 `push_branch` 补丁审批） | `policy` | `approval.requested`；`subject_digest`：PR 类为 head SHA，补丁为 `ValidatedPatch.sha256`（P-20） |
-| 上报项 | `store`（`notify`、`conversation` 订阅） | [data-model InboxItem](../data-model.md)；词表见 §7.11 |
+| 动作判定与审批请求（`merge_pr`；M2 起 `push_branch` 补丁审批） | `policy`（`ActionPolicy`） | `approval.requested`；`subject_digest`：PR 类为 head SHA，补丁为 `ValidatedPatch.sha256`（P-20） |
+| 上报项 | `Inbox::raise`（`notify` 写 `inbox.raised`；`conversation`、`notify` 订阅） | [notify.md §6.1](notify.md)；词表见 §7.11 |
 | 模板目录、模块状态 | `api` | `TemplateCatalog`、`ModuleStatus`（`settings/status` 的 `modules.engine`） |
 
 ## 6. 对外接口

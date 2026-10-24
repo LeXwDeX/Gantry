@@ -132,8 +132,8 @@ impl WriteTx {
     pub fn now(&self) -> Timestamp;  // 事务开始时取一次 Clock，保证同一事务内的时间一致且不早于上一个事件的 ts
     /// 校验 data → 校验状态转移 → 插入 → 折叠投影；每次 append 在一个 SAVEPOINT 里，失败只回滚这一次。
     pub async fn append(&mut self, ev: NewEvent) -> Result<Appended, StoreError>;
-    /// 带乐观并发守卫：expect_subject_seq = Some(s) 时，要求该 subject 当前最后一个事件的 seq 恰为 s（None = 该 subject 还没有事件），
-    /// 否则 PreconditionFailed(SubjectMoved { actual })。engine 的 DeliveryActor 用它避免读-改-写之间被他人插入。
+    /// 带乐观并发守卫：opts.expect_subject_seq = Some(Some(s)) 时，要求该 subject 当前最后一个事件的 seq 恰为 s；Some(None) 要求该 subject 还没有事件；
+    /// 不符则 PreconditionFailed(SubjectMoved { actual })。engine 的 DeliveryActor 用它避免读-改-写之间被他人插入。
     pub async fn append_with(&mut self, ev: NewEvent, opts: AppendOpts) -> Result<Appended, StoreError>;
     pub async fn advance_cursor(&mut self, consumer: &str, seq: Seq) -> Result<()>;   // 与本事务的写入原子（conversation："追加消息 + 推进游标"）
     pub fn read(&mut self) -> TxReader<'_>;                 // 能读到本事务尚未提交的写入；实现 ProjectionRead

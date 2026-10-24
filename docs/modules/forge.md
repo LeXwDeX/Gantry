@@ -78,15 +78,16 @@
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
-| `core` | ID 类型、`ForgeActionKind`、`ForgeEvent` / `Origin`、`OutboxAction`、`UntrustedText`、`PullRequestRef` / `IssueRef`、`EffectiveSettings`；幂等键与 JCS 规范化的纯函数（提议放 `core`，让 `FakeForge` 共用同一实现） | [data-model §1–§3](../data-model.md)、FA §2.2、§6.2 |
-| `store` | 追加事件（`forge.*`、`outbox.*`、`project.updated`）、投影读写（快照、Delivery 绑定、Approval、`patch.validated`）、`outbox` 表（入队去重、原子 claim、状态迁移）、跨表事务、事件 `dedup_key` 唯一索引、事件订阅游标 | [architecture §4](../architecture.md#4-模块地图)、data-model [OutboxAction](../data-model.md#outboxaction)、§4.3、§5 |
-| `repo` | `MirrorPort`：镜像仓路径、拉取更新的协调、提交对象信息（parent / tree / trailer） | FA §3.3、§8；[worker-protocol §2.4](../interfaces/worker-protocol.md)（工作区从镜像准备） |
+| `core` | ID 类型、`ForgeActionKind`（14）/ `ForgeEventKind`（23）、`ForgeEventEnvelope`、14 个动作的 payload 类型（`deny_unknown_fields`）、`IdempotencyKey::derive`（`forge` 只负责每个 `kind` 的 `target` / `intent` 推导，core OQ-9）、`OutboxAction`、`UntrustedText`、`PullRequestRef` / `IssueRef`、`EffectiveSettings`；端口 trait `ApprovalGate`（policy.md 假定放在 `core`，OQ-P2，core.md 尚未列出）| data-model §1–§3；FA §2.2、§6.2；[core.md §6.6](core.md) |
+| `store` | `WriteTx`（事件追加 + 投影 + `outbox()` + `module_conn("forge")` 同一事务）、`OutboxTx`（`enqueue` / `claim` / `record_effects` / `renew_lease` / `complete` / `fail` / `requeue` / `cancel` / `cancel_blocked`，`coalesce_key`）、事件 `dedup_key` 唯一索引（`Appended::Duplicate`）、`ModuleSpec`（注册 `forge_*` 表的迁移）、消费者游标、`Store::open_temp` / `open_in_memory`（测试）| [store.md §6.1、§6.3、§7.10](store.md)；data-model [OutboxAction](../data-model.md#outboxaction)、§4.3、§5 |
+| `repo` | `RepoService`：`ensure_mirror`、`mirror_access(Fetch \| Push)`（得到 `MirrorGuard{git_dir, fetch_refspecs}`，持共享锁）、`check_mirror`、`has_commit`、`provenance(oid)`（提交 ← 已校验补丁的溯源，I8）。初次 clone 与之后的 fetch / push 由 `forge` 执行 | [repo.md §6.1、§6.3](repo.md)；FA §3.3、§8 |
 | `secrets` | `forge` 使用方视图：App 私钥、webhook secret（当前与上一个） | [config.md §2.4、§10](../interfaces/config.md)；architecture §6 |
-| `policy` | `ApprovalPort`：读 Approval 状态、成功后置 `consumed`；读 `patch.validated` 的 `ValidatedPatch.verdict` 与 `result_tree`；密钥扫描器（与 worker-protocol P9 同一个） | FA §2.5；[api.md §6](../interfaces/api.md)；worker-protocol §8.3 |
+| `policy`（经 `core` 端口注入，无 crate 依赖）| `ApprovalGate::check_for_execution` / `mark_consumed`（审批状态半边的执行点复核、幂等消费）| [policy.md §6.5](policy.md)；FA §2.5；[api.md §6](../interfaces/api.md) |
+| `notify` | `Inbox::raise`（`forge` 自身的权限 / 健康问题上报，`delivery_id` 可空）| [notify.md §6.1](notify.md) |
 | 设置（经 `core::EffectiveSettings`，由 `store` 投影提供） | `github.app.*`、`guardian.patrol_interval_s`、`levels.*.budget.forge_writes_per_hour` | config.md §10、§6.2、§4.1 |
 | GitHub（外部） | REST、GraphQL、git over HTTPS、webhook、App JWT 端点 | FA §5–§10 |
 
-> 与 [architecture §4](../architecture.md#4-模块地图) 的出入：地图里 `forge` 依赖 `core, store, repo`；依赖图里另有 `secrets → forge`；`forge` 还需要 `policy`（读审批、置 `consumed`、读补丁校验记录）。见 §13 F-OQ-5。
+> 与 [architecture §4](../architecture.md#4-模块地图) 的出入：地图里 `forge` 依赖 `core, store, repo`；依赖图里另有 `secrets → forge`；`forge` 还要用 `policy` 的 `ApprovalGate`（policy.md 主张放进 `core` 的端口模块，由 `gantryd` 注入）和 `notify` 的 `Inbox`。见 §13 F-OQ-5。
 
 ## 4. 输入
 
@@ -111,11 +112,12 @@
 | `forge.synced` | `store` | 快照变化；`data` 形状为本文提议（§7.5），待契约 PR（F-OQ-7） |
 | `forge.drift_detected` | `store` | FA §7.4 |
 | `outbox.enqueued`（入队同事务）、`outbox.executing`、`outbox.succeeded`、`outbox.failed`（仅终态）、`outbox.cancelled` | `store` | data-model §5.2；`outbox.failed.data.code` 取 FA §2.6 |
-| `approval.consumed` 通知 | `policy` | `ApprovalPort::consume`（§6） |
+| 审批消费 | `policy`（追加 `approval.consumed`）| `ApprovalGate::mark_consumed(permit, act_id)`，幂等 |
+| 上报项（`forge` 自身的权限 / 不可达问题）| `notify` | `Inbox::raise`，`kind = escalation`，`delivery_id` 可空 |
 | `project.updated` | `store` | 仓库设置快照变化 |
-| 快照投影 | `store` | `IssueRef` / `PullRequestRef`（含 `synced_at`） |
+| 快照投影 | `store` | `IssueRef` / `PullRequestRef`（含 `synced_at`），与 `forge.*` 事件同事务 |
 | GitHub 写调用 | GitHub | FA §3；git push / git data API |
-| 镜像仓对象更新 | `repo` 的镜像仓 | `git fetch` |
+| 镜像仓对象更新 | `repo` 的镜像仓（`refs/mirror/heads/*`）| `git fetch --prune`，refspec 取自 `MirrorGuard` |
 | 模块健康 | `status`（config.md §2.8 `modules.forge`） | `ok` / `degraded` / `unhealthy` + `detail` |
 | 日志、指标 | 运维 | §11 |
 
@@ -126,48 +128,58 @@
 ```rust
 // crates/gantry-forge/src/lib.rs
 
-/// engine / guardian / policy / api 看到的门面。唯一的 GitHub 写入口是 `enqueue`（I2）。
+/// engine / guardian / api 看到的门面。唯一的 GitHub 写入口是 `enqueue*`（I2）。
 #[async_trait::async_trait]
 pub trait Forge: Send + Sync + 'static {
-    /// 幂等入队：键 = FA §2.2；键已存在则返回已有行（created = false），不新建。
-    /// 已存在且为 failed / cancelled 的行，调用方要重做必须 epoch + 1。
-    /// upsert_status_comment 入队时，同一 (delivery, target, slot) 的旧 queued 行被置
-    /// cancelled(superseded)（FA §2.7）。
+    /// 在调用方的事务里入队（engine 需要"状态变化 + 事件 + 入队"原子，store.md §6.1 调用约定）。
+    /// forge 做：payload schema 校验 → 推导 (target, intent, coalesce_key) → 入队时机械校验 →
+    /// 调 `tx.outbox().enqueue(..)`（键 = core::IdempotencyKey::derive）。
+    /// 键已存在则返回已有行（created = false），不新建；已存在且为 failed / cancelled 的行，
+    /// 调用方要重做必须 epoch + 1。upsert_status_comment 的 coalesce_key 使同一
+    /// (delivery, target, slot) 的旧 queued 行被置 cancelled(superseded)（FA §2.7）。
+    async fn enqueue_in(&self, tx: &mut WriteTx, req: EnqueueRequest) -> Result<EnqueueOutcome, EnqueueError>;
+
+    /// 便利封装：自开一个事务入队（调用方没有要原子绑定的状态变化时用，如 guardian 的状态评论）。
     async fn enqueue(&self, req: EnqueueRequest) -> Result<EnqueueOutcome, EnqueueError>;
 
-    /// 取消非终态动作。executing 中的动作不可取消（返回 NotCancellable），由执行器自行收尾。
+    /// 取消非终态动作。executing 中的动作不可取消（NotCancellable），由执行器自行收尾。
     async fn cancel(&self, id: &ActionId, reason: CancelReason) -> Result<CancelOutcome, ForgeError>;
 
-    async fn action(&self, id: &ActionId) -> Result<Option<OutboxAction>, ForgeError>;
-
-    /// 立即对账一个目标并等待快照更新完成（审批签名前、merge 前；api.md §6.4 第 5 步）。
-    /// 同一目标的并发调用合并为一次（single-flight）。
+    /// 立即对账一个目标并等待快照更新完成（审批签名前、merge 前）。同一目标的并发调用合并为一次（single-flight）。
     async fn reconcile_now(&self, target: ReconcileTarget) -> Result<ReconcileReport, ForgeError>;
 
+    /// 请求把镜像仓拉到至少包含某 ref / OID（repo.md §9：`BaseNotInMirror` → engine 让 forge 先 fetch）。
+    /// 异步合并；返回时已拉取完成或失败。
+    async fn sync_mirror(&self, project: &ProjectId, want: MirrorWant) -> Result<(), ForgeError>;
+
     fn reader(&self) -> &dyn ForgeReader;
+}
+
+/// api.md 模块的 `grant` 前强制对账端口（api.md §6 的 PrRefresher）；由同一实现提供。
+#[async_trait::async_trait]
+impl PrRefresher for ForgeImpl {
+    async fn refresh_pr(&self, repo: &RepoRef, number: u64) -> Result<PrHead, ModuleError>; // = reconcile_now(Pr) 后读快照
 }
 
 pub struct EnqueueRequest {
     pub project_id: ProjectId,
     pub delivery_id: DeliveryId,
-    pub kind: ForgeActionKind,                 // 14 个；预留的 3 个返回 UnsupportedKind
-    pub payload: serde_json::Value,            // 按 schemas/forge/<kind>.json 校验
-    pub requires_approval: Option<ApprovalId>, // 由 engine 向 policy 取判定后填写
+    pub payload: ActionPayload,                // core 里 14 个 payload 类型的和类型，kind 即其判别式；预留的 3 个动作无对应类型
+    pub requires_approval: Option<ApprovalId>, // 由调用方向 policy 的 ActionPolicy::decide_action 取得后填写
     pub depends_on: Vec<ActionId>,
     pub priority: Priority,                    // high | normal | low
     pub not_before: Option<Timestamp>,
     pub epoch: u32,                            // 默认 0
-    pub enqueued_by: Enqueuer,                 // { module: "engine" | "guardian", causation_id }
+    pub enqueued_by: EnqueuedBy,               // { module: "engine" | "guardian", causation_id }
 }
 pub struct EnqueueOutcome { pub action: OutboxAction, pub created: bool }
 
 pub enum EnqueueError {
-    UnsupportedKind(String),                      // delete_branch / publish_release / change_repo_settings
     InvalidPayload { pointer: String, message: String },
-    ApprovalRequired { reason: &'static str },    // merge_pr 缺审批；push_branch force / 越界前缀缺审批
+    ApprovalRequired { reason: &'static str },    // merge_pr 缺审批；push_branch 的 force / 越界前缀缺审批
     PermissionMissing { kind: ForgeActionKind, permission: &'static str }, // FA §9.5
     ProjectUnknown,
-    Internal(anyhow::Error),
+    Store(StoreError),
 }
 pub enum CancelOutcome { Cancelled, AlreadyTerminal(OutboxStatus), NotCancellable }
 
@@ -191,30 +203,14 @@ pub trait ForgeReader: Send + Sync {
 pub enum ReconcileTarget { Pr { project: ProjectId, number: u64 }, Issue { project: ProjectId, number: u64 },
                            Delivery(DeliveryId), Project(ProjectId) }
 pub struct ReconcileReport { pub emitted: Vec<EventId>, pub drifts: Vec<DriftKind>, pub synced_at: Timestamp }
-
-/// 本模块需要 policy 提供的端口（policy 实现；FakePolicy 实现测试替身）。
-#[async_trait::async_trait]
-pub trait ApprovalPort: Send + Sync {
-    async fn get(&self, id: &ApprovalId) -> Result<Option<Approval>, PortError>;
-    /// 幂等：已 consumed 返回 AlreadyConsumed。成功后追加 approval.consumed。
-    async fn consume(&self, id: &ApprovalId, by: &ActionId) -> Result<ConsumeOutcome, PortError>;
-    async fn validated_patch(&self, sha256: &str) -> Result<Option<ValidatedPatchRecord>, PortError>;
-}
-
-/// 本模块需要 repo 提供的端口（F-OQ-4）。
-#[async_trait::async_trait]
-pub trait MirrorPort: Send + Sync {
-    async fn mirror_path(&self, p: &ProjectId) -> Result<PathBuf, PortError>;
-    /// 拉取期间 repo 不得 gc / 删除对象；Drop 即释放。
-    async fn begin_fetch(&self, p: &ProjectId) -> Result<MirrorFetchGuard, PortError>;
-    async fn commit_info(&self, p: &ProjectId, oid: &GitOid) -> Result<Option<CommitInfo>, PortError>; // parent、tree、trailers
-}
+pub enum MirrorWant { Branch(String), Oid(GitOid), All }
 
 /// Webhook 入口：只含 POST /webhook。gantryd 把它挂在独立监听（forge.webhook.listen），
 /// 与 mTLS API 不共享端口、中间件与鉴权。
 pub fn webhook_router(state: WebhookState) -> axum::Router;
 
-/// 装配与生命周期。
+/// 装配与生命周期；注册 store 的 ModuleSpec{ module: "forge", migrations, projector: None }。
+pub fn module_spec() -> store::ModuleSpec;
 pub struct ForgeRuntime;
 impl ForgeRuntime {
     pub async fn start(deps: ForgeDeps, boot: ForgeBootstrapConfig) -> Result<ForgeHandle, StartError>;
@@ -227,6 +223,17 @@ pub struct ForgeHandle { pub forge: Arc<dyn Forge>, pub webhook: axum::Router /*
 `FailureCode`（`outbox.failed.data.code`，FA §2.6）：`rate_limited`、`transient`、`token_expired`、`precondition_failed`（子码 `head_changed` `remote_diverged` `spec_edited_by_human` `existing_pr` `thread_has_new_replies` `run_not_failed` `stale_head`）、`not_mergeable`、`validation_failed`、`permission_denied`、`target_missing`、`approval_invalid`、`signature_required`。
 
 事件由消费方（`engine` / `guardian` / `policy`）经 `store` 订阅 `forge.*` 获得，**不**经本 trait 回调。
+
+**本模块使用的外部端口**（定义在对方规格书里，此处只列用到的方法，不重新定义）：
+
+| 端口 | 方法 | 出处 |
+| --- | --- | --- |
+| `RepoService`（`repo`）| `ensure_mirror`、`mirror_access(project, MirrorMode::{Fetch, Push})`、`check_mirror`、`has_commit`、`provenance(project, oid) -> Option<CommitRecord{commit_oid, tree_oid, parent, patch_sha256, job_id, worktree_id}>` | repo.md §6.1、§6.3 |
+| `ApprovalGate`（`policy`，经 `core` 端口）| `check_for_execution(approval, ExecutionCheck::{MergePr, PushBranch}) -> ExecutionPermit`、`mark_consumed(permit, outbox_action_id)`（幂等；`ExecutionPermit::AlreadyConsumedBy` 使崩溃重放不被误取消）| policy.md §6.5 |
+| `Inbox`（`notify`）| `raise(tx, RaiseRequest{ dedupe_key, summary: SafeSummary, .. })` | notify.md §6.1 |
+| `Store` / `WriteTx` / `OutboxTx`（`store`）| 见 §3 | store.md §6 |
+| 密钥扫描器 | 与 worker-protocol P9 同一个；归属未定（F-OQ-13）| repo.md OQ-R8、policy.md OQ-P3 |
+
 
 ## 7. 内部设计
 
