@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Gantry 设置 · 模型</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#0E1014}
+a{color:#58A6FF}a:hover{color:#79B8FF}
+button,select{font:inherit;color:inherit}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-direction: column; background: #0E1014; color: #E6E8EB; font-family: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif; font-size: 13px">
+
+  <header style="display: flex; align-items: center; gap: 12px; padding: 0 12px; min-height: 44px; flex-wrap: wrap; background: #111418; border-bottom: 1px solid #22272E">
+    <a href="Main.dc.html" style="display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid #2A3038; color: #A9B1BA; text-decoration: none; font-size: 12.5px">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M7.5 2.5L4 6l3.5 3.5"></path></svg>返回工作区</a>
+    <span style="font-weight: 600">设置</span>
+    <span style="margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #A9B1BA; font-family: 'JetBrains Mono', monospace"><span style="width: 7px; height: 7px; border-radius: 50%; background: #3FB950"></span>ubuntu-01 · mTLS</span>
+  </header>
+
+  <div style="display: flex; flex-wrap: wrap; flex: 1">
+    <nav aria-label="设置分类" style="flex: 1 1 200px; box-sizing: border-box; padding: 12px 10px; border-right: 1px solid #22272E; background: #111418; display: flex; flex-direction: column; gap: 2px">
+      <span style="padding: 0 8px 6px; font-size: 11px; color: #8B949E; letter-spacing: 0.4px">服务端</span>
+      <button style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: #1C2128; color: #E6E8EB; cursor: pointer">模型</button>
+      <button style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #C9D1D9; cursor: pointer">档位与预算</button>
+      <button style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #C9D1D9; cursor: pointer">GitHub App</button>
+      <button style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #C9D1D9; cursor: pointer">沙盒与出网</button>
+      <button style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #C9D1D9; cursor: pointer">危险动作策略</button>
+      <span style="padding: 12px 8px 6px; font-size: 11px; color: #8B949E; letter-spacing: 0.4px">本机</span>
+      <button style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #C9D1D9; cursor: pointer">设备与证书</button>
+      <button style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #C9D1D9; cursor: pointer">外观</button>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 20px 24px; display: flex; flex-direction: column; gap: 22px">
+      <div style="display: flex; flex-direction: column; gap: 6px; max-width: 980px">
+        <h1 style="margin: 0; font-size: 18px; font-weight: 600">模型</h1>
+        <span style="color: #8B949E; line-height: 1.6">三类模型分工，保存在服务端，对所有项目生效；项目可在「项目设置」里覆盖。提供方凭据只存在服务端，桌面端不保存。</span>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; max-width: 980px">
+        <section style="border: 1px solid #2A3038; border-radius: 10px; background: #151920; padding: 14px; display: flex; flex-direction: column; gap: 12px">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span style="font-size: 11px; color: #8B949E; border: 1px solid #8B949E; border-radius: 4px; padding: 1px 6px">打杂</span>
+            <span style="font-weight: 600">打杂模型</span>
+          </div>
+          <span style="font-size: 12px; color: #A9B1BA; line-height: 1.6">摘要 PR 事件、分类 CI 日志、生成提交说明与状态清单。量大、要便宜。</span>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">模型
+            <select style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-family: 'JetBrains Mono', monospace; font-size: 12px"><option>claude-haiku-5-5</option><option>claude-sonnet-5-5</option></select>
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">推理深度
+            <select style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-size: 12px"><option>none</option><option>low</option><option>medium</option></select>
+          </label>
+        </section>
+
+        <section style="border: 1px solid #F0883E; border-radius: 10px; background: #151920; padding: 14px; display: flex; flex-direction: column; gap: 12px">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span style="font-size: 11px; color: #F0883E; border: 1px solid #F0883E; border-radius: 4px; padding: 1px 6px">大脑</span>
+            <span style="font-weight: 600">大脑模型</span>
+          </div>
+          <span style="font-size: 12px; color: #A9B1BA; line-height: 1.6">规划拆图、需求准入问答、reasoner 预演、arbiter 裁决。量少、要准。</span>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">模型
+            <select style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-family: 'JetBrains Mono', monospace; font-size: 12px"><option>claude-opus-5-5</option><option>claude-fable-5-1</option></select>
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">推理深度
+            <select style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-size: 12px"><option>xhigh</option><option>high</option><option>max</option></select>
+          </label>
+        </section>
+
+        <section style="border: 1px solid #2A3038; border-radius: 10px; background: #151920; padding: 14px; display: flex; flex-direction: column; gap: 12px">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span style="font-size: 11px; color: #58A6FF; border: 1px solid #58A6FF; border-radius: 4px; padding: 1px 6px">干活</span>
+            <span style="font-weight: 600">干活模型</span>
+          </div>
+          <span style="font-size: 12px; color: #A9B1BA; line-height: 1.6">实现、修复、各 review 视角。主力产量，按档位调推理深度。</span>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">模型
+            <select style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-family: 'JetBrains Mono', monospace; font-size: 12px"><option>claude-sonnet-5-5</option><option>claude-opus-5-5</option></select>
+          </label>
+          <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">推理深度
+            <select style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-size: 12px"><option>随档位</option><option>medium</option><option>high</option></select>
+          </label>
+        </section>
+      </div>
+
+      <section style="display: flex; flex-direction: column; gap: 8px; max-width: 980px">
+        <h2 style="margin: 0; font-size: 14px; font-weight: 600">档位如何调用三类模型</h2>
+        <div style="overflow-x: auto; border: 1px solid #22272E; border-radius: 10px">
+          <table style="width: 100%; min-width: 640px; border-collapse: collapse; font-size: 12.5px">
+            <thead>
+              <tr style="text-align: left; color: #8B949E; font-size: 11px; letter-spacing: 0.4px; background: #111418">
+                <th style="padding: 8px 12px; font-weight: 500">档位</th>
+                <th style="padding: 8px 12px; font-weight: 500">大脑</th>
+                <th style="padding: 8px 12px; font-weight: 500">干活</th>
+                <th style="padding: 8px 12px; font-weight: 500">打杂</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace">None</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; color: #8B949E">不调用</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">单轮回答</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">—</td></tr>
+              <tr><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace">Low</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; color: #8B949E">不调用</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">单节点实现</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">提交说明</td></tr>
+              <tr><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace">Medium</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">规划</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">plan / build / verify</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">状态清单</td></tr>
+              <tr><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace">High</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">规划、准入</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">实现 + 多角色 review</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">事件摘要</td></tr>
+              <tr><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace">Max</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">规划、reasoner、arbiter</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">实现 + 对抗 review</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">事件摘要</td></tr>
+              <tr><td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace">Ultimate</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">拆 Milestone、每个 PR 裁决</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">多 PR 并行，每个按 Max</td><td style="padding: 8px 12px; border-top: 1px solid #1A1E24">事件摘要</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div style="display: flex; gap: 8px; max-width: 980px">
+        <button style="height: 32px; padding: 0 14px; border-radius: 6px; border: 0; background: #58A6FF; color: #0E1014; font-weight: 600; cursor: pointer">保存</button>
+        <button style="height: 32px; padding: 0 14px; border-radius: 6px; border: 1px solid #2F353D; background: transparent; cursor: pointer">测试连接</button>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Gantry 设计讨论记录
 
-> 状态：讨论中（2026-10-24）。本文与在线文档同步记录设计讨论结论，正式架构设计文档待待决问题确定后另行整理。
+> 状态：历史记录（2026-10-24）。本文保留最初的设计讨论，已被 [architecture.md](architecture.md)、[decisions.md](decisions.md) 等正式文档取代；两者冲突时以正式文档为准。对本文的评审见 [reviews/2026-10-24-design-review.md](reviews/2026-10-24-design-review.md)。
 
 ## 背景与定位
 
