@@ -240,23 +240,24 @@ pub trait ReservationPolicy: Send + Sync {
 
 ```
 store 事件 ──► EventRouter（持久游标 "engine"）──► DeliveryActor[delivery_id]（串行执行体，邮箱）
-命令（EngineApi / DeliveryControl / HealRunner）──────────────►          │
+命令（EngineApi / DeliveryControl / HealPort）────────────────►          │
 AttemptRunner 报告（尝试进展 / 终结）─────────────────────────►          ▼
                               ┌─ 打开 WriteTx ──────────────────────────────────────┐
                               │ 1. tx.read() 读该交付单元的投影，得到 DeliveryState   │
                               │ 2. decide(state, input) -> Vec<Decision>（纯函数，无 IO）│
-                              │ 3. tx.append(事件…)；Inbox::raise(Some(tx), …)         │
+                              │ 3. tx.append(事件…)；InboxPort::raise(Some(tx), …)；     │
+                              │    OutboxPort::enqueue_in(tx, …)                     │
                               │ 4. tx.advance_cursor("engine", seq)；commit            │
                               └───────────────────────────────────────────────────┘
                                                   │ 提交之后
                                                   ▼
-          副作用执行：Forge::enqueue、SandboxService::submit / cancel / release、RepoService、models 调用
+          副作用执行：SandboxService::submit / wait / cancel / release、RepoService、models 调用、ForgeReader 拉取材料
 ```
 
 要点：
 
 - **每个活跃交付单元一个串行执行体（actor）**：交付单元内严格串行，交付单元之间并行；全局只有一个调度器（派发队列与在途 `submit` 上限）。
-- **决策在事务内、副作用在提交后**：`store` 是单写者，`WriteTx` 里先读后写不会被他人插入（[store.md §6.1](store.md)），因此不需要额外的乐观版本守卫；事务内只做 CPU 计算（`decide` 是纯函数），不做外部 IO，也不 `await` 无界的东西。事务内追加的事件由 `core` 的状态机校验，非法迁移得到 `TransitionError`（暴露契约缺口，core.md §7.4）。外部副作用（`Forge::enqueue`、起沙盒、调模型）在提交之后发起；它们都是幂等的，崩溃后由 `decide(Tick)` 重新派生同样的请求补上（§7.13）。
+- **决策在事务内、副作用在提交后**：`store` 是单写者，`WriteTx` 里先读后写不会被他人插入（[store.md §6.1](store.md)），因此不需要额外的乐观版本守卫；事务内只做 CPU 计算（`decide` 是纯函数），不做外部 IO，也不 `await` 无界的东西。事务内追加的事件由 `core` 的状态机校验，非法迁移得到 `TransitionError`（暴露契约缺口，core.md §7.4）。Outbox 入队经 `OutboxPort::enqueue_in` 与决策事件**同事务**（`WriteTx` 作为 `TxHandle` 传入，入队只做校验与插入，不做外部 IO）；外部副作用（起沙盒、调模型、拉取材料）在提交之后发起；它们都是幂等的，崩溃后由 `decide(Tick)` 重新派生同样的请求补上（§7.13）。
 - **决策幂等**：`decide` 对同一状态与同一输入返回相同结果；每个决策都带前置条件（例如"节点仍为 `pending`"），状态已前进则不产生重复事件。
 - **ID 在事件里**：节点 / 尝试 / 工作流 ID 在决策时生成并写进事件，恢复时从事件读取，不重新生成。
 - **读写分离**：读 `Delivery` / `Workflow` / `Node` / `Attempt` / `BudgetLedger` / PR 与 Issue 快照用 `store` 投影；写一律走事件。
@@ -265,19 +266,20 @@ AttemptRunner 报告（尝试进展 / 终结）───────────
 
 ```rust
 pub struct DeliveryState {
-    pub id: DeliveryId, pub project_id: ProjectId, pub origin: Origin,
+    pub id: DeliveryId, pub project_id: ProjectId, pub origin: DeliveryOrigin,
     pub level_cap: Level, pub level_effective: Level,
-    pub stage: Stage, pub stage_status: StageStatus,
+    pub stage: Stage, pub stage_status: StageStatus,                 // running | waiting_human | blocked | paused | done（P-55）
+    pub status_before_pause: Option<StageStatus>,                  // 暂停前的值，resume 时恢复（P-56）
     pub issues: Vec<IssueRef>, pub pr: Option<PullRequestRef>,   // 快照（GitHub 事实源，I4）
     pub worktree: Option<WorktreeInfo>, pub branch: String,      // 分支名由引擎在创建时确定（§7.12）
     pub parent_id: Option<DeliveryId>, pub depends_on: Vec<DeliveryId>,
     pub config_rev: u64,                                          // 创建时固化
     pub ledger: BudgetLedger,
     pub workflows: BTreeMap<WorkflowId, WorkflowState>,
-    pub triggered_gates: BTreeSet<GateId>,                        // 已触发的闸门，降档不撤销
+    pub triggered_gates: BTreeSet<GateId>,                        // 已触发的闸门，永不撤销（P-57）
     pub evidence: Evidence,                                       // 见下
     pub open_inbox: BTreeMap<InboxId, OpenInbox>,                 // 引擎创建且未关闭的上报项
-    pub pushed_head: Option<Oid>,                                 // 最近一次入队推送的本地提交
+    pub pushed_head: Option<GitOid>,                              // 最近一次入队推送的本地提交
     pub round_history: Vec<RoundRecord>,                          // 每轮 REVISE 的 finding 指纹，用于无进展检测
 }
 pub struct WorkflowState { pub id: WorkflowId, pub stage: Stage, pub graph_rev: u32,
@@ -288,9 +290,9 @@ pub struct NodeState { pub id: NodeId, pub key: NodeKey, pub role: Role, pub tie
     pub status: NodeStatus, pub verdict: Option<Verdict>, pub superseded_by: Option<NodeId>,
     pub attempts: Vec<AttemptState> }
 pub struct Evidence {                       // 退出证据的本地记录，全部绑定 head（见 §7.6）
-    pub judged_head: Option<Oid>,           // 最近一次判定所基于的候选 head
-    pub candidate_head: Option<Oid>,        // repo 为已通过校验的补丁生成的最新本地提交
-    pub patch_sha256: Option<Sha256>,       // 最近一份已校验补丁（补丁审批的 subject_digest）
+    pub judged_head: Option<GitOid>,        // 最近一次判定所基于的候选 head
+    pub candidate_head: Option<GitOid>,     // repo 为已通过校验的补丁生成的最新本地提交
+    pub patch_sha256: Option<Sha256Digest>, // 最近一份已校验补丁（补丁审批的 subject_digest）
 }
 ```
 
@@ -302,18 +304,18 @@ tier / exec 的固定搭配见 [architecture §9](../architecture.md#9-三类模
 
 | role | 判定节点（产出 verdict） | 补丁 | 默认 `required` | 谁调度 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `admission` | 是 | — | 是 | 引擎 | `direct`；`REVISE` = NOT_READY |
+| `admission` | 是 | — | 是 | 引擎 | `direct`；只在 High 及以上（P-55）；`REVISE` = NOT_READY |
 | `plan` | 否 | forbidden | 是 | 引擎 | `blocking_questions` 非空 → 追问，不算失败 |
-| `reasoner` | **否**（P-45） | forbidden | 否 | 引擎 | 只产出预演报告；结果里若带 `verdict` 一律忽略（OQ-5） |
+| `reasoner` | **否**（P-45） | forbidden | 否 | 引擎 | 只产出预演报告；worker-protocol 已去掉其 `verdict`（C25） |
 | `build` | 否 | optional | 是 | 引擎 | `no_change_reason` 处理见 OQ-15 |
 | `verify` | 是 | forbidden | 是 | 引擎 | 在候选 head 上跑检查 |
 | `single` | 否 | optional | 是 | 引擎 | Low 档实现 + 自检 |
 | `review:<视角>` | 是 | forbidden | 是 | 引擎 | |
 | `arbiter` | 是（Max 评审阶段的唯一裁决） | forbidden | 是 | 引擎 | |
 | `summarize` | 否（无 verdict） | — | 否 | 引擎 | `direct`；结果用于评审摘要，不决定阶段结论 |
-| `heal` | 否 | optional | 是 | `guardian` 经 `HealRunner` | |
-| `answer` | 否 | forbidden | 是 | `conversation` 经 `run_answer` | |
-| `classify` | 否 | — | — | `guardian` 经 `ClassifyRunner`（节点，计入 `nodes`）；引擎自己的辅助调用（commit 说明、通知文案）不是节点，见 §7.9"辅助调用" | |
+| `heal` | 否 | optional | 是 | `guardian` 经 `HealPort::request_heal` | |
+| `answer` | 否 | forbidden | 是 | `conversation` 经 `run_answer` | 挂在会话上的临时图（`Workflow.delivery_id = None`，P-58） |
+| `classify` | 否 | — | — | `guardian` 经 `ClassifyPort`（节点，计入 `nodes`）；引擎自己的辅助调用（commit 说明、通知文案）不是节点，见 §7.9"辅助调用" | |
 | `intent` | 否 | — | — | `conversation` 直接经 `models` 调用 | 不是图节点 |
 
 ### 7.4 图模板（每个档位）
@@ -322,7 +324,8 @@ tier / exec 的固定搭配见 [architecture §9](../architecture.md#9-三类模
 
 **通则**
 
-- `Workflow` 与阶段运行一一对应：每次进入一个有 agent 图的阶段就新建一个 Workflow（`graph_rev = 1`）；`propose`、`merge`、`closed` 没有 agent 图，不建 Workflow。
+- `Workflow` 与阶段运行一一对应：每次进入一个有 agent 图的阶段就新建一个 Workflow（`graph_rev = 1`）；`propose`、`merge`、`closed` 没有 agent 图，不建 Workflow。计划是独立阶段（P-55）：计划阶段图 = `plan`（Max 起加 `reasoner`）；实现阶段图 = `build → verify`（Low 为 `single`）；准入图 = `admission`（仅 High 及以上）。
+- None 档代码问答（P-58）：`answer` 节点所在的 Workflow 挂在会话上（`delivery_id = None`、`conversation_id` 必填、`stage` 为空），不属于任何交付单元的阶段机。
 - 节点的 `depends_on` 满足条件：每个 `required` 依赖已 `succeeded`，且每个非 `required` 依赖已进入终态。`required` 依赖终态失败（重试耗尽）→ 下游 `skipped`，Workflow `failed`，上报（§7.8）。
 - `exec = sandbox` 的节点需要工作树写权锁，`sandbox_ro` 与 `direct` 不需要（§7.7）。
 - 视角清单、critical 标注、`required` 取值为 [提议]，见 OQ-5。
@@ -331,7 +334,7 @@ tier / exec 的固定搭配见 [architecture §9](../architecture.md#9-三类模
 
 ```mermaid
 flowchart LR
-  subgraph spec["spec（Medium 起）"]
+  subgraph spec["spec（High 起准入）"]
     adm["admission<br/>planner · direct · 判定"]
   end
   subgraph plan["plan"]
@@ -373,8 +376,8 @@ flowchart LR
 
 | 阶段 | Workflow.template | 节点 | 说明 |
 | --- | --- | --- | --- |
-| spec | —（无图） | — | 免准入；创建后立即 `spec → implement` |
-| plan | — | — | 跳过（状态机无 `plan` 经过） |
+| spec | —（无图） | — | 免准入；规格确认后 `spec → implement`（`AdmissionSkipped`） |
+| plan | — | — | 无计划阶段（P-55） |
 | implement | `low.implement` | `single`（R；worker · sandbox；补丁 optional；proposals 允许 `open_pr`、`escalate`） | 实现 + 自检 |
 | review | —（无图） | — | 只等 CI：退出证据是当前 head 的 `checks.required_ok` |
 
@@ -382,15 +385,16 @@ flowchart LR
 
 | 阶段 | Workflow.template | 节点与边 | 判定规则 |
 | --- | --- | --- | --- |
-| spec | `medium.spec` | `admission`（R） | `Single(admission)`（是否准入见 OQ-2，本文暂做） |
+| spec | —（无图） | — | 免准入（P-55）：规格确认后 `spec → plan`（`AdmissionSkipped`） |
 | plan | `medium.plan` | `plan`（R） | `None` |
 | implement | `medium.implement` | `build`（R，上游：`plan`）→ `verify`（R，上游：`build`、`plan`；依赖 `build` 且 `build` 的补丁已通过校验并生成本地提交） | `Single(verify)` |
 | review | `medium.review` | `review:general`（R；上游：`plan`） | `Single(review:general)` |
 
-*High：`high.multi_review`*：spec / plan / implement 同 Medium（模板名换成 `high.*`；`verify` 为 C），review 为：
+*High：`high.multi_review`*：plan / implement 同 Medium（模板名换成 `high.*`；`verify` 为 C）；spec 有准入（P-55）；review 为：
 
 | 阶段 | Workflow.template | 节点与边 | 判定规则 |
 | --- | --- | --- | --- |
+| spec | `high.spec` | `admission`（R） | `Single(admission)` |
 | review | `high.review` | 并行：`review:correctness`（R，C）、`review:security`（R，C）、`review:tests`（R）；汇总：`summarize`（非 R；依赖三者，上游：三者） | `Fold([三个 review 节点])` |
 
 *Max：`max.adversarial`*
@@ -412,13 +416,13 @@ flowchart LR
 
 **节点数核对**（按上表模板与建议默认预算，供调参，非契约）：
 
-| 档位 | 首轮节点数 | 每轮 REVISE 追加 | 预算 `nodes` / `rounds` | 用满轮次所需节点 |
+| 档位 | 首轮节点数 | 每轮 REVISE 追加 | 预算 `nodes` / `rounds`（C29 调整后的建议值） | 用满轮次所需节点 |
 | --- | --- | --- | --- | --- |
-| Medium | 5（admission、plan、build、verify、review） | 3（build、verify、review） | 12 / 3 | 5 + 3×3 = 14，**先于 rounds 撞 nodes** |
-| High | 8 | 6（build、verify、3 个 reviewer、summarize） | 30 / 4 | 8 + 6×4 = 32，同上 |
+| Medium | 4（plan、build、verify、review；免准入） | 3（build、verify、review） | ≥ 20 / 3 | 4 + 3×3 = 13，留出守护 `heal` / `classify` 余量 |
+| High | 8（admission、plan、build、verify、3 个 reviewer、summarize） | 6（build、verify、3 个 reviewer、summarize） | ≥ 40 / 4 | 8 + 6×4 = 32，在预算内 |
 | Max | 10 | 7 | 60 / 6 | 10 + 7×6 = 52，在预算内 |
 
-守护的 `heal` 节点也占 `nodes`。这是配置层面的调参问题（config 的默认值是"建议值，待调优"），在 OQ-9 里提示。
+守护的 `heal` 节点也占 `nodes`。C29 已把 config 中各档 `nodes` 建议值调到不先于 `rounds` 耗尽（仍标"建议值，待调优"）；Low 档的 `nodes` 是否同步上调见 OQ-9(f)。
 
 ### 7.5 判定与有界迭代
 
