@@ -1,6 +1,6 @@
 # 事件存储（`store`）
 
-> 状态：设计 v0.1 · 里程碑：M1（M0 仅冻结接口，见 OQ-1） · 泳道：`be-engine` · crate / 目录：`crates/gantry-store`
+> 状态：设计 v0.1 · 里程碑：M0（冻结接口与 `Store::open_in_memory`，P-51）、M1 · 泳道：`be-engine` · crate / 目录：`crates/gantry-store`
 
 `store` 是服务端唯一的持久化边界：追加式事件日志（event log）是编排状态的事实源（I4），投影（projection）是它在同一事务里维护、可整体重建的视图，Outbox 表保证 GitHub 写动作"先落盘、后执行"（I2），内容寻址存储放尝试结果和被拒产物。其他模块不直接接触 SQLite。
 
@@ -24,8 +24,8 @@
 
 | 里程碑 | 交付 |
 | --- | --- |
-| M0 | milestones 未给 `store` 交付物。本文建议（OQ-1）至少冻结 §6 的公开签名，并提供 `InMemoryStore`（`testing` feature，即 `Store::open_in_memory`）让其他泳道并行开发——`engine`、`policy`、`api` 的规格书都已假定它存在；`store` 自己的实现从 M1 开始 |
-| M1 | `be-engine` 泳道明确要求"事件日志、投影、SSE 游标"。本文展开为：§1 的 1–6、8、9 全部；M1 用到的实体投影（项目、对话、消息、交付单元及 Issue / PR 快照、工作流 / 节点 / 尝试、工作树及锁、沙盒、收件箱、审批、设备、预算台账、settings）；Outbox 全部操作（`coalesce_key` 除外）；CAS 的 `put` / `get` / `has`；SQLite 备份；启动恢复；`Store::open_temp` / `open_in_memory`；崩溃注入测试 |
+| M0 | 冻结 §6 的公开签名，并提供内存实现 `Store::open_in_memory`（`testing` feature，裁决 C5 / P-51 列为 M0 替身），让其他泳道并行开发；`store` 自己的完整实现从 M1 开始 |
+| M1 | `be-engine` 泳道明确要求"事件日志、投影、SSE 游标"。本文展开为：§1 的 1–6、8、9 全部；M1 用到的实体投影（项目、对话、消息、交付单元及 Issue / PR 快照、工作流 / 节点 / 尝试、工作树及锁、沙盒、收件箱、审批、设备、预算台账、settings）；Outbox 全部操作（`coalesce_key` 除外；失败语义按 P-53）；会话台账（`BudgetLedger.subject = conversation`，P-58）；收件箱按项目的 open 计数（`GET /v1/inbox/summary`，P-63）；CAS 的 `put` / `get` / `has`；SQLite 备份；启动恢复与 `log_epoch`（P-67）；`Store::open_temp` / `open_in_memory`；崩溃注入测试 |
 | M2 | 随上层模块推进 [提议，milestones 未单列]：Outbox 的 `coalesce_key`（状态清单评论，guardian）与优先级调度；审计查询 `audit`（`sec` 的审计日志）；审批失效 / 过期的到期扫描查询；多节点图所需的预算计数全量启用 |
 | M3 | 图改写：`workflow.revised`、`node.superseded` 的投影与 `include_superseded` 查询；settings 历史版本列表（config.md OQ-25）；CAS 的隔离区与保留期（取决于 OQ-3） |
 | M4 | 父子交付单元：`parent_id` / `depends_on` 查询、父交付单元预算台账汇总；手机档案的事件过滤（`EventFilter.exclude` 已满足，无需新接口）；通知所需的推送令牌表（经 OQ-4 的模块私有表） |
@@ -43,6 +43,7 @@
 | 密钥值 | `secrets`；事件里只有 `SecretRef`（I6） |
 | 沙盒产物的校验（白名单、补丁校验） | `sandbox`、`repo`；`store` 把 CAS 内容当**不透明字节**，不解析不执行 |
 | 备份的调度、传输、保留 | `deploy` |
+| 设备吊销的日志外副本 `revocations.journal` 及其恢复后重放 | `pki`（P-67）；`store` 只在 `restore_from` 后把 `log_epoch` 加一 |
 | 事件和 CAS 的保留期 | 未定（OQ-5）；本文不删除任何事件 |
 
 ## 3. 依赖
@@ -119,7 +120,7 @@ impl Store {
     pub fn events(&self) -> EventLog;
     pub fn cursors(&self) -> Cursors;
     pub fn cas(&self) -> Cas;
-    pub fn log_identity(&self) -> LogIdentity;                              // {log_id, restore_epoch}，OQ-6
+    pub fn log_identity(&self) -> LogIdentity;                              // {log_id, log_epoch}；log_epoch 每次从备份恢复加一（P-67）
 
     pub async fn backup_to(&self, dest_dir: &Path) -> Result<BackupReport, StoreError>;
     pub async fn verify(&self, level: VerifyLevel) -> Result<VerifyReport, StoreError>;     // Quick / Full
@@ -177,6 +178,7 @@ pub trait ProjectionRead {
     async fn pr_snapshot(&mut self, repo: &RepoSlug, number: u64) -> Result<Option<PullRequestRef>>;
     async fn issue_snapshot(&mut self, repo: &RepoSlug, number: u64) -> Result<Option<IssueRef>>;
     async fn budget(&mut self, d: &DeliveryId) -> Result<Option<BudgetLedger>>;
+    async fn conversation_budget(&mut self, c: &ConversationId, day: Date) -> Result<Option<BudgetLedger>>; // 会话台账（subject = conversation，P-58），按 UTC 日
     // 图
     async fn workflows(&mut self, d: &DeliveryId, stage: Option<Stage>, p: &Page) -> Result<Paged<Workflow>>;
     async fn workflow(&mut self, id: &WorkflowId, include_superseded: bool) -> Result<Option<WorkflowWithNodes>>;
@@ -187,6 +189,8 @@ pub trait ProjectionRead {
     async fn worktrees(&mut self, q: &WorktreeQuery, p: &Page) -> Result<Paged<Worktree>>;
     async fn inbox_item(&mut self, id: &InboxId) -> Result<Option<InboxItem>>;
     async fn inbox(&mut self, q: &InboxQuery, p: &Page) -> Result<Paged<InboxItem>>;       // project_id、status（默认 open）、kind
+    async fn inbox_open_by_dedup_key(&mut self, key: &str) -> Result<Option<InboxItem>>;   // InboxItem.dedup_key（P-63）
+    async fn inbox_summary(&mut self) -> Result<Vec<InboxProjectCount>>;                   // GET /v1/inbox/summary：按项目的 open 计数
     async fn approval(&mut self, id: &ApprovalId) -> Result<Option<Approval>>;
     async fn approvals(&mut self, q: &ApprovalQuery, p: &Page) -> Result<Paged<Approval>>; // status、delivery_id
     async fn due_approvals(&mut self, now: Timestamp, limit: u32) -> Result<Vec<ApprovalId>>; // 已过期仍为 pending / granted，供 policy 扫描
@@ -243,11 +247,13 @@ impl Cursors {
 ### 6.3 Outbox
 
 ```rust
-pub struct EnqueueRequest {
+/// store 层的行插入请求；对外的入队端口是 core::ports::OutboxPort（forge 实现，请求类型是 `core::ports::EnqueueRequest`），forge 推导出 target / intent 后调用本方法。
+pub struct OutboxInsert {
     pub project_id: ProjectId, pub delivery_id: DeliveryId, pub kind: ForgeActionKind,
     pub target: String, pub intent: serde_json::Value,       // 供派生幂等键（forge-actions §3.2 的 target / intent）
     pub payload: serde_json::Value,
-    pub requires_approval: Option<ApprovalId>, pub depends_on: Vec<ActionId>,
+    pub requires_approval: Option<ApprovalId>,   // 入队方按 PolicyPort 的判定写入（P-62）
+    pub depends_on: Vec<ActionId>,
     pub priority: Priority, pub not_before: Option<Timestamp>, pub epoch: u32,
     pub coalesce_key: Option<String>,                        // 同一 (delivery, target, slot) 的 upsert_status_comment，M2
     pub enqueued_by: EnqueuedBy,                             // {module, causation_id}
@@ -257,7 +263,7 @@ pub struct Enqueued { pub action: OutboxAction, pub created: bool }
 impl OutboxTx<'_> {
     /// 幂等：键 = IdempotencyKey::derive(...)。键已存在返回已有行（created = false），不新建、不发事件；
     /// 已有行为 failed / cancelled 时原样返回，调用方要重做必须 epoch + 1。
-    pub async fn enqueue(&mut self, req: EnqueueRequest) -> Result<Enqueued>;
+    pub async fn enqueue(&mut self, req: OutboxInsert) -> Result<Enqueued>;
     /// 原子认领：选出一个就绪行 → executing，写租约，attempts += 1（重放不加），追加 outbox.executing。
     /// 就绪 = queued 且 not_before 已到且依赖全部 succeeded；或 executing 且租约已过期（replay = true）。
     /// ClaimOpts { lease: Duration, exclude_deliveries: BTreeSet<DeliveryId> }——预算已耗尽的交付单元由 forge 传入排除（forge-actions §2.7），其行保持 queued。
@@ -265,8 +271,9 @@ impl OutboxTx<'_> {
     pub async fn record_effects(&mut self, id: &ActionId, effects: Vec<ExpectedEffect>) -> Result<()>;  // 写在变更调用之前
     pub async fn renew_lease(&mut self, id: &ActionId, until: Timestamp) -> Result<()>;
     pub async fn complete(&mut self, id: &ActionId, github_ref: GithubRef) -> Result<()>;   // succeeded + outbox.succeeded，同事务
-    /// Terminal：置 failed 并追加 outbox.failed（data.code 取 forge-actions §2.6）。
-    /// Retry：回到 queued 并设 not_before，last_error 更新，**不**追加 outbox.failed（与 forge.md 的"outbox.failed 仅终态"一致，OQ-9）。
+    /// Terminal：置 failed（终态）并追加 outbox.failed（data.code 取 forge-actions §2.6）。
+    /// Retry：临时错误，行**留在 queued** 并设 not_before 退避，last_error 更新，**不**追加 outbox.failed（P-53）。
+    /// 已 failed 的行不会回到 queued；人工重试由调用方以 epoch + 1 入队一个新动作。
     pub async fn fail(&mut self, id: &ActionId, err: OutboxError, then: AfterFailure) -> Result<()>;
     pub async fn requeue(&mut self, id: &ActionId, not_before: Timestamp, refund_attempt: bool) -> Result<()>; // 限流退避：不消耗尝试次数
     pub async fn cancel(&mut self, id: &ActionId, reason: CancelReason) -> Result<()>;
@@ -340,7 +347,7 @@ SQLite `STRICT` 表。主键、唯一约束、触发器是正确性的一部分�
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
 -- 键：schema_version、projector.<module>.version（内置投影器的 module 为 core）、module.<name>.version、
---     log_id（建库时生成的随机 ULID）、restore_epoch、projected_seq
+--     log_id（建库时生成的随机 ULID）、log_epoch（P-67）、projected_seq
 
 CREATE TABLE events (
   seq            INTEGER PRIMARY KEY AUTOINCREMENT,         -- 全局单调；AUTOINCREMENT 保证不复用
@@ -412,15 +419,15 @@ CREATE TABLE settings_docs (                                -- 投影：settings
 | `projects` | Project | `project.added` / `updated` | `UNIQUE(repo)`；不含 `settings_override`（它在 `settings_docs`） |
 | `conversations` | Conversation | `conversation.created` | `UNIQUE(project_id)` |
 | `messages` | Message | `message.posted` | `(conversation_id, id)` |
-| `deliveries` | Delivery | `delivery.created` / `stage_changed` / `level_changed` / `abandoned`；`worktree.created`（挂 `worktree_id`） | `(project_id, stage, id)`；`(parent_id)` |
+| `deliveries` | Delivery | `delivery.created` / `stage_changed` / `level_changed` / `paused` / `resumed` / `abandoned`；`worktree.created`（挂 `worktree_id`） | `(project_id, stage, id)`；`(parent_id)` |
 | `issue_snapshots`、`pr_snapshots`、`delivery_issues` | IssueRef / PullRequestRef 与绑定 | `delivery.created`（绑定）、`forge.synced`、`forge.<kind>`；只有 `actor.kind = forge` 的事件可更新快照列 [提议] | `PK(repo, number)`；`(delivery_id)` |
-| `workflows`、`nodes` | Workflow、Node | `workflow.created` / `revised` / `finished`、`node.*` | `(delivery_id, stage)`；`(workflow_id)` |
+| `workflows`、`nodes` | Workflow、Node | `workflow.created` / `revised` / `finished`、`node.*`（含 `node.retry_requested`） | `(delivery_id, stage)`；`(conversation_id)`（`delivery_id` 可空时必有 `conversation_id`，P-58）；`(workflow_id)` |
 | `attempts` | Attempt | `attempt.started` / `finished` | `UNIQUE(node_id, n)`；终态后拒绝任何修改 |
 | `worktrees` | Worktree + 锁 | `worktree.*` | `UNIQUE(project_id, branch)` |
 | `sandboxes` | Sandbox | `sandbox.created` / `destroyed` | `(attempt_id)` |
-| `inbox_items` | InboxItem | `inbox.raised` / `resolved` / `dismissed` | `(status, id)`；`(delivery_id)` |
+| `inbox_items` | InboxItem | `inbox.raised` / `resolved` / `dismissed` | `(status, id)`；`(project_id, status)`（`inbox_summary`）；`(delivery_id)`；`dedup_key` 在 `open` 行上唯一（部分唯一索引，P-63） |
 | `approvals` | Approval | `approval.*` | `(delivery_id)`；`(status, expires_at)` |
-| `budget_ledgers` | BudgetLedger | `delivery.created`（建账）、`budget.charged` / `exhausted` | `UNIQUE(delivery_id)` |
+| `budget_ledgers` | BudgetLedger | `delivery.created`（建账）、`budget.charged` / `exhausted` | 交付台账 `UNIQUE(delivery_id)`；会话台账（`subject = conversation`，P-58）按 `(conversation_id, UTC 日)` 唯一，`budget.charged` 无 `delivery_id` 而带 `conversation_id` 时首笔即建账 |
 | `devices` | Device（事件可得的列） | `device.paired` / `updated` / `revoked` | `UNIQUE(cert_serial)`；`last_seen` 等非事件列归 `pki` 的表（OQ-4） |
 | `settings_secret_changes` | `(ref, version) → seq` 反查 | `settings.updated` 的 `secret_changes[]` | `PK(ref, version)`；只存名字与版本，无值无哈希 |
 
@@ -484,7 +491,7 @@ LIMIT 1;
 
 - 单写者 + 同一事务内"选 + 更新"，天然保证同一行不会被两个认领者拿到；若将来多进程（OQ-9），改为 `UPDATE … WHERE status='queued' … RETURNING` 的原子抢占（forge-actions §2.3 的预留说明）。
 - `record_effects` 在变更调用**之前**单独提交（write-ahead），`complete` 把 `github_ref`、`succeeded` 与 `outbox.succeeded` 放在同一事务。
-- `requeue(…, refund_attempt = true)` 用于限流退避，不消耗尝试次数（forge-actions §2.6）；`fail(…, Retry)` 把行置回 `queued`、设 `not_before` 与 `last_error`，不追加 `outbox.failed`；`Terminal` 置 `failed` 并追加 `outbox.failed`（`failed` 的终态性与 `outbox.failed` 是否逐次发出，见 OQ-9）。
+- `requeue(…, refund_attempt = true)` 用于限流退避，不消耗尝试次数（forge-actions §2.6）；`fail(…, Retry)` 把行从 `executing` 置回 `queued`、设 `not_before` 与 `last_error`，不追加 `outbox.failed`；`Terminal` 置 `failed`（终态，无出边）并追加 `outbox.failed`。`failed → queued` 不存在（P-53）：人工重试由入队方以新 `epoch` 创建新动作。
 - `coalesce_key`：新行创建成功后，同键的其他 `queued` 行置 `cancelled`（reason `superseded`），各发 `outbox.cancelled`。
 - `count_succeeded_since(delivery_id, since)` 让 `forge` 用滑动窗口实现每小时令牌桶，**不在 `store` 里持久化令牌桶状态**。
 
@@ -509,7 +516,7 @@ LIMIT 1;
 ### 7.8 备份、恢复、完整性
 
 - `backup_to(dir)`：`VACUUM INTO '<dir>/gantry-<ts>.db'`（一致性快照，写者可继续写），随后对副本执行 `PRAGMA integrity_check`，写一份清单（`head_seq`、`log_id`、各表行数摘要、CAS 对象数）。CAS 目录是内容寻址的，`deploy` 可用增量复制；`store` 提供 `cas().verify_sample()` 校验副本。**不备份 `secrets/`**（它有自己的加密备份）。
-- 恢复是离线操作（`Store::restore_from(dir)`，由运维命令调用）：校验副本 → 替换数据库文件 → `restore_epoch += 1`，`log_id` 保持。恢复后 `head` 可能小于恢复前客户端见过的 `seq`；这类客户端的处置见 OQ-6。
+- 恢复是离线操作（`Store::restore_from(dir)`，由运维命令调用）：校验副本 → 替换数据库文件 → `log_epoch += 1`（P-67），`log_id` 保持。恢复后 `head` 可能小于恢复前客户端见过的 `seq`：`api` 在事件流与快照响应中携带 `log_epoch`，客户端发现变化就全量重同步。随后由 `pki` 重放 `revocations.journal` 中晚于备份的吊销（`deploy` 的恢复命令按此顺序调用）。
 - `verify(Quick)`：`PRAGMA quick_check`；`meta.projected_seq == head`；`outbox` 与 `events` 的 ID 前缀 / 枚举合法。`verify(Full)`：在临时库里全量折叠事件，与现有投影表逐表比较哈希；CAS 抽样重算摘要。
 - 发现 `SQLITE_CORRUPT`：拒绝启动并输出"从备份恢复"的指引；**不自动修复**。
 
@@ -627,12 +634,14 @@ LIMIT 1;
 - [ ] settings：`rev == 事件 seq`；`settings_current` 对从未写过的返回 `rev 0`；`settings_at_rev` / `settings_as_of` / `config_rev(project)` 在随机交错的全局 / 项目写入下正确；项目 `DELETE` 后 `value` 为 `None`。
 - [ ] 带 `credential.value` 的 `settings.updated` 追加返回 `InvalidEvent`；正常的 `secret_changes[]` 不含值与哈希；`by_secret_change(ref, version)` 能反查到对应 `seq`，未写入的返回 `None`。
 - [ ] 快照列只接受 `actor.kind = forge` 的事件 [提议]。
+- [ ] 会话台账：`delivery_id` 为空、带 `conversation_id` 的 `budget.charged` 计入该会话当日台账；跨 UTC 日新建台账；`delivery_id` 与 `conversation_id` 都为空的 `workflow.created` 被拒（P-58）。
+- [ ] 收件箱：同一 `dedup_key` 的第二个 `open` 项被唯一索引拒绝；`inbox_summary` 的按项目计数与逐项统计一致（P-63）。
 
 ### 12.4 Outbox
 
 - [ ] 认领互斥：N 个并发认领者争抢 M 个就绪行，每行恰好被一个认领者拿到；`exclude_deliveries` 里的交付单元的行不被认领且保持 `queued`。
 - [ ] 出队顺序 `(priority, enqueued_seq)`；`not_before` 未到不出队；依赖未 `succeeded` 不出队；依赖 `failed` / `cancelled` 时 `cancel_blocked` 级联取消并发 `outbox.cancelled`。
-- [ ] `requeue(refund_attempt = true)` 不增加 `attempts`；`fail(Retry)` 回到 `queued` 且不产生 `outbox.failed`；`fail(Terminal)` 置 `failed` 并产生 `outbox.failed`，再次 `enqueue` 同键不复活。
+- [ ] `requeue(refund_attempt = true)` 不增加 `attempts`；`fail(Retry)` 回到 `queued`（带 `not_before`）且不产生 `outbox.failed`；`fail(Terminal)` 置 `failed` 并产生恰好一条 `outbox.failed`，再次 `enqueue` 同键不复活，`epoch + 1` 得到新行；任何路径都不出现 `failed → queued`（P-53）。
 - [ ] `coalesce_key`（M2）：新行创建后同键 `queued` 旧行被取消，已 `executing` 的不受影响。
 - [ ] `count_succeeded_since` 的窗口边界正确。
 - [ ] `outbox.*` 事件与 `outbox` 表状态一致：对随机操作序列，从事件重放得到的状态流转与表终态相容（`verify(Full)` 校验）。
@@ -640,7 +649,7 @@ LIMIT 1;
 ### 12.5 CAS、备份、迁移、故障
 
 - [ ] CAS：`put` 去重（同内容同摘要、只存一份）；并发 `put` 同内容安全；`get_bytes` 超过 `max` 被拒；构造的目录穿越摘要字符串无法通过 `Sha256Digest` 解析；文件写入后崩溃（有文件无行）经 `verify` 补行；`put_manifest` 对键序不同但内容相同的清单得到同一摘要。
-- [ ] `backup_to` 在写者持续写入时产出的副本：`integrity_check` 通过，`head_seq` 对应一个已提交前缀；副本可被 `restore_from` 恢复，`restore_epoch` 递增。
+- [ ] `backup_to` 在写者持续写入时产出的副本：`integrity_check` 通过，`head_seq` 对应一个已提交前缀；副本可被 `restore_from` 恢复，`log_epoch` 加一，`log_identity()` 返回新值（P-67）。
 - [ ] 迁移：从 `schema_version = n` 升到 n+1 成功；更高版本 → `SchemaTooNew`；模块迁移表名不带前缀被拒。
 - [ ] 第二个 `open` 同目录得到 `AlreadyRunning`。
 - [ ] 小容量 tmpfs 写满：写返回 `DiskFull`、事务无半成品，读正常，释放空间后恢复。
@@ -654,15 +663,15 @@ LIMIT 1;
 
 | # | 问题 | 本文临时处理 | 影响 |
 | --- | --- | --- | --- |
-| OQ-1 | **M0 替身缺口**：milestones 的 M0 替身表没有 `store`，而 `forge`、`pki`、`policy`、`notify`、`repo`、`models`、`conversation`、`api` 在 M1 与 `store` 同期并行开发，都依赖它；`engine`、`policy`、`api` 的规格书已经假定一个 `InMemoryStore` 存在（engine 称其由 `contract` 提供）。是否把 §6 的签名冻结与 `InMemoryStore` 作为 M0 交付，或让 `store` 的最小可用版本先行？ | 按"M0 冻结签名 + 提供 `open_in_memory` / `open_temp`"写；`store` 实现仍从 M1 起 | milestones、全部 M1 泳道 |
+| OQ-1 | **已决：见裁决 C5 / P-51**（`Store::open_in_memory` 为 M0 替身，签名在 M0 冻结）。原问题：**M0 替身缺口**：milestones 的 M0 替身表没有 `store`，而 `forge`、`pki`、`policy`、`notify`、`repo`、`models`、`conversation`、`api` 在 M1 与 `store` 同期并行开发，都依赖它；`engine`、`policy`、`api` 的规格书已经假定一个 `InMemoryStore` 存在（engine 称其由 `contract` 提供）。是否把 §6 的签名冻结与 `InMemoryStore` 作为 M0 交付，或让 `store` 的最小可用版本先行？ | 按"M0 冻结签名 + 提供 `open_in_memory` / `open_temp`"写；`store` 实现仍从 M1 起 | milestones、全部 M1 泳道 |
 | OQ-2 | **投影归属与可折叠性**：(a) 投影能否**纯由事件折叠**重建，取决于每个事件的 `data` 是否自带足够状态（"胖事件"）；data-model 只给了少数事件的 `data`，api.md §5.3 还允许客户端在 `data` 不足时重新 `GET`。(b) 谁拥有 `Approval` / `InboxItem` / `Device` 的投影表：`policy`、`notify`、`pki` 的规格书假定由本模块注册投影器、自己维护（`policy` 还用 `UPDATE approvals … WHERE status IN (…)` 做比较并交换）；`engine`、`conversation` 假定读 `store` 的投影且"引擎没有自己的表" | (a) 按"事件自带足够状态"设计，core.md §7.5 列出缺口，M0 须补；(b) 机制两种都支持（内置投影器 + 模块注册投影器 + `owns` 接管），**默认由内置投影器负责**，待决定 | `core`、全部事件发出方、`policy`、`notify`、`pki` |
 | OQ-3 | **CAS 的归属与保留**：architecture §3 拓扑图把"结果库 CAS"画在 STORE 内，§4 模块地图的 `store` 行却没列；worker-protocol OQ-12 的保留期、隔离区保留期未定；单对象上限未定 | 放在 `store`；`gc` 默认不删；单对象上限 64 MiB | `store`、`sandbox`、`engine`、`deploy` |
 | OQ-4 | **模块私有表放哪**：`forge` 的 `forge_webhook_inbox` / `forge_effect_index`、`pki` 表（architecture §6）、设备 `last_seen`（节流更新，非事件）、`api` 的 `Idempotency-Key` 记录（24 h 保留）、审批 challenge / nonce（`policy_challenges`，api.md OQ-6）、`policy_cursor`（可改用 `Cursors`）、通知推送令牌（M4） | 同一个 SQLite 文件，模块注册迁移、表名前缀、`module_conn` 同事务读写（§7.10） | `forge`、`pki`、`api`、`notify`、`policy` |
 | OQ-5 | 事件、CAS、幂等记录的**保留与清理**：api.md OQ-13 暂定"保留不限"，`410 cursor_expired` 预留 | 事件永不删除；CAS 默认不删；不实现过期 | 存储增长、`api` |
-| OQ-6 | **备份恢复后的 `seq` 回退**：api.md 只处理"游标超前"（`409 cursor_ahead`）。恢复到旧备份后，`seq` 会被重新发放；一个游标已越过旧 head、但此后日志又长过它的客户端，会静默错过 / 错位事件 | `store` 暴露 `log_id` 与 `restore_epoch`；需要 `api` 把它们告知客户端（例如 `/v1/me` 与心跳）以触发全量重拉 | `api`、`desktop-shell`、`mobile` |
+| OQ-6 | **已决：见裁决 C21 / P-67**（`log_epoch` 每次恢复加一，事件流与快照响应携带，客户端变化即全量重同步；吊销另记 `revocations.journal`）。原问题：**备份恢复后的 `seq` 回退**：api.md 只处理"游标超前"（`409 cursor_ahead`）。恢复到旧备份后，`seq` 会被重新发放；一个游标已越过旧 head、但此后日志又长过它的客户端，会静默错过 / 错位事件 | `store` 暴露 `log_id` 与 `log_epoch`；`api` 在事件流与快照响应中携带 `log_epoch` | `api`、`desktop-shell`、`mobile` |
 | OQ-7 | `GET …?rev=N`（config.md §2.3）当 `N` 不是该 `(scope, resource)` 的某个确切 rev 时：返回"≤ N 的最近一次"还是 `404` | 提供两种读取（`settings_at_rev` 精确、`settings_as_of` 取最近），`api` 择一 | `api` |
 | OQ-8 | `synchronous` 默认 `FULL` 的成本是否接受（掉电可靠 vs 提交延迟） | 默认 `FULL`，可配 `NORMAL` | 性能、可靠性 |
-| OQ-9 | Outbox：(a) `failed` 是终态还是可重试的中间态（data-model §4.3 写 `executing → failed（可重试）→ queued`，forge-actions §2.2 写 `failed`（终态）要 `epoch + 1`）；`outbox.failed` 是逐次失败都发（forge-actions §2.6 把可重试码也列在该事件的 `data.code` 下）还是仅终态（forge.md 写"仅终态"）；(b) 将来 `forge` 拆成独立进程时认领与通知如何做 | (a) `fail` 带 `AfterFailure` 区分：`Retry` 回 `queued` 且不发 `outbox.failed`，`Terminal` 置 `failed` 并发；(b) 现为单进程 + flock | `forge`、`core` |
+| OQ-9 | (a) **已决：见裁决 C7 / P-53**（临时错误留在 `queued` 以 `not_before` 退避；`failed` 为终态，只在终态发 `outbox.failed`；人工重试 = 新 `epoch` 的新动作）。(b) 未决。原问题：Outbox：(a) `failed` 是终态还是可重试的中间态（data-model §4.3 写 `executing → failed（可重试）→ queued`，forge-actions §2.2 写 `failed`（终态）要 `epoch + 1`）；`outbox.failed` 是逐次失败都发（forge-actions §2.6 把可重试码也列在该事件的 `data.code` 下）还是仅终态（forge.md 写"仅终态"）；(b) 将来 `forge` 拆成独立进程时认领与通知如何做 | (a) 已按 P-53 落实到 §6.3、§7.6；(b) 现为单进程 + flock | `forge`、`core` |
 | OQ-10 | 事件 `data` 体积：forge 事件含评论正文、`diff_hunk`、check 输出，可能很大；超限时由谁截断 | `store` 只拒绝超限事件；`forge` 须在发出前截断并置 `truncated` | `forge`、`store` |
 | OQ-11 | `forge.<kind>`、`policy.denied`、`budget.*` 事件的 `subject` 取值未定，而 `by_subject` 与索引依赖它 | 暂不对这几类做 `by_subject` 保证，只保证 `by_type` / `audit` | `core`、`api` |
 | OQ-12 | 事件 `ts` 与 forge 事件里 `occurred_at` 的精度：data-model §1 要求毫秒，forge-actions §6.4 示例的 `occurred_at` 只到秒 | `Timestamp` 宽松解析兜住；`store` 不处理 `data` 内的时间 | `core`、`forge` |

@@ -203,7 +203,7 @@ pub struct RouteSpec {
 #[async_trait] pub trait SettingsContext: Send + Sync {
     fn validation_ctx(&self) -> ValidationCtx;                    // models 能力表、engine 模板登记、密钥存在性、他 resource 当前值
     async fn catalog(&self) -> Result<serde_json::Value, ModuleError>;   // config.md §2.8
-    async fn status(&self) -> Result<SettingsStatus, ModuleError>;       // latest_seq + modules.<name>.{applied_seq, health, detail?, unresolved_secret_refs}
+    async fn status(&self) -> Result<SettingsStatus, ModuleError>;       // latest_seq + modules.<name>.{applied_rev, health, detail?, unresolved_secret_refs}
 }
 
 /// 凭据转交：secrets.md 的 `SecretSink` 两阶段写入（stage → commit / abort），保证
@@ -334,7 +334,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 **写入后的广播**：`settings.updated`（`subject = "settings"` 或 `prj_…`）由事件流按 §7.9 的门禁下发。
 
-**`catalog` / `status`**：字段结构以 config.md §2.8 为准（`status` 为 `latest_seq` + `modules.<name>.{applied_seq, health, detail?, unresolved_secret_refs}`；api.md §4.9 示例里的 `applied_rev` / `healthy` 只是示意，见 OQ-A4）。聚合不到的模块报 `health: unhealthy`，不报错。
+**`catalog` / `status`**：字段结构以 config.md §2.8 为准（`status` 为 `latest_seq` + `modules.<name>.{applied_rev, health, detail?, unresolved_secret_refs}`；api.md §4.9 示例里的 `applied_rev` / `healthy` 只是示意，见 OQ-A4）。聚合不到的模块报 `health: unhealthy`，不报错。
 
 ### 7.9 SSE 事件流
 
@@ -608,7 +608,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 | OQ-A1 | api.md §2.3 写"仅下表 9 条"，实际表中是 10 条路由（§4.1 注记也是 10 条） | 按 10 条实现并测试 | api.md、`fe-mobile` |
 | OQ-A2 | api.md §3.3 的"必带 `Idempotency-Key`"清单没有 #42 `choose`，而 §4.1 路由表标"必" | 按 §4.1：必带 | api.md |
 | OQ-A3 | 目标态已达成的内部动作（吊销已吊销的设备、角色未变）是否仍要求签名 / 消费审批 | 吊销已吊销设备原样 `200`，先于签名校验；改成相同角色按普通写入走完整校验并消费审批，不发事件 | api.md §4.10、`pki` |
-| OQ-A4 | `GET /v1/settings/status` 的字段：api.md §4.9 示例用 `applied_rev` / `healthy`（自称示意），config.md §2.8 定义为 `latest_seq` + `modules.<name>.{applied_seq, health, detail?, unresolved_secret_refs}` | 采用 config.md §2.8 | api.md 示例、`desktop-ui` |
+| OQ-A4 | `GET /v1/settings/status` 的字段：api.md §4.9 示例用 `applied_rev` / `healthy`（自称示意），config.md §2.8 定义为 `latest_seq` + `modules.<name>.{applied_rev, health, detail?, unresolved_secret_refs}` | 采用 config.md §2.8 | api.md 示例、`desktop-ui` |
 | OQ-A5 | 手机档案能否在消息里带 `level_cap`：api.md §2.3 允许（"可带 `level_cap`、`refs`"），但 P-35 / 原型要求"手机发出的消息固定使用项目默认上限，升档只在桌面" | 照 api.md：接受，不强制剥离 | api.md、P-35、`conversation` |
 | OQ-A6 | 密钥转交的真实通道：模型 key 属于 `egress`（独立进程、独立系统用户）、App 私钥属于 `secrets/`，`api` 如何把 `value` 交给另一进程并做两阶段提交（secrets.md OQ-1 同一问题）；`deploy` 在没有任何设备之前写初始凭据的入口（secrets.md OQ-4） | `Consumer::Egress` 用跨进程适配器实现 `SecretSink`；`Consumer::Forge` 用进程内 `ScopedSecrets` | `secrets`、`egress`、`deploy` 规格 |
 | OQ-A7 | 邻接规格与 §6.3 的对齐：`conversation.md` 的 `post_user_message` 用 `ActorCtx`（本文 `WriteCtx`）、`notify.md` 用 `DeviceActor`；`store.md` 的 `WriteTx` 是具体类型，§6.3 的写 facade 当前不接收调用方事务（靠 `dedup_key` 保证至多一次），而 `pki` / `policy` 的"同一事务"接口接收 `&mut WriteTx` | `WriteCtx { actor, request_id, dedup }` 作为各写 facade 的统一入参；内部动作的"消费 + 业务写"由本模块开 `WriteTx` 后传给 `policy` / `pki` | `conversation`、`notify`、`engine`、`repo` 规格 |

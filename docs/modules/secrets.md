@@ -2,7 +2,7 @@
 
 > 状态：设计 v0.1 · 里程碑：M1（M3 增加轮换工作流） · 泳道：`sec` · crate / 目录：`crates/gantry-secrets`
 
-服务端有几类必须长期保存、泄露即失守的凭据：GitHub App 私钥与 webhook secret、CA 中间证书私钥、模型 key、私有包仓库凭据。`secrets` 是保存它们的**库**，不是服务：每个进程（`gantryd`、`egress`）各开自己的实例，目录、操作系统用户、主密钥都不同，所以 `gantryd` 被攻破也读不到 Egress 里的模型 key（decisions P-16、P-38，architecture §4、§6）。
+服务端有几类必须长期保存、泄露即失守的凭据：GitHub App 私钥与 webhook secret、CA 中间证书私钥、模型 key、私有包仓库凭据、APNs 认证密钥（M4）。`secrets` 是保存它们的**库**，不是服务：每个进程（`gantryd`、`egress`）各开自己的实例，目录、操作系统用户、主密钥都不同，所以 `gantryd` 被攻破也读不到 Egress 里的模型 key（decisions P-16、P-38，architecture §4、§6）。
 
 读者：实现 `secrets` 的 agent；以及 `forge`、`pki`、`egress`、`api`、`deploy` 的实现者（读 §6 与 §7.5 即可）。
 
@@ -11,13 +11,13 @@
 ## 1. 职责
 
 1. **静态加密存储**：把凭据值以认证加密（Authenticated Encryption with Associated Data, AEAD）写成本地文件，仅服务进程用户可读（architecture §6："本地密钥文件（加密）"）。
-2. **按使用方隔离读取**：读取句柄绑定一个使用方（`Consumer`，定义在 [core §6.1](core.md#61-标识符时间基础值)）——`forge`：App 私钥与 webhook secret（含轮换窗口里的上一个）；`pki`：中间 CA 私钥；`egress`：模型 key 与私有包仓库凭据（architecture §4 `secrets` 行）。跨使用方读取一律失败。
+2. **按使用方隔离读取**：读取句柄绑定一个使用方（`Consumer`，定义在 [core §6.1](core.md#61-标识符时间基础值)）——`forge`：App 私钥与 webhook secret（含轮换窗口里的上一个）；`pki`：中间 CA 私钥；`notify`：APNs 认证密钥（M4，P-59）；`egress`：模型 key 与私有包仓库凭据（architecture §4 `secrets` 行）。跨使用方读取一律失败。
 3. **版本化**：同名写入产生新版本，版本号单调递增、**删除后也不回退**；版本号回报给 settings 的 `secret_changes[].version`（[config.md §2.3–§2.4](../interfaces/config.md#24-凭据secret_ref)）。
 4. **可与事件原子配合的写入**：`stage` → `commit` / `abort` 两阶段，使"secret 写入与 `settings.updated` 要么都成功要么都不成功"（config.md §2.4"原子性"）在单进程内可实现。
 5. **删除与回收**：墓碑（tombstone）记录删除，保证版本号不复用；保留最近 `retain_versions` 个版本，其余清理。
 6. **轮换**（M3）：读取方在下一次使用时拿到新值；旧版本在窗口内仍可按版本读取；主密钥换封（rewrap）。
 7. **加密备份与恢复**（architecture §6"需要（加密备份）"）：导出为独立于主机主密钥的加密归档，恢复时保留版本号。
-8. **存在性与健康**：`present`、`check_refs`（供 settings 的 `unresolved_secret_refs`，config.md §2.8）。
+8. **存在性与健康**：`present`（只回答布尔值）、`check_refs`（供 settings 的 `unresolved_secret_refs`，config.md §2.8）。
 9. **内存与输出卫生**：密钥值类型零化、不可序列化、不可 `Debug` 输出；进程加固辅助（禁用 core dump）。
 10. **测试实现**：`MemorySecrets`（同一组 trait、同一套契约测试）。
 
@@ -25,11 +25,11 @@
 
 | 里程碑 | 交付 |
 | --- | --- |
-| M0 | milestones 未给 `secrets` 交付物。`core` 已提供 `SecretName` / `Consumer` / `SecretWrite`。本文建议（OQ-1）冻结 §6 的 trait 签名并提供 `MemorySecrets` 作为替身，因为 `forge`、`pki`、`egress` 在 M1 与 `secrets` 同期并行开发 |
-| M1 | milestones 明确："加密存储、按使用方隔离读取、加密备份"。本文展开为：§1 的 1–5、7–10 全部（含 `reader` / `scoped` / `admin` 三级句柄、`stage` / `commit` / `abort`、`check_refs`、`put` 覆盖写（版本递增）、`FileSecrets` 与 `MemorySecrets`（含故障注入）、备份 / 恢复、`harden_process`） |
+| M0 | milestones 未给 `secrets` 交付物（P-51 的 M0 替身清单也未列）。`core` 已提供 `SecretName` / `Consumer` / `SecretWrite`。本文建议冻结 §6 的 trait 签名并提供 `MemorySecrets` 作为替身（OQ-10），因为 `forge`、`pki`、`egress` 在 M1 与 `secrets` 同期并行开发 |
+| M1 | milestones 明确："加密存储、按使用方隔离读取、加密备份"。本文展开为：§1 的 1–5、7–10 全部（含 `reader` / `scoped` / `admin` 三级句柄、`stage` / `commit` / `abort`、`check_refs`、`put` 覆盖写（版本递增）、`FileSecrets` 与 `MemorySecrets`（含故障注入）、备份 / 恢复、`harden_process`）；引导期主机写入入口（第一台设备配对前，P-66）所需的本地 `put` |
 | M2 | milestones 未列；无新增 |
 | M3 | milestones 明确："密钥轮换（App 私钥、中间 CA、模型 key）"。本文展开为：`SecretHandle`（自动刷新）、旧版本保留窗口与 `get_version`、`rewrap`、与 `forge` / `pki` / `egress` 重载联动的约定；各自的轮换流程归 `forge`、`pki`、`egress` |
-| M4 | 无 |
+| M4 | `notify` 使用方（APNs 密钥，P-59）；无新增接口 |
 
 ## 2. 不负责
 
@@ -37,12 +37,12 @@
 | --- | --- |
 | 谁有权写 / 改密钥（角色、设备签名） | `api`（settings 路由，[config.md §2.5](../interfaces/config.md#25-修改权限设备角色)）；`secrets` 不认识设备与角色 |
 | 校验 `secret_ref` 的引用关系（V03）、防误填（V02） | `core` 的校验器 + `api` |
-| `api`（`gantryd` 进程）把模型 key **转交**给 Egress 进程的通道，以及跨进程的原子性 | 未定（OQ-1）；`secrets` 只提供各实例的本地 API |
+| `api`（`gantryd` 进程）把模型 key **转交**给 Egress 进程的通道，以及跨进程的原子性 | Egress 控制面（`/run/gantry/egress.sock`，`EgressControl::{secret_present, stage_secret, activate_secret, discard_secret, staged_secrets}`，只写不读，P-50）；`secrets` 只提供各实例的本地 API，Egress 实例在控制面背后调用它 |
 | 把凭据注入出站请求 | `egress`；JWT 签名与换 installation token：`forge`；证书签发：`pki` |
 | CA 根私钥 | 离线保存，服务端不常驻（architecture §6） |
 | 客户端设备私钥 | `desktop-shell`（I6） |
 | GitHub installation token | `forge` 进程内存，不入 `secrets`（[forge-actions §9.4](../interfaces/forge-actions.md#94-令牌与最小化)） |
-| 主密钥的生成、发放、保管；备份的调度、传输、接收方密钥保管 | `deploy`（OQ-2、OQ-3） |
+| 主密钥的生成、发放、保管；备份的调度、传输、接收方密钥保管；引导期主机命令（`gantry github setup` 等）的 CLI 形态 | `deploy`（OQ-2、OQ-3；P-65、P-66） |
 | 把凭据写进沙盒的环境变量 / 挂载 | **没有这条路径**（I1）；`secrets` 不提供任何"导出到环境 / 文件"的 API |
 | 审计事件 | 调用方：`api` 在 `settings.updated.secret_changes[]` 里记 `{ref, op, version}`；`secrets` 无事件日志依赖 |
 
@@ -58,10 +58,10 @@
 
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
-| 凭据明文值 | `api`（settings 写入，经 mTLS 来自 approver 设备）；`deploy` 的安装流程（App Manifest 回调、CA 中间私钥）；`pki` | `SecretValue`，≤ `max_value_bytes`；内容不透明 | 最高敏感；来自可信模块但**值本身**不被解释 |
+| 凭据明文值 | `api`（settings 写入，经 mTLS 来自 approver 设备；模型 key 经 Egress 控制面转交给 Egress 实例）；引导期主机命令与 App Manifest 回调（`forge` 的 `/setup/github/callback`，第一台设备配对前，P-65、P-66）；`deploy` 的安装流程（CA 中间私钥）；`pki` | `SecretValue`，≤ `max_value_bytes`；内容不透明 | 最高敏感；来自可信模块但**值本身**不被解释 |
 | 主密钥 | `deploy` 配置的 `MasterKeySource` | 32 字节 | 最高敏感 |
 | 磁盘上的密钥文件 | 本地文件系统 | §7.2 信封格式 | **完整性不可信**：任何篡改 → AEAD 失败 → `Corrupt` |
-| 读取 / 写入请求 | `forge`、`pki`、`egress`、`api` | `SecretSource::get` / `SecretSink::put`… | 调用方可信，但受 `Consumer` 约束 |
+| 读取 / 写入请求 | `forge`、`pki`、`notify`（M4）、`egress`、`api` | `SecretSource::get` / `SecretSink::put`… | 调用方可信，但受 `Consumer` 约束 |
 | 备份接收方公钥 / 恢复身份 | `deploy` / 运维 | §7.6 | 公钥可信；恢复身份最高敏感 |
 | 备份归档（恢复时） | 运维 | §7.6 | 经 AEAD 校验后才被采纳 |
 
@@ -101,7 +101,7 @@ pub enum Expect { Any, Absent, Version(SecretVersion) }              // 比较�
 pub trait SecretSource: Send + Sync {
     fn get(&self, name: &SecretName) -> Result<Option<Secret>, SecretsError>;
     fn version(&self, name: &SecretName) -> Result<Option<SecretVersion>, SecretsError>;   // 轻量：只看目录，不解密
-    fn exists(&self, name: &SecretName) -> Result<bool, SecretsError>;                      // = settings 的 present
+    fn present(&self, name: &SecretName) -> Result<bool, SecretsError>;                     // = settings 的 present；EgressControl::secret_present 在 Egress 实例里调用它
     fn get_version(&self, name: &SecretName, v: SecretVersion) -> Result<Option<Secret>, SecretsError>; // 轮换窗口内读旧版本（M3）
 }
 
@@ -165,12 +165,13 @@ pub type InMemorySecrets = MemorySecrets;
 
 | 其他规格书的占位 | 本文 |
 | --- | --- |
-| `api.md` 的 `SecretOwner { Egress, Forge }` | `core::Consumer { Forge, Pki, Egress }`（多一个 `Pki`，它不经 settings 写入） |
-| `api.md` 的 `SecretForwarder::{exists, stage, activate, discard}` | `SecretSink::{exists, stage, commit, abort}`；`activate` 返回的 `u64` 版本在 `SecretMeta.version` |
+| `api.md` 的 `SecretOwner { Egress, Forge }` | `core::Consumer { Forge, Pki, Notify, Egress }`（`Pki` 不经 settings 写入；`Notify` 为 M4 APNs 密钥，P-59） |
+| Egress 实例：`EgressControl::{secret_present, stage_secret, activate_secret, discard_secret, staged_secrets}`（P-50） | Egress 进程内调用 `SecretSink::{present, stage, commit, abort, staged}`；`activate_secret` 返回的版本即 `SecretMeta.version` |
+| `gantryd` 实例（`forge` 的 App 私钥 / webhook secret） | `api` 直接用 `ScopedSecrets(Forge)` 的同名方法 |
 | `api.md` 的 `SecretString` | `SecretValue`（从 `core::SecretString` 转入）；`SecretError` ≡ `SecretsError` |
 | `pki.md` 的 `SecretStore`（`get / put / delete`，按使用方隔离） | `ScopedSecrets`（`SecretSink`）；`InMemorySecrets` ≡ `MemorySecrets` |
 
-`api` 与 Egress 实例之间如何传递（`SecretForwarder` 的跨进程实现）仍是 OQ-1。
+`api` 与 Egress 实例之间经 Egress 控制面传递（P-50，见 [egress.md §6.2](egress.md)、[interfaces/egress-control.md](../interfaces/egress-control.md)）；控制面只写不读，没有读取值的路由。
 
 ```rust
 pub enum SecretsError {
@@ -196,7 +197,7 @@ pub enum SecretsError {
 <secrets.dir>/                     目录 0700，属主 = 当前进程的有效 uid
   secrets.meta                      明文 JSON：{format:1, instance_id:<ULID>, key_id:<hex8>, consumers:[…], created_at}（无机密）
   .lock                             flock：写操作期间持有（互斥）；读不加锁
-  <consumer>/                       0700（forge / pki / egress）
+  <consumer>/                       0700（forge / pki / notify / egress）
     <name>.v<N>.sec                 已提交版本，0600，写入后不可变
     <name>.v<N>.staged              暂存版本；读者与 list 都不可见
     <name>.v<N>.tomb                墓碑：删除标记，保证版本号不回退
@@ -281,7 +282,7 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 | 不变式 / 要求 | `secrets` 如何保证 |
 | --- | --- |
 | I1 沙盒只计算：无长期凭据 | 库里**没有**导出到环境变量 / 挂载 / 文件的 API；沙盒用户对任何 `secrets` 目录无权限（目录 `0700`、属主为服务用户，`open` 检查）；模型 key 只存在 Egress 实例 |
-| I6 客户端不持凭据 | `SecretMeta` / `PutOutcome` / 事件里只有名字与版本；值类型不可序列化，无法被放进响应、事件或日志；`present` 来自 `exists()` |
+| I6 客户端不持凭据 | `SecretMeta` / `PutOutcome` / 事件里只有名字与版本；值类型不可序列化，无法被放进响应、事件或日志；`present` 来自 `present()`（只回答布尔值） |
 | 使用方隔离 | `SecretReader(who)` / `ScopedSecrets(who)` 只持有 `who` 的 DEK；密文经 AAD 绑定使用方 + 名字 + 版本；跨使用方读 → `Denied`，把文件复制到别的使用方目录 → `Corrupt` |
 | 失败即闭合 | 权限异常、AEAD 失败、主密钥不符、格式未知，一律返回错误，不降级为明文、不返回旧值、不自动修复 |
 | 防篡改 | AEAD 覆盖密文与头部（含 `created_at`、`key_id`）；使用方、名字、版本号绑定进 AAD，所以把旧版本文件改名冒充新版本、或跨名字 / 跨使用方复制，解密都会失败 |
@@ -311,7 +312,7 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `secrets.dir` | 无默认（`deploy` 给出；`gantryd` 与 `egress` 各一个，位于不同用户的目录） | 实例目录 |
-| `secrets.consumers` | `gantryd`：`["forge","pki"]`；`egress`：`["egress"]` | 本实例承载的使用方；与 architecture §4 的 `secrets` 行一致 |
+| `secrets.consumers` | `gantryd`：`["forge","pki","notify"]`（`notify` 自 M4）；`egress`：`["egress"]` | 本实例承载的使用方；与 architecture §4 的 `secrets` 行一致（P-59） |
 | `secrets.master_key.source` | 无默认（OQ-2）：`systemd_credential` / `key_file` | 主密钥来源 |
 | `secrets.master_key.name` / `.path` | 无默认 | credential 名 / 密钥文件路径（后者必须在 `secrets.dir` 之外、`0400`） |
 | `secrets.retain_versions` | `2` **[建议值，待调优]** | 保留最近几个已提交版本 |
@@ -336,16 +337,17 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 
 - [ ] **沙盒内读不到任何模型 key**（与 `exec` 泳道联合验收）：库内没有任何导出到环境 / 挂载 / 文件的公开函数（用 `cargo public-api` 或等价检查，加测试断言公开 API 清单）；以另一个操作系统用户身份打开 `secrets.dir` / 读取其中任何文件失败；模型 key 只出现在 Egress 实例目录。
 - [ ] **写入模型凭据需要 approver 设备签名**（`api` 泳道执行）：`secrets` 侧的配合验收——`stage` 后若 `settings.updated` 未提交，`abort` 使 `staged_all()` 为空且 `get` 仍返回旧值 / 无值；提交后 `commit`，`get` 返回新值、版本 +1。
+- [ ] **引导期写入**（P-66）：第一台设备配对之前，主机命令以 `ScopedSecrets(Forge)` 写入 App 私钥与 webhook secret 成功，调用方追加审计事件；`secrets` 侧只校验与普通 `put` 相同的版本与权限规则（配对之后的拦截在 `api` / 主机命令一侧验收）。
 - [ ] **加密备份**：`export_backup` 的输出中搜索任意已知哨兵明文，零命中；用正确身份 `import_backup(Fresh)` 到新实例（不同主密钥）后，所有条目的值与版本号逐一相同；错误身份无法解密。
 
 ### 12.2 存储与隔离
 
-- [ ] 往返：`put` → `get` 值相同；`version` 从 1 起，覆盖写 +1；`exists` 与 `get().is_some()` 一致。
+- [ ] 往返：`put` → `get` 值相同；`version` 从 1 起，覆盖写 +1；`present` 与 `get().is_some()` 一致。
 - [ ] 篡改检测：翻转密文 / 头部 / 标签任意一个字节 → `Corrupt`；把 `forge` 目录下的文件复制到 `pki` 目录同名 → `Corrupt`（AAD 不符）；把 `v1.sec` 改名为 `v2.sec` → `Corrupt`。
 - [ ] 隔离：只承载 `[Forge, Pki]` 的实例上 `reader(Egress)` → `Denied`；`reader(Forge).get` 取 `pki` 里存在的名字 → `Ok(None)`（命名空间不同）；`scoped(Egress)` 在该实例上 → `Denied`；`scoped(Forge).put` 不能写 `pki` 命名空间（接口里没有 `who` 参数，写入只落在自己的命名空间）；用 `gantryd` 实例的主密钥打开 Egress 的目录 → `KeyMismatch`。
 - [ ] 权限：目录 `0755`、文件 `0644`、属主不符、符号链接目录 → `InsecurePermissions` / 拒绝；`open` 不修复。
 - [ ] 版本：删除后再 `put`，版本号 > 删除前最大版本；`Expect::Absent` / `Version(n)` 冲突返回 `Conflict`；`retain_versions = 2` 时第三次写入后最旧版本被清理，`get_version` 对已清理版本返回 `None`。
-- [ ] `stage` / `commit` / `abort`：暂存版本对 `get` / `exists` / `list` 不可见；同名第二次 `stage` → `AlreadyStaged`；`commit` 后版本可见；`abort` 后无痕；崩溃注入（子进程 `SIGKILL`）在 `.tmp` 写完、`rename` 前后、`commit` 前后各一次，重开后 `.sec` 都是完整文件，`staged()` 报告遗留暂存项，`secrets` 不自动提交或丢弃。
+- [ ] `stage` / `commit` / `abort`：暂存版本对 `get` / `present` / `list` 不可见；同名第二次 `stage` → `AlreadyStaged`；`commit` 后版本可见；`abort` 后无痕；崩溃注入（子进程 `SIGKILL`）在 `.tmp` 写完、`rename` 前后、`commit` 前后各一次，重开后 `.sec` 都是完整文件，`staged()` 报告遗留暂存项，`secrets` 不自动提交或丢弃。
 - [ ] 并发：多线程同时 `put` 同名（带 `Expect::Any`），版本号恰好是 1..N 无重复无跳变；读者并发读取始终得到完整的某个版本，从不报 `Corrupt`。
 - [ ] 值大小：恰好 `max_value_bytes` 通过，+1 → `TooLarge`；空值是否允许见 OQ-6，测试固化最终决定。
 
@@ -376,12 +378,13 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 
 | # | 问题 | 本文临时处理 | 影响 |
 | --- | --- | --- | --- |
-| OQ-1 | **`api`（`gantryd`）→ Egress 的转交通道与原子性**。config.md §2.4 要求"同一次 `PUT` 里的 secret 写入与 `settings.updated` 要么都成功要么都不成功"，同时模型 key"只存在 Egress 的密钥存储、仅 Egress 进程用户可读，`api` 写入时只转交、不留存"。两个独立进程、不同用户之间如何传值、如何做两阶段提交、`present` 如何在 `gantryd` 里得知 Egress 实例里 ref 的存在、启动对账怎么做，**没有任何契约**。另：M0 替身表没有 `secrets`，而 `forge` / `pki` / `egress` 同期并行 | 本库只给各实例的本地 `stage` / `commit` / `abort` / `staged` / `exists`；跨进程通道（例如 Egress 的管理接口）由 `egress` 规格与 `api` 另定，且须保持 I1（该通道不能对沙盒可达）。建议 M0 冻结 trait 并交付 `MemorySecrets` | `api`、`egress`、`deploy`、M1 全部 `sec` / `exec` 泳道 |
+| OQ-1 | **已决：见裁决 C4 / P-50**（经 Egress 控制面 `egress.sock` 写入 secret（只写不读）、查询 `present`；两阶段 `stage_secret` / `activate_secret` / `discard_secret` 与 `settings.updated` 配合）。原问题：**`api`（`gantryd`）→ Egress 的转交通道与原子性**。config.md §2.4 要求"同一次 `PUT` 里的 secret 写入与 `settings.updated` 要么都成功要么都不成功"，同时模型 key"只存在 Egress 的密钥存储、仅 Egress 进程用户可读，`api` 写入时只转交、不留存"。两个独立进程、不同用户之间如何传值、如何做两阶段提交、`present` 如何在 `gantryd` 里得知 Egress 实例里 ref 的存在、启动对账怎么做，**没有任何契约**。另：M0 替身表没有 `secrets`，而 `forge` / `pki` / `egress` 同期并行 | 已落实到 §2、§6；M0 替身另见 OQ-10 | `api`、`egress`、`deploy`、M1 全部 `sec` / `exec` 泳道 |
 | OQ-2 | **主密钥保管方式与默认值**：systemd credential（可选 TPM 绑定）、仅属主可读的密钥文件、启动时口令。后两者对"已拿到服务进程用户代码执行"的攻击者都不构成保护 | 提供 `SystemdCredential` 与 `KeyFile` 两个实现，默认不定；口令方式不适合无人值守，不提供 | `deploy` |
 | OQ-3 | **备份加密方案与接收方密钥保管**：本文提议 `age`（X25519 接收方）、接收方私钥离线保管（与根 CA 同样处理）。architecture §6 只写"加密备份" | 如提议；备份流格式见 §7.6 | `deploy`、运维手册 |
-| OQ-4 | **写入入口**：`api` 的 settings 路由可写；但 `deploy` 的安装流程要在没有任何设备之前写入 App 私钥、webhook secret（App Manifest 回调）和 CA 中间私钥，需要一个主机侧入口（例如 `gantry secrets …` 子命令）。skeleton 只定义了 `gantry pair` 与 `gantry device recover` | 本库提供 `init` / `put`；CLI 形态由 `deploy` 定。离线操作（`init`、`import_backup`、`rewrap`）需在对应进程停止后执行，或经守护进程的管理入口 | `deploy`、`pki`、`forge` |
+| OQ-4 | **已决：见裁决 C19 / C20（P-65、P-66）**（第一台设备配对之前，主机命令（需 root）可写入 `github.*` 等"仅 approver"配置并写审计事件；App Manifest 经 `gantry github setup` 与同一入口的 `/setup/github/callback` 写入；之后改为需要审批签名）。CLI 细节仍由 `deploy` 定。原问题：**写入入口**：`api` 的 settings 路由可写；但 `deploy` 的安装流程要在没有任何设备之前写入 App 私钥、webhook secret（App Manifest 回调）和 CA 中间私钥，需要一个主机侧入口（例如 `gantry secrets …` 子命令）。skeleton 只定义了 `gantry pair` 与 `gantry device recover` | 本库提供 `init` / `put`；离线操作（`init`、`import_backup`、`rewrap`）需在对应进程停止后执行，或经守护进程的管理入口 | `deploy`、`pki`、`forge` |
 | OQ-5 | **ref 与使用方的对应**：config.md §2.4 允许"多个字段引用同一个 ref"，而本库按使用方隔离（同名 ref 在不同使用方命名空间里是不同的密钥）。是否在校验层禁止跨使用方共用同名 ref（core.md OQ-14）；`github.app.*` → `Forge`、`models.providers.*` 与 `egress.injection.*` → `Egress`、中间 CA 私钥 → `Pki` 的映射是否确认 | 按左侧映射；跨使用方同名视为校验错误 | `core`、`api` |
 | OQ-6 | 空值与非 UTF-8 值：是否允许存空凭据；二进制凭据是否需要 | 拒绝空值；允许任意字节（PEM 恰好是 UTF-8） | `core`（V02/V03）、`api` |
 | OQ-7 | **回收未被引用的 ref**（config.md §2.4 [提议]）由谁触发：引用关系分散在 settings 文档里，`secrets` 看不到 | `secrets` 只提供 `delete`；`api` 在 `settings.updated` 之后计算引用并调用 | `api` |
 | OQ-8 | Egress 的**重载信号**（config.md §2.4"收到重载信号后换新"，M3）：信号形态（SIGHUP、管理接口、轮询 `version()`）未定 | `SecretHandle` 轮询 + `invalidate()`；信号绑定由 `egress` 做 | `egress`（M3） |
-| OQ-9 | secrets 读写是否要进入审计事件（事件目录里没有 `secret.*` 类型；`settings.updated.secret_changes[]` 只覆盖经 settings 的写入，不覆盖 `deploy` 安装流程与读取） | 不进事件日志；只有日志与指标 | `core`（事件目录）、`policy`（审计） |
+| OQ-9 | （引导期主机写入的审计**已决：见裁决 C20 / P-66**——写审计事件，由调用方追加；读取与 `deploy` 其余安装步骤是否进审计仍未决）secrets 读写是否要进入审计事件（事件目录里没有 `secret.*` 类型；`settings.updated.secret_changes[]` 只覆盖经 settings 的写入，不覆盖 `deploy` 安装流程与读取） | 不进事件日志；只有日志与指标 | `core`（事件目录）、`policy`（审计） |
+| OQ-10 | `secrets` 的 M0 替身：P-51 的 M0 替身清单没有 `MemorySecrets`，而 `forge`、`pki`、`notify`（M4）在 M1 与本模块并行 | 建议由本模块在 M0 交付 `MemorySecrets`（同一套契约测试）；需 milestones 确认 | milestones、`forge`、`pki` |

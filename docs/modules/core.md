@@ -2,9 +2,9 @@
 
 > 状态：设计 v0.1 · 里程碑：M0（类型与契约冻结），M1–M4 随契约增量 · 泳道：`contract` · crate / 目录：`crates/gantry-core`
 
-`core` 是所有模块共用的领域词汇：ID、值类型、实体、状态机、事件、Forge 动作、Worker 协议类型和配置类型的唯一 Rust 定义，外加把它们落成 `schemas/` 的生成与校验。它没有 IO，任何模块都能依赖它而不引入运行时耦合；契约的每一次变化因此集中在一个 crate 里评审。
+`core` 是所有模块共用的领域词汇：ID、值类型、实体、状态机、事件、Forge 动作、Worker 协议类型、配置类型和**跨模块端口 trait**（`core::ports`，P-51）的唯一 Rust 定义，外加把它们落成 `schemas/` 的生成与校验。它没有 IO，任何模块都能依赖它而不引入运行时耦合；契约的每一次变化因此集中在一个 crate 里评审。
 
-读者：实现 `core` 的 agent；其他模块的实现者只需读 §6（接口）和 §7.4–§7.6（状态机、事件、settings 规则表）。
+读者：实现 `core` 的 agent；其他模块的实现者只需读 §6（接口，跨模块端口见 §6.10）和 §7.4–§7.6（状态机、事件、settings 规则表）。
 
 本文遵循的优先级见 [AGENTS.md](../../AGENTS.md)：与 `decisions.md`、[architecture.md §5](../architecture.md#5-信任边界与不变式)、`interfaces/` 冲突时以后者为准，并**停下来提问**，不要在实现 PR 里改契约。标注 **[提议]** 的是本文为了能实现而给的默认，骨架没定；标注 **OQ-n** 的见 §13，不要自行拍板。
 
@@ -15,22 +15,23 @@
 3. **实体**：[data-model §3](../data-model.md#3-实体字段) 的全部实体及其枚举。字段名与枚举值与 data-model 逐字一致（映射表见 §6.3）。
 4. **状态机**：[data-model §4](../data-model.md#4-状态机) 的交付单元阶段、节点、尝试、审批、Outbox 动作，以及工作流、沙盒、收件箱、工作树锁。纯函数 + 常量转移表，非法转移返回错误；**谁来触发转移不归 `core`**（见 §2）。
 5. **事件**：信封、事件类型目录（[data-model §5](../data-model.md#5-事件)）、每个类型 `data` 的 Rust 类型；校验函数 `validate_event_data`；`schemas/events/<type>.json` 的生成。
-6. **Forge 契约类型**：`ForgeActionKind`（14 个）、`PolicyActionId`（20 个，[config.md §5.1](../interfaces/config.md#51-policiesactions)）、`ApprovalAction`、`ForgeEventKind`（23 个）、Outbox 幂等键派生 `IdempotencyKey::derive`（[forge-actions §2.2](../interfaces/forge-actions.md#22-幂等键)）、14 个动作的 payload 类型；对应 `schemas/forge/`。
-7. **Worker 协议类型** **[提议，OQ-1]**：`JobSpec`、`ResultJson`、`ProgressEvent`、`Proposals`、各 role 的 `StructuredOutput`、`ResultManifest`、`ValidatedPatch`（[worker-protocol §4–§6、§5.2、§8.3](../interfaces/worker-protocol.md)）；对应 `schemas/worker/`。`gantry-worker`（沙盒内二进制）与服务端共用同一份定义。
-8. **预算台账算术**：`BudgetLimits` / `BudgetUsed` / `BudgetDelta` 与按 [data-model BudgetLedger 口径](../data-model.md#device--budgetledger) 的纯函数（累计、是否超限）。
+6. **Forge 契约类型**：`ForgeActionKind`（14 个）、`PolicyActionId`（20 个，[config.md §5.1](../interfaces/config.md#51-policiesactions)）、`ApprovalAction`（`ForgeActionKind` ∪ 七个非 Forge 动作，P-54）、`ForgeEventKind`（23 个）、Outbox 幂等键派生 `IdempotencyKey::derive`（[forge-actions §2.2](../interfaces/forge-actions.md#22-幂等键)）、14 个动作的 payload 类型；对应 `schemas/forge/`。
+7. **Worker 协议类型**（P-51 认可放 `core`）：`JobSpec`、`ResultJson`、`ProgressEvent`、`Proposals`、各 role 的 `StructuredOutput`、`ResultManifest`、`ValidatedPatch`、`PatchFacts`（形状以 repo.md §6.3 为准，P-69）（[worker-protocol §4–§6、§5.2、§8.3](../interfaces/worker-protocol.md)）；对应 `schemas/worker/`。`gantry-worker`（沙盒内二进制）与服务端共用同一份定义。
+8. **预算台账算术**：`BudgetLimits` / `BudgetUsed` / `BudgetDelta` / `TokenWeights` 与按 [data-model BudgetLedger 口径](../data-model.md#device--budgetledger) 的纯函数（累计、是否超限、加权，权重取 `levels.token_weights`，P-70）；台账主体为交付单元或会话（`BudgetLedger.subject`，P-58）。
 9. **设置（settings）**：八个 resource 的类型、内置默认、RFC 7386 合并、"仅收紧"的 clamp、`relaxes[]` 差分、所需角色与签名判定、校验器 V01–V22（[config.md §1.3、§2、§11](../interfaces/config.md)，该文标注为 **[提议]**）。
 10. **规范化与摘要** **[提议，OQ-3]**：RFC 8785 JSON 规范化方案（JSON Canonicalization Scheme, JCS）、"拒绝重复键 + 深度上限"的严格 JSON 解析、`sha256:` 摘要串、审批签名载荷的构造。`forge` 幂等键、`api` 请求体摘要、`policy` 验签、`desktop-shell` 签名共用同一份实现，避免字节级分歧。
 11. **不可信文本** **[提议，OQ-4]**：`UntrustedText` 的类型约束，以及 [worker-protocol §4.4](../interfaces/worker-protocol.md#44-输入材料打包与隔离标记) 步 2–3 的规范化函数。
-12. **测试支撑**（cargo feature `testing`）：`FakeClock`、`SeqEntropy`、实体工厂（builders）、契约示例夹具（fixtures）。
+12. **测试支撑**（cargo feature `testing`）：`FakeClock`、`SeqEntropy`、实体工厂（builders）、契约示例夹具（fixtures）。需要 IO 的替身（`FakeForge`、`FakeGitHub` 等）不在 `core`，见 §6.9。
 13. **`schemas/` 生成与一致性**：由类型生成 JSON Schema，CI 校验提交的 schema 与生成结果一致，并以契约文档中的示例作为正例 / 反例测试。
+14. **跨模块端口**（`core::ports`，P-51）：`ForgeReader`、`OutboxPort`、`SandboxService`、`ModelProvider`、`RepoService`、`PolicyPort`、`InboxPort`、`EgressControl` 八个 trait 及其请求 / 响应 / 错误类型、事务句柄 `TxHandle`（§6.10）。只有签名，没有实现；实现在提供方模块，替身在 `gantry-fakes`（§6.9）。
 
 ### 1.1 各里程碑交付
 
 | 里程碑 | 交付 |
 | --- | --- |
-| M0 | 本文 §1 全部**类型**（含全部里程碑用到的事件类型、实体、枚举）；ID、`Timestamp`、`Level`；全部状态机的转移表与测试；JCS、严格 JSON；事件 `data` 类型与 `schemas/events/*.json`；`schemas/forge/*.json`、`schemas/worker/*.json`、`schemas/config/*.json`；settings 的合并 / clamp / `relaxes` / 角色判定与通用校验 V01–V03；`IdempotencyKey::derive`；`testing` feature。退出标准见 §12.1 |
+| M0 | 本文 §1 全部**类型**（含全部里程碑用到的事件类型、实体、枚举）；ID、`Timestamp`、`Level`；全部状态机的转移表与测试；JCS、严格 JSON；事件 `data` 类型与 `schemas/events/*.json`；`schemas/forge/*.json`、`schemas/worker/*.json`、`schemas/config/*.json`；settings 的合并 / clamp / `relaxes` / 角色判定与通用校验 V01–V03；`IdempotencyKey::derive`；`testing` feature；`core::ports` 的八个端口 trait（§6.10，P-51）。`contract` 泳道同期交付 §6.9 的替身。退出标准见 §12.1 |
 | M1 | 随 M1 模块启用的校验器与守卫：`models`（V04–V06、V21–V22）、`egress`（V10、V13）、`models` ↔ `egress`（V11）、`github`、`sandbox`（V12）、`policies.actions / paths / approval / patch`（V14–V15）[提议，按 config.md §13 的设置页里程碑推断]；M1 用到的 `ApprovalPayload` 构造与测试向量 |
-| M2 | `levels`（V07–V09）、`policies.escalation`（V16）、`guardian`（V17）、`notify`（V18）、项目覆盖规则（V19）的校验器；`delivery` 状态机中 `merge → review` 的完整触发器；审批失效的守卫 |
+| M2 | `levels`（V07–V09，含 `levels.token_weights` 与 `levels.None.daily_tokens`）、`policies.escalation`（V16）、`guardian`（V17）、`notify`（V18）、项目覆盖规则（V19）的校验器；`delivery` 状态机中 `merge → review` 的完整触发器；审批失效的守卫 |
 | M3 | 图改写相关（`workflow.revised`、`node.superseded`）的不变式校验；`arbiter` / `reasoner` 的结构化输出一致性规则（类型 M0 已有，规则此时启用） |
 | M4 | `parent_id` / `depends_on` 的无环与父子汇总校验；手机档案的事件白名单常量（见 [api.md §5.4](../interfaces/api.md#54-过滤)） |
 
@@ -40,13 +41,13 @@
 
 | 事 | 归谁 |
 | --- | --- |
-| 任何 IO：数据库、文件、网络、系统时钟、操作系统随机源 | `store` / `api` / `forge` / 部署组装；`core` 只定义 `Clock` / `Entropy` trait（OQ-5） |
+| 任何 IO：数据库、文件、网络、系统时钟、操作系统随机源 | `store` / `api` / `forge` / 部署组装；`core` 只定义 `Clock` / `Entropy` 与 `core::ports` 的 trait（OQ-5） |
 | 阶段推进的**决策**（何时准入通过、何时进入下一阶段）、图模板选择、调度、预算预留 | `engine`；`core` 只回答"这条转移合法吗" |
 | 投影到表、事件落盘与游标 | `store` |
 | 危险动作是否放行、验签（ECDSA）、审批创建 | `policy`、`api`；`core` 只提供 `Approval` 状态机与签名字节的构造 |
 | settings 的存储、角色检查、`If-Match`、secret 值转存、HTTP 错误体 | `api`、`store`、`secrets` |
 | 客户端 API 的 `problem+json` 错误码映射 | `api`；`core` 只产出 config.md §11 的语义码 |
-| 真实的 `Forge` / `SandboxDriver` / `ModelProvider` 等扩展点 trait | 各自模块；定义位置见 OQ-1 |
+| 端口 trait 的**实现**（`forge` 实现 `ForgeReader` / `OutboxPort`，`sandbox` 实现 `SandboxService`，`models` 实现 `ModelProvider`，`repo` 实现 `RepoService`，`policy` 实现 `PolicyPort`，`notify` 实现 `InboxPort`，`gantryd` 侧的 Egress 客户端实现 `EgressControl`）；模块内部的 trait（如 `sandbox` 的容器面 `SandboxDriver`，P-52） | 各自模块；trait **定义**在 `core::ports`（§6.10，P-51） |
 | 每个 Outbox `kind` 的 `target` / `intent` 推导（含 `render_digest`） | `forge`（OQ-9）；`core` 只提供 `IdempotencyKey::derive` |
 | GitHub 域名族完整硬编码拒绝表 | `egress` 规格书（[config.md §5.5](../interfaces/config.md#55-不变式规定不可配置为放宽的项)）；`core` 的 V10 只带最小集（OQ-11） |
 | 密钥值的存储 | `secrets`；`core` 的类型**不携带**密钥值（§8） |
@@ -59,7 +60,7 @@
 
 外部库约束（`Cargo.toml` 用 `cargo deny` 或等价检查强制）：
 
-- **允许**：`serde`、`serde_json`、`schemars`、`thiserror`、`sha2`、`zeroize` / `secrecy`、`regex`（或等价的纯 Rust 实现）、纯计算的时间历法库。
+- **允许**：`serde`、`serde_json`、`schemars`、`thiserror`、`sha2`、`zeroize` / `secrecy`、`regex`（或等价的纯 Rust 实现）、纯计算的时间历法库；为 `core::ports` 的 async 签名另允许 `async-trait` 与 `futures-core`（只有类型与宏，不含运行时）。
 - **禁止**：`tokio`、`sqlx`、`reqwest`、`std::fs` / `std::net` / `std::process` 的任何使用、`SystemTime::now`、`getrandom`（`testing` feature 之外）；本 crate 自身代码不使用 `unsafe`（依赖库内部除外）。
 - 必须能在 Linux、macOS、Windows 上编译（architecture §4 把 `core` 的位置写成"共享 crate"，`desktop-shell` 可能依赖它，OQ-2）。
 
@@ -176,7 +177,7 @@ pub fn normalize_untrusted(input: &[u8], limits: NormalizeLimits) -> Normalized;
 pub struct SecretRefView { pub secret_ref: SecretName, pub present: bool }
 pub enum SecretWrite { Keep, Set(SecretString) }
 // Deserialize：字段缺省 = Keep；字符串 = Set；null = Err(code "secret_clear_in_use")。不实现 Serialize / Clone；Debug 不输出值。
-pub enum Consumer { Forge, Pki, Egress }  // 密钥的使用方（architecture §4 secrets 行）
+pub enum Consumer { Forge, Pki, Notify, Egress }  // 密钥的使用方（architecture §4 secrets 行；Notify 为 M4 APNs 密钥，P-59）
 ```
 
 ### 6.2 严格 JSON、规范化、摘要
@@ -207,20 +208,20 @@ impl ApprovalPayload {
 | Rust 类型 | data-model | 线上形态要点 |
 | --- | --- | --- |
 | `Project` | §3 Project | 不含 `settings_override`（api.md §4.3、§8.2：它只经 settings 路由读写，由 `SettingsDoc` 承载） |
-| `Delivery`、`Stage`、`StageStatus`、`DeliveryOrigin` | §3 Delivery、§4.1 | `Stage`：`spec` / `plan` / `implement` / `propose` / `review` / `merge` / `closed` / `abandoned`；`StageStatus`：`running` / `waiting_human` / `blocked` / `done`；`DeliveryOrigin`：`conversation` / `github_label` / `github_command`（与 `ForgeOrigin` 不是同一个东西） |
+| `Delivery`、`Stage`、`StageStatus`、`DeliveryOrigin` | §3 Delivery、§4.1 | `Stage`：`spec` / `plan` / `implement` / `propose` / `review` / `merge` / `closed` / `abandoned`；`StageStatus`：`running` / `waiting_human` / `blocked` / `paused` / `done`（P-55）；`level_effective` ≤ `level_cap`，只升不降（P-57）；`DeliveryOrigin`：`conversation` / `github_label` / `github_command`（与 `ForgeOrigin` 不是同一个东西） |
 | `IssueRef`、`PullRequestRef`、`CheckSummary` | §3、§1.1 | `title` 是 `UntrustedText`；`mergeable_state` 保存 GitHub 原值字符串，不枚举；`PullRequestRef.state` 为 `open` / `closed` / `merged` |
-| `Workflow`、`WorkflowStatus` | §3 | `status`：`running` / `paused` / `succeeded` / `failed` / `cancelled`（api.md §4.7 示例的 `finished` 不在此集合，见 OQ-6） |
+| `Workflow`、`WorkflowStatus` | §3 | `status`：`running` / `paused` / `succeeded` / `failed` / `cancelled`（api.md 示例已改为 `succeeded`，C26）；`delivery_id: Option<DeliveryId>`，为空时必有 `conversation_id`（None 档挂在会话上的临时图，P-58），构造时校验 |
 | `Node`、`Role`、`Tier`、`Exec`、`Verdict` | §3、architecture §9 | `Role::Review(String)` 序列化为 `review:<视角>`，视角匹配 `[a-z][a-z0-9_-]*`；`Verdict` 大写 `ACCEPT` / `REVISE` / `REJECT` / `BLOCKED`；`Tier`：`utility` / `planner` / `worker`；`Exec`：`sandbox` / `sandbox_ro` / `direct`；`role`、`tier`、`exec` 的固定搭配由 `fn role_profile(Role) -> (Tier, Exec)` 给出，构造 `Node` 时校验 |
 | `Effort`、`EffortSetting` | config.md §3.2、worker-protocol §4.2 | `Effort`：`none` / `low` / `medium` / `high` / `max`（`JobSpec.execution.reasoning_effort`）；`EffortSetting`：`Fixed(Effort)` 或 `ByLevel`（配置里 `reasoning_effort` 的取值，只允许 planner / worker） |
 | `Attempt`、`AttemptStatus`、`FailureClass`、`TokenUsage` | §3 | `FailureClass`：`timeout` / `exec_failed` / `verdict_fail` / `policy_denied` / `cancelled` / `budget_exhausted` / `infra_error`；`failure_detail` 为 `FailureDetail(String)`，形如 `timeout.wall`，已知子码常量取自 worker-protocol §9，但不做封闭枚举（协议会增长）；`TokenUsage = {input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, requests}` |
 | `Worktree`、`WorktreeLock`、`LockHolder` | §3 | `holder`：`engine` / `guardian` / `human` |
 | `Sandbox`、`SandboxStatus`、`SandboxTrust`、`SandboxLimits`、`WorktreeSnapshot` | §3 | `status`：`created` / `running` / `stopped` / `destroyed` / `lost` |
-| `Conversation`、`Message`、`MessageRole`、`AgentKind`、`Card`、`Ref` | §3、§1.1 | `Card` 未知 `kind` 反序列化为 `Card::Unknown`（保留原 JSON），不报错 |
-| `InboxItem`、`InboxKind`、`Severity`、`InboxPayload` | §3 | `InboxPayload` 是按 `kind` 分派的枚举，形状见 data-model 的 payload 表 |
-| `Approval`、`ApprovalStatus`、`ApprovalTarget`、`SubjectDigest` | §3、§4.4、api.md §6.1 | `SubjectDigest`：PR 类动作为 40 位 head SHA（`GitOid`），补丁与内部动作为 `sha256:…`；构造时按 `action` 校验形式 |
-| `OutboxAction`、`OutboxStatus`、`Priority`、`ExpectedEffect`、`GithubRef` | §3、forge-actions §2、§4.2 | `status`：`queued` / `executing` / `succeeded` / `failed` / `cancelled` |
-| `Device`、`DevicePlatform`、`DeviceRole`、`DeviceStatus` | §3 | `role`：`viewer` / `operator` / `approver`，实现 `Ord`（`approver > operator > viewer`） |
-| `BudgetLedger`、`BudgetLimits`、`BudgetUsed` | §3、BudgetLedger 口径 | 台账另需记 `config_rev`（config.md §2.6），data-model 未列此字段，见 OQ-8 |
+| `Conversation`、`Message`、`MessageRole`、`AgentKind`、`Card`、`Ref` | §3、§1.1 | `Card` 未知 `kind` 反序列化为 `Card::Unknown`（保留原 JSON），不报错；`Card.summary` 为 `items[]`（每项 `{text, ref}`，C26）；对话事件行消息带 `tone`：`info` / `ok` / `run` / `warn`（C26） |
+| `InboxItem`、`InboxKind`、`Severity`、`InboxPayload` | §3 | 含 `project_id` 与 `dedup_key`（P-63）；`InboxPayload` 是按 `kind` 分派的枚举，形状见 data-model 的 payload 表；`escalation` / `spec_needed` / `decision_needed` 的 `options[]` 为 `{id, label, primary?}`（P-63） |
+| `Approval`、`ApprovalStatus`、`ApprovalTarget`、`SubjectDigest` | §3、§4.4、api.md §6.1 | `SubjectDigest`：PR 类动作为 40 位 head SHA（`GitOid`），补丁与内部动作为 `sha256:…`；每个 `ApprovalAction` 的 `target` / `subject_digest` 形状取 data-model 的列表（P-54），常量表 `APPROVAL_SHAPES`，构造时按 `action` 校验，**表中没有的动作构造失败**（fail-closed） |
+| `OutboxAction`、`OutboxStatus`、`Priority`、`ExpectedEffect`、`GithubRef` | §3、forge-actions §2、§4.2 | `status`：`queued` / `executing` / `succeeded` / `failed` / `cancelled`（`failed` 为终态，P-53）；`ExpectedEffect.matched_webhook_deliveries`（C26） |
+| `Device`、`DevicePlatform`、`DeviceRole`、`DeviceStatus` | §3 | `role`：`viewer` / `operator` / `approver`，实现 `Ord`（`approver > operator > viewer`）；含审批签名公钥 `approval_pubkey`（与 mTLS 证书公钥是两把不同的密钥，P-47） |
+| `BudgetLedger`、`BudgetLimits`、`BudgetUsed` | §3、BudgetLedger 口径 | `subject`：`delivery` / `conversation`（P-58）；会话台账按日、上限 `levels.None.daily_tokens`；交付台账的预算模板在创建时按 `level_cap` 固定（P-57）；台账另需记 `config_rev`（config.md §2.6，OQ-8） |
 | `Event`、`Actor`、`ActorKind`、`Seq` | §5.1 | `ActorKind`：`engine` / `guardian` / `user` / `device` / `forge` / `system`；`Seq` 为 ≥ 1 的整数，构造时检查 ≤ 2^53−1 |
 
 **其他规格书对 `core` 类型的引用名与本文的对应**（它们是占位性质的写法，以本文为准；名字冲突的在这里消解）：
@@ -233,7 +234,11 @@ impl ApprovalPayload {
 | `Oid` | `GitOid` | |
 | `Sha256`、`CasRef` | `Sha256Digest` | `Attempt.result_ref` 的类型 |
 | `Origin`（`forge`、`guardian`：`self` / `external`） | `ForgeOrigin` | 交付单元的 `origin` 是 `DeliveryOrigin` |
-| `ForgeEvent` | `ForgeEventEnvelope`（`Event<ForgeEventEnvelope>` 即日志中的 `forge.<kind>` 事件） | |
+| `ForgeEvent` | `ForgeEventEnvelope`（`Event<ForgeEventEnvelope>` 即日志中的 `forge.<kind>` 事件） | `occurred_at` 带毫秒（C26） |
+| `Forge`（forge 门面）、`Inbox`（notify）、`ApprovalGate` / `ActionPolicy` / `PatchPolicy`（policy）、`MirrorPort`、`UsageMeter`、`SecretForwarder` | `OutboxPort` + `ForgeReader`、`InboxPort`、`PolicyPort`、`RepoService`、`EgressControl` | 均在 `core::ports`（§6.10，P-51） |
+| `FakeSandboxDriver`（milestones 替身表，供 `engine`） | `FakeSandboxService` | 实现引擎面 `SandboxService`；容器面 `SandboxDriver` 只在 `sandbox` 内部（P-52） |
+| `dedupe_key`（notify 上报项） | `dedup_key` | 与事件信封的 `dedup_key` 同名（P-63） |
+| `applied_seq`（settings status） | `applied_rev` | C26 |
 | `Rng`（`pki`） | 不在 `core`；`core` 只有 `Entropy`（用于 ID 生成） | |
 
 ### 6.4 状态机
@@ -245,18 +250,21 @@ pub mod machines {
     pub mod delivery {
         /// 触发器名与 data-model §4.1 状态图的边标签一一对应。
         pub enum StageTrigger {
-            AdmissionAccept, AdmissionRevise, LowSkipAdmission, PlanProduced, PatchValidated,
-            PlanInfeasible, PrCreated, ReviewRevise, CiFailureNeedsCode, ReviewAcceptCiGreen,
+            AdmissionAccept, AdmissionRevise, AdmissionSkipped, PlanProduced, PatchValidated,
+            PlanInfeasible, Replan, PrCreated, ReviewRevise, CiFailureNeedsCode, ReviewAcceptCiGreen,
             ApprovalInvalidated, BaseAdvanced, MergedAndIssuesClosed,
-            UserAbandoned, IssueNotPlanned, PrClosedUnmerged,
+            UserAbandoned, IssueNotPlanned, PrClosedUnmerged, PrReopened,
         }
-        pub enum StatusTrigger { GateRejected, GateBlocked, HumanResolved } // 阶段内 stage_status 的变化，见 OQ-6
+        /// 阶段内 stage_status 的变化（P-55；转移规则以 data-model 为准，§7.4）
+        pub enum StatusTrigger { StageEntered, WaitHuman, HumanResolved, GateBlocked, Unblocked, Pause, Resume, StageDone }
         pub const EDGES: &[Edge];   // (from, trigger, to, level_guard)
         pub fn next_stage(from: Stage, t: StageTrigger, level_effective: Level) -> Result<Stage, TransitionError>;
         pub fn is_legal_change(from: Stage, to: Stage, level_effective: Level) -> bool; // 供 store 校验 delivery.stage_changed
         pub fn next_status(cur: StageStatus, t: StatusTrigger) -> Result<StageStatus, TransitionError>;
+        /// 每档位的阶段序列（P-55）：Low 无 plan；Low 的 review 只等 CI。
+        pub fn stages_for(level: Level) -> &'static [Stage];
     }
-    pub mod node     { pub fn check(from: NodeStatus, to: NodeStatus) -> Result<(), TransitionError>; }
+    pub mod node     { pub fn check(from: NodeStatus, to: NodeStatus) -> Result<(), TransitionError>; } // 含 failed → queued（node.retry_requested，P-56）
     pub mod attempt  {
         pub fn check(from: AttemptStatus, to: AttemptStatus) -> Result<(), TransitionError>;
         pub fn check_terminal(a: &Attempt) -> Result<(), InvariantError>; // 终态不可变；failure_class 与 status 一致
@@ -266,12 +274,12 @@ pub mod machines {
     pub mod inbox    { pub fn check(from: InboxStatus, to: InboxStatus) -> Result<(), TransitionError>; }
     pub mod approval {
         pub fn check(from: ApprovalStatus, to: ApprovalStatus) -> Result<(), TransitionError>;
-        /// granted 且未过期且 subject_digest 仍等于当前主体，才可消费（一次）。
+        /// granted 且未过期且 subject_digest 仍等于当前主体，才可消费（一次）。消费发生在执行开始前（P-54）。
         pub fn can_consume(a: &Approval, current_subject: &SubjectDigest, now: Timestamp) -> Result<(), ApprovalError>;
         /// 主体变化（PR head 变了）时应转入的状态：pending / granted → invalidated；其余 None。
         pub fn on_subject_changed(a: &Approval, new_subject: &SubjectDigest) -> Option<ApprovalStatus>;
     }
-    pub mod outbox   { pub fn check(from: OutboxStatus, to: OutboxStatus, cause: OutboxCause) -> Result<(), TransitionError>; }
+    pub mod outbox   { pub fn check(from: OutboxStatus, to: OutboxStatus, cause: OutboxCause) -> Result<(), TransitionError>; } // failed 为终态（P-53）
     pub mod worktree_lock {
         pub fn acquire(cur: Option<&WorktreeLock>, req: &LockRequest, now: Timestamp) -> Result<WorktreeLock, LockError>;
         pub fn renew  (cur: &WorktreeLock, holder: LockHolder, until: Timestamp, now: Timestamp) -> Result<WorktreeLock, LockError>;
@@ -304,7 +312,7 @@ pub struct NewEvent {                                 // store 追加时补 id /
 }
 
 /// 闭集；as_str / FromStr 与 data-model §5.2 逐字一致；"forge.<kind>" 用 Forge(ForgeEventKind)。
-pub enum EventType { /* 49 个固定类型 + Forge(ForgeEventKind) */ }
+pub enum EventType { /* data-model §5.2 的全部固定类型（含 P-56 的 delivery.paused / delivery.resumed / node.retry_requested、P-60 的 guardian.triaged / guardian.heal_requested / guardian.escalated）+ Forge(ForgeEventKind) */ }
 pub struct EventTypeInfo { pub name: &'static str, pub emitter: &'static [&'static str], pub subject: SubjectKind }
 pub const EVENT_TYPES: &[EventTypeInfo];
 
@@ -321,8 +329,14 @@ pub enum ForgeActionKind { PushBranch, CreatePr, UpdatePr, UpsertStatusComment, 
     RequestReviewers, MergePr, RerunFailedJobs }                 // serde snake_case，共 14 个
 pub enum PolicyActionId { /* config.md §5.1 的 20 个 id；ForgeActionKind 的 14 个 + force_push、
     push_outside_prefix、resolve_review_thread_human + 预留 delete_branch、publish_release、change_repo_settings */ }
-pub enum InternalAction { SettingsUpdate, DeviceRoleChange, DeviceRevoke }
-pub enum ApprovalAction { Policy(PolicyActionId), Internal(InternalAction) }   // 线上是同一个字符串空间，见 OQ-7
+/// Approval.action（P-54）= ForgeActionKind ∪ 七个非 Forge 动作；线上是同一个字符串空间。
+/// 预留的 delete_branch / publish_release / change_repo_settings 不是审批动作。
+pub enum ApprovalAction {
+    Forge(ForgeActionKind),
+    SettingsUpdate, DeviceRoleChange, DeviceRevoke,                          // 内部动作
+    ForcePush, PushOutsidePrefix, ResolveReviewThreadHuman, PatchApplyProtected,
+}
+impl ApprovalAction { pub fn shape(&self) -> Option<&'static ApprovalShape>; } // 取 data-model 的形状表；None → fail-closed
 impl PolicyActionId { pub fn is_dangerous(&self) -> bool; pub fn allows_auto(&self) -> bool; } // 前 7 个不允许 auto（P-42）
 
 pub struct IdempotencyKey(String);                               // "gk1_" + 26 位小写 base32（无填充）
@@ -349,7 +363,8 @@ impl BudgetLedger {
     pub fn would_exceed(&self, d: &BudgetDelta, w: &TokenWeights) -> Vec<BudgetDimension>; // used + delta > limit
     pub fn is_exhausted(&self, dim: BudgetDimension, w: &TokenWeights) -> bool;           // used >= limit
 }
-pub struct TokenWeights { /* input, output, cache_read, cache_write；默认全 1，见 OQ-10 */ }
+pub struct TokenWeights { /* input, output, cache_read, cache_write：取 levels.token_weights（P-70），内置默认为建议值，标"待按价格调优" */ }
+pub enum LedgerSubject { Delivery(DeliveryId), Conversation { conversation_id: ConversationId, day: Date } }  // P-58
 
 // 设置
 pub enum Resource { Models, Levels, Policies, Guardian, Sandbox, Egress, Notify, Github }
@@ -397,7 +412,7 @@ pub fn validate(r: Resource, scope: &Scope, doc: &Value, ctx: &dyn ValidationCon
 
 `cargo xtask schemas`（或等价命令）：把 §6 的类型经 `schemars` 生成 JSON Schema 写入 `schemas/{events,forge,worker,config}/`；`cargo xtask schemas --check` 在 CI 中失败于"提交的文件与生成结果不一致"。`schemas/openapi.yaml` 不由 `core` 生成（归 `api` 契约），但其中引用的实体 schema 须与 `core` 一致（M0 退出标准"所有 schema 通过校验并与 `docs/interfaces/` 一致"）。
 
-### 6.9 测试支撑（feature `testing`）
+### 6.9 测试支撑（feature `testing`）与 M0 替身
 
 ```rust
 pub struct FakeClock { /* 可手动推进 */ }  impl Clock for FakeClock {}
@@ -405,6 +420,45 @@ pub struct SeqEntropy { /* 确定性序列 */ } impl Entropy for SeqEntropy {}
 pub mod builders { /* delivery() / node() / attempt() / approval() / event() ... 带合法默认值 */ }
 pub mod fixtures { pub fn load(name: &str) -> serde_json::Value; } // 取自契约文档示例的原样 JSON
 ```
+
+**M0 替身**（`contract` 泳道交付，P-51；需要 IO 的放在 dev-dependency crate `gantry-fakes`，不在 `core`）：
+
+| 替身 | 实现的端口 / 替代 | 使用者 |
+| --- | --- | --- |
+| `Store::open_in_memory` | `store` 的内存实现（在 `gantry-store` 的 `testing` feature） | 全部服务端模块 |
+| `FakeForge` | `ForgeReader` + `OutboxPort` | `engine`、`guardian`、`conversation`、`api` |
+| `FakeGitHub` | HTTP 级 GitHub（REST / GraphQL / git-http 子集，可注入 webhook） | `forge` |
+| `FakeSandboxService`（milestones 旧称 `FakeSandboxDriver`） | `SandboxService`（按脚本返回 Worker 协议结果，P-52） | `engine` |
+| `FakeRepo` | `RepoService` | `engine`、`forge`、`sandbox` |
+| `FakeModelProvider` | `ModelProvider` | `models`（进而 `engine`、`conversation`） |
+| `FakePolicy` | `PolicyPort` | `engine`、`guardian`、`repo`、`forge` |
+| `FakeInbox` | `InboxPort` | `engine`、`guardian`、`conversation`、`forge` |
+| `EgressStub` | `EgressControl`（并可起回环 HTTP 模拟 `svc_model`） | `sandbox`、`models`、`api` |
+| `TestCA`、Mock API 服务 | `pki`；整个服务端 | `api`、`fe-desktop`、`fe-mobile` |
+
+每个替身至少一个使用示例测试（M0 退出标准），并与对应的真实实现共用提供方模块的一致性用例。
+
+### 6.10 跨模块端口（`core::ports`，P-51）
+
+服务端模块之间的调用一律经下列 trait；`gantryd` 装配时注入实现。签名的权威是**提供方模块**的规格书（下表"签名"列），本节只列名字、方法与归属，避免两处漂移；请求 / 响应 / 错误类型随 trait 一起定义在 `core::ports`。
+
+```rust
+/// 跨端口传递调用方的写事务（store::WriteTx 实现它；实现方向下转型取回 WriteTx）。core 不知道 SQLite。
+pub trait TxHandle: Send { fn as_any_mut(&mut self) -> &mut dyn std::any::Any; }
+```
+
+| 端口 | 提供方（实现） | 主要调用方 | 方法 | 签名 |
+| --- | --- | --- | --- | --- |
+| `ForgeReader` | `forge` | `engine`、`guardian`、`conversation`、`api` | `pull_request`、`issue`、`project_snapshot`、`discussion`（Issue / PR 正文与评论，按需拉取、`UntrustedText`、不进快照，P-59）、`ci_log`、`changed_files`、`review_thread`、`check_annotations`、`reconcile_now`、`sync_mirror`；均不写 GitHub | [forge.md §6](forge.md) |
+| `OutboxPort` | `forge` | `engine`、`guardian` | `enqueue_in(tx: &mut dyn TxHandle, EnqueueRequest)`、`enqueue`、`cancel`；`requires_approval` 由入队方向 `PolicyPort` 取得（P-62） | [forge.md §6](forge.md) |
+| `SandboxService` | `sandbox` | `engine` | `submit`、`wait`、`progress`、`cancel`、`release`、`recover`、`sweep_orphans`、`capacity`（引擎面，P-52） | [sandbox.md §6.1](sandbox.md) |
+| `ModelProvider` | `models`（`AnthropicProvider`） | `models` 内部的调用器（经 `ModelRouter` 间接服务 `engine`、`conversation`、`notify`） | `kind`、`map_effort`、`complete(ProviderRequest, &EgressRoute)` | [models.md §6](models.md) |
+| `RepoService` | `repo` | `engine`、`forge`、`sandbox`、`guardian`、`api` | 镜像仓、工作树、写权锁、`prepare_workspace`、`validate_patch`、`commit_patch`、`provenance` | [repo.md §6](repo.md) |
+| `PolicyPort` | `policy` | `engine`、`guardian`、`repo`、`forge` | `decide_action`、`request_approval`、`invalidate`、`live_approvals_for_pr`、`decide_proposals`、`evaluate_patch`、`check_approval`、`path_rules`、`path_rules_snapshot`、`scan_text`、`consume_for_execution` | [policy.md §6](policy.md) |
+| `InboxPort` | `notify` | `engine`、`guardian`、`conversation`、`forge`、`api` | `raise(tx: Option<&mut dyn TxHandle>, RaiseRequest)`、`resolve`、`dismiss`、`choose`、`get`、`list`、`summary` | [notify.md §6.1](notify.md) |
+| `EgressControl` | `gantryd` 侧的 Egress 控制面客户端（经 `/run/gantry/egress.sock`，P-50） | `sandbox`、`models`、`api` | `endpoints`、`issue_job_token`、`job_usage`、`revoke_job_token`、`forget_job`、`service_token`、`apply_config`、`secret_present`、`stage_secret`、`activate_secret`、`discard_secret`、`staged_secrets`、`call_usage`、`usage_since`、`status` | [egress.md §6.2](egress.md)；[interfaces/egress-control.md](../interfaces/egress-control.md) |
+
+不进 `core::ports` 的：只有一个调用方、且调用方本就 crate 依赖提供方的服务接口（`models` 的 `ModelRouter`、`policy` 的 `ApprovalService` / `AuditLog`、`pki` 的 `DeviceDirectory` 等，由 `api` / `engine` 直接依赖），以及模块内部 trait（`sandbox` 的 `SandboxDriver`）。
 
 ## 7. 内部设计
 
@@ -450,61 +504,68 @@ crates/gantry-core/
 
 ### 7.4 状态机转移表
 
-**交付单元阶段**（data-model §4.1 状态图的逐边实现）。`level_effective` 守卫只有两处：Low 走 `LowSkipAdmission`，其余档位走 `AdmissionAccept`。
+**交付单元阶段**（data-model §4.1 状态图的逐边实现，按 P-55 补全）。`level_effective` 守卫：**准入只在 High 及以上**（`AdmissionAccept` / `AdmissionRevise`）；Medium 走 `AdmissionSkipped` 到 `plan`（免准入）；Low 走 `AdmissionSkipped` 到 `implement`（免准入、无计划阶段）。
 
 | from | 触发器 | to | 备注 |
 | --- | --- | --- | --- |
-| `spec` | `AdmissionAccept` | `plan` | 非 Low |
-| `spec` | `AdmissionRevise` | `spec` | 追问；自环 |
-| `spec` | `LowSkipAdmission` | `implement` | 仅 Low |
-| `plan` | `PlanProduced` | `implement` | |
+| `spec` | `AdmissionAccept` | `plan` | 仅 High 及以上 |
+| `spec` | `AdmissionRevise` | `spec` | 追问；自环；仅 High 及以上 |
+| `spec` | `AdmissionSkipped` | `plan` | 仅 Medium |
+| `spec` | `AdmissionSkipped` | `implement` | 仅 Low |
+| `plan` | `PlanProduced` | `implement` | 非 Low |
 | `implement` | `PatchValidated` | `propose` | |
-| `implement` | `PlanInfeasible` | `plan` | |
-| `propose` | `PrCreated` | `review` | |
-| `review` | `ReviewRevise` / `CiFailureNeedsCode` | `implement` | 两个触发器同一条边 |
+| `implement` | `PlanInfeasible` | `plan` | 非 Low |
+| `implement` / `review` | `Replan` | `plan` | `REJECT` 后用户选择"重新规划"；非 Low |
+| `propose` | `PrCreated` | `review` | 含 Low（Low 的 review 只等 CI） |
+| `review` | `ReviewRevise` / `CiFailureNeedsCode` | `implement` | 守护的静默自愈不走这条边；只有需要改代码且超出自愈范围时（`guardian.escalated` 后由 `engine` 触发 `CiFailureNeedsCode`）才走（P-60） |
 | `review` | `ReviewAcceptCiGreen` | `merge` | |
 | `merge` | `ApprovalInvalidated` / `BaseAdvanced` | `review` | 同一条边 |
 | `merge` | `MergedAndIssuesClosed` | `closed` | |
-| `spec` | `UserAbandoned` / `IssueNotPlanned` | `abandoned` | 状态图只画了这一个起点 |
-| `review` | `PrClosedUnmerged` | `abandoned` | 状态图只画了这一个起点；`UserAbandoned` 是否也可从 `review` 及其他阶段发起见 OQ-6 |
+| 任一非终态 | `UserAbandoned` / `IssueNotPlanned` / `PrClosedUnmerged` | `abandoned` | P-55；`merge` 阶段 PR 被关闭同样走这里 |
+| `abandoned` | `PrReopened` | `review` | 仅当放弃原因为 `PrClosedUnmerged` 且 PR 被重新打开（P-55）；其余原因的 `abandoned` 无出边 |
 
-`closed`、`abandoned` 是终态，没有出边。**转移表按状态图实现，不自行补边**；状态图没覆盖的现实情形（例如 `merge` 阶段 PR 被关闭、`implement` 阶段用户放弃）会让调用方得到 `TransitionError`，这是有意的：它暴露契约缺口，由 OQ-6 推动契约 PR 补边。
+`closed` 是终态；`abandoned` 除上表最后一行外无出边。守护的静默自愈不改变阶段（P-60）。**转移表按 data-model 实现，不自行补边**；未覆盖的情形返回 `TransitionError`，由契约 PR 补边。
+
+**阶段内状态 `stage_status`**（P-55，规则以 data-model 为准）：进入新阶段 → `running`；需要人回答 / 签名 → `waiting_human`，人处理后回 `running`；闸门 `BLOCKED` 或外部条件不满足 → `blocked`，解除后回 `running`；`delivery.paused` → `paused`（从 `running` / `waiting_human` / `blocked` 进入，记住进入前的值），`delivery.resumed` 回到进入前的值；阶段完成 → `done`（随即被下一阶段的 `running` 取代）；终态阶段恒为 `done`。
+
+**档位 `level_effective`**（P-57）：初值由 `engine` 在规格阶段按风险评估给出，必须 ≤ `level_cap`；之后只能在上限内升、不自动降；已触发的闸门永不撤销。`core` 提供 `fn check_level_change(cap, from, to) -> Result<(), LevelError>`（拒绝降级与越过上限）。
 
 **其他状态机**（data-model §4.2–§4.4 及各契约）：
 
 | 状态机 | 合法转移 | 出处 / 备注 |
 | --- | --- | --- |
-| 节点 | `pending → queued → running → succeeded / failed / skipped / cancelled`；`superseded` 为被图改写替换 | §4.2。进入 `skipped` / `cancelled` / `superseded` 的合法起点、`failed` 后重试时节点状态：OQ-6，**暂只放行 §4.2 字面写出的链**，并额外放行 `pending / queued → cancelled / superseded`（worker-protocol §3.4 的"节点被图改写替换而取消"）[提议] |
+| 节点 | `pending → queued → running → succeeded / failed / skipped / cancelled`；`superseded` 为被图改写替换；`failed → queued`（`node.retry_requested`，人工重试，P-56） | §4.2。进入 `skipped` / `cancelled` / `superseded` 的合法起点：OQ-6，暂放行 `pending / queued → cancelled / superseded`（worker-protocol §3.4 的"节点被图改写替换而取消"）[提议] |
 | 尝试 | `preparing → running → succeeded / failed / cancelled`；`preparing → failed / cancelled` | worker-protocol §3.2–§3.4（创建 / 注入阶段失败或被取消）。终态不可变。`check_terminal`：`failed` / `cancelled` 必有 `failure_class`；`cancelled` 的 `failure_class` 恒为 `cancelled`；`succeeded` 且 gate 判定非 `ACCEPT` 时 `verdict_fail` 对应的 `Attempt.status`：OQ-6 |
-| 工作流 | `running ⇄ paused`；`running / paused → succeeded / failed / cancelled` | §3 Workflow 枚举；转移为 [提议]（骨架只给了枚举） |
+| 工作流 | `running ⇄ paused`（随 `delivery.paused` / `delivery.resumed`，P-56）；`running / paused → succeeded / failed / cancelled` | §3 Workflow 枚举；转移为 [提议] |
 | 沙盒 | `created → running → stopped → destroyed`；任意非 `destroyed` → `lost`；`created / running / stopped → destroyed` | §3 Sandbox 枚举 + worker-protocol §3.2、§3.5；转移为 [提议] |
 | 收件箱 | `open → resolved / dismissed` | api.md §4.8：`dismiss` 对 `dismissed` 幂等，对 `resolved` 为 `conflict`；`choose` 仅 `open` |
-| 审批 | `pending → granted → consumed / invalidated / expired`；`pending → denied / invalidated / expired` | data-model §4.4、P-20。`consumed` 只能一次 |
-| Outbox | `queued → executing → succeeded`；`executing → failed`；`failed → queued`（可重试）；`executing → queued`（限流退避、租约过期重放）；`queued / executing / failed → cancelled` | data-model §4.3。`failed` 是终态还是可重试的中间态，data-model 与 forge-actions §2.2 的措辞不同（OQ-6）；转移表放行 `failed → queued`，`OutboxCause`（`Retry` / `RateLimited` / `LeaseExpired` / `DependencyFailed` / `Superseded` / `Manual`）区分原因 |
+| 审批 | `pending → granted → consumed / invalidated / expired`；`pending → denied / invalidated / expired` | data-model §4.4、P-20。`consumed` 只能一次，发生在执行开始前并记录 Outbox 动作 ID；执行终态失败不退回（P-54）；有效期 `policies.approval.ttl_s`（C27） |
+| Outbox | `queued → executing → succeeded`；`executing → queued`（临时错误以 `not_before` 退避、限流、租约过期重放）；`executing → failed`（重试用尽或终态错误，**终态**）；`queued / executing → cancelled` | data-model §4.3、P-53：没有 `failed → queued`；人工重试 = 入队方以新 `epoch` 创建新动作。`OutboxCause`（`Retry` / `RateLimited` / `LeaseExpired` / `Exhausted` / `TerminalError` / `DependencyFailed` / `Superseded` / `Manual`）区分原因 |
 | 工作树锁 | `acquire`：无锁、或已过期、或同持有者 → 成功；否则 `LockConflict`。`release`：只能释放自己的锁。`human` 锁租约默认 1800 s、最长 14400 s（api.md §3.7）由调用方传入上限 | data-model §3 Worktree；租约到期**由调用时的 `now` 判定**，不依赖后台任务 |
 
 ### 7.5 事件目录实现清单
 
-`EVENT_TYPES` 必须覆盖 data-model §5.2 的全部类型（49 个固定类型 + 23 个 `forge.<kind>`）。下表按事件族列出**已知**的 `data` 内容及其出处，以及 M0 必须补齐的缺口。凡写"缺口"的，`contract` 泳道在 M0 通过契约 PR 补全并回写 data-model，不要靠实现者猜。
+`EVENT_TYPES` 必须覆盖 data-model §5.2 的全部类型（全部固定类型 + 23 个 `forge.<kind>`）。下表按事件族列出**已知**的 `data` 内容及其出处，以及 M0 必须补齐的缺口。凡写"缺口"的，`contract` 泳道在 M0 通过契约 PR 补全并回写 data-model，不要靠实现者猜。
 
 | 事件族 | 发出方 | 已知的 `data` 内容（出处） | 缺口 |
 | --- | --- | --- | --- |
 | `settings.updated` | `api` | `scope`、`resource`、`schema_version`、`base_rev`、`value`（已剥离 secret）、`relaxes[]`、`secret_changes[]`（`{ref, op, version}`，无值无哈希）；`subject` 为 `settings` 或 `prj_…`（config.md §2.3） | 无 |
-| `forge.<kind>` | `forge` | `data` 即 `ForgeEventEnvelope`（forge-actions §6.2–§6.3）；`dedup_key` 进信封外的唯一索引列 | `subject` 取值（交付单元 / PR / 项目）未定；`occurred_at` 示例无毫秒（宽松解析兜住） |
+| `forge.<kind>` | `forge` | `data` 即 `ForgeEventEnvelope`（forge-actions §6.2–§6.3）；`dedup_key` 进信封外的唯一索引列；`occurred_at` 带毫秒（C26）；`pr_synchronized` 带 `head_epoch`（计数以事件日志为准，P-61） | `subject` 取值（交付单元 / PR / 项目）未定 |
 | `forge.synced` / `forge.drift_detected` | `forge` | drift 形状见 forge-actions §7.4 | `forge.synced` 的 data（快照差异）未定 |
-| `outbox.*` | `forge`、`store` | `outbox.failed.data.code`（forge-actions §2.6）；`outbox.succeeded` 带 `github_ref` | `enqueued` 需带完整动作（payload、依赖、优先级）才能让投影可重建 |
-| `delivery.*` | `engine`、`api` | `stage_changed` 示意 `{from, to}`（api.md §5.1）；`abandoned` 带可选 `reason`（≤ 500 字符，api.md §4.4） | `created` 需带完整交付单元与预算台账（模板名、limits、`config_rev`）；`stage_changed` 建议带 `trigger`；`level_changed` 未定 |
-| `workflow.*` / `node.*` | `engine` | `superseded_by`（data-model）；`workflow.revised` 带新 `graph_rev` | 节点的创建随 `workflow.created` / `revised` 带入的假设需确认；`Workflow.template` 取值（族名还是阶段模板名，OQ-6） |
+| `outbox.*` | `forge`、`store` | `outbox.failed.data.code`（forge-actions §2.6），只在终态发（P-53）；`outbox.succeeded` 带 `github_ref`；`upsert_status_comment` 的 `outbox.enqueued` 带 `revision`（P-61） | `enqueued` 需带完整动作（payload、依赖、优先级）才能让投影可重建 |
+| `delivery.*` | `engine`、`api` | `stage_changed` 示意 `{from, to}`（api.md §5.1）；`abandoned` 带可选 `reason`（≤ 500 字符，api.md §4.4）；`paused` / `resumed`（P-56）；`level_changed` 只升（P-57） | `created` 需带完整交付单元与预算台账（模板名按 `level_cap` 固定、limits、`config_rev`）；`stage_changed` 建议带 `trigger` |
+| `workflow.*` / `node.*` | `engine` | `superseded_by`（data-model）；`workflow.revised` 带新 `graph_rev`；`workflow.created` 的 `delivery_id` 可空、此时带 `conversation_id`（P-58）；`node.retry_requested`（P-56） | 节点的创建随 `workflow.created` / `revised` 带入的假设需确认；`Workflow.template` 取值（族名还是阶段模板名，OQ-6） |
 | `attempt.started` / `finished` | `engine` | `started`：实际使用的 provider / model / effort 与 `config_rev`（config.md §2.6）；`finished`：`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`（worker-protocol §3.2、§3.5） | `Attempt` 从 `preparing` 转 `running` 没有对应事件 |
 | `attempt.progress` | `sandbox` / `engine` | 采样后的进度（worker-protocol §7），仅展示 | 形状未定 |
-| `patch.validated` / `rejected` | `repo` | `ValidatedPatch`（`sha256`、`result_tree`、`files[]`、`verdict`、`reasons[]`，worker-protocol §8.3） | 无 |
+| `patch.validated` / `rejected` | `repo` | `ValidatedPatch`（`sha256`、`result_tree`、`files[]`、`verdict`、`reasons[]`，worker-protocol §8.3）；`rejected` 带 `reason`（机械拒绝码或 `policy_denied`，P-69） | 无 |
 | `sandbox.*` | `sandbox` | — | `Sandbox.status` 的 `running` / `stopped` / `lost` 没有对应事件（OQ-6） |
 | `worktree.*` | `repo`、`api`（人工锁） | 锁字段 `{holder, delivery_id, acquired_at, lease_until}` | 租约到期自动释放是否产生 `worktree.unlocked`（原因 `expired`）未定 |
 | `message.posted` | `api`、`conversation` | 完整 `Message`（api.md §4.5） | 无（建议带全文，使投影可重建） |
-| `inbox.*` | `engine`、`guardian`、`api` | `resolved.data.option_id`（api.md §4.8）；payload 形状见 data-model | 无 |
-| `approval.*` | `policy`、`api` | `requested` 带 `config_rev`（config.md §2.6）；`consumed` 需带消费时核对的 `subject_digest` | 其余未定 |
-| `budget.charged` / `exhausted` | `engine`、`models` | 按 tier 的用量、实际 provider / model（config.md §3.4） | `charged` 的粒度（逐次调用 / 逐 Attempt）未定；`exhausted.data` = `{dimension, limit, used}`（data-model InboxItem payload 可参照） |
-| `policy.denied` | `policy` | 原因码（worker-protocol §9 的 `policy.*`）、`config_rev` | 其余未定 |
+| `inbox.*` | `notify`（经 `InboxPort`，调用方 `engine`、`guardian`、`forge`、`conversation`）、`api` | `resolved.data.option_id`（api.md §4.8）；`raised` 带含 `project_id`、`dedup_key` 的完整项（P-63）；payload 形状见 data-model | 无 |
+| `guardian.*` | `guardian` | `triaged`（`event_ref`、`class`、`action`）、`heal_requested`、`escalated`（P-60） | `heal_requested` / `escalated` 的其余字段以 guardian.md 为准 |
+| `approval.*` | `policy`、`api` | `requested` 带 `config_rev`（config.md §2.6）；`consumed` 带消费时核对的 `subject_digest` 与 `consumed_by`（Outbox 动作 ID，P-54） | 其余未定 |
+| `budget.charged` / `exhausted` | `engine`、`models` | 按 tier 的用量、实际 provider / model（config.md §3.4）；`delivery_id` 或 `conversation_id`（会话台账，P-58）；加权口径 `levels.token_weights`（P-70） | `charged` 的粒度（逐次调用 / 逐 Attempt）未定；`exhausted.data` = `{dimension, limit, used}`（data-model InboxItem payload 可参照） |
+| `policy.denied` | `policy` | 原因码（worker-protocol §9 的 `policy.*`，含 `policy.path_protected:workflows`，P-48）、`config_rev`；只用于策略判定（P-69） | 其余未定 |
 | `device.*` / `project.*` / `conversation.created` | `pki`、`api`、`forge` | 对应实体的字段（data-model §3） | `project.added` 的触发者（api.md OQ-8） |
 | 未入目录 | — | — | `artifact.unexpected`（worker-protocol §5.1、§8.2 称"记审计"）、`gantry device recover` 的审计事件（P-39）、自报用量与计量显著偏离的审计（worker-protocol §7.4）都没有事件类型（OQ-6） |
 
@@ -533,7 +594,8 @@ pub enum RelaxCmp {
 ```
 
 - 规则表按 config.md §2.2 的行逐条录入，**每一行一个测试**（§12.2）。
-- `required_authority`：任一 `relaxes` 非空，或写入了 `approver_only` 键，或带 secret `value` → `approver` + 需要签名；否则 `operator`、无签名（config.md §2.5）。
+- `required_authority`：任一 `relaxes` 非空，或写入了 `approver_only` 键，或带 secret `value` → `approver` + 需要签名；否则 `operator`、无签名（config.md §2.5；设置保存只在凭据或放宽类改动时需要签名，C27）。
+- **引导期**（P-66）：第一台设备配对之前，主机命令（需 root）可以写入 `github.*`、`sandbox.base_image` 等"仅 approver"键而不需要签名；`core` 提供 `fn bootstrap_writable(r: Resource, path: &KeyPath) -> bool` 列出允许的键，是否处于引导期、审计事件由调用方（`api` / 主机命令）判定与追加。之后同类改动恢复为需要审批签名。
 - `split_secret_values` 依据 schema 上的 `x-gantry-secret` 注解找 `SecretRef` 字段，`Consumer` 由字段路径决定：`models.providers.*.credential`、`egress.injection.*.credential` → `Egress`；`github.app.*` → `Forge`；`pki` 的中间 CA 私钥不经 settings（`pki` 直接用 `secrets`）。
 - 内置默认放在 `src/settings/defaults/<resource>.json`，随二进制编译；config.md §4.3、§5、§6、§7 的 **[建议值，待调优]** 原样录入并保留该标注（注释字段不进 JSON，进同目录的 `.md` 说明）。
 
@@ -588,6 +650,7 @@ pub enum RelaxCmp {
 | `approval.ttl_s` 范围 | `60 ..= 604800` | config.md §5.4 |
 | `policies.patch.*` 的硬上限 | **未给值** | config.md §5.5"大小阈值只能在 `core` 定义的硬上限内调"；OQ-8 |
 | 手机档案事件白名单 | `project.*`、`conversation.*`、`message.*`、`inbox.*`、`device.revoked` | api.md §5.4 [提议]（M4 才启用） |
+| `approval.ttl_s` 默认 | `86400` | C27（[建议值]）；challenge 有效期 120 s |
 
 ## 11. 可观测性
 
@@ -602,7 +665,8 @@ pub enum RelaxCmp {
 - [ ] `schemas/events/`、`forge/`、`worker/`、`config/` 全部 schema 通过元校验，且与 `docs/interfaces/` 一致：§7.7 第 3 步提取的每个示例夹具都通过对应 schema 与对应 Rust 类型的反序列化，再序列化后与原文 JSON 语义相等（键序无关）。
 - [ ] `cargo xtask schemas --check` 在干净检出上通过；任意手改 `schemas/` 下的生成文件会使其失败。
 - [ ] Mock API 服务能用 `core` 的 `Event` 类型回放录制数据，按 `seq` 游标续传（与 `api` / `store` 的契约测试共用夹具）。
-- [ ] `testing` feature 提供的 `FakeClock`、`SeqEntropy`、builders 各有至少一个使用示例测试。
+- [ ] `testing` feature 提供的 `FakeClock`、`SeqEntropy`、builders 各有至少一个使用示例测试；§6.9 的每个 M0 替身各有至少一个使用示例测试，且实现了对应的 `core::ports` trait（编译期断言）。
+- [ ] `core::ports` 的八个 trait 与各提供方规格书 §6 的签名一致（契约 PR 评审项；`gantry-fakes` 编译通过即证明可实现）。
 - [ ] `core` 在 Linux、macOS、Windows 上 `cargo test` 通过，且 `cargo deny`（或等价检查）确认依赖符合 §3。
 
 ### 12.2 逐项验收
@@ -615,7 +679,11 @@ pub enum RelaxCmp {
 
 **状态机**
 
-- [ ] 交付单元：`EDGES` 导出的 mermaid 与 data-model §4.1 的边集合逐边比对（测试内置期望边集合，文档变化时需同步修改）；Low 档 `spec → plan` 被拒、非 Low 档 `LowSkipAdmission` 被拒。
+- [ ] 交付单元：`EDGES` 导出的 mermaid 与 data-model §4.1 的边集合逐边比对（测试内置期望边集合，文档变化时需同步修改）；Medium 的 `AdmissionAccept` 被拒、Medium 的 `AdmissionSkipped` 到 `plan`、Low 的 `AdmissionSkipped` 到 `implement`、Low 的任何 `→ plan` 被拒；每个非终态阶段经 `UserAbandoned` 到 `abandoned`；`merge` 经 `PrClosedUnmerged` 到 `abandoned`，再经 `PrReopened` 回到 `review`；`UserAbandoned` 造成的 `abandoned` 不接受 `PrReopened`；`implement` / `review` 经 `Replan` 到 `plan`（P-55）。
+- [ ] `stage_status`：`Pause` 从 `running` / `waiting_human` / `blocked` 进入 `paused`，`Resume` 回到进入前的值；`paused` 下 `Pause` 被拒（P-55、P-56）。
+- [ ] `check_level_change`：降级、越过 `level_cap` 被拒；同级或上升（≤ 上限）通过（P-57）。
+- [ ] `ApprovalAction::shape()`：七个非 Forge 动作与 data-model 形状表逐行一致；表中没有的动作构造 `Approval` 失败（P-54）。
+- [ ] Outbox：`failed` 无出边；`executing → queued` 只接受 `Retry` / `RateLimited` / `LeaseExpired`（P-53）。
 - [ ] 对每个状态机做穷举测试：全部 `(from, to)` 组合，只有表内转移通过，其余返回 `TransitionError`（终态无出边）。
 - [ ] 审批：`consumed` 只能从 `granted` 进入；同一审批第二次 `can_consume` 失败；`subject_digest` 变化后 `can_consume` 失败；过期后失败。
 - [ ] 工作树锁：他人持有且未过期 → `LockConflict`；已过期 → 可被取得；`release` 他人的锁失败；`human` 租约超过调用方传入的上限被拒。
@@ -623,7 +691,7 @@ pub enum RelaxCmp {
 
 **事件**
 
-- [ ] `EventType::from_str(as_str(x)) == x` 对全部 49 + 23 个类型成立；未知类型字符串返回错误；`EVENT_TYPES` 与 data-model §5.2 的类型清单逐项比对。
+- [ ] `EventType::from_str(as_str(x)) == x` 对全部固定类型与 23 个 `forge.<kind>` 成立（含 `delivery.paused`、`delivery.resumed`、`node.retry_requested`、`guardian.triaged`、`guardian.heal_requested`、`guardian.escalated`）；未知类型字符串返回错误；`EVENT_TYPES` 与 data-model §5.2 的类型清单逐项比对。
 - [ ] 每个事件类型至少一个正例与一个反例 `data`；`validate_event_data` 对缺必填字段、多余字段、错误枚举值给出带 JSON Pointer 的错误。
 - [ ] `settings.updated` 的 `data` 里，任何 `SecretRef` 位置带 `value` 键 → `SchemaError`（存储形态的 `SecretRef` 只有 `secret_ref` 等非值字段）；`secret_changes[]` 带 `value` 或哈希字段同样被拒。`store` 依赖这条 schema 作为"事件日志里没有密钥值"的防线（store.md §7.3）。
 
@@ -636,6 +704,7 @@ pub enum RelaxCmp {
 
 **预算**
 
+- [ ] `TokenWeights` 由 `levels.token_weights` 构造；`apply` 的加权 token 与手算一致（P-70）；会话台账（`LedgerSubject::Conversation`）只计 token 维度并按 `levels.None.daily_tokens` 判耗尽（P-58）。
 - [ ] `apply` 按 data-model 口径：被图改写替换的节点仍计入 `nodes`，`attempts` 单独计，`wall_time` 为秒，`rounds` 为评审轮与守护自愈轮之和，`forge_writes` 为累计数；`concurrency` 不进 `used`。
 - [ ] `would_exceed` 与 `is_exhausted` 的边界（`used + delta == limit` 不超限但已耗尽）有测试。
 
@@ -663,17 +732,18 @@ pub enum RelaxCmp {
 
 | # | 问题 | 本文临时处理 | 影响 |
 | --- | --- | --- | --- |
-| OQ-1 | **契约类型与扩展点 trait 的归属**。M0 要交付 `FakeForge` / `FakeSandboxDriver` / `FakeRepo` / `FakeModelProvider`，它们要实现的 `Forge` / `SandboxDriver` / `Repo` / `ModelProvider` / `Notifier` / `WorkerAdapter` trait 定义在哪（`core`，还是各模块 crate 的 M0 骨架）？Worker 协议与 Forge payload 类型放 `core` 是否接受？ | Worker / Forge 的**数据类型**放 `core`；**trait** 不放（`core` 无 IO、无 async） | `contract` 泳道的 M0 范围；crate 依赖图 |
+| OQ-1 | **已决：见裁决 C5 / C6（P-51、P-52）**（八个跨模块端口 trait 定义在 `core::ports`，M0 交付；Worker / Forge 数据类型放 `core`；需要 IO 的替身放 `gantry-fakes`）。原问题：**契约类型与扩展点 trait 的归属**。M0 要交付 `FakeForge` / `FakeSandboxDriver` / `FakeRepo` / `FakeModelProvider`，它们要实现的 `Forge` / `SandboxDriver` / `Repo` / `ModelProvider` / `Notifier` / `WorkerAdapter` trait 定义在哪（`core`，还是各模块 crate 的 M0 骨架）？Worker 协议与 Forge payload 类型放 `core` 是否接受？ | 已落实到 §6.9、§6.10；`core` 为此允许 `async-trait` 与 `futures-core`（§3） | `contract` 泳道的 M0 范围；crate 依赖图 |
 | OQ-2 | `desktop-shell`（Rust）是否依赖 `core`（architecture §4 把位置写成"共享 crate"）？若是，需要客户端容错解码（api.md §1.4）与 Windows / macOS 编译 | 服务端严格解码；客户端用 `Tolerant<T>` 包装，不改服务端类型；crate 保持跨平台 | `core` 依赖约束、`desktop-shell` 设计 |
 | OQ-3 | JCS、严格 JSON、审批载荷构造放 `core` 不在 architecture §4 对 `core` 的一句话职责里 | 放 `core`（单一实现，避免字节分歧） | `policy`、`api`、`forge`、`desktop-shell` |
 | OQ-4 | `UntrustedText` 的规范化（worker-protocol §4.4 步 2–3）与隔离包装归 `core` 还是 `sandbox`？ | 规范化放 `core`；包装（nonce、标记行）留给 `sandbox` | `sandbox`、`engine` |
 | OQ-5 | `Clock` / `Entropy` 的真实实现放哪（`core` 禁止 IO） | 只定义 trait；生产实现由 `gantryd` 组装时提供 | 组装、测试 |
-| OQ-6 | **状态机缺口**：(a) `abandoned` 的起点——状态图只有 `spec` / `review`，而 api.md `abandon` 路由与 P-37 对任意非终态可用，`merge` 阶段 PR 被关闭也没有边；(b) "重新规划"（`REJECT` 后）的边；(c) `stage_status` 各值的进入 / 退出条件（`waiting_human` / `blocked` / `done`；`AdmissionRevise` 自环期间的状态）；(d) architecture §8 表对 Medium 写"全部"、High 写"全部，含准入"，而 data-model §4.1 只豁免 Low——Medium 是否走准入；(e) 节点进入 `skipped` / `cancelled` / `superseded` 的起点，`failed` 后重试时的节点状态；(f) gate 判定非 `ACCEPT` 时 `Attempt.status`；(g) Outbox `failed` 是终态还是可重试中间态（data-model §4.3 与 forge-actions §2.2）；(h) `Attempt` 的 `preparing → running`、`Sandbox` 的 `running` / `stopped` / `lost` 无对应事件；(i) `Workflow.status` 示例 `finished`（api.md §4.7）不在 data-model 枚举，`Workflow.template` 示例 `medium.implement` 与 `levels.*.graph_template`（`medium.plan_build_verify`）口径不同；(j) `artifact.unexpected`、`gantry device recover` 等审计事件无类型 | 转移表只实现状态图 / 字面写出的边，其余按 §7.4 标注 [提议] 或拒绝 | `engine`、`store` 的校验会让缺口显形，需契约 PR |
-| OQ-7 | `Approval.action` 的词表：data-model 写"`ForgeActionKind` 或内部动作"，但 `force_push` 不是 `ForgeActionKind`；config.md §5.1 有 `push_outside_prefix`、`resolve_review_thread_human` 两个需审批的伪动作，forge-actions §2.5 没有对应行 | `ApprovalAction = PolicyActionId ∪ InternalAction`（20 + 3），`target` / `subject_digest` 形态按已有三行，另两个伪动作的形态待定 | `policy`、`forge`、`api` |
+| OQ-6 | **部分已决**：(a)(b)(c)(d) 见裁决 C9 / P-55（任何非终态 → `abandoned`；`REJECT` 后"重新规划" → `plan`；`merge` 阶段 PR 关闭 → `abandoned`、重新打开回 `review`；`stage_status` 五值；准入只在 High 及以上）；(e) 中 `failed` 后人工重试见 C10 / P-56（`node.retry_requested`，`failed → queued`）；(g) 见 C7 / P-53；(i) 中 `Workflow.status` 示例见 C26。其余（(e) 的 `skipped` / `cancelled` / `superseded` 起点、(f)、(h)、(i) 的 `Workflow.template` 口径、(j)）未决。原问题：**状态机缺口**：(a) `abandoned` 的起点——状态图只有 `spec` / `review`，而 api.md `abandon` 路由与 P-37 对任意非终态可用，`merge` 阶段 PR 被关闭也没有边；(b) "重新规划"（`REJECT` 后）的边；(c) `stage_status` 各值的进入 / 退出条件（`waiting_human` / `blocked` / `done`；`AdmissionRevise` 自环期间的状态）；(d) architecture §8 表对 Medium 写"全部"、High 写"全部，含准入"，而 data-model §4.1 只豁免 Low——Medium 是否走准入；(e) 节点进入 `skipped` / `cancelled` / `superseded` 的起点，`failed` 后重试时的节点状态；(f) gate 判定非 `ACCEPT` 时 `Attempt.status`；(g) Outbox `failed` 是终态还是可重试中间态（data-model §4.3 与 forge-actions §2.2）；(h) `Attempt` 的 `preparing → running`、`Sandbox` 的 `running` / `stopped` / `lost` 无对应事件；(i) `Workflow.status` 示例 `finished`（api.md §4.7）不在 data-model 枚举，`Workflow.template` 示例 `medium.implement` 与 `levels.*.graph_template`（`medium.plan_build_verify`）口径不同；(j) `artifact.unexpected`、`gantry device recover` 等审计事件无类型 | 已决部分落实到 §6.4、§7.4；未决部分转移表只实现字面写出的边，其余按 §7.4 标注 [提议] 或拒绝 | `engine`、`store` 的校验会让缺口显形，需契约 PR |
+| OQ-7 | **已决：见裁决 C8 / P-54**（`Approval.action` ∈ `ForgeActionKind` ∪ {`settings_update`、`device_role_change`、`device_revoke`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、`patch_apply_protected`}，形状在 data-model 列表定义，未定义的 fail-closed）。原问题：`Approval.action` 的词表：data-model 写"`ForgeActionKind` 或内部动作"，但 `force_push` 不是 `ForgeActionKind`；config.md §5.1 有 `push_outside_prefix`、`resolve_review_thread_human` 两个需审批的伪动作，forge-actions §2.5 没有对应行 | 已落实到 §6.6、§6.3 | `policy`、`forge`、`api` |
 | OQ-8 | 实体字段缺口：`BudgetLedger.config_rev`（config.md §2.6）data-model 未列；config.md §5.5 提到的 `core` 硬上限（`policies.patch.*`）没给数值；事件信封 `causation_id` / `correlation_id` 的可空性未定 | 前者加为可选字段；硬上限未定前 `patch.*` 只校验为正整数；信封两字段按 `Option` | `engine`、`policy`、`store` |
 | OQ-9 | 每个 `ForgeActionKind` 的 `target` / `intent` 推导放哪：`upsert_status_comment` 的 `render_digest`、`update_issue` 的 `spec_block_digest` 依赖 `forge` 的渲染 | `core` 只给通用 `derive`；推导归 `forge` | `forge`、`engine`、`guardian` |
-| OQ-10 | token 是否加权：decisions P-44 写"按加权 token 计，权重是配置项（默认按价格比例）"，config.md OQ-7 仍写"不加权"且没有权重键 | `TokenWeights` 默认全 1，不引入配置键 | `engine`、`models`、预算口径 |
+| OQ-10 | **已决：见裁决 C24 / P-70**（config 增加 `levels.token_weights`）。原问题：token 是否加权：decisions P-44 写"按加权 token 计，权重是配置项（默认按价格比例）"，config.md OQ-7 仍写"不加权"且没有权重键 | 已落实到 §6.7 | `engine`、`models`、预算口径 |
 | OQ-11 | V10 的 GitHub 域名族清单：`core` 校验器与 `egress` 的完整硬编码表可能漂移 | `core` 只内置 config.md §5.5 点名的最小集（`github.com`、`api.github.com` 及其子域），并要求与 `egress` 共用一份常量 | `egress`、`sandbox` |
 | OQ-12 | JSON Schema 方言与 OpenAPI 3.1 对齐的方式 | 2020-12 | `ops` 的校验工具选型 |
 | OQ-13 | settings 稀疏存储下，内置默认随版本变化会静默改变未显式设置的键（config.md OQ-20）；`schema_version` 迁移策略 | 暂无迁移；`SETTINGS_SCHEMA_VERSION` 变化视为破坏性变更 | `core`、`deploy` |
 | OQ-14 | 跨使用方共用同一 `secret_ref`：config.md §2.4 允许"多个字段引用同一个 ref"，而 `secrets` 按使用方隔离 | `split_secret_values` 对"同一名字出现在不同 `Consumer` 的字段里"报错（新增语义码，需契约 PR 登记） | `secrets`、`api` |
+| OQ-15 | `levels.None.daily_tokens`（P-58）使 `levels` 出现 `None` 键，而 V07 与 `LevelKey` 原本排除 `none`；本文让 `levels.None` 只允许 `daily_tokens` 一个键 | V07 改为"`None` 只允许 `daily_tokens`"；`LevelKey` 不变，另设 `LevelsSettings.none_daily_tokens` | config.md V07、`api` 校验 |

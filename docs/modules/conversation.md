@@ -346,7 +346,7 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 - **消费的事件**：见 §4。
 - **日志**：结构化，字段含 `conversation_id`、`message_id`、`intent`、`route`、`cap`、`delivery_id?`、各步耗时；不记正文。
 - **指标**（名称 [提议]）：`conv_messages_total{role}`、`conv_intent_total{intent}`、`conv_route_total{route}`、`conv_intent_seconds`、`conv_process_seconds`、`conv_event_rows_total{type}`、`conv_cards_total{kind}`、`conv_errors_total{stage,kind}`、`conv_queue_depth`。
-- **健康**：向 `settings/status` 报告 `applied_seq` 与健康（游标落后、模型未配置时 `degraded`）。
+- **健康**：向 `settings/status` 报告 `applied_rev` 与健康（游标落后、模型未配置时 `degraded`）。
 
 ## 12. 测试与验收
 

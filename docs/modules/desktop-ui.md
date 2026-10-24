@@ -314,7 +314,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | R-63 | 分组导航：服务端（模型、档位与预算、GitHub App、沙盒与出网、危险动作策略、后台守护、通知）/ 项目（每个项目一页）/ 本机（设备与证书、外观）（§3，P-31） | `SettingsNav` | `overlay.settings.page` | 条目由 config.md §13 的里程碑决定：未交付的页显示"尚未提供"并链到 config.md；viewer 看不到设置入口（api.md §2.2） | M1 起 |
 | R-64 | 模型页：三张卡（大脑 / 干活 / 打杂），含用途说明、模型、推理深度；被项目覆盖时注明"被 n 个项目覆盖：…"（§3） | `SettingsModels`、`ModelTierCard`、`ProviderCredentialField` | 页内草稿 | `settings.get models` + `settings.catalog`。模型下拉 = `catalog.models.capabilities` 的键（`worker` / `planner` 过滤掉不支持工具调用的）；推理深度 = 所选模型的 `reasoning_efforts`，planner / worker 另有"随档位"（`by_level`）。"被 n 个项目覆盖"：对每个项目 `project_settings.get models`（n+1 请求，仅在该页打开时；OQ-U13）。凭据输入框只写不读，已设置显示 `present`（config.md §2.4） | M1 |
 | R-65 | "每个档位里三类模型各做什么"表，与 architecture 的角色表一致（§3） | `LevelModelTable` | — | 随包静态说明（来源 architecture §8、§9），带一个快照测试对比；`catalog` 不提供这张表（OQ-U13） | M1 |
-| R-66 | 保存：需要审批设备签名；保存后提示新配置从运行中节点的下一个节点开始生效（§3、Settings 原型） | `SaveBar` | 页内 `saving` / `lastSaved { rev }` | **以服务端为准**：`guardedWritePrepare` 返回的 `requires_signature` 决定是否出现"此改动需要审批设备签名"；中性 / 收紧类不签名（config.md §2.5，与 prototype.md §3 的"保存需要签名"字面不同，见 OQ-U13）。保存成功文案按 config.md §2.6：判定类键"下一次判定起"，worker 配置"下一个尝试起"；并用 `settings.status` 的 `applied_seq` 显示"某模块尚未应用 rev N" | M1 |
+| R-66 | 保存：需要审批设备签名；保存后提示新配置从运行中节点的下一个节点开始生效（§3、Settings 原型） | `SaveBar` | 页内 `saving` / `lastSaved { rev }` | **以服务端为准**：`guardedWritePrepare` 返回的 `requires_signature` 决定是否出现"此改动需要审批设备签名"；中性 / 收紧类不签名（config.md §2.5，与 prototype.md §3 的"保存需要签名"字面不同，见 OQ-U13）。保存成功文案按 config.md §2.6：判定类键"下一次判定起"，worker 配置"下一个尝试起"；并用 `settings.status` 的 `applied_rev` 显示"某模块尚未应用 rev N" | M1 |
 | R-67 | 项目页：每个项目一页，只列可覆盖的键；继承全局 / 覆盖；安全相关的键标"只能收紧"（§3） | `SettingsProject` | 页内草稿 | 行集合来自 config.md §2.2 的覆盖矩阵（schema 注解 + `catalog`）；继承值 = `project_settings.get ?view=effective`（灰显，附 `clamped[]`）；覆盖 = `guardedWritePrepare{settings_put, scope: project}`；回到继承 = `settings_delete`。"只能收紧"的输入被约束在不宽于全局的范围，仍以服务端 `override_loosens_global` 为准 | M2 |
 | R-68 | 本机：设备与证书、外观（§3、config.md §13） | `SettingsDevices`、`SettingsAppearance` | — | 设备：`devices.list` / `devices.rename`；改角色 `guarded_write{device_role}`、吊销 `guarded_write{device_revoke}`；本机证书信息取 `identity_status()`；"配对令牌发放"无路由（OQ-U14）。外观：`prefs_set`（主题 / 密度 / 语言 / 通知开关 / 面板宽度），不含凭据与配置键 | M2（建议） |
 
@@ -423,7 +423,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 - **保存流程**：本地草稿 → `guardedWritePrepare`（`dry_run`）→ 有 `errors` 则按 `pointer`（相对 `value`）标到对应字段，`code` 本地化；有 `warnings` 显示黄色提示但可继续；`relaxes[]` 非空时在保存条写"此改动放宽了安全限制"；`requires_signature` 为真时显示"此改动需要审批设备签名"，本机不是 approver 则**禁用保存**并说明（跨设备签名的限制见 OQ-S7）→ `guardedWriteSubmit` → 成功：更新 `rev`、提示"已保存（rev N）"和生效说明；`412 precondition_failed`：横幅"此页已被其他设备修改"，提供"载入最新值（丢弃我的改动）"，**不自动合并**。
 - **秘密值**：只存在于输入框组件的局部状态里，`prepare` 调用后立即清空输入框并把"待写入"标记为占位；不进入 store、不写 `ui_state`、不进日志；组件卸载时清空。
 - **未保存拦截**（R-62）与"返回工作区"保持工作区状态不变。
-- **生效提示**：`settings.status` 轮询仅在刚保存后进行（退避，直到 `applied_seq ≥ rev` 或 30 s [建议值]）；之后依靠 `settings.updated` 事件。
+- **生效提示**：`settings.status` 轮询仅在刚保存后进行（退避，直到 `applied_rev ≥ rev` 或 30 s [建议值]）；之后依靠 `settings.updated` 事件。
 - **没有契约的控件**：原型的"测试连接"没有路由（OQ-U13），不渲染。
 
 ### 7.12 配对向导与设备页
@@ -619,7 +619,7 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 
 - [ ] [M1] **E2E-15 凭据写入需要签名**（M1 退出标准的 UI 侧）：模型页填入凭据 → 保存 → 出现"此改动需要审批设备签名"→ 完成签名 → 保存成功显示 `rev`；输入框已清空并显示"已设置"；无签名的写入（Mock 直接 `PUT`）被 `403 signature_required`；`GET`、`settings.updated` 事件、IPC 日志、`ui_state` 中检索不到凭据值。
 - [ ] [M1] 中性 / 收紧类改动：`dry_run` 返回 `requires_signature = false`，保存不弹签名；operator 设备遇到需要签名的改动时保存禁用并说明。
-- [ ] [M1] **E2E-21**：未保存改动 → 点"返回工作区"出现确认条，继续编辑 / 放弃改动并返回均正确；返回后工作区的草稿、`sel` 完好；`412` → 横幅"此页已被其他设备修改"，不自动合并；保存后显示"某模块尚未应用 rev N"直到 `applied_seq` 追上；`errors[].pointer` 标到对应字段。
+- [ ] [M1] **E2E-21**：未保存改动 → 点"返回工作区"出现确认条，继续编辑 / 放弃改动并返回均正确；返回后工作区的草稿、`sel` 完好；`412` → 横幅"此页已被其他设备修改"，不自动合并；保存后显示"某模块尚未应用 rev N"直到 `applied_rev` 追上；`errors[].pointer` 标到对应字段。
 - [ ] [M1] 设置页不渲染没有契约的控件（"测试连接"）；viewer 看不到设置入口。
 - [ ] [M2] 项目页：行集合与"只能收紧"标记符合 config.md §2.2；`override_loosens_global` 标到字段；"回到继承"调用 `settings_delete`。
 
