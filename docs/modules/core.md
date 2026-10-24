@@ -286,7 +286,7 @@ pub struct Event<D = serde_json::Value> {            // data-model §5.1 信封�
 pub struct NewEvent {                                 // store 追加时补 id / seq / ts
     pub ty: EventType, pub subject: Subject, pub project_id: Option<ProjectId>, pub actor: Actor,
     pub causation_id: Option<EventId>, pub correlation_id: Option<String>,
-    pub data: serde_json::Value, pub dedup_key: Option<String>,   // dedup_key 仅 forge.<kind> 使用（forge-actions G1）
+    pub data: serde_json::Value, pub dedup_key: Option<String>,   // 可选；forge.<kind> 必带（forge-actions G1），其他事件按需（如 message.posted）
 }
 
 /// 闭集；as_str / FromStr 与 data-model §5.2 逐字一致；"forge.<kind>" 用 Forge(ForgeEventKind)。
@@ -599,7 +599,7 @@ pub enum RelaxCmp {
 
 - [ ] `EventType::from_str(as_str(x)) == x` 对全部 49 + 23 个类型成立；未知类型字符串返回错误；`EVENT_TYPES` 与 data-model §5.2 的类型清单逐项比对。
 - [ ] 每个事件类型至少一个正例与一个反例 `data`；`validate_event_data` 对缺必填字段、多余字段、错误枚举值给出带 JSON Pointer 的错误。
-- [ ] `settings.updated` 的 `data` 序列化结果不含 `value` 键的 secret 值（用哨兵字符串断言）。
+- [ ] `settings.updated` 的 `data` 里，任何 `SecretRef` 位置带 `value` 键 → `SchemaError`（存储形态的 `SecretRef` 只有 `secret_ref` 等非值字段）；`secret_changes[]` 带 `value` 或哈希字段同样被拒。`store` 依赖这条 schema 作为"事件日志里没有密钥值"的防线（store.md §7.3）。
 
 **Forge 与摘要**
 

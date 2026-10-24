@@ -9,10 +9,10 @@
 1. **动作判定**：把一个待执行的 `ForgeActionKind`（连同它的载荷事实）解析成 `policies.actions` 里的动作 id（含三个条件伪动作 `force_push`、`push_outside_prefix`、`resolve_review_thread_human`），按生效的处置 `auto` / `approve` / `deny` 给出 `Allow` / `NeedsApproval` / `Deny`。依据：[config.md §5.1](../interfaces/config.md)、[forge-actions §3.5](../interfaces/forge-actions.md)、decisions P-28、P-42。
 2. **补丁策略校验**：对 `repo` 在干净检出上枚举出的补丁事实，应用路径规则（`policies.paths`、`allow_globs`、`JobSpec` 的 `allow` / `deny`）、大小阈值（`policies.patch.*`）、敏感文件与密钥扫描、权限位变更、二进制 / 符号链接 / 子模块的处置，产出 `PatchPolicyVerdict`（`allow` / `needs_approval` / `deny`）。依据：[worker-protocol §8.3](../interfaces/worker-protocol.md) 的 P1、P5–P9、config.md §5.2、§5.4、decisions P-41。
 3. **proposals 判定**：对 worker 的动作提议（`open_pr` 等）给出 `accepted` / `needs_approval` / `denied`（[worker-protocol §8.4](../interfaces/worker-protocol.md)）。文本净化与 `target` 句柄校验不归本模块。
-4. **审批生命周期**：创建审批（Forge 动作由 `engine` / `guardian` 经本模块创建，内部动作由 `api` 代客户端创建）、签发 challenge、验签放行（`grant`）、拒绝（`deny`）、消费（`consume`）、失效（`invalidated`）、过期（`expired`）。状态机见 [data-model §4.4](../data-model.md)，decisions P-20。
-5. **验签与主体一致性**：按 [api.md §6.2–§6.4](../interfaces/api.md) 的规范化载荷与 ES256 重建、验证签名；`subject_digest`（PR 类为 head SHA，补丁为 `sha256:…`，内部动作为请求体摘要）在放行与消费两个时点各核对一次；任何推送使绑定旧 head 的审批失效（architecture §7.4）。
+4. **审批生命周期**：创建审批（Forge 动作由 `engine` / `guardian` 经本模块创建，内部动作由 `api` 代客户端创建）、签发挑战（challenge）、验签放行（`grant`）、拒绝（`deny`）、消费（`consume`）、失效（`invalidated`）、过期（`expired`）。状态机见 [data-model §4.4](../data-model.md)，decisions P-20。
+5. **验签与主体一致性**：按 [api.md §6.2–§6.4](../interfaces/api.md) 的规范化（canonicalization）载荷与 ES256（ECDSA P-256 + SHA-256）重建、验证签名；`subject_digest`（PR 类为 head SHA，补丁为 `sha256:…`，内部动作为请求体摘要）在放行与消费两个时点各核对一次；任何推送使绑定旧 head 的审批失效（architecture §7.4）。
 6. **审计**：每次拒绝写 `policy.denied`，每次审批状态转移写对应 `approval.*` 事件；所有判定事件带做决定时的 `config_rev`（config.md §2.6）；M2 起提供基于事件日志的审计查询。审计是事件日志的视图，不另设可改写的存储。
-7. **M1 → M2 过渡**：M1 的 policy v0 用内置规则，对 `.github/workflows/`、依赖清单、lockfile 的改动一律拒绝并建议上报（fail-closed，P-19），`merge_pr` 等动作的设备签名审批 M1 起即可用（P-18）；M2 起 `policies.*` 可配置，受保护路径由"拒绝"改为"需要审批"。
+7. **M1 → M2 过渡**：M1 的 policy v0 用内置规则，对 `.github/workflows/`、依赖清单、lockfile 的改动一律拒绝并建议上报（失败即关闭 fail-closed，P-19），`merge_pr` 等动作的设备签名审批 M1 起即可用（P-18）；M2 起 `policies.*` 可配置，受保护路径由"拒绝"改为"需要审批"。
 8. **配置消费**：读取 `policies.*` 的生效值（全局 + 项目覆盖，经 `core` 的 merge / clamp），原子热加载，向 `settings/status` 汇报 `applied_seq` 与健康。
 
 ### 1.1 各里程碑交付
@@ -22,7 +22,7 @@
 | M0 | 不交付实现。依赖 M0 产物：`core` 中的 `Approval`、`ApprovalStatus`、`ForgeActionKind`、事件枚举，`schemas/events/approval.*.json`、`policy.denied.json`，`schemas/config/policies.json`。本模块在 M0 只落 crate 骨架与 trait 定义（§6）；`ScriptedPolicy` 替身（§12.1）建议并入 M0 替身清单（见 §13 OQ-P1） |
 | M1 | policy v0：内置规则（不读 `policies` 设置，`applied_seq = 0`）；动作判定（`merge_pr` 恒需审批、`push_branch` 等按内置默认）；补丁校验（P1 / P6 / P7 / P8 / P9，受保护路径一律 deny + 上报提示）；审批状态机全部状态与转移；challenge / 验签 / 主体一致性（`merge_pr` 与三个内部动作 `settings_update`、`device_role_change`、`device_revoke`）；`forge.pr_synchronized` 驱动的失效；过期清扫；`policy.denied` 与 `approval.*` 事件；`ApprovalGate` 供 `forge` 执行点使用 |
 | M2 | `policies.*` 可配置（热加载、项目覆盖 clamp、`applied_seq`）；路径规则由 deny 改为 `needs_approval`，补丁审批（`push_branch` + `path_rules`，`subject_digest` = 补丁 sha256）；审批因新推送失效后的重新请求路径（与 `engine` 配合）；审计查询；`repo_meta` 等规则生效 |
-| M3 | `reply_review_thread` / `resolve_review_thread` 判定上线（含 `resolve_review_thread_human` 条件伪动作）；审计保留期若已决（OQ-21）则落地；无其他新增 |
+| M3 | `reply_review_thread` / `resolve_review_thread` 判定上线（含 `resolve_review_thread_human` 条件伪动作）；审计保留期若已决（config.md OQ-21）则落地；无其他新增 |
 | M4 | 无新增功能；回归：手机档案设备在任何情形下都不能 `grant`（§8） |
 
 ## 2. 不负责
@@ -35,28 +35,30 @@
 | HTTP 路由、challenge 的 HTTP 外壳、`Idempotency-Key`、限流、角色 / 档案的路由级判定 | `api`。本模块对 `grant` 另做防御性检查（§8），不依赖调用方 |
 | 设备证书、设备公钥的保管与吊销表 | `pki`；公钥由 `api` 从 `pki` 取出后随请求传入，本模块不依赖 `pki` crate（architecture §4 依赖图） |
 | 写 InboxItem、推送通知 | `notify`；本模块只在返回值里给 `ReportHint`，由调用方（`engine` / `guardian`）上报 |
-| 守护的分流表、"已审批 PR 上不得静默推送"的执行（锁定类 `push_after_approval`） | `guardian`（config.md §5.5）。本模块提供查询 `live_approvals_for_pr`（§6.4） |
-| 档位自动加码 `policies.escalation` 的求值 | `engine`（config.md §5.3）。本模块可导出 glob 匹配器 `PathMatcher` 供其复用（§7.3） |
+| 守护的分流表、"已审批 PR 上不得静默推送"的执行（锁定类 `push_after_approval`） | `guardian`（config.md §5.5）。本模块提供查询 `live_approvals_for_pr`（§6.1） |
+| 档位自动加码 `policies.escalation` 的求值 | `engine`（config.md §5.3）。本模块可导出 glob 匹配器 `PathMatcher` 供其复用（§7.2） |
 | 设置的读写、合并、校验（V01–V22）、`dry_run` | `api` + `core`（config.md §2.1、§11）。本模块只消费结果 |
 | GitHub review approve | 永不提供（P-12；forge-actions §3.4） |
 
 ## 3. 依赖
 
+本文中不带路径的 `api.md`、`config.md`、`forge-actions`、`worker-protocol` 均指 `docs/interfaces/` 下的契约；模块规格写作 `modules/<id>.md`，本规格自身称"本文"。
+
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
-| `core` | `Approval`、`ApprovalStatus`、`ForgeActionKind`、ID 类型、`Level`、事件枚举；`EffectiveSettings` / merge / clamp；时间类型；JCS（RFC 8785）规范化与密钥扫描器（若 `core` 提供，见 OQ-P3） | [data-model §3 Approval、§4.4、§5](../data-model.md)；[config.md §2](../interfaces/config.md) |
+| `core` | `Approval`、`ApprovalStatus`、`ForgeActionKind`、ID 类型、`Level`、事件枚举；`EffectiveSettings` / merge / clamp；时间类型；JSON 规范化方案（JCS，RFC 8785）与密钥扫描器（若 `core` 提供，见 OQ-P3） | [data-model §3 Approval、§4.4、§5](../data-model.md)；[config.md §2](../interfaces/config.md) |
 | `store` | 在同一写事务里追加事件并更新投影；一致读（投影 + 最大 `seq`）；按游标订阅事件；事件去重键；本模块自有表的迁移（`policy_challenges`、`policy_cursor`） | [data-model §5.1](../data-model.md)。**`store` 规格书尚不存在**，§3.1 列出本模块对它的需求，类型名为占位，以 `store` 规格为准 |
-| `Clock`、`Rng`（进程内 trait） | 当前时间；CSPRNG（nonce）。测试注入 `FakeClock`、`SeededRng` | — |
+| `Clock`、`Rng`（进程内 trait） | 当前时间；密码学安全随机数发生器（CSPRNG，用于生成一次性随机数 nonce）。测试注入 `FakeClock`、`SeededRng` | — |
 | 非依赖 | **不依赖** `pki`、`forge`、`repo`、`engine`（它们反过来调用本模块）。设备公钥、当前 PR head、补丁事实都由调用方传入或从 `store` 投影读取 | architecture §4 |
 
 ### 3.1 对 `store` 的需求（占位，须与 `store` 规格对齐）
 
 | 需求 | 用途 |
 | --- | --- |
-| `WriteTx`：串行化的写事务；`append(NewEvent) -> Event`（返回 `seq`）；事务提交时在同一事务内运行已注册的投影器 | 每次审批转移 = 一次 CAS + 一条事件，同事务（data-model §5.1） |
+| `WriteTx`：串行化的写事务；`append(NewEvent) -> Event`（返回 `seq`）；事务提交时在同一事务内运行已注册的投影器 | 每次审批转移 = 一次比较并交换（compare-and-swap, CAS） + 一条事件，同事务（data-model §5.1） |
 | `ReadSnapshot`：同一读事务里读投影与最大 `seq` | 取 PR 快照（`PullRequestRef.head_sha`）、审批、`config_rev` |
 | `subscribe(from_seq, filter)`：至少一次的事件流，可跨进程重启从持久游标续 | 订阅 `forge.pr_synchronized`、`forge.synced`、`forge.pr_closed`、`forge.pr_merged`、`delivery.abandoned`、`settings.updated` |
-| 事件 `dedup_key` 唯一索引 | `policy.denied` 去重（§7.8） |
+| 事件 `dedup_key` 唯一索引 | `policy.denied` 去重（§7.3 第 8 步） |
 | 自有表迁移机制 | `approvals` 投影、`policy_challenges`、`policy_cursor` |
 
 ## 4. 输入
@@ -67,7 +69,7 @@
 | `PatchFacts` + `AddedLineSource`（补丁的枚举事实与新增行） | `repo` | §6.2；事实来自服务端 git 在干净检出上的输出（worker-protocol §8.3 P3） | **事实的来源是不可信补丁**：路径、内容都当数据；本模块不执行、不解释其中任何文本（I5） |
 | `Vec<Proposal>` | `engine`（已过 V6 的 `kind` / `target` / 净化检查） | worker-protocol §5.4 | 不可信（worker 产出）；只按 `kind` 与结构化字段判定 |
 | `GrantRequest`（nonce、签名、设备公钥与角色快照） | `api` | §6.4；签名串为 base64url | `nonce`、`signature` 不可信，验证前不采纳；设备公钥 / 角色由 `api` 从 `pki` 实时读取，视为可信 |
-| `ConsumeInternal`（内部动作写入时的校验上下文） | `api`（与业务写入同一事务） | §6.4 | 请求体摘要由 `api` 用本模块的 `request_digest` 计算 |
+| `ConsumeInternal`（内部动作写入时的校验上下文） | `api`（与业务写入同一事务） | §6.4 | 请求体摘要由 `api` 用本模块的 `signing::request_digest` 计算 |
 | `ExecutionCheck` | `forge` 执行器 | §6.5；`live_head_sha` 来自 `forge` 执行前对 GitHub 的实时 `GET` | GitHub 内容，不可信但被当作"待比较的事实" |
 | ForgeEvent / 生命周期事件流 | `store` | [forge-actions §6.3](../interfaces/forge-actions.md)：`forge.pr_synchronized`（`head_sha`、`previous_head_sha`）、`forge.synced`、`forge.pr_closed`、`forge.pr_merged`；`delivery.abandoned` | 结构可信，文本字段当数据 |
 | `policies.*` 生效配置 | `store`（`settings.updated` + `core` merge） | [config.md §5](../interfaces/config.md) | 可信（经 `api` 校验与角色 / 签名闸门写入） |
@@ -77,7 +79,7 @@
 | 输出 | 去向 | 格式 / 契约 |
 | --- | --- | --- |
 | `ActionDecision`（`Allow` / `NeedsApproval` / `Deny`） | `engine`、`guardian` | §6.1 |
-| `PatchPolicyVerdict`（含 `reasons[]`、`matched_rules[]`、`ReportHint?`） | `repo`（据此写 `patch.validated` / `patch.rejected`、`engine` 据此推进） | §6.2；reason 码取 worker-protocol §9 的 `policy.*` 子码 |
+| `PatchPolicyVerdict`（含 `reasons[]`、`matched_approval_rules[]`、`ReportHint?`） | `repo`（据此写 `patch.validated` / `patch.rejected`、`engine` 据此推进） | §6.2；reason 码取 worker-protocol §9 的 `policy.*` 子码 |
 | `ProposalDecision[]` | `engine` | §6.3 |
 | `Approval`（投影行）及其转移 | `api`（读、challenge、grant、deny）、`forge`（读状态）、`engine`（读状态） | api.md §6.1 的表示；data-model §4.4 |
 | 事件：`approval.requested` / `approval.granted` / `approval.consumed` / `approval.invalidated` / `approval.expired` / `approval.denied`、`policy.denied` | `store` | data-model §5.2；`data` 的 JSON Schema 在 `schemas/events/<type>.json`（M0）。所有判定类事件带 `config_rev` |
@@ -122,6 +124,7 @@ pub enum ActionFacts {
     PushBranch {
         repo: RepoRef, branch: String, branch_prefix: String,   // forge.push.branch_prefix（默认 "gantry/"）
         force: bool, local_head_oid: Oid, expected_remote_oid: Option<Oid>,
+        expected_tree_oid: Option<Oid>,                          // = ValidatedPatch.result_tree（forge-actions §3.3）
         validation_ref: Option<Sha256Digest>,                    // = ValidatedPatch.sha256
     },
     ResolveReviewThread { repo: RepoRef, thread_has_human_comment: bool },
@@ -151,7 +154,7 @@ pub struct ReportHint { pub inbox_kind: InboxKind, pub reason_code: String, pub 
 pub enum DenyReason {
     ActionDenied,                // 处置为 deny
     ApprovalDenied,              // 同主体的审批已被拒绝
-    ApprovalConsumedOrStale,     // 同主体审批已消费 / 失效且无新主体
+    ApprovalConsumed,            // 同主体审批已被消费（动作已执行过）
     HeadMismatch,                // 载荷 expected_head_sha 与 store 里 PR 快照的 head 不一致
     NoValidatedPatch,            // push_branch 找不到匹配的 patch.validated（I8）
     PatchDenied,                 // 关联补丁的结论是 deny
@@ -264,9 +267,6 @@ pub trait ApprovalService: Send + Sync {
 
     // ---- 内部动作的消费：必须与业务写入同一事务 ----
     async fn consume_internal(&self, tx: &mut dyn WriteTx, req: ConsumeInternal) -> Result<(), ConsumeError>;
-
-    /// 请求体摘要：sha256(JCS(body))，格式 "sha256:" + 小写十六进制（api.md §6.6）。api 与 shell 都用同一实现。
-    fn request_digest(body: &serde_json::Value) -> Result<SubjectDigest, SigningError>;
 }
 
 /// 由 api 从 pki 实时读取后传入；policy 不信任调用方已做的授权，自己再查 role / profile（§8）
@@ -286,7 +286,7 @@ pub struct ConsumeInternal {
     pub approval_id: ApprovalId,
     pub expected_action: InternalAction,
     pub expected_target: ApprovalTarget,     // 由路径参数 / 路由推出
-    pub body_digest: SubjectDigest,          // api 用 request_digest 对本次请求体算出
+    pub body_digest: SubjectDigest,          // api 用 signing::request_digest 对本次请求体算出
     pub rev_check: Option<RevCheck>,         // settings：{ if_match_rev, current_rev }
     pub actor: ActorRef,                     // {kind: device, id}
 }
@@ -353,6 +353,9 @@ pub mod signing {
     pub fn signing_input(payload: &SigningPayload) -> Result<Vec<u8>, SigningError>;
     /// ES256，签名为 64 字节 r‖s；严格 base64url 无填充（长度必须 86）
     pub fn verify_es256(key: &VerifyingKey, input: &[u8], sig_b64: &str) -> Result<(), SigningError>;
+    /// 内部动作的请求体摘要：sha256(JCS(body))，格式 "sha256:" + 小写十六进制（api.md §6.6）。
+    /// 无请求体按 {} 计算；api 与 desktop-shell 共用同一实现（OQ-P3）。
+    pub fn request_digest(body: &serde_json::Value) -> Result<SubjectDigest, SigningError>;
 }
 pub struct SigningPayload {                  // 字段与 api.md §6.2 的 payload 一致，v = 1
     pub action: String, pub approval_id: ApprovalId,
@@ -400,15 +403,15 @@ pub struct PolicyBuild { pub patch_approvals: bool, pub settings: SettingsSource
 - **硬底线**（校验器之外，本模块在装载时再断言一次，违反则拒绝该份配置、沿用上一份并把健康置 `degraded`）：`merge_pr`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、三个预留动作的处置不是 `auto`（V14、P-42）；`sensitive_files` 处置为 `deny`；`approval.ttl_s ≤ 604800`；`patch.*` 不超过 `core` 的硬上限；`unlisted_action ≠ auto`。
 - **M1（`PolicyBuild.settings = Builtin`）**：不读 `policies` 设置，`applied_seq` 恒为 0，`status.modules.policy` 显示 `detail: "builtin_v0"`。内置值 = config.md §5.1–§5.4 的出厂默认。
 - 冷启动无法读到配置：用内置值（比任何合法配置都严格或相等）。
-- glob：gitignore 风格、区分大小写、仓库相对 POSIX 路径，用 `ignore` crate 的 `GitignoreBuilder` 或等价实现；**不支持 `!` 取反**（取反会让 `deny` 规则语义不可判定，V15 `glob_invalid` [建议]）。`PathMatcher` 作为公开工具导出，供 `engine` 的加码规则 `when.paths` 复用，避免两处匹配语义漂移。
+- 路径通配符（glob）：gitignore 风格、区分大小写、仓库相对 POSIX 路径，用 `ignore` crate 的 `GitignoreBuilder` 或等价实现；**不支持 `!` 取反**（取反会让 `deny` 规则语义不可判定，V15 `glob_invalid` [建议]）。`PathMatcher` 作为公开工具导出，供 `engine` 的加码规则 `when.paths` 复用，避免两处匹配语义漂移。
 
 ### 7.3 动作判定算法 `decide_action`
 
 1. **解析 id**：`merge_pr` → `merge_pr`；`push_branch` 且 `force` → `force_push`；否则分支名不以 `branch_prefix` 开头 → `push_outside_prefix`；否则 `push_branch`；`resolve_review_thread` 且 `thread_has_human_comment` → `resolve_review_thread_human`；其余同名。force 与非前缀同时成立时取 `force_push`（审批的 `target.branch` 让签名者看到分支）。**此优先级契约未规定，属临时处理**（OQ-P5）。
 2. **取处置**：`config.actions[id]`，缺失则 `unlisted_action`。
-3. **`push_branch` 族的 I8 前置**（`push_branch` / `force_push` / `push_outside_prefix`）：必须能在 `store` 里找到 `patch.validated` 事件，其 `sha256 == validation_ref` 且 `result_tree` 与待推提交的树一致；找不到 → `Deny(NoValidatedPatch)`。该补丁的结论为 `deny` → `Deny(PatchDenied)`；为 `needs_approval`（M2）→ 需要一份 `action = push_branch`、`target.path_rules = matched_approval_rules`、`subject_digest = validation_ref` 的审批，**这一条与第 2 步的处置无关**（即使 `push_branch` 的处置是 `auto`）；同时还需要 `force_push` 类审批时 → `Deny(MultipleApprovalsRequired)`（OQ-P5）。
+3. **`push_branch` 族的 I8 前置**（`push_branch` / `force_push` / `push_outside_prefix`）：必须能在 `store` 里找到 `patch.validated` 事件，其 `sha256 == validation_ref` 且 `result_tree == expected_tree_oid`；找不到 → `Deny(NoValidatedPatch)`。该补丁的结论为 `deny` → `Deny(PatchDenied)`；为 `needs_approval`（M2）→ 需要一份 `action = push_branch`、`target.path_rules = matched_approval_rules`、`subject_digest = validation_ref` 的审批，**这一条与第 2 步的处置无关**（即使 `push_branch` 的处置是 `auto`）；同时还需要 `force_push` 类审批时 → `Deny(MultipleApprovalsRequired)`（OQ-P5）。
 4. **`merge_pr`**：从 `store` 的 PR 快照读当前 head；`expected_head_sha ≠` 快照 head → `Deny(HeadMismatch)`（调用方应先重读）；否则审批规格为 `{merge_pr, {kind:"pr", repo, number}, digest = head}`。`merge_pr` 的 GitHub 侧就绪条件（必需 review、checks、merge queue）由 `engine` 在请求审批前确认、由 GitHub 在合并时强制；本模块不重复判断（P-12、P-33）。
-5. **处置分派**：`auto` → `Allow`（`approval = None`）；`deny` → `Deny(ActionDenied)`；`approve` → 查同主体审批：`granted` 且未过期且主体仍一致 → `Allow{approval}`；`pending` → `NeedsApproval{pending}`；`denied` → `Deny(ApprovalDenied)`（同主体不再自动重新询问；主体变了才会产生新规格）；`consumed` / `invalidated` / `expired` → `NeedsApproval{pending: None}`（`expired` / `invalidated`）或 `Deny(ApprovalConsumedOrStale)`（`consumed`）。
+5. **处置分派**：`auto` → `Allow`（`approval = None`）；`deny` → `Deny(ActionDenied)`；`approve` → 查同主体审批：`granted` 且未过期且主体仍一致 → `Allow{approval}`；`pending` → `NeedsApproval{pending}`；`denied` → `Deny(ApprovalDenied)`（同主体不再自动重新询问；主体变了才会产生新规格）；`consumed` / `invalidated` / `expired` → `NeedsApproval{pending: None}`（`expired` / `invalidated`）或 `Deny(ApprovalConsumed)`（`consumed`）。
 6. **审批形状表**（`approve` 处置时的 `action` / `target` / `subject_digest`）：
 
 | 判定 id | `Approval.action` | `target` | `subject_digest` | 出处 |
@@ -468,7 +471,7 @@ stateDiagram-v2
 | 并发 grant | 多个 approver 设备并发：先提交者赢，其余 `NotPending` |
 | 懒过期 | 任何读 / 转移入口先比较 `now ≥ expires_at`，是则先 CAS 到 `expired` 再返回，不依赖清扫任务及时运行 |
 | `granted` 后规则变 deny | 消费时重判（config.md §2.6）：被阻止，审批状态**不变**，`GateError::ApprovalInvalid`；不自动 `invalidated`（契约只把"绑定 head 变化"定义为失效原因） |
-| 有效期 | Forge 动作：`created_at + approval.ttl_s`（默认 86400 s，创建时固化）；内部动作：300 s（api.md §3.7）；challenge TTL 120 s 且不超过审批的 `expires_at` |
+| 有效期 | Forge 动作：`created_at + approval.ttl_s`（默认 86400 s，创建时固化）；内部动作：300 s（api.md §3.7）；挑战的存活时间（TTL）120 s 且不超过审批的 `expires_at` |
 
 ### 7.6 challenge 与验签
 
@@ -480,7 +483,7 @@ stateDiagram-v2
 2. 审批 `pending`（懒过期）→ 否则 `NotPending{status}`。
 3. 取该设备的 challenge：无 → `ChallengeInvalid{None}`；`nonce` 不等（常量时间比较）→ `Mismatch`；已用 → `Used`；已过期 → `Expired`。
 4. 用**服务端保存的** `payload_canonical` 重建待签字节（客户端不能提交 payload），`verify_es256`，不通过 → `SignatureInvalid`。签名串必须是严格 base64url、无填充、长度 86，解码后恰为 64 字节；其余一律 `SignatureInvalid`。
-5. PR 类动作：`payload.subject_digest == current_subject.head_sha`（`current_subject` 由 `api` 在调用前让 `forge` 强制对账一次后传入；缺失则退回读 `store` 快照）。不等 → **先落盘** `pending → invalidated`（`approval.invalidated`，`data` 含新旧 head），**再**返回 `StaleHead{current_head_sha}`（这次调用不回滚状态转移）。补丁与内部动作的主体在消费时核对。
+5. PR 类动作：`payload.subject_digest == current_subject.head_sha`（`current_subject` 由 `api` 在调用前让 `forge` 强制对账一次后传入，其 `repo` / `number` 须与审批 `target` 一致，否则视为未提供；缺失则退回读 `store` 快照）。不等 → **先落盘** `pending → invalidated`（`approval.invalidated`，`data` 含新旧 head），**再**返回 `StaleHead{current_head_sha}`（这次调用不回滚状态转移）。补丁与内部动作的主体在消费时核对。
 6. 通过：同一事务写 `device_id`、`signature`、`status = granted`，标记 challenge `used_at`，追加 `approval.granted`（`data`：`approval_id`、`device_id`、`pubkey_fpr`、`payload_sha256`），`200`。
 
 **`consume_internal(tx, req)`** 对应 api.md §6.6 第 4 步的 #2–#5（#1 缺头与 #6 角色由 `api` 判）：`status` 不是 `granted` → `NotGranted`（`consumed` → `Consumed`，过期 → `Expired`）；`action` / `target` 与路由推出的不一致 → `ActionMismatch` / `TargetMismatch`；`body_digest ≠ subject_digest` → `DigestMismatch`；`rev_check`（settings）：`target.base_rev` 须等于 `if_match_rev` 且等于 `current_rev` → 否则 `BaseRevMismatch`（`if_match_rev ≠ current_rev` 的 `412` 由 `api` 在此之前判，优先级更高）。全部通过则 `consumed` + `approval.consumed`（`data.consumed_by = "req:<request_id>"`），与调用方传入的 `tx` 同事务。
@@ -521,11 +524,13 @@ stateDiagram-v2
 
 ## 8. 不变式与安全要求
 
+本模块要保证 [architecture.md §5](../architecture.md#5-信任边界与不变式) 中的 **I3**（放行唯一决策点）与 **I8**（执行产物先验后推），并遵守 I2、I5、I6、I7。
+
 | 不变式 | 本模块如何保证 |
 | --- | --- |
 | **I3 放行唯一决策点**（核心） | ① 所有危险动作（`merge_pr`、`force_push`、`push_outside_prefix`、路径规则命中的推送）的放行都以 `ActionPolicy` / `ApprovalGate` 的结果为前提；`Approval` 只能经本模块创建（构造函数私有，不导出 `Approval::new`）。② `ActionDecision::Allow` 携带 `config_rev`，建议再带一个不可在 crate 外构造的 `AllowProof`（私有字段），由 `engine` 入队时附在 `OutboxAction` 的入队参数上，使"没经过 policy 的危险动作"在类型层面无法入队（是否采纳见 OQ-P2）。③ 审批绑定 `(action, target, subject_digest)`，`subject_digest` 在 `grant` 与消费两个时点核对；PR 类审批在任何新推送时失效（§7.7），`forge` 执行点再对 GitHub 实时 head 复核（`HeadChanged`），三道各自独立。④ 消费时按当前规则重判。⑤ 内部动作的审批 `subject_digest` 覆盖整个请求体，base_rev 绑定写入版本，同一签名不能挪作他用（api.md §6.6）。⑥ 审批只能被消费一次（CAS + `consumed_by`） |
 | **I8 先验后推** | 路径、大小、敏感文件三项规则不可关闭（`sensitive_files` 的 `deny` 不可降低、阈值不超过 `core` 硬上限，config.md §5.5）；`push_branch` 在没有匹配 `patch.validated` 时一律拒绝（§7.3 第 3 步），所以"推送的就是校验过的那个对象" |
-| **I5 外部文本不可信** | 补丁路径、行内容、PR 标题、分支名都当数据：只比较、不拼进任何命令或提示；写入事件 `data` 时按 `UntrustedText` 截断；规则中出现的由外部文本触发的升级只能"提高审视"（不会放宽处置）；`reason_code` 是固定枚举，不含自由文本 |
+| **I5 外部文本不可信** | 补丁路径、行内容、PR 标题、分支名都当数据：只比较、不拼进任何命令或提示；写入事件 `data` 时按 `UntrustedText` 截断；本模块没有任何配置键或判定路径能被外部文本改变或放宽；`reason_code` 是固定枚举，不含自由文本 |
 | **I7 配置与工作分离** | 本模块不提供任何写配置的入口，不解析自然语言；规则只来自 `policies.*` 设置（M1 为内置常量） |
 | **I2** | 本模块不写 GitHub，不持有 token |
 | **I6** | 本模块不持有任何设备私钥，只验证公钥签名；返回给客户端的 `Approval` 里只有签名与摘要 |
@@ -565,6 +570,8 @@ stateDiagram-v2
 | 引导常量（不是设置） | challenge TTL 120 s；内部动作审批 300 s；过期清扫间隔 30 s [建议]；`policy.denied` 去重窗口随 `config_rev` | 实现为 crate 内常量，集中在一个 `consts` 模块，不散落（对照 api.md §3.7 的做法） |
 
 ## 11. 可观测性
+
+发出的事件见 [data-model §5](../data-model.md#5-事件)。
 
 - **事件**（data-model §5.2）：`approval.requested` / `approval.granted` / `approval.consumed` / `approval.invalidated` / `approval.expired` / `approval.denied`、`policy.denied`。`data` 一律不含签名以外的凭据、不含补丁内容、不含未截断的外部文本；判定类事件带 `config_rev`；`approval.granted` 带 `pubkey_fpr` 与 `payload_sha256`，使审批"不可抵赖"可事后核验。
 - **日志**（结构化，`tracing`）：每次判定一行 `decision`（`action_id`、`project_id`、`delivery_id`、`outcome`、`reason_code`、`config_rev`、`request_id`）；`grant` 失败按原因分级（`signature_invalid` 记 `warn`，反复出现是安全信号）；密钥扫描命中只记路径与模式名。
@@ -625,7 +632,7 @@ stateDiagram-v2
 **动作判定（M1，M2 扩展）**
 
 - [ ] 20 个动作 id 在出厂默认下的处置与 config.md §5.1 表逐行一致（表驱动测试）；前七个 id 配置为 `auto` 被硬底线拒绝装载。
-- [ ] `merge_pr`：无审批 → `NeedsApproval`；`pending` → 带 `pending`；`granted` 且 head 未变 → `Allow{approval}`；`expected_head_sha` 与快照不符 → `Deny(HeadMismatch)`；`denied` → `Deny(ApprovalDenied)`；`consumed` → `Deny(ApprovalConsumedOrStale)`。
+- [ ] `merge_pr`：无审批 → `NeedsApproval`；`pending` → 带 `pending`；`granted` 且 head 未变 → `Allow{approval}`；`expected_head_sha` 与快照不符 → `Deny(HeadMismatch)`；`denied` → `Deny(ApprovalDenied)`；`consumed` → `Deny(ApprovalConsumed)`。
 - [ ] `push_branch` 条件伪动作：`force = true` → `force_push`；非 `gantry/` 前缀 → `push_outside_prefix`；两者同时 → `force_push`；`gantry/` 前缀、非 force、补丁 `allow` → `Allow`。
 - [ ] `push_branch` 没有匹配的 `patch.validated`（或 `validation_ref` 对不上）→ `Deny(NoValidatedPatch)`。
 - [ ] 处置为 `approve` 而审批形状未定义的动作（如把 `create_pr` 配成 `approve`、`push_outside_prefix`）→ `Deny(ApprovalShapeUndefined)` + `ReportHint`，不会 `Allow` 也不会创建审批。
@@ -652,7 +659,7 @@ stateDiagram-v2
 
 **配置与过渡（M1 / M2）**
 
-- [ ] M1 构建：设置里写入任意 `policies` 值对判定无影响；`applied_seq = 0`。
+- [ ] M1 构建：即使事件日志里存在 `policies` 的 `settings.updated`（测试注入），判定也只用内置规则；`applied_seq = 0`。
 - [ ] M2 构建：`settings.updated` 后新判定立即用新规则，进行中的判定不被打断；收紧立即作用于已 `granted` 未消费的审批（消费时重判）；`applied_seq` 与 `settings/status` 一致。
 - [ ] 项目覆盖只收紧：全局放宽后既有项目覆盖被 clamp；`config_rev` 取全局与项目 `settings.updated` 的最大 `seq`。
 - [ ] 同一套判定代码在 M1 / M2 仅由 `PolicyBuild` 两个字段区分（编译期 / 构造期断言，不存在两套实现）。
@@ -691,4 +698,4 @@ stateDiagram-v2
 | OQ-P8 | 审计日志的读取路径：契约的 42 条路由里没有审计读取；保留期未定（config.md OQ-21） | 仅内部 `AuditLog` trait，事件永久保留 | api.md、config.md OQ-21 |
 | OQ-P9 | `forge.base_advanced` 使 `merge` 阶段回到评审重验时，已 `granted` 的 `merge_pr` 审批（head 未变）是否仍有效、是否需重新签名 | 不因 base 前移而失效（契约只定义 head 变化失效） | engine、UI 文案、I3 的解读 |
 | OQ-P10 | 守护"已审批 PR 上不得静默推送"由 `guardian` 锁定类强制，`policy` 是否在 `decide_action(push_branch)` 里再做一道（PR 上有活跃的 granted 审批时拒绝非 engine 来源的推送） | 只提供 `live_approvals_for_pr`，不额外拒绝 | guardian、config.md §5.5 |
-| OQ-P11 | M1 里 settings 路由允许写 `policies`，但 policy v0 忽略它：是否在 M1 对 `policies` 写入返回明确提示 / 拒绝 | 接受写入，`status` 显示 `builtin_v0`，不生效 | api、desktop-ui |
+| OQ-P11 | M1 的 policy v0 不读 `policies` 设置；契约列出的 `policies` resource 在 M1 能不能被写入（写了却不生效会误导用户） | 依 [modules/api.md §1.1、§7.8](api.md) 的建议，M1 只开放 `models` 的写入，`policies` 写入从 M2 开放；`status` 显示 `builtin_v0` | api、desktop-ui、milestones |

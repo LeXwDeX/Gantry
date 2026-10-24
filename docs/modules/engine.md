@@ -2,7 +2,7 @@
 
 > 状态：设计 v0.1 · 里程碑：M1（Low 档）→ M2（Medium / High、准入、预算）→ M3（Max）→ M4（Ultimate） · 泳道：`be-engine` · crate / 目录：`crates/gantry-engine`
 
-引擎把"档位（Level） + GitHub 证据"变成"阶段内的图 + 阶段推进"：按档位展开图，把节点调度到沙盒（Sandbox）或直接调用，按预算熔断，让交付单元（Delivery）沿阶段机前进，遇到需要人的事就上报。它是 `delivery.*`、`workflow.*`、`node.*`、`attempt.*`、`budget.*` 事件的唯一写入者。
+引擎把"档位（Level） + GitHub 证据"变成"阶段内的图 + 阶段推进"：按档位展开图，把节点调度到沙盒（Sandbox）或直接调用，按预算熔断，让交付单元（Delivery）沿阶段机前进，遇到需要人的事就上报。它是 `delivery.*`、`workflow.*`、`node.*`、`attempt.*` 事件的唯一写入者，也是交付单元范围内 `budget.*` 事件的写入者（无交付单元归属的用量由 `models` 写，见 OQ-9）。
 
 ## 1. 职责
 
@@ -50,7 +50,7 @@
 | `core` | 领域类型（`Level`、`Stage`、`StageStatus`、`Role`、`Tier`、`Exec`、`Verdict`、ID）、事件枚举、阶段机转移表、`EffectiveSettings` 合并 / 收紧、Outbox 幂等键派生、JSON Schema 校验器 | [data-model §1–§5](../data-model.md)、[forge-actions §2.2](../interfaces/forge-actions.md) |
 | `store` | 批量追加事件（带按 subject 的乐观并发守卫，可与 Outbox 入队同事务）、按游标订阅、读投影、消费者游标持久化、读 CAS 对象 | [architecture §4、§6](../architecture.md) |
 | `models` | `resolve`（档位 / 层级 → 具体模型与推理深度）、`invoke_direct`（`admission`、`summarize`、`classify`）、用量折算 | [models.md](models.md)、[config.md §3](../interfaces/config.md) |
-| `sandbox` | `SandboxDriver`：create / stage / start / cancel / collect / destroy / 按 `job_id` 重新接管；回传 `RawArtifacts`、运行时事实、Egress 计量 | [worker-protocol §3](../interfaces/worker-protocol.md) |
+| `sandbox` | `SandboxDriver`：create / stage / start / cancel / collect / destroy / 按 `job_id` 重新接管；回传 `RawArtifacts`、运行时事实、出网代理（Egress）的计量 | [worker-protocol §3](../interfaces/worker-protocol.md) |
 | `repo` | 确保工作树、写权锁、准备沙盒工作区、在干净检出上校验补丁并（经 `policy`）出结论、幂等地生成本地提交、生成 `diff.patch` | [worker-protocol §8.3](../interfaces/worker-protocol.md) |
 | `policy` | 动作判定（`auto` / `approve` / `deny`）、请求 Gantry 审批、路径规则快照、proposals 判定、审批状态 | [config.md §5](../interfaces/config.md)、[api.md §6](../interfaces/api.md)、[forge-actions §2.5](../interfaces/forge-actions.md) |
 
@@ -99,7 +99,7 @@ pub trait EngineApi: Send + Sync {
     /// 以 `cmd.source_message_id` 为幂等键：同一条消息重复调用返回同一个交付单元。
     /// 同步完成：写 `delivery.created`（含固化的预算台账与 `config_rev`），
     /// 其余推进（准入、规划、实现）由引擎异步进行。
-    /// 模型未配置（`models.planner` / `worker` 的 `model` 缺失）→ `EngineError::NotConfigured`，不创建。
+    /// 所需层级的模型未配置（该档位图用到的 `models.planner` / `worker` 缺 `model`）→ `EngineError::NotConfigured`，不创建。
     async fn create_delivery(&self, cmd: CreateDelivery) -> Result<DeliveryHandle, EngineError>;
 
     /// 定位：给定 refs，返回已绑定且未终结的交付单元（0..n 个）。只读投影，不产生事件。
@@ -258,7 +258,7 @@ pub struct NodeState { pub id: NodeId, pub key: NodeKey, pub role: Role, pub tie
     pub status: NodeStatus, pub verdict: Option<Verdict>, pub superseded_by: Option<NodeId>,
     pub attempts: Vec<AttemptState> }
 pub struct Evidence {                       // 退出证据的本地记录，全部绑定 head（见 §7.6）
-    pub judged_head: Option<Oid>,           // 最近一次 判定所基于的候选 head
+    pub judged_head: Option<Oid>,           // 最近一次判定所基于的候选 head
     pub candidate_head: Option<Oid>,        // repo 为已通过校验的补丁生成的最新本地提交
     pub patch_sha256: Option<Sha256>,       // 最近一份已校验补丁（补丁审批的 subject_digest）
 }
@@ -391,7 +391,7 @@ flowchart LR
 
 ### 7.5 判定与有界迭代
 
-**阶段结论（`StageVerdict`）的取得**：按 `VerdictRule`——`Single` 取该节点 verdict；`Arbiter` 取裁决节点 verdict；`Fold` 对 `required` 且已成功的 判定节点做确定性折叠，优先级 `REJECT` > `BLOCKED` > `REVISE` > `ACCEPT`（OQ-6）。
+**阶段结论（`StageVerdict`）的取得**：按 `VerdictRule`——`Single` 取该节点 verdict；`Arbiter` 取裁决节点 verdict；`Fold` 对 `required` 且已成功的判定节点做确定性折叠，优先级 `REJECT` > `BLOCKED` > `REVISE` > `ACCEPT`（OQ-6）。
 
 **verdict 的处置**（所有阶段通用，P-24；"判定节点失败 / 结果无效"不是 verdict，走 §7.8 的失败处理）：
 
@@ -465,7 +465,7 @@ flowchart LR
 
 **派发（对应 worker-protocol §3.2 阶段 0）**：
 
-1. 预留预算（§7.9）；`models.resolve(...)` 得到 `ResolvedExecution`（provider、model、推理深度、`attempt_wall_s`、`max_turns`；`level_effective` 与 `critical` 参与取值，config §3.2–§3.3）。
+1. 预留预算（§7.9）；`models.resolve(...)`（`purpose = Sandbox`）得到 `ResolvedModel`（provider、model、推理深度，及 `sandbox` 部分的 adapter、`attempt_wall_s`、`max_turns`；`level_effective` 与 `critical` 参与取值，config §3.2–§3.3）。
 2. 追加 `node.started`（首个尝试）+ `attempt.started`，`data` 带：`attempt.n`、实际使用的 provider / model / `reasoning_effort`、`config_rev`、`base_sha`、预留的 `tokens_total`、有效 `wall_time_s`（= min(`attempt_wall_s`，`sandbox.limits.wall_time_s`，预算剩余 `wall_time`)，config §3.2）。**先落事件再起沙盒**。
 3. 生成 JobSpec 的可信部分：
    - `task.instructions` = 角色模板（引擎内置）+ `CreateDelivery.user_text` / `supply_spec` 的用户原文；**任何来自 GitHub、沙盒、模型产出的文字不得进入此字段**（W5、I5）。
@@ -790,7 +790,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | OQ-11 | 没有交付单元的节点：`answer`（None 档）与 `heal`——`Workflow.delivery_id` 必填；None 档没有台账，`answer` 的 token 封顶无处可取。`heal` 应挂在哪个 Workflow | `heal`：每轮单独的 `stage = review` Workflow（`<level>.heal`）；`answer` 未实现挂靠，等契约 | `conversation`、`guardian` |
 | OQ-12 | 事件 / 实体缺口：台账创建无事件（暂放 `delivery.created.data`）；`Delivery.pr` 绑定由哪个事件投影；消息与交付单元的关联无事件；暂停 / 继续无事件；api.md §4.7 示例 `Workflow.status = "finished"` 与 data-model 枚举 `succeeded` 不一致（api.md OQ-10 仍称枚举待定）；`critical` / `required` 不是 Node 字段；worker-protocol §1 责任表未列 V3 / V4 / 分类归属 | 见各处标注 | `schemas/events`、data-model |
 | OQ-13 | 上报词表：`reason_code` 与选项 `id` 取值没有契约；`escalation` 的 payload 没有 `options[]`，api.md §4.8 却把它列为可带选项；`dismiss` 阻塞项后的状态 | §7.11 的 [提议] 词表；按钮类一律 `decision_needed`；dismiss 不解除阻塞 | `notify`、`desktop-ui` |
-| OQ-14 | base 前移后：forge-actions 没有 update-branch / rebase 动作，分支 `behind` / `dirty` 时无手段；审批是否随 base 前移失效；`merge_pr.merge_method` 由引擎还是 `forge` 填 | 回 `review` 刷新快照；审批不因 base 前移失效；`merge_method` 取仓库允许方法与 forge 默认优先级的交集 | `merge` 阶段 |
+| OQ-14 | base 前移后：forge-actions 没有 update-branch / rebase 动作，分支 `behind` / `dirty` 时无手段；审批是否随 base 前移失效；`merge_pr.merge_method` 由引擎还是 `forge` 填；仓库没有必需 check 时 `checks.required_ok` 是否为真（T10 依赖它，由 `forge` 定义） | 回 `review` 刷新快照；审批不因 base 前移失效；`merge_method` 取仓库允许方法与 forge 默认优先级的交集 | `merge` 阶段 |
 | OQ-15 | `build` / `single` 无补丁（`no_change_reason`）如何处理；非受保护路径的 `deny` 是否一律上报（worker-protocol OQ-5） | 无补丁 → `escalation(no_change)`；其他 `deny` 重试 1 次后上报 | 体验 |
 | OQ-16 | 守护自愈的接口与阶段：`request_heal` 是否会改变 `stage`、heal 推送后是否触发重评（`guardian.md` 尚未存在） | 不改 `stage`；head 变化按 T10 重新取得证据 | `guardian` |
 | OQ-17 | head 变化后复审能否只评增量（成本）；worker-protocol 的 `diff.patch` 只有 `pr_base_sha..base_sha` | 全量复审 | 成本 |

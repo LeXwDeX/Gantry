@@ -208,7 +208,7 @@ Accepted → Queued → Creating → Created → Staging → Staged → Starting
 任一前置阶段失败 → Failed(InfraDetail) → Destroying（若容器已建）
 ```
 
-与 data-model `Sandbox.status` 的对应：`Created`（已建、已注入前后均可，未启动）→ `created`；`Running` / `Stopping` → `running`；`Stopped` / `Collecting` / `Collected` → `stopped`；`Destroyed` → `destroyed`；恢复时查无此沙盒 → `lost`。`running` / `stopped` / `lost` 没有对应事件（数据模型只有 `sandbox.created` 与 `sandbox.destroyed`），见 OQ-S9。
+与 data-model `Sandbox.status` 的对应：`Created` / `Staging` / `Staged` / `Starting`（已建、已注入、未启动）→ `created`；`Running` / `Stopping` → `running`；`Stopped` / `Collecting` / `Collected` → `stopped`；`Destroyed` → `destroyed`；恢复时查无此沙盒 → `lost`。`running` / `stopped` / `lost` 没有对应事件（数据模型只有 `sandbox.created` 与 `sandbox.destroyed`），见 OQ-S9。
 
 每次相位迁移先把 `meta.json` 原子写盘（临时文件 + `fsync` + `rename`）再执行动作，使重启后能知道"做到了哪一步"。
 
@@ -238,6 +238,7 @@ Accepted → Queued → Creating → Created → Staging → Staged → Starting
 4. `output.schema.json`：按 `output.structured_schema.id` 从 `core` 的内置 schema 注册表取出，校验 `sha256` 与 `job.json` 声明一致。
 5. 写 `job.json`（规范化序列化，字节固定；`job_sha256` 即这些字节的哈希），写 `MANIFEST.json`；用 `schemas/worker/job.schema.json` 校验 `job.json`，不通过 → `InvalidSpec`（引擎缺陷，不启动）。
 6. 全部输入文件 `0444`、目录 `0555`；`out/` 与 `work/` 的属主适配见 §7.7。
+7. 原子创建 `inputs/READY`（临时文件 + `rename`）。worker 总是等待该文件再读 `job.json`（[worker.md §7.1](worker.md#71-运行流程)）：常规路径下它在 `start` 之前就已存在，预热池下在认领并 `stage` 完成后才创建（§7.11）。这样两种路径的 worker 逻辑相同（OQ-S8）。
 
 ### 7.3 Podman 驱动与隔离配置
 
@@ -508,7 +509,7 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 - [ ] `create` 后容器未启动；`start` 后运行；`stop(grace)` 先 SIGTERM，宽限后 SIGKILL，返回时已 `exited` 且无残留进程。
 - [ ] `remove` 幂等；`list` 按标签选择；`logs(since)` 可重复读且顺序稳定。
 - [ ] `validate_invariants`：`ContainerSpec` 含 host 网络、特权、设备、cap_add、可写 `inputs`、宿主任意路径挂载、socket 挂载、含 `*TOKEN*` 的环境变量名（非豁免）、未固定 digest 的镜像——每一种都被拒绝，且不产生容器。
-- [ ] `FakeSandboxDriver`（M0）满足 §6.1 `SandboxService` 的语义：`submit` 幂等、`outcome` 只 resolve 一次、`cancel` 幂等、`release` 后可重复提交同 `job_id` 失败。
+- [ ] `FakeSandboxDriver`（M0）满足 §6.1 `SandboxService` 的语义：`submit` 幂等、`outcome` 只 resolve 一次、`cancel` 与 `release` 幂等。
 
 ### B. staging 与材料打包（M1）
 
@@ -597,7 +598,7 @@ submit → (排队) → create 容器（未启动）→ egress.register_job(iden
 | OQ-S5 | 镜像组成与归属：`sandbox.base_image` 只有一个，而 worker 适配层要"声明镜像"（含固定版本的 `claude` CLI 与工具链）；项目自己的语言工具链（Rust / Node / Python）怎么进沙盒（预装、devcontainer、运行期经 Egress 安装）；谁构建、谁发布、谁预拉取 | `sandbox`、`worker`、`deploy` | `SandboxSpec.exec.image_digest` 由 `engine` 从适配层取；`sandbox` 只校验 digest 并 `--pull=never` |
 | OQ-S6 | `Sandbox.trust`（trusted / untrusted）在驱动层的语义：骨架只有字段，没有区别对待的规则（design.md 的"档位 × 信任级别"表是历史记录，且已被 P-09 缩小范围） | 隔离强度是否随 trust 变化 | 记录该字段，两种取值都按最严配置处理，不放宽 |
 | OQ-S7 | `devcontainer.json` 安全子集的字段清单，以及"环境复现"在无网络沙盒里如何完成（依赖安装走哪个白名单） | M2 | 只保证加固项不可被覆盖 |
-| OQ-S8 | 预热池用 `READY` 文件标记是否接受（worker-protocol OQ-16）；池分桶策略与 TTL | M2、worker 启动逻辑 | §7.11 |
+| OQ-S8 | 预热池用 `READY` 文件标记是否接受（worker-protocol OQ-16）；本文让**所有**路径都创建 `READY`（常规路径在 `start` 前，预热池在认领后），以统一 worker 逻辑，这比契约字面（"M1 不需要"）多做了一步；池分桶策略与 TTL | M2、worker 启动逻辑 | §7.2 第 7 步、§7.11 |
 | OQ-S9 | 事件缺口：`Sandbox.status` 的 `running` / `stopped` / `lost` 没有对应事件；`artifact.unexpected` 审计不在事件目录里 | 投影与审计 | 状态保存在 `meta.json` 与标签；`unexpected` 进 `ResultBundle` |
 | OQ-S10 | 内容寻址结果库（CAS）在 architecture §6 有，但 §4 模块地图中无人拥有；`ResultBundle` 清单由谁组装并写 `Attempt.result_ref`（worker-protocol §5.2 说"服务端生成"，未指明模块）；被拒产物保留期（OQ-12）；M0 替身清单没有内存 store / CAS / `FakeEgress` | `sandbox`、`engine`、`store` | 暂依赖 `store` 的 CAS trait；`sandbox` 交原料，`engine` 组装清单 |
 | OQ-S11 | 命名层级：milestones 里的 `FakeSandboxDriver` 被说成替代 `sandbox` + `worker`、供 `engine` 使用，所以它应实现引擎面 `SandboxService`；而 architecture §11 的 `SandboxDriver` trait 是容器面。两者需要不同的名字 | M0 替身与 trait 命名 | 引擎面 `SandboxService`、容器面 `SandboxDriver`；`FakeSandboxDriver` 实现前者 |

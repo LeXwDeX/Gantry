@@ -10,7 +10,7 @@ Tauri 2 进程里唯一可信的一半：持有不可导出的设备私钥、发
 2. **配对客户端流程**：解析配对串 → 生成密钥与 CSR → 经单向 TLS 配对端点提交 → 校验证书链 → 展示 6 位确认码供人工核对 → 落盘身份（api.md §1.3，architecture §7.1）。
 3. **互相认证 TLS（mTLS）客户端**：桌面端所有 HTTP 请求与事件流只由本进程发出；WebView 不联网（api.md 开头、design-review F36）。rustls 配自定义签名器（调用 Secure Enclave / CNG），服务端证书只信"链到已固定 CA 指纹"的链。
 4. **事件流客户端**：唯一一条服务端推送事件（Server-Sent Events，SSE）流；帧解析、心跳与 45 s 空闲判定、指数退避、游标、`close` 帧与 `409 cursor_ahead` 处理；把帧转发给 `desktop-ui`（api.md §5）。
-5. **审批签名**：取挑战（challenge）→ §6.5 展示前自检 → 生成展示模型 → 用户确认（M1 外壳原生确认框，M2 起 Touch ID / Windows Hello）→ 签名 → `grant`。内部动作（`settings_update`、`device_role_change`、`device_revoke`）的"发起审批 → 签名 → 带 `Gantry-Approval` 重发"全链路（api.md §6、§6.6）。
+5. **审批签名**：取挑战（challenge）→ 展示前自检（api.md §6.5）→ 生成展示模型 → 用户确认（M1 外壳原生确认框，M2 起 Touch ID / Windows Hello）→ 签名 → `grant`。内部动作（`settings_update`、`device_role_change`、`device_revoke`）的"发起审批 → 签名 → 带 `Gantry-Approval` 重发"全链路（api.md §6、§6.6）。
 6. **IPC 边界**：Tauri 能力（capability）只授予本文 §6 的白名单命令；每个命令校验参数；路由白名单把 42 条路由分成"UI 可调"和"外壳专用"两类（§6.4）；严格内容安全策略（Content Security Policy，CSP）、禁止 WebView 导航与新窗口、外链只经 `open_external` / `open_github`。
 7. **响应整形**：向 WebView 返回的 HTTP 结果只含状态码、解析后的体、白名单响应头；`problem+json` 的 `detail` 只写日志、不过 IPC（api.md §1.5、§3.1）。
 8. **本机存储**：外观与布局偏好、按项目保存的界面状态（草稿等）、待发送消息队列的持久化块；**不存**任何凭据、配置键、服务端数据快照（OQ-S6）。
@@ -33,7 +33,7 @@ Tauri 2 进程里唯一可信的一半：持有不可导出的设备私钥、发
 - 工作区、设置页、审批单的**界面渲染**、状态管理、不可信文本的渲染规则 → [`desktop-ui`](desktop-ui.md)。本模块只提供数据与展示模型。
 - 是否需要审批、审批绑定什么 → `policy`（I3）。本模块只对服务端下发的 payload 签名，不自行组装、不修改。
 - 挑战的生成、nonce 管理、验签、审批状态机 → `api` / `policy`（api.md §6.4）。
-- 证书签发、吊销表、CA、配对令牌 → `pki`（`modules/pki.md`，待写）。
+- 证书签发、吊销表、CA、配对令牌 → `pki`（[pki.md](pki.md)）。
 - GitHub 凭据、模型 key 的保存 → 不持有（I6）；服务端 `secrets` / `egress`。设置里的 `SecretRef.value` 只在本进程内存中短暂经过（§8 S-2）。
 - 通知文案生成 → `notify`；本模块只做本机弹窗，文案由固定模板生成。
 - 代码查看、编辑、执行 → 非目标（architecture §1）。用户用外部编辑器 `git fetch` 分支。
@@ -44,7 +44,7 @@ Tauri 2 进程里唯一可信的一半：持有不可导出的设备私钥、发
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
 | `api`（契约，非代码） | 全部 mTLS 路由、事件流、配对端点、审批签名原语（challenge → 规范化 → 签名 → `grant`）、`Gantry-Approval` 头、错误码表 | [api.md](../interfaces/api.md)（尤其 §1.3、§2、§3、§5、§6、§9） |
-| `pki`（契约，非代码） | 配对串格式、CA 指纹的含义、证书链形状、密钥算法（本文按 ECDSA P-256 / ES256）、证书有效期与续期 | `modules/pki.md`（待写）；api.md §1.3、OQ-6、OQ-12 |
+| `pki`（契约，非代码） | 配对串格式、CA 指纹的含义、证书链形状、密钥算法（本文按 ECDSA P-256 / ES256）、证书有效期与续期 | [pki.md](pki.md)（§7.1 指纹口径、§7.4.2 配对串、§7.7 续期，其中多项仍是 pki.md 自己的 [提议]：OQ-K2 / K3 / K6 / K8）；api.md §1.3、OQ-6、OQ-12 |
 | `core`（共享 crate）[提议] | 事件信封与实体类型、JCS 规范化与摘要函数。**与服务端必须是同一份实现，或用同一组测试向量互验**（§12） | [data-model.md](../data-model.md) §5.1、api.md §6.3 |
 | `desktop-ui` | 唯一的 IPC 调用方 | 本文 §6 |
 | 操作系统 | macOS：Security.framework（Secure Enclave 密钥、钥匙串）、LocalAuthentication；Windows：CNG（Microsoft Platform Crypto Provider）、Windows Hello；系统通知；系统浏览器 | 平台文档；实现者核实各 API 的能力差异（OQ-S10） |
@@ -57,7 +57,7 @@ Tauri 2 进程里唯一可信的一半：持有不可导出的设备私钥、发
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
 | IPC 命令调用 | `desktop-ui`（WebView） | §6 的命令与参数 | **不可信**：WebView 可能被 XSS 控制，参数一律重新校验，命令不得接受"待签内容" |
-| 配对串 | 用户粘贴 / 扫码（OQ-S3） | 地址 + CA 指纹 + 一次性 token（格式由 `modules/pki.md` 定） | 用户给定，格式严格校验；token 视为秘密（不入日志） |
+| 配对串 | 用户粘贴 / 扫码（OQ-S3） | 地址 + CA 指纹 + 一次性 token（格式见 [pki.md §7.4.2](pki.md)，契约未定） | 用户给定，格式严格校验；token 视为秘密（不入日志） |
 | API 响应、challenge | 服务端（mTLS） | api.md 全部响应；`application/problem+json` | 通道可信（固定 CA + 客户端证书）；**内容中的文本字段不可信**（`UntrustedText`、`Message.text` 等），本模块只透传、不解释 |
 | 事件流帧 | 服务端 | api.md §5.1：业务事件（data-model §5.1 信封原样）、`heartbeat`、`close` | 同上 |
 | 用户确认结果 | 外壳原生确认框 / 系统生物识别 | 通过 / 取消 / 失败 | 可信（外壳自己渲染与发起） |
@@ -91,7 +91,7 @@ IPC 是本模块唯一的对外接口，调用方只有 `desktop-ui`。命令名
 | `identity_status` | — | `IdentityStatus` | `state`：`unpaired` / `pending_confirm` / `paired` / `revoked` / `cert_expired`；另含 `server_host`、`ca_fingerprint`、`device`（`id`、`name`、`platform`）、`cert`（`serial`、`not_after`）、`key_backend`（`secure_enclave` / `tpm` / `test_software`） | M1 |
 | `pairing_begin` | `{ pairing_string, device_name }` | `{ confirmation_code, device }` | 仅在 `unpaired` 状态；`platform` 由外壳填，不接受 UI 传入；步骤见 §7.2 | M1 |
 | `pairing_confirm` | `{ matches: bool }` | `IdentityStatus` | 仅在 `pending_confirm`；`false` 或超时 → 删除密钥与待定证书（OQ-S4） | M1 |
-| `identity_reset` | — | `IdentityStatus` | 外壳弹原生确认框后，删除本机密钥、证书、身份文件；用于"设备已被吊销 / 证书过期，重新配对" | M1 |
+| `identity_reset` | — | `IdentityStatus` | 外壳弹原生确认框后，删除本机密钥、证书、身份文件，**并清除 `ui-state/`**（其中的项目 ID 属于旧服务端）；`prefs.json` 保留。用于"设备已被吊销 / 证书过期，重新配对" | M1 |
 | `connection_state` | — | `ConnectionState` | 当前合并状态（§7.3）；变化同时以 `state` 帧推送 | M1 |
 | `api_request` | `{ route, path?, query?, body?, idempotency_key? }` | `ApiResult` | 仅 §6.4 "UI 可调"的 32 条路由，`route` 是枚举 ID 而不是 URL。校验见 §7.1 | M1 |
 | `events_open` | `{ after_seq? }` + `Channel<StreamFrame>` | — | 打开**唯一**事件流；已打开则替换旧流。`after_seq` 是 UI 快照的最小 `X-Event-Seq`（api.md §5.3） | M1 |
@@ -126,7 +126,8 @@ type StreamFrame =
   | { t: "event"; envelope: EventEnvelope }             // data-model §5.1 信封，原样
   | { t: "heartbeat"; seq: number }
   | { t: "state"; state: ConnectionState }              // 变化时推送
-  | { t: "resync_required"; reason: "cursor_ahead" | "cursor_expired" };
+  | { t: "resync_required"; reason: "cursor_ahead" | "cursor_expired" }
+  | { t: "navigate"; inbox_id: string };                // M2：用户点击系统通知后要求 UI 定位到该上报项
 
 type ConnectionState = {
   phase: "unpaired" | "connecting" | "live" | "reconnecting"
@@ -155,17 +156,44 @@ type ConnectionState = {
 | `can_sign` | `{ ok: true } \| { ok: false, reason }`，`reason`：`not_connected` / `not_approver` / `not_pending` / `expired` / `self_check_failed` |
 | `challenge_expires_at` / `server_time_offset_ms` | 倒计时用，已用 `/v1/me` 校正时钟偏差 |
 
+**`GuardedWritePreview`**（`guarded_write_prepare` 的返回，§7.4.2）：
+
+| 字段 | 内容 |
+| --- | --- |
+| `pending_id` | 外壳内部句柄，5 分钟 [建议值] 后过期并清零请求体 |
+| `valid` / `errors[]` / `warnings[]` | 设置：来自 `dry_run`（`errors[].pointer` 相对 `value`，`code` 含 config.md §11 的语义码）；设备动作：本地校验结果（如 `self_role_change`） |
+| `relaxes[]` | 本次放宽的键路径（设置），供界面提示"此改动放宽了安全限制" |
+| `required_role` / `requires_signature` | 服务端判定（设置）或固定值（设备动作：approver + 签名） |
+| `preview` | 同 `ApprovalSheetModel.preview`：差异（秘密字段不含值）或设备名与新角色 |
+| `can_submit` | `{ ok: true } \| { ok: false, reason }`：`not_connected` / `not_approver`（需要签名而本机不是 approver，临时处理见 OQ-S7）/ `invalid` |
+
 ### 6.4 路由分类（42 条，恰好分入一类）
 
 编号取自 api.md §4.1 路由总表。契约测试（§12）检查：`openapi.yaml` 的每条路由恰好属于下列一类，且新增路由未分类时构建失败。
 
 | 类 | 路由编号 | 经由 |
 | --- | --- | --- |
-| **UI 可调**（32） | #2–#25、#29（`approvals/{id}/deny`）、#30 / #32（settings 的 `GET`）、#35 / #36（`catalog`、`status`）、#37 / #38（设备列表、重命名）、#42（`choose`） | `api_request`，`route` 为枚举 ID（如 `deliveries.patch`、`inbox.choose`） |
+| **UI 可调**（32） | #2–#25、#29（`approvals/{id}/deny`）、#30 / #32（settings 的 `GET`）、#35 / #36（`catalog`、`status`）、#37 / #38（设备列表、重命名）、#42（`choose`） | `api_request`，`route` 为枚举 ID，见下 |
 | **外壳专用**（10） | #1 `pair` | `pairing_*` |
 | | #26 `POST /v1/approvals`（发起内部动作审批）、#31 / #33 / #34（settings 的 `PUT` / `DELETE`）、#39 `role`、#40 `revoke` | `guarded_write_*` |
 | | #27 `challenge`、#28 `grant` | `approval_*`（`approval_sign` 内部调用） |
 | | #41 `events` | `events_*` |
+
+**`api_request` 的 32 个路由 ID**（`<资源>.<动作>`，与 api.md §4.1 编号一一对应；`desktop-ui` 与本文共用）：
+
+| 编号 | 路由 ID |
+| --- | --- |
+| #2–#4 | `me.get`、`projects.list`、`projects.get` |
+| #5–#9 | `deliveries.list`、`deliveries.get`、`deliveries.patch`、`deliveries.abandon`、`deliveries.budget` |
+| #10–#12 | `conversations.list`、`messages.list`、`messages.post` |
+| #13–#16 | `worktrees.list`、`worktrees.get`、`worktrees.lock_put`、`worktrees.lock_delete` |
+| #17–#20 | `workflows.list`、`workflows.get`、`attempts.list`、`attempts.get` |
+| #21–#23 | `inbox.list`、`inbox.get`、`inbox.dismiss` |
+| #24、#25、#29 | `approvals.list`、`approvals.get`、`approvals.deny` |
+| #30、#32 | `settings.get`、`project_settings.get` |
+| #35、#36 | `settings.catalog`、`settings.status` |
+| #37、#38 | `devices.list`、`devices.rename` |
+| #42 | `inbox.choose` |
 
 ### 6.5 内部 trait 草案（Rust）
 
@@ -188,7 +216,7 @@ struct PresencePrompt { title: String, summary: String /* 如 "merge acme/web#12
 ### 7.1 `api_request`：路由表驱动
 
 - 路由表由 `schemas/openapi.yaml` 在构建时生成（路径模板、方法、请求体 schema、所需 `Idempotency-Key` / `If-Match`），再叠加外壳本地的分类（§6.4）。契约未标注时，分类写在本模块的一个 `routes.toml`，并由契约测试与 openapi 对账（OQ-S12）。
-- **参数校验**：路径参数匹配对应 ID 前缀 + ULID 形态（如 `^dlv_[0-9A-HJKMNP-TV-Z]{26}$`）；查询参数只接受该路由声明的键（未知键 → `shell.bad_argument`，避免被服务端 `400 invalid_request` 才发现）；请求体按 schema 校验（`additionalProperties: false`），超过 64 KiB（api.md §3.7）拒绝；`Idempotency-Key` 形态 `^[A-Za-z0-9_-]{16,64}$`，必带幂等键的路由缺失则拒绝。
+- **参数校验**：路径参数匹配对应 ID 前缀 + ULID 形态（如 `^dlv_[0-9A-HJKMNP-TV-Z]{26}$`）；查询参数只接受该路由声明的键（未知键 → `shell.bad_argument`，避免被服务端 `400 invalid_request` 才发现）；请求体按 schema 校验（`additionalProperties: false`），超过 64 KiB（api.md §3.7）拒绝；`Idempotency-Key` 形态 `^[A-Za-z0-9_-]{16,64}$`，必带幂等键的路由缺失则拒绝（UI 可调路由里是 `messages.post`、`approvals.deny`、`inbox.choose`——后者在 api.md §4.1 表里标"必"而 §3.3 清单漏列，见 [modules/api.md OQ-A2](api.md)）。
 - **头**：外壳自己设置 `Content-Type`、`Accept`；UI 只能传 `idempotency_key`。UI 可调路由里没有需要 `If-Match` 的（settings 写入全部走 `guarded_write_*`），所以 `api_request` 没有 `if_match` 参数。**UI 不能传 `Gantry-Approval` 或任何其他头**。
 - **重试**：网络错误与 5xx 沿用同一 `Idempotency-Key` 退避重试（读路由直接重试，写路由仅当带幂等键）；`429` / `503` 按 `Retry-After` 加抖动；其余 4xx 不重试（api.md §3.1）。
 - **响应整形**：只返回 §6.2 的 `ApiResult`；`detail` 写日志后丢弃；响应头只保留 `ETag`、`X-Event-Seq`、`Idempotent-Replayed`、`Retry-After`。
@@ -214,7 +242,7 @@ stateDiagram-v2
 
 `pairing_begin` 步骤（任一步失败 → 删除已生成的密钥，返回错误）：
 
-1. 解析配对串并校验（`https` 地址、指纹 `sha256:` + 64 位十六进制、token 非空）；格式由 `modules/pki.md` 定（OQ-S3）。
+1. 解析配对串并校验（`https` 地址、指纹 `sha256:` + 64 位十六进制、token 非空）；格式暂按 [pki.md §7.4.2](pki.md) 建议的 URL 形式 `gantry+pair://<host>:<port>/?v=1&fp=sha256:<64 位十六进制>&t=<token>` 解析（OQ-S3）；`fp` 指**根**证书 DER 的 SHA-256。
 2. 在硬件中生成 P-256 密钥；硬件不可用时 **fail-closed**，不降级为软件密钥（OQ-S2）。
 3. 生成 CSR（subject 任意，服务端重写，api.md §1.3）。
 4. 以固定 CA 指纹的单向 TLS 连接配对端点，`POST /v1/pair`，体 `{ token, csr, device: { name, platform } }`。`401 pair_token_invalid` 不区分原因，提示"重新生成配对串"；响应丢失时 token 已被消耗，同样提示重新生成。
@@ -402,7 +430,7 @@ stateDiagram-v2
 
 ## 12. 测试与验收
 
-"Mock API 服务"指 M0 交付的服务端替身（`schemas/openapi.yaml` 生成，事件流回放录制数据，[milestones.md](../milestones.md)），"TestCA"指测试用证书与设备。除"真机"项外，测试都在 CI 上对着它们跑。外壳需要的 Mock 能力（缺哪项就向 `contract` 泳道提 Issue，不要在本模块里另写一套）：mTLS 监听器 + 配对监听器；按真实算法验签的 `challenge` / `grant`（JCS + ES256，用设备证书公钥）；可注入事件、可断开连接、可返回指定错误（`403 signature_required`、`409 stale_head`、`429` + `Retry-After`、`409 cursor_ahead`）；可切换设备角色与档案。
+"Mock API 服务"指 M0 交付的服务端替身（`schemas/openapi.yaml` 生成，事件流回放录制数据，[milestones.md](../milestones.md)），"TestCA"指测试用证书与设备。除"真机"项外，测试都在 CI 上对着它们跑。milestones.md 里与外壳相关的 M1 退出标准——重新打开后事件流从游标续上、写入模型凭据需要 approver 设备签名、吊销后事件流在心跳间隔内断开——分别对应下面"事件流""受保护写入""端到端（外壳层）"三组。外壳需要的 Mock 能力（缺哪项就向 `contract` 泳道提 Issue，不要在本模块里另写一套）：mTLS 监听器 + 配对监听器；按真实算法验签的 `challenge` / `grant`（JCS + ES256，用设备证书公钥）；可注入事件、可断开连接、可返回指定错误（`403 signature_required`、`409 stale_head`、`429` + `Retry-After`、`409 cursor_ahead`）；可切换设备角色与档案。
 
 **密钥与身份**
 
@@ -485,11 +513,11 @@ stateDiagram-v2
 
 | # | 问题 | 本文的临时处理 | 影响 |
 | --- | --- | --- | --- |
-| OQ-S1 | **mTLS 密钥与审批密钥是否分开。** api.md §6.3 与 `Device.pubkey_fpr` 现文是"签名密钥 = 设备证书对应的私钥"（OQ-6），但 mTLS 每次握手都要用这把私钥，后台重连不能每次要求用户在场；而[设计评审 F27](../reviews/2026-10-24-design-review.md) 的核验意见接受"两把密钥、配对时随 CSR 登记审批公钥"。`POST /v1/pair` 目前没有审批公钥字段 | 按 api.md 现文实现单钥：`sign_tls` 无提示，`sign_approval` 先经 `UserPresence::confirm`（**应用层**用户在场，不是密钥级访问控制）。`DeviceKeys` trait 已把两种用法分开，改双钥只需换实现并补契约字段 | api（pair 请求 / 验签公钥来源）、`pki`、`policy`、本模块、`mobile` 不受影响 |
+| OQ-S1 | **mTLS 密钥与审批密钥是否分开。** api.md §6.3 与 `Device.pubkey_fpr` 现文是"签名密钥 = 设备证书对应的私钥"（OQ-6），但 mTLS 每次握手都要用这把私钥，后台重连不能每次要求用户在场；而[设计评审 F27](../reviews/2026-10-24-design-review.md) 的核验意见接受"两把密钥、配对时随 CSR 登记审批公钥"。`POST /v1/pair` 目前没有审批公钥字段 | 按 api.md 现文实现单钥（与 [pki.md OQ-K8](pki.md) 的临时处理一致）：`sign_tls` 无提示，`sign_approval` 先经 `UserPresence::confirm`（**应用层**用户在场，不是密钥级访问控制）。`DeviceKeys` trait 已把两种用法分开，改双钥只需换实现并补契约字段 | api（pair 请求 / 验签公钥来源）、`pki`、`policy`、本模块、`mobile` 不受影响 |
 | OQ-S2 | 无 Secure Enclave / TPM 的设备（部分旧 Mac、无 TPM 的 Windows）是否允许降级为"系统存储的不可导出软件密钥" | fail-closed：拒绝配对，提示原因 | 用户可用性、安全基线 |
-| OQ-S3 | 配对串格式；"CA 指纹"固定的对象（根还是中间、整张证书还是公钥）。api.md §1.3 的 `certificate_chain` 只含 `[叶子, 中间 CA]`，若指纹是根，客户端缺少根证书无法"链到指纹"；桌面端是否支持扫码（桌面不一定有摄像头）还是仅粘贴 | §7.1 的接受条件：链中任一证书的 SHA-256（DER）等于已固定指纹且链内签名有效；配对入口只做粘贴 | `pki`、api §1.3 |
-| OQ-S4 | 确认码核对失败的处置：设备在核对前是否已在服务端 `active`；有无 abort 路由 | 外壳只删本机密钥并提示用户到服务端处理 | `pki`、api OQ-12 |
-| OQ-S5 | 证书续期路由未定；"将过期"阈值 | 到期前 `cert_warn_days = 7` 提示重新配对；不实现续期 | `pki`、api OQ-12 |
+| OQ-S3 | 配对串格式；"CA 指纹"固定的对象（根还是中间、整张证书还是公钥）。api.md §1.3 的 `certificate_chain` 只含 `[叶子, 中间 CA]`，若指纹是根，客户端缺少根证书无法"链到指纹"；桌面端是否支持扫码（桌面不一定有摄像头）还是仅粘贴 | §7.1 的接受条件：链中任一证书的 SHA-256（DER）等于已固定指纹且链内签名有效。[pki.md](pki.md) 的临时口径是"钉扎根证书、TLS 握手链含根"（OQ-K2），与此兼容；配对入口只做粘贴，格式用 pki.md §7.4.2 的 URL 形式 | `pki`、api §1.3 |
+| OQ-S4 | 确认码核对失败的处置：设备在核对前是否已在服务端 `active`；有无 abort 路由 | 外壳只删本机密钥并提示用户到服务端处理。[pki.md OQ-K4](pki.md) 的临时口径：设备在 `201` 时即 `active`、无 abort 路由，核对不一致由管理员在主机上吊销 | `pki`、api OQ-12 |
+| OQ-S5 | 证书续期路由未定；"将过期"阈值 | 到期前 `cert_warn_days = 7` 提示重新配对；不实现续期。注意 [pki.md OQ-K6](pki.md) 的默认设备证书有效期是 30 天，续期路由落地前等于每月重新配对 | `pki`、api OQ-12 |
 | OQ-S6 | 本机持久化范围：服务端快照与游标是否落盘；待发送消息队列、草稿是否跨重启保留 | 快照与游标只在内存，每次启动重新快照；界面状态块（含草稿、待发送队列）经 `ui_state_*` 持久化 [提议] | 离线可用性、磁盘上的数据敏感度 |
 | OQ-S7 | operator 发起、另一台 approver 签名的内部动作：approver 设备看不到 `settings_update` 的内容，只有摘要 | §7.4.2：`settings_update` 跨设备拒签；设备动作可核对 | `policy` / api §6.6、desktop-ui 设置页 |
 | OQ-S8 | M2 起是否在生物识别之外**保留**外壳自己渲染的详情确认窗口（独立 WebView 窗口、无远程内容、独立能力集），以进一步隔离被注入的主窗口 | M1 用原生确认框；M2 起仅生物识别提示（文案含摘要） | 签名防护强度、体验 |

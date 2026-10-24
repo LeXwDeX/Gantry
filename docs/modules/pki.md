@@ -2,15 +2,15 @@
 
 > 状态：设计 v0.1 · 里程碑：M1（主体）→ M3（密钥轮换、进程内即时断流）→ M4（iOS 配对）· 泳道：`sec` · crate / 目录：`crates/gantry-pki`
 
-`pki` 把"这台设备是谁、还被不被信任"变成密码学事实：私有 CA（离线根 + 在线中间 CA）签发服务端与设备证书；一次性令牌 + CA 指纹固定完成首次配对；握手时按吊销表拒绝；设备丢了有主机应急命令兜底。它不处理任何业务 HTTP，也不替客户端保管私钥。
+`pki` 把"这台设备是谁、还被不被信任"变成密码学事实：私有证书颁发机构（CA，离线根 + 在线中间 CA）签发服务端与设备证书；一次性令牌 + CA 指纹固定完成首次配对；握手时按吊销表拒绝；设备丢了有主机应急命令兜底。它不处理任何业务 HTTP，也不替客户端保管私钥。
 
 ## 1. 职责
 
 1. **CA 层次**：离线根 CA（安装时生成、导出到离线介质后从服务端删除）+ 在线中间 CA（私钥只经 `secrets` 由本模块读取）；提供安装时的引导工具（`bootstrap`）供 `deploy` 调用（architecture §7.1 步骤 1）。
 2. **服务端证书**：签发服务端叶子证书，到期前自动续签并热加载，不断开现有连接。
-3. **配对**：`gantry pair` 的令牌与配对窗口；配对端点 `POST /v1/pair` 的全部业务逻辑（令牌核验、CSR 校验、签发、创建 Device、确认码）；第一台设备为 `approver`、之后默认 `operator`（P-23）。HTTP 监听器由 `api` 持有，业务由本模块实现（[api.md §1.3](../interfaces/api.md)）。
+3. **配对**：`gantry pair` 的令牌与配对窗口；配对端点 `POST /v1/pair` 的全部业务逻辑（令牌核验、证书签名请求（CSR）校验、签发、创建 Device、确认码）；第一台设备为 `approver`、之后默认 `operator`（P-23）。HTTP 监听器由 `api` 持有，业务由本模块实现（[api.md §1.3](../interfaces/api.md)）。
 4. **设备注册表**：Device 实体（名称、平台、角色、状态、`last_seen`）、证书表、吊销表；事件 `device.paired` / `device.updated` / `device.revoked`。
-5. **握手校验**：提供 rustls 的 `ClientCertVerifier`——证书链、有效期、增强密钥用途、算法、`cert_serial` 是否在册且未吊销（无 CRL / OCSP，握手时直接查库）。
+5. **握手校验**：提供 rustls 的 `ClientCertVerifier`——证书链、有效期、增强密钥用途、算法、`cert_serial` 是否在册且未吊销（无证书吊销列表（CRL）与在线证书状态协议（OCSP），握手时直接查库）。
 6. **角色与吊销**：`set_role`、`revoke`、重命名；对 `api` 暴露"在调用方事务内执行"的接口，使"消费审批 + 写业务"同事务（api.md §6.6）。
 7. **吊销生效**：新握手立即被拒；已建立的事件流在 M1 靠 `api` 心跳内的设备状态检查在 ≤ 60 s 内断开，M3 起提供进程内即时通知（P-30）。
 8. **证书轮换与续期**：服务端叶子证书自动续签（M1）；中间 CA 轮换（M3，需要离线根）；设备证书续期的内部接口（路由未定，OQ-K6）。
@@ -32,7 +32,7 @@
 | 事 | 归谁 |
 | --- | --- |
 | HTTP 监听、路由、限流、`Idempotency-Key`、角色 / 档案的路由级判定 | `api`；配对监听器的端口、开关由 `api` 按本模块给出的配对窗口执行 |
-| 审批的创建、challenge、验签、状态机、`subject_digest` 一致性 | `policy`。本模块只提供设备公钥与角色 |
+| 审批的创建、挑战（challenge）、验签、状态机、`subject_digest` 一致性 | `policy`。本模块只提供设备公钥与角色 |
 | `device_role_change` / `device_revoke` 审批的签名校验与消费 | `policy`（`consume_internal`）；`api` 在同一事务里调用本模块的 `set_role` / `revoke` |
 | 客户端私钥的生成与保管、CSR 生成、系统级确认 | `desktop-shell`、`mobile`（I6：服务端从不生成客户端私钥） |
 | 密钥的加密存储与按使用方隔离读取（中间 CA 私钥、服务端叶子私钥） | `secrets`（本模块是其 `pki` 使用方，只能读自己的密钥） |
@@ -43,6 +43,8 @@
 | 设备的 settings（证书有效期等是否做成运行期设置） | 不做（config.md OQ-18）：全部为引导配置 |
 
 ## 3. 依赖
+
+本文中不带路径的 `api.md`、`config.md`、`forge-actions`、`worker-protocol` 均指 `docs/interfaces/` 下的契约；模块规格写作 `modules/<id>.md`，本规格自身称"本文"。
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
@@ -57,7 +59,7 @@
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |
 | --- | --- | --- | --- |
 | `PairRequest { token, csr_pem, device{name, platform} }` | `api` 的配对监听器（单向 TLS，未认证） | [api.md §1.3](../interfaces/api.md) | **完全不可信**：令牌、CSR、名称都要严格校验（§7.4） |
-| 客户端证书链（握手） | `api` 的 mTLS 监听器 | X.509，TLS 1.3 | 不可信，验证后才映射为 Device |
+| 客户端证书链（握手） | `api` 的双向 TLS（mTLS）监听器 | X.509，TLS 1.3 | 不可信，验证后才映射为 Device |
 | `gantry pair` / `gantry device recover` 命令 | 主机管理员（终端） | §7.8；recover 需 root | 主机 root 可信；命令参数仍严格校验 |
 | 调用方事务 `tx` + 操作者 `ActorRef` | `api`（`set_role` / `revoke`，审批已在同一 tx 被 `policy` 消费） | §6 | 可信（已通过 `api` 的角色与审批校验）；本模块对"不能改自己"等不变量再做一次防御性检查 |
 | 引导配置 | `deploy` 写入的配置文件 | §10 | 可信 |
@@ -110,7 +112,7 @@ pub trait DeviceDirectory: Send + Sync {
     /// 序列号不在册（哪怕链有效，如从旧备份恢复）→ None。
     async fn by_cert_serial(&self, serial: &CertSerial) -> Result<Option<Device>, PkiError>;
     async fn get(&self, id: &DeviceId) -> Result<Option<Device>, PkiError>;
-    async fn list(&self, page: PageReq) -> Result<Page<Device>, PkiError>;       // 含已吊销，keyset 分页
+    async fn list(&self, page: PageReq) -> Result<Page<Device>, PkiError>;       // 含已吊销，键集（keyset）分页
     /// 审批验签用；设备已吊销或密钥不是 P-256 → None
     async fn verifying_key(&self, id: &DeviceId) -> Result<Option<VerifyingKey>, PkiError>;
     /// 节流写入（≤ 每设备每 60 s 一次），不产生事件
@@ -185,14 +187,15 @@ pub struct TlsMaterial {
 }
 ```
 
-`api` 必须用这两件拼 `ServerConfig`，并满足契约 [interfaces/api.md §1.2](../interfaces/api.md) 与模块规格 [modules/api.md §7.2](api.md) 的加固要求（仅 TLS 1.3、禁会话票据、禁 0-RTT）。
+`api` 必须用这两件拼 `ServerConfig`，并满足契约 [interfaces/api.md §1.2](../interfaces/api.md) 与模块规格 [modules/api.md §7.2](api.md) 的加固要求（仅 TLS 1.3、禁会话票据、禁零往返数据（0-RTT））。
 
 ### 6.5 吊销通知（M3）
 
 ```rust
 pub struct RevocationNotifier(tokio::sync::broadcast::Sender<DeviceId>);
 impl RevocationNotifier { pub fn subscribe(&self) -> broadcast::Receiver<DeviceId>; }
-// revoke 的事务提交成功之后才发送（回滚不发）；接收方落后（Lagged）时必须退回"全量检查所有流的设备状态"。
+// revoke 的事务提交成功之后才发送（回滚不发）：通过调用方事务的提交后钩子（占位 `WriteTx::on_commit`，需 `store` 提供）注册发送。
+// 接收方落后（Lagged）时必须退回"全量检查所有流的设备状态"。
 ```
 
 ### 6.6 引导、轮换、应急命令
@@ -204,7 +207,7 @@ pub mod bootstrap {
     pub fn run(params: BootstrapParams, secrets: &dyn SecretStore, clock: &dyn Clock)
         -> Result<BootstrapReport, PkiError>;
     pub struct BootstrapParams {
-        pub server_names: Vec<String>,            // 服务端叶子证书的 SAN（DNS 名 / IP）
+        pub server_names: Vec<String>,            // 服务端叶子证书的主体备用名（Subject Alternative Name, SAN；DNS 名 / IP）
         pub root_export_path: PathBuf, pub root_export_passphrase: SecretString,
         pub install_id: String, pub data_dir: PathBuf,
     }
@@ -234,7 +237,7 @@ pub mod recover {       // gantry device recover
 
 | 项 | 取值 | 说明 |
 | --- | --- | --- |
-| 公钥算法（强制） | ECDSA P-256（secp256r1），所有 CA 与叶子 | design.md；api.md 的 ES256 审批签名也要求设备密钥是 P-256（§6.3）。CSR 带其他算法 → 拒绝 |
+| 公钥算法（强制） | ECDSA P-256（secp256r1），所有 CA 与叶子 | design.md；api.md 的 ES256（ECDSA P-256 + SHA-256）审批签名也要求设备密钥是 P-256（§6.3）。CSR 带其他算法 → 拒绝 |
 | 签名算法 | `ecdsa-with-SHA256` | — |
 | TLS | 仅 TLS 1.3（强制，api.md §1.2）；握手签名方案仅 `ECDSA_NISTP256_SHA256` | 由 `api` 的 `ServerConfig` 固定（modules/api.md §7.2） |
 | 根 CA | 自签；有效期 10 年 [建议]；`basicConstraints: CA:TRUE, pathlen:1`（critical）；`keyUsage: keyCertSign, cRLSign`（critical）；`CN = "Gantry Root CA <install_id>"` | 私钥导出到离线介质（口令加密 PKCS#8），服务端删除；**服务端只保留根证书（公钥）** |
@@ -243,7 +246,7 @@ pub mod recover {       // gantry device recover
 | 设备叶子 | 中间 CA 签发；有效期 30 天 [建议，design.md 示例；见 OQ-K6]；`CA:FALSE`；`keyUsage: digitalSignature`；`EKU: clientAuth`；**无 DNS / IP SAN**；`CN = "<device.id>"`（服务端重写，api.md §1.3）；可加 URI SAN `urn:gantry:device:<device.id>` [建议] | **只取 CSR 里的公钥**，CSR 请求的任何扩展、subject、SAN 一律忽略 |
 | 生效时间 | `notBefore = 签发时刻 − 5 分钟` [建议] | 两端时钟偏差余量（design.md） |
 | 序列号 | 每张证书 128 位 CSPRNG 随机数，最高位清零保证为正，表示为小写十六进制、去前导零 [建议]；全库唯一（冲突则重新生成） | 与 api.md 示例（20 位十六进制）形态兼容；格式由 api.md OQ-10 最终确认（OQ-K2） |
-| 公钥指纹 `pubkey_fpr` | `"sha256:"` + 小写十六进制（设备公钥 SubjectPublicKeyInfo DER 的 SHA-256） | api.md 示例形态；SPKI 还是裸点由 OQ-K2 确认 |
+| 公钥指纹 `pubkey_fpr` | `"sha256:"` + 小写十六进制（设备公钥主体公钥信息（SubjectPublicKeyInfo, SPKI）DER 编码的 SHA-256） | api.md 示例形态；SPKI 还是裸点由 OQ-K2 确认 |
 | CA 指纹（配对串里的 `ca_fingerprint`） | `"sha256:"` + 小写十六进制（**根**证书 DER 的 SHA-256） | 客户端固定根而非中间 CA，使中间 CA 轮换对客户端无感；api.md `certificate_chain` 不含根，客户端在配对握手里从服务端发送的链取得根并核对指纹——此取舍契约未定（OQ-K2） |
 | 随机数 | `OsRng`；令牌、序列号、确认码都不得用可预测来源 | — |
 
@@ -255,20 +258,20 @@ pub mod recover {       // gantry device recover
 
 | 表 | 列（要点） | 说明 |
 | --- | --- | --- |
-| `pki_ca` | `kind(root|intermediate)`、`serial`、`fingerprint`、`not_before`、`not_after`、`status(current|previous|retired)`、`cert_pem` | 根只存证书；中间 CA 私钥在 `secrets` |
+| `pki_ca` | `kind`（`root` / `intermediate`）、`serial`、`fingerprint`、`not_before`、`not_after`、`status`（`current` / `previous` / `retired`）、`cert_pem` | 根只存证书；中间 CA 私钥在 `secrets` |
 | `pki_server_cert` | `serial`、`not_before`、`not_after`、`chain_pem`、`status` | 私钥在 `secrets` |
-| `devices` | `id`、`name`、`platform`、`role`、`status(active|revoked)`、`cert_serial`（当前）、`pubkey_fpr`、`pubkey_spki`（DER，验签用）、`created_at`、`updated_at`、`last_seen` | Device 投影；`last_seen` 不进事件日志（避免洪泛；备份恢复后可能回退，无业务后果） |
-| `device_certs` | `serial`（主键）、`device_id`、`not_before`、`not_after`、`status(active|superseded|revoked)` | 吊销表；握手时按 `serial` 查询 |
-| `pairing_sessions` | `id`、`token_sha256`、`created_at`、`expires_at`、`failed_attempts`、`state(open|redeemed|voided|expired)`、`redeemed_device_id?`、`confirmation_code?`、`created_by_uid` | CLI 与守护进程之间的会合点（§7.8）；明文 token 永不落库 |
+| `devices` | `id`、`name`、`platform`、`role`、`status`（`active` / `revoked`）、`cert_serial`（当前）、`pubkey_fpr`、`pubkey_spki`（DER，验签用）、`created_at`、`updated_at`、`last_seen` | Device 投影；`last_seen` 不进事件日志（避免洪泛；备份恢复后可能回退，无业务后果） |
+| `device_certs` | `serial`（主键）、`device_id`、`not_before`、`not_after`、`status`（`active` / `superseded` / `revoked`） | 吊销表；握手时按 `serial` 查询 |
+| `pairing_sessions` | `id`、`token_sha256`、`created_at`、`expires_at`、`failed_attempts`、`state`（`open` / `redeemed` / `voided` / `expired`）、`redeemed_device_id?`、`confirmation_code?`、`created_by_uid` | CLI 与守护进程之间的会合点（§7.8）；明文 token 永不落库 |
 
 ### 7.3 握手校验器 `ClientCertVerifier`
 
 按顺序，任一步失败即握手失败（对客户端表现为 TLS 告警，**不产生 HTTP 响应**；失败原因只记本地日志）：
 
-1. **链**：用 `rustls-webpki` 以根证书为信任锚，验证 `[叶子, 中间 CA]`，时间用注入的 `Clock`；增强密钥用途须含 `clientAuth`；叶子 `CA:FALSE`；公钥为 P-256，签名算法在白名单内。
+1. **链**：用 `rustls-webpki` 以根证书为信任锚，验证 `[叶子, 中间 CA]`，时间取 rustls 的 `TimeProvider`（由注入的 `Clock` 实现，测试可控）；增强密钥用途须含 `clientAuth`；叶子 `CA:FALSE`；公钥为 P-256，签名算法在白名单内。
 2. **中间 CA 钉扎**：出示的中间 CA 的指纹必须属于 `pki_ca` 中 `current` 或 `previous` 的集合（使泄露的中间 CA 可被单独退役，M3）。
 3. **身份格式**：叶子 `CN` 形如 `dev_<ULID>`。
-4. **吊销 / 在册检查**：用叶子 `serial` 查 `device_certs`（读库，**不加带 TTL 的缓存**）：行必须存在，状态为 `active`，或为 `superseded` 且仍在宽限期内（建议 10 分钟）；所属设备 `status = active`。**序列号不在册 → 拒绝**（失败即关闭：如从旧备份恢复后，链上有效但库里没有的证书不放行）。
+4. **吊销 / 在册检查**：用叶子 `serial` 查 `device_certs`（读库，**不加带存活时间（TTL）的缓存**）：行必须存在，状态为 `active`，或为 `superseded` 且仍在宽限期内（建议 10 分钟）；所属设备 `status = active`。**序列号不在册 → 拒绝**（失败即关闭：如从旧备份恢复后，链上有效但库里没有的证书不放行）。
 5. 通过后不在 verifier 里放任何业务状态；`api` 从 `peer_certificates()` 取叶子序列号，再用 `DeviceDirectory::by_cert_serial` 实时映射到 Device（每个请求一次，api.md §2.1）。
 
 要求：`offer_client_auth = true`、`client_auth_mandatory = true`（无证书直接失败）；`root_hint_subjects` 给出中间 CA 的 subject。
@@ -372,6 +375,8 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 ## 8. 不变式与安全要求
 
+本模块要保证 [architecture.md §5](../architecture.md#5-信任边界与不变式) 中的 **I6**（客户端不执行、不持凭据），并为 I3 提供验签所需的设备公钥与实时角色；信任边界上的"桌面端可信但会失窃"（设备私钥不可导出、客户端固定 CA 指纹）靠本模块的吊销与配对设计兜底。
+
 | 不变式 / 要求 | 本模块如何保证 |
 | --- | --- |
 | **I6 客户端不执行、不持凭据**（核心） | 服务端**从不生成**客户端私钥，只接收 CSR 并只取其中的公钥；设备私钥不可导出、不出设备；配对响应与任何接口都不含 GitHub / 模型凭据或服务端私钥；设备证书不含秘密 |
@@ -406,7 +411,7 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 ## 10. 配置
 
-`pki` 的参数是**引导配置**（`deploy` 写入的配置文件，重启生效），不是 settings（config.md OQ-18 不收录；这也使 `pki` 不受 I7 的"设置页"约束）。下列默认值**全部是建议值**，除标注"强制"外。
+`pki` 的参数是**引导配置**（`deploy` 写入的配置文件，重启生效），不是 settings，不经 API 修改（config.md OQ-18 不收录）。下列默认值**全部是建议值**，除标注"强制"外。
 
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
@@ -429,11 +434,13 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 ## 11. 可观测性
 
+发出的事件见 [data-model §5](../data-model.md#5-事件)。
+
 - **事件**（data-model §5.2）：`device.paired`、`device.updated`（改名、改角色、续期换钥）、`device.revoked`。均为全局事件（`project_id = null`）；`actor`：配对 `{system, pki}`，API 触发为 `{device, dev_…}`，recover 为 `{system, host_recover}`。事件 `data` 不含令牌、私钥、CSR。
 - **日志**（结构化）：配对会话创建 / 兑换 / 作废（令牌只记哈希前 8 位）、握手拒绝（原因、序列号，不含证书全文）、证书签发（kind、serial、subject CN、notAfter）、续签结果、`recover` 的执行者 uid 与参数、启动自检结果。
 - **指标**：`pki_handshake_total{result,reason}`、`pki_pairing_attempts_total{result}`（`ok` / `token_invalid` / `validation` / `voided`；失败突增 = 安全信号，应告警）、`pki_certs_issued_total{kind}`、`pki_cert_expiry_seconds{kind=root|intermediate|server}` 与设备证书最小剩余（仪表）、`pki_active_devices{role}`、`pki_pairing_window_open`（仪表）、`pki_revocations_total`。
 - **告警建议**：服务端叶子剩余 < 14 天；中间 CA 剩余 < 90 天；配对失败 5 分钟内 > N；启动自检失败；`unknown_serial` 握手拒绝出现（可能是备份恢复或伪造）。
-- **健康**：并入 `GET /v1/settings/status` 之外的运维健康检查（`ok` / `degraded` / `unhealthy`）。
+- **健康**：`pki` 不消费 settings，不在 `GET /v1/settings/status` 的 `modules` 列表里；健康（`ok` / `degraded` / `unhealthy`：续签失败、`secrets` 读不到、启动自检失败）由 `deploy` 的运维健康检查读取。
 
 ## 12. 测试与验收
 
@@ -514,7 +521,7 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 
 - [ ] `platform = ios` 配对成功并如实记录；配对串长度能放进二维码（版本 ≤ 10，纠错级别 M）；`api` 对该设备给出 `mobile` 档案（联调）。
 
-**模糊 / 属性测试（建议）**
+**模糊测试（fuzzing）/ 属性测试（property-based testing）（建议）**
 
 - [ ] 对 CSR 解析、令牌解析、配对请求体做 `cargo fuzz`：无 panic、无超时、无内存增长。
 - [ ] 属性：任意并发的 `redeem` / `revoke` / `set_role` 序列下，恒有"设备 `revoked` 则其所有证书 `revoked`"、"至多一台设备在创建时被赋予 approver（当时库为空）"。

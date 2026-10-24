@@ -2,7 +2,7 @@
 
 > 状态：设计 v0.1 · 里程碑：M1 起（M0 出契约与 `FakeForge`，M1–M3 逐步交付，见 §1.1）· 泳道：`be-forge`（[milestones.md](../milestones.md)）· crate / 目录：`crates/gantry-forge`
 
-`forge` 是 Gantry 与 GitHub 之间唯一的通道：所有对 GitHub 的写都经它的 Outbox（发件箱）执行，所有来自 GitHub 的事实都经它回读、去重、归一化之后才进入事件日志。
+`forge` 是 Gantry 与 GitHub 之间唯一的通道：所有对 GitHub 的写都经它的发件箱（Outbox）执行，所有来自 GitHub 的事实都经它回读、去重、归一化之后才进入事件日志。
 
 > 实现者读法：本规格书只写"这个模块怎么做、怎么验收"，**不重复**契约。动作目录、幂等键算法、崩溃点矩阵、ForgeEvent 目录、权限与限流数值的权威定义都在 [interfaces/forge-actions.md](../interfaces/forge-actions.md)（下文简称 FA），本文用"FA §x"引用；冲突时按 [AGENTS.md](../../AGENTS.md) 的优先级处理，并登记到 §13。标注"需核实"的 GitHub 行为不要当作事实写进代码，先做 spike 核实。
 
@@ -21,7 +21,7 @@
 
 **归一化（normalization）**
 
-- 把 webhook 当作"提示"：按 `(repo, PR 或 Issue)` 分邮箱串行处理，窗口内合并，**回读** GitHub 当前状态，与本地快照比较，由**状态差异**产生 `ForgeEvent`（FA §5.4、§6）。保证已去重、已对账、单目标有序、陈旧标记（FA §6.1 G1–G5）。
+- 把 webhook 当作"提示"：按 `(repo, PR 或 Issue)` 分邮箱（mailbox）串行处理，窗口内合并，**回读** GitHub 当前状态，与本地快照比较，由**状态差异**产生 `ForgeEvent`（FA §5.4、§6）。保证已去重、已对账、单目标有序、陈旧标记（FA §6.1 G1–G5）。
 - 维护 `IssueRef` / `PullRequestRef` 快照（含 `head_epoch` 等 forge 内部字段），每次变化追加 `forge.synced`。
 
 **自身事件识别**
@@ -292,8 +292,8 @@ CREATE TABLE forge_snapshot_ext (            -- 快照里 data-model 没有的 f
   PRIMARY KEY (project_id, kind, number)
 );
 CREATE TABLE forge_effect_index (            -- 自身事件归因的反查索引（预期效果与 github_ref 同写）
-  effect_kind TEXT NOT NULL,                 -- pr | branch | comment | thread | issue | marker
-  effect_key  TEXT NOT NULL,                 -- 如 "acme/shop-api#57"、"acme/shop-api:comment:123"
+  effect_kind TEXT NOT NULL,                 -- pr_head | pr | branch | comment | thread | issue | marker
+  effect_key  TEXT NOT NULL,                 -- 如 "acme/shop-api:gantry/42-x->main"（pr_head）、"acme/shop-api#57"（pr）
   action_id   TEXT NOT NULL, delivery_id TEXT NOT NULL, created_at TEXT NOT NULL,
   PRIMARY KEY (effect_kind, effect_key)
 );
@@ -627,11 +627,11 @@ pub trait TokenProvider {
 
 **替身**：`FakeGitHub`（本模块自建的 HTTP 级替身，见下）、`FakeRepo`（M0，镜像仓与提交）、`FakePolicy`（Approval 行与 `patch.validated` 记录）、`FakeSecrets`、`TestClock`（可拨快的时钟）、`MemStore`（`store` 的内存实现，F-OQ-14）、故障注入点（`fail` crate 或等价物）。`FakeForge`（M0）不用于测试本模块，而是**被**本模块的一致性测试约束（D 组）。
 
-**`FakeGitHub`**：进程内 axum 服务，实现被测路径所需的 REST / GraphQL / git-http 子集，状态在内存里（仓库、分支、PR、评论、review、check、Issue、合并队列）；可注入：投递 webhook（自动签名，可重复、乱序、丢弃）、响应丢失（变更成功但连接断开）、`403 + retry-after`、`401`、`5xx`、延迟、"要求签名提交"规则、权限集合。`M0` 替身清单没有它（F-OQ-14），由本模块在 M1 交付。
+**`FakeGitHub`**：进程内 axum 服务，实现被测路径所需的 REST / GraphQL / git-http 子集，状态在内存里（仓库、分支、PR、评论、review、check、Issue、合并队列）；可注入：投递 webhook（自动签名，可重复、乱序、丢弃）、响应丢失（变更成功但连接断开）、`403 + retry-after`、`401`、`5xx`、延迟、"要求签名提交"规则、权限集合。milestones 的 M0 替身清单里没有它（F-OQ-14），由本模块在 M1 交付。
 
 ### A. M1 退出标准（本泳道可独立验证的部分）
 
-- [ ] **重复投递**：同一 `X-GitHub-Delivery` 投递两次 → `forge_webhook_inbox` 一行、只产生一组 `ForgeEvent`，`FakeGitHub` 上只有一个 PR（首次 202，二次 200）。
+- [ ] **重复投递**：同一 `X-GitHub-Delivery` 投递两次 → `forge_webhook_inbox` 一行、只产生一组 `ForgeEvent`，`FakeGitHub` 上只有一个 PR（首次 202，二次 200）。M1 没有评论类动作，"不产生重复评论"由 B 组第 1–2 条在 M2 用 `upsert_status_comment` 复验。
 - [ ] **同一事实不同 GUID**：`push` 与 `pull_request.synchronize` 各一条投递 → 只有一个 `pr_synchronized`（快照差异 + `dedup_key`）。
 - [ ] **创建 PR 后写库前崩溃**：在"变更调用成功、记录之前"注入崩溃 → 重启后 probe 命中（按 marker 与作者），补记 `github_ref`，动作 `succeeded`，`FakeGitHub` 上 PR 数仍为 1。
 - [ ] **崩溃矩阵**：对 `push_branch`、`create_pr`、`close_issue`、`merge_pr` 在 FA §2.3 的每个崩溃点（claim 前、claim 后变更前、变更后记录前、记录后、多步中间）注入崩溃，重放结果一致。
@@ -681,7 +681,7 @@ pub trait TokenProvider {
 | # | 问题 | 影响 | 本文暂用 |
 | --- | --- | --- | --- |
 | F-OQ-1 | **冲突**：milestones M2 退出标准要求"改动 `.github/workflows/` 的补丁签名批准后才提交推送"，但 FA §9.2 / §9.5 规定 App **不申请** `Workflows` 权限（出现即拒绝启动），而没有该权限的 App 令牌无法推送 workflow 文件改动（需核实）。需用户决定：给 App 加 `Workflows: write`（并改 FA §9.2 / §9.5 与审批类别）、改由人手动推送、或改 M2 退出标准 | `push_branch` 的 M2 审批路径、`policy` 路径规则审批 | 不实现该路径；推送会 `permission_denied` |
-| F-OQ-2 | 本文取 GitHub 行为的全部"需核实"项见 FA §13；另有本文新增的待核实点：GraphQL 在安装令牌下的字段可用性、`x-access-token` 用户名、Actions 日志下载的重定向与鉴权头、`GET /app/installations/{id}` 的返回结构、`refs/pull/N/head` 拉取、`merge_queue_enabled` 的探测方式 | M1–M2 | 均标"需核实"，spike 后定 |
+| F-OQ-2 | GitHub 行为的"需核实"项汇总在 FA §13；本文新增的待核实点：GraphQL 在安装令牌下的字段可用性、`x-access-token` 用户名、Actions 日志下载的重定向与鉴权头、`GET /app/installations/{id}` 的返回结构、`refs/pull/N/head` 拉取、`merge_queue_enabled` 的探测方式 | M1–M2 | 均标"需核实"，spike 后定 |
 | F-OQ-3 | `store` 的事务接口：`forge` 私有表、事件追加、`outbox` 表能否在同一事务；事件表 `dedup_key` 唯一索引；原子 claim；事件订阅游标。`store` 规格书未成稿 | 崩溃点矩阵、G1 | 假定 `store` 提供事务句柄与上述能力 |
 | F-OQ-4 | `repo` 端口：`MirrorPort` 形状、拉取与 `repo` 的 gc / 清理如何协调、refspec 命名空间、`repo` 如何请求"现在拉取一次"、`commit_info` | 镜像、`push_branch` 复核 | §6 草案 |
 | F-OQ-5 | 依赖图缺口：`forge` 还依赖 `policy`（读审批、`consume`、读补丁校验记录）；`approval.consumed` 由 `forge` 通知 `policy` 追加还是 `forge` 直接追加；成功与 `consume` 无法同事务 | 模块地图、审批一致性 | 事务后 `consume`，启动补做 |
