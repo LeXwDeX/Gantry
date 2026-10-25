@@ -1,0 +1,11 @@
+{
+  "id": "inb_01JB7P2K6R9T3X5N8Q1V4W7YZJ",
+  "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+  "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+  "kind": "approval_needed",
+  "severity": "blocker",
+  "summary": "PR #12 可以合并，需要你的审批。",
+  "payload": { "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK" },
+  "status": "open",
+  "dedup_key": "approval:apr_01JB7P4M8T2X6N9R3Q5K1V7WZK"
+}

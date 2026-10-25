@@ -1,0 +1,117 @@
+{
+  "push_branch": {
+    "repo": "acme/shop-api",
+    "branch": "gantry/42-fix-pagination",
+    "base_ref": "main",
+    "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+    "local_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+    "expected_tree_oid": "3b9d5e0c2f7a41868d0e5c1a9b7f2d4e6a8c0b13",
+    "expected_remote_oid": null,
+    "validation_ref": "sha256:5b1f0c2a9e7d4f3b8a6c1d0e2f4a5b7c9d1e3f50a2b4c6d8e0f1a3b5c7d9e1f3",
+    "transport": "git",
+    "force": false
+  },
+  "create_pr": {
+    "repo": "acme/shop-api",
+    "head": "gantry/42-fix-pagination",
+    "base": "main",
+    "title": "Fix pagination off-by-one in /orders",
+    "body": "Fixes the off-by-one when page size divides total count.",
+    "draft": false,
+    "closes": [42],
+    "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+    "maintainer_can_modify": false
+  },
+  "update_pr": {
+    "repo": "acme/shop-api",
+    "pull_number": 57,
+    "title": "Fix pagination off-by-one in /orders (#42)",
+    "body": null,
+    "base": null,
+    "state": null
+  },
+  "upsert_status_comment": {
+    "repo": "acme/shop-api",
+    "target": { "type": "pr", "number": 57 },
+    "slot": "delivery_status",
+    "revision": 7,
+    "head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486",
+    "title": "Gantry 状态",
+    "items": [
+      { "id": "build", "state": "passed", "label": "实现与本地校验" },
+      { "id": "ci", "state": "running", "label": "CI", "detail": "2/5 个 check 已完成" },
+      { "id": "review", "state": "pending", "label": "评审" },
+      { "id": "merge", "state": "blocked", "label": "合并", "detail": "等待用户在 GitHub 上 approve" }
+    ]
+  },
+  "create_comment": {
+    "repo": "acme/shop-api",
+    "target": { "type": "issue", "number": 42 },
+    "client_ref": "p2",
+    "body": "A fix is ready and will be linked here once the PR is opened."
+  },
+  "reply_review_thread": {
+    "repo": "acme/shop-api",
+    "pull_number": 57,
+    "thread_node_id": "PRRT_kwDOabc123_example",
+    "in_reply_to_comment_id": 1893456721,
+    "body": "已在 f2c03d8 中修正：分页上界改为 ceil(total / size)。"
+  },
+  "resolve_review_thread": {
+    "repo": "acme/shop-api",
+    "pull_number": 57,
+    "thread_node_id": "PRRT_kwDOabc123_example",
+    "expected_comment_count": 2,
+    "reason": "fixed_in_commit",
+    "fixed_in_oid": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+  },
+  "create_issue": {
+    "repo": "acme/shop-api",
+    "client_ref": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM:followup:1",
+    "title": "Follow-up: add regression test for empty result pages",
+    "body": "由 Gantry 在处理 #42 时发现，范围超出 #42，另开跟进。",
+    "labels": ["gantry/follow-up"],
+    "assignees": [],
+    "milestone": null
+  },
+  "update_issue": {
+    "repo": "acme/shop-api",
+    "number": 42,
+    "spec_block_markdown": "### 验收标准\n- [ ] 当总数恰为页大小整数倍时，最后一页不再多出一页\n- [ ] 新增回归测试覆盖 size=10,total=20",
+    "expected_block_hash": null,
+    "title": null,
+    "labels": null
+  },
+  "close_issue": {
+    "repo": "acme/shop-api",
+    "number": 42,
+    "state_reason": "completed",
+    "require_merged_pr": 57
+  },
+  "add_labels": {
+    "repo": "acme/shop-api",
+    "number": 57,
+    "labels": ["gantry/auto"]
+  },
+  "request_reviewers": {
+    "repo": "acme/shop-api",
+    "pull_number": 57,
+    "reviewers": ["alice"],
+    "team_reviewers": []
+  },
+  "merge_pr": {
+    "repo": "acme/shop-api",
+    "pull_number": 57,
+    "expected_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+    "merge_method": "squash",
+    "mode": "auto",
+    "commit_title": "Fix pagination off-by-one in /orders (#57)",
+    "commit_message": "Closes #42"
+  },
+  "rerun_failed_jobs": {
+    "repo": "acme/shop-api",
+    "run_id": 9876543210,
+    "expected_run_attempt": 1,
+    "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+  }
+}

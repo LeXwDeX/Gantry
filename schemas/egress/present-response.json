@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "present": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9._-]{0,63}$": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "required": [
+    "present"
+  ],
+  "title": "PresentResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::PresentResponse"
+}

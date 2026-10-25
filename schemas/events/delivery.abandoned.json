@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "by": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "by"
+  ],
+  "description": "`delivery.abandoned`：`reason`（api.md §4.4，≤ 500 字符）、`by`（engine.md §11）。",
+  "title": "DeliveryAbandonedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "delivery.abandoned",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

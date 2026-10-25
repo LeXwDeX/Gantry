@@ -1,0 +1,568 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_inb"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_prj"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "delivery_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "kind": {
+      "$ref": "#/$defs/InboxKind"
+    },
+    "severity": {
+      "$ref": "#/$defs/Severity"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "payload": {
+      "$ref": "#/$defs/InboxPayload"
+    },
+    "status": {
+      "$ref": "#/$defs/InboxStatus"
+    },
+    "dedup_key": {
+      "type": "string"
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "severity",
+    "summary",
+    "payload",
+    "status",
+    "dedup_key",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "InboxItem",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_inb": {
+      "type": "string",
+      "pattern": "^inb_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "InboxKind": {
+      "type": "string",
+      "enum": [
+        "approval_needed",
+        "decision_needed",
+        "spec_needed",
+        "budget_exhausted",
+        "escalation",
+        "security_finding"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warn",
+        "blocker"
+      ]
+    },
+    "InboxPayload": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "approval_id": {
+              "$ref": "#/$defs/Id_apr"
+            }
+          },
+          "required": [
+            "approval_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/DecisionKind"
+            },
+            "reason_code": {
+              "$ref": "#/$defs/ReasonCode"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InboxOption"
+              }
+            },
+            "node_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id_nod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "patch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PatchRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "kind",
+            "reason_code",
+            "options"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "missing": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MissingAspect"
+              }
+            }
+          },
+          "required": [
+            "missing"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dimension": {
+              "$ref": "#/$defs/BudgetDimension"
+            },
+            "limit": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "used": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InboxOption"
+              }
+            }
+          },
+          "required": [
+            "dimension",
+            "limit",
+            "used",
+            "options"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason_code": {
+              "$ref": "#/$defs/ReasonCode"
+            },
+            "node_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id_nod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "attempt_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id_att"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "target_level": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Level"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EvidenceRef"
+              }
+            },
+            "options": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/InboxOption"
+              },
+              "default": null
+            }
+          },
+          "required": [
+            "reason_code",
+            "evidence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/Ref"
+            },
+            "finding": {
+              "$ref": "#/$defs/SecurityFinding"
+            },
+            "attempt_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id_att"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "source",
+            "finding"
+          ]
+        }
+      ]
+    },
+    "Id_apr": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "DecisionKind": {
+      "type": "string",
+      "enum": [
+        "gate_reject",
+        "manual_action",
+        "review_dispute",
+        "other"
+      ]
+    },
+    "ReasonCode": {
+      "type": "string",
+      "pattern": "^[a-z0-9_.:-]{1,200}$"
+    },
+    "InboxOption": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "primary": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "PatchRef": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "ref",
+        "paths"
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "MissingAspect": {
+      "type": "object",
+      "properties": {
+        "aspect": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "aspect",
+        "question"
+      ]
+    },
+    "BudgetDimension": {
+      "type": "string",
+      "enum": [
+        "tokens_by_tier.utility",
+        "tokens_by_tier.planner",
+        "tokens_by_tier.worker",
+        "nodes",
+        "rounds",
+        "wall_time",
+        "concurrency",
+        "forge_writes"
+      ]
+    },
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Level": {
+      "type": "string",
+      "enum": [
+        "None",
+        "Low",
+        "Medium",
+        "High",
+        "Max",
+        "Ultimate"
+      ],
+      "description": "线上档位值：`\"None\"`…`\"Ultimate\"`。"
+    },
+    "EvidenceRef": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Ref"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/EvidenceKind"
+            },
+            "ref": {
+              "$ref": "#/$defs/Sha256Digest"
+            }
+          },
+          "required": [
+            "kind",
+            "ref"
+          ]
+        }
+      ]
+    },
+    "Ref": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "issue"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pr"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "worktree"
+            },
+            "id": {
+              "$ref": "#/$defs/Id_wtr"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "delivery"
+            },
+            "id": {
+              "$ref": "#/$defs/Id_dlv"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "EvidenceKind": {
+      "type": "string",
+      "enum": [
+        "result"
+      ]
+    },
+    "SecurityFinding": {
+      "type": "object",
+      "properties": {
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "category": {
+          "type": "string"
+        },
+        "title": {
+          "$ref": "#/$defs/UntrustedText"
+        }
+      },
+      "required": [
+        "severity",
+        "category",
+        "title"
+      ]
+    },
+    "UntrustedText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "source",
+        "truncated"
+      ],
+      "description": "来自 GitHub、沙盒或其他外部来源的文本。\n\n刻意不实现 `Deref<Target = str>`、`Display`、`AsRef<str>`；取内容必须调用\n[`UntrustedText::as_untrusted_str`]，`Debug` 不输出正文。"
+    },
+    "InboxStatus": {
+      "type": "string",
+      "enum": [
+        "open",
+        "resolved",
+        "dismissed"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "entities::InboxItem"
+}

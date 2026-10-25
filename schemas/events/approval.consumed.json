@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "approval_id": {
+      "$ref": "#/$defs/Id_apr"
+    },
+    "consumed_by": {
+      "type": "string"
+    },
+    "subject_digest": {
+      "$ref": "#/$defs/SubjectDigest"
+    }
+  },
+  "required": [
+    "approval_id",
+    "consumed_by",
+    "subject_digest"
+  ],
+  "description": "`approval.consumed`（policy.md §7.5；P-54）。",
+  "title": "ApprovalConsumedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_apr": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "SubjectDigest": {
+      "type": "string",
+      "pattern": "^(sha256:[0-9a-f]{64}|[0-9a-f]{40})$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "approval.consumed",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

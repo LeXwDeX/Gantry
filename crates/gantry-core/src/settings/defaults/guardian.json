@@ -1,0 +1,12 @@
+{
+  "triage": {
+    "ci_failure_in_scope": "silent_fix",
+    "bot_finding_valid": "silent_fix",
+    "bot_finding_invalid": "silent_reply",
+    "nit": "batch",
+    "mechanical_conflict": "escalate"
+  },
+  "no_progress": { "same_class_repeats": 2, "stalled_rounds": 2 },
+  "status_checklist": { "enabled": true, "min_update_interval_s": 30 },
+  "patrol_interval_s": 1800
+}

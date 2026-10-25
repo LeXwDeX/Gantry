@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "applied_rev": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "applied_rev"
+  ],
+  "title": "ConfigApplyResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::ConfigApplyResponse"
+}

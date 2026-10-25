@@ -1,0 +1,8 @@
+{"v":1,"seq":1,"type":"hello","job_id":"att_01JBX4Q9ZK3M8T5V2N7RHC6WYD","agent":"claude-code","agent_version":"x.y.z"}
+{"v":1,"seq":2,"type":"stage","stage":"explore","detail":"reading src/api/items.rs"}
+{"v":1,"seq":3,"type":"tool","phase":"start","call_id":"c1","tool":"Bash","summary":"cargo test -p api items::pagination"}
+{"v":1,"seq":4,"type":"tool","phase":"end","call_id":"c1","tool":"Bash","ok":true,"duration_ms":4210}
+{"v":1,"seq":5,"type":"usage","input_tokens":18200,"output_tokens":2400,"cache_read_tokens":9000,"cache_write_tokens":1200,"turns":3}
+{"v":1,"seq":6,"type":"heartbeat","in_flight":1}
+{"v":1,"seq":7,"type":"warn","code":"material_truncated","detail":"mat-002 was truncated by the server"}
+{"v":1,"seq":8,"type":"finish","status":"succeeded"}

@@ -1,0 +1,12 @@
+{
+  "repo": "acme/shop-api",
+  "branch": "gantry/42-fix-pagination",
+  "base_ref": "main",
+  "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+  "local_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+  "expected_tree_oid": "3b9d5e0c2f7a41868d0e5c1a9b7f2d4e6a8c0b13",
+  "expected_remote_oid": null,
+  "validation_ref": "sha256:5b1f0c2a9e7d4f3b8a6c1d0e2f4a5b7c9d1e3f50a2b4c6d8e0f1a3b5c7d9e1f3",
+  "transport": "git",
+  "force": false
+}

@@ -1,0 +1,11 @@
+{
+  "type": "urn:gantry:problem:stale_head",
+  "title": "Approval head is stale",
+  "status": 409,
+  "code": "stale_head",
+  "detail": "PR head moved from 9f2c4e7a1b3d to 41ab93c0d2e4; the approval was invalidated.",
+  "instance": "/v1/approvals/apr_01JB7P4M8T2X6N9R3Q5K1V7WZK/grant",
+  "request_id": "01JB7P9Z3K5R8T2X6N1Q4V7WYA",
+  "current_head_sha": "41ab93c0d2e4f6a81b3c5d7e9f0a2b4c6d8e0f13",
+  "approval_status": "invalidated"
+}

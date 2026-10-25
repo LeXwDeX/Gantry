@@ -1,0 +1,210 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "$ref": "#/$defs/Id_att"
+    },
+    "sha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "base_sha": {
+      "$ref": "#/$defs/GitOid"
+    },
+    "result_tree": {
+      "$ref": "#/$defs/GitOid"
+    },
+    "verdict": {
+      "$ref": "#/$defs/PatchVerdict"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PatchFile"
+      }
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PatchReason"
+      }
+    },
+    "config_rev": {
+      "$ref": "#/$defs/Seq"
+    }
+  },
+  "required": [
+    "job_id",
+    "sha256",
+    "base_sha",
+    "result_tree",
+    "verdict",
+    "files",
+    "reasons",
+    "config_rev"
+  ],
+  "description": "`patch.validated`（repo.md §11）。复用 worker 协议的 `ValidatedPatch` 组成字段。",
+  "title": "PatchValidatedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "PatchVerdict": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "needs_approval",
+        "deny"
+      ]
+    },
+    "PatchFile": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/RepoPath"
+        },
+        "status": {
+          "$ref": "#/$defs/FileStatus"
+        },
+        "old_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "new_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "added": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        },
+        "deleted": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        },
+        "is_binary": {
+          "type": "boolean"
+        },
+        "is_symlink": {
+          "type": "boolean"
+        },
+        "is_submodule": {
+          "type": "boolean"
+        },
+        "size_after": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "is_binary",
+        "is_symlink",
+        "is_submodule"
+      ]
+    },
+    "RepoPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "FileStatus": {
+      "type": "string",
+      "enum": [
+        "added",
+        "modified",
+        "deleted",
+        "mode_only"
+      ]
+    },
+    "FileMode": {
+      "type": "string",
+      "enum": [
+        "100644",
+        "100755",
+        "120000",
+        "160000"
+      ]
+    },
+    "PatchReason": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/PolicyCode"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rule_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "code"
+      ]
+    },
+    "PolicyCode": {
+      "type": "string"
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "patch.validated",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

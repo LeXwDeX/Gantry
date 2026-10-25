@@ -1,0 +1,14 @@
+{
+  "groups": {
+    "model_api": { "hosts": ["api.anthropic.com"] },
+    "npm": { "hosts": ["registry.npmjs.org"] },
+    "pypi": { "hosts": ["pypi.org", "files.pythonhosted.org"] },
+    "crates": { "hosts": ["crates.io", "index.crates.io", "static.crates.io"] },
+    "go": { "hosts": ["proxy.golang.org", "sum.golang.org"] }
+  },
+  "profiles": {
+    "default": { "groups": ["model_api"] }
+  },
+  "default_profile": "default",
+  "injection": {}
+}

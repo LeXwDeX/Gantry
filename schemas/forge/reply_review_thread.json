@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "pull_number": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "thread_node_id": {
+      "type": "string"
+    },
+    "in_reply_to_comment_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "body": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "repo",
+    "pull_number",
+    "thread_node_id",
+    "in_reply_to_comment_id",
+    "body"
+  ],
+  "title": "ReplyReviewThreadPayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "ReplyReviewThreadPayload",
+  "x-gantry-action-kind": "reply_review_thread"
+}

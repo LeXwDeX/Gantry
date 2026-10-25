@@ -1,0 +1,17 @@
+{
+  "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+  "state": "revoked",
+  "revoked_at": "2026-10-24T12:58:49.310Z",
+  "usage": {
+    "input_tokens": 415200,
+    "output_tokens": 18100,
+    "cache_read_tokens": 351000,
+    "cache_write_tokens": 21000,
+    "requests": 26
+  },
+  "weighted_tokens": 567050,
+  "capped": false,
+  "incomplete": false,
+  "upstream_errors": { "total_5xx": 0, "total_429": 1, "total_conn_errors": 0, "max_consecutive": 1, "last_at": "2026-10-24T12:47:12.004Z" },
+  "denied": { "not_allowed_host": 2, "path_not_allowed": 0, "budget_exhausted": 0 }
+}

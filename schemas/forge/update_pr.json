@@ -1,0 +1,68 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "pull_number": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "body": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "base": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "repo",
+    "pull_number"
+  ],
+  "title": "UpdatePrPayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "PrState": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "UpdatePrPayload",
+  "x-gantry-action-kind": "update_pr"
+}

@@ -1,0 +1,183 @@
+[
+  {
+    "id": "delivery-stage-missing-to",
+    "schema": "schemas/events/delivery.stage_changed.json",
+    "rust": "event:delivery.stage_changed",
+    "event_type": "delivery.stage_changed",
+    "data": {
+      "from": "spec"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "delivery-stage-missing-status",
+    "schema": "schemas/events/delivery.stage_changed.json",
+    "rust": "event:delivery.stage_changed",
+    "event_type": "delivery.stage_changed",
+    "data": {
+      "from": "spec",
+      "to": "plan"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "inbox-raised-flat-shape",
+    "schema": "schemas/events/inbox.raised.json",
+    "rust": "event:inbox.raised",
+    "event_type": "inbox.raised",
+    "data": {
+      "id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "kind": "approval_needed",
+      "severity": "blocker",
+      "summary": "需要审批",
+      "payload": {
+        "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK"
+      },
+      "status": "open",
+      "dedup_key": "approval:apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "attempt-progress-contract-undefined",
+    "schema": "schemas/events/attempt.progress.json",
+    "rust": "event:attempt.progress",
+    "event_type": "attempt.progress",
+    "data": {},
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "settings-updated-secret-value",
+    "schema": "schemas/events/settings.updated.json",
+    "rust": "event:settings.updated",
+    "event_type": "settings.updated",
+    "data": {
+      "scope": "global",
+      "resource": "models",
+      "schema_version": 1,
+      "base_rev": 1,
+      "value": {
+        "models": {
+          "providers": {
+            "anthropic": {
+              "credential": {
+                "secret_ref": "model.anthropic.main",
+                "value": "leaked"
+              }
+            }
+          }
+        }
+      },
+      "relaxes": [],
+      "secret_changes": []
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "egress-present-extra-key",
+    "schema": "schemas/egress/present-request.json",
+    "rust": "egress::PresentRequest",
+    "data": {
+      "refs": [],
+      "bogus": 1
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "outbox-action-kind-payload-mismatch",
+    "schema": "schemas/forge/outbox-action.json",
+    "rust": "entities::OutboxAction",
+    "data": {
+      "id": "act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+      "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+      "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+      "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+      "kind": "push_branch",
+      "payload": {
+        "repo": "acme/shop-api",
+        "head": "gantry/42-fix-pagination",
+        "base": "main",
+        "title": "Fix pagination off-by-one in /orders",
+        "body": "Fixes the off-by-one when page size divides total count.",
+        "draft": false,
+        "closes": [42],
+        "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+        "maintainer_can_modify": false
+      },
+      "requires_approval": null,
+      "depends_on": [],
+      "priority": "normal",
+      "not_before": null,
+      "epoch": 0,
+      "status": "queued",
+      "attempts": 0,
+      "lease_until": null,
+      "last_error": null,
+      "expected_effects": [],
+      "github_ref": null,
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "outbox-enqueue-envelope-unknown-module",
+    "schema": "schemas/forge/outbox-enqueue-envelope.json",
+    "rust": "forge::OutboxEnqueueEnvelope",
+    "data": {
+      "id": "act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+      "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+      "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+      "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+      "kind": "create_pr",
+      "payload": {
+        "repo": "acme/shop-api",
+        "head": "gantry/42-fix-pagination",
+        "base": "main",
+        "title": "Fix pagination off-by-one in /orders",
+        "body": "Fixes the off-by-one when page size divides total count.",
+        "draft": false,
+        "closes": [42],
+        "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+        "maintainer_can_modify": false
+      },
+      "requires_approval": null,
+      "depends_on": ["act_01JBA1F2N8SW1M6A4C7G9K3QTB"],
+      "priority": "high",
+      "not_before": null,
+      "epoch": 0,
+      "enqueued_by": {
+        "module": "scheduler",
+        "causation_id": "evt_01JBA1G8S2WY4Z6B9D1F3H5KNP"
+      }
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  }
+]

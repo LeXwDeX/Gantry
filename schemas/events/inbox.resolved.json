@@ -1,0 +1,91 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "inbox_id": {
+      "$ref": "#/$defs/Id_inb"
+    },
+    "resolution": {
+      "$ref": "#/$defs/InboxResolution"
+    },
+    "option_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "message_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_msg"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "approval_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_apr"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "inbox_id",
+    "resolution"
+  ],
+  "title": "InboxResolvedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_inb": {
+      "type": "string",
+      "pattern": "^inb_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "InboxResolution": {
+      "type": "string",
+      "enum": [
+        "chosen",
+        "answered",
+        "approval_settled",
+        "delivery_closed",
+        "delivery_abandoned",
+        "superseded",
+        "external",
+        "system"
+      ]
+    },
+    "Id_msg": {
+      "type": "string",
+      "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_apr": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "inbox.resolved",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

@@ -1,0 +1,21 @@
+{
+  "id": "inb_01JB7P3M7S1T4X6N9Q2V5W8YZK",
+  "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+  "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+  "kind": "escalation",
+  "severity": "warn",
+  "summary": "改动触及 auth 路径，需要升到 Max 才能插入对抗评审。",
+  "payload": {
+    "reason_code": "level_cap_exceeded",
+    "node_id": null,
+    "attempt_id": null,
+    "evidence": [{ "kind": "pr", "repo": "acme/web", "number": 12 }],
+    "options": [
+      { "id": "upgrade", "label": "升到 Max 并继续", "primary": true },
+      { "id": "narrow", "label": "保持当前，缩小范围" },
+      { "id": "abandon", "label": "放弃" }
+    ]
+  },
+  "status": "open",
+  "dedup_key": "escalation:dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB:level_cap_exceeded:Max"
+}

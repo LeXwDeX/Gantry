@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "from": {
+      "$ref": "#/$defs/Level"
+    },
+    "to": {
+      "$ref": "#/$defs/Level"
+    },
+    "kind": {
+      "$ref": "#/$defs/LevelChangeKind"
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "from",
+    "to",
+    "kind",
+    "reason"
+  ],
+  "description": "`delivery.level_changed`（engine.md §11）：`effective` 只升（P-57）。",
+  "title": "DeliveryLevelChangedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Level": {
+      "type": "string",
+      "enum": [
+        "None",
+        "Low",
+        "Medium",
+        "High",
+        "Max",
+        "Ultimate"
+      ],
+      "description": "线上档位值：`\"None\"`…`\"Ultimate\"`。"
+    },
+    "LevelChangeKind": {
+      "type": "string",
+      "enum": [
+        "cap",
+        "effective"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "delivery.level_changed",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

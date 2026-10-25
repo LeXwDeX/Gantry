@@ -1,0 +1,1136 @@
+{
+  "oneOf": [
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "push_branch"
+            },
+            "payload": {
+              "$ref": "#/$defs/PushBranchPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "create_pr"
+            },
+            "payload": {
+              "$ref": "#/$defs/CreatePrPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "update_pr"
+            },
+            "payload": {
+              "$ref": "#/$defs/UpdatePrPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "upsert_status_comment"
+            },
+            "payload": {
+              "$ref": "#/$defs/UpsertStatusCommentPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "create_comment"
+            },
+            "payload": {
+              "$ref": "#/$defs/CreateCommentPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "reply_review_thread"
+            },
+            "payload": {
+              "$ref": "#/$defs/ReplyReviewThreadPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "resolve_review_thread"
+            },
+            "payload": {
+              "$ref": "#/$defs/ResolveReviewThreadPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "create_issue"
+            },
+            "payload": {
+              "$ref": "#/$defs/CreateIssuePayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "update_issue"
+            },
+            "payload": {
+              "$ref": "#/$defs/UpdateIssuePayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "close_issue"
+            },
+            "payload": {
+              "$ref": "#/$defs/CloseIssuePayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "add_labels"
+            },
+            "payload": {
+              "$ref": "#/$defs/AddLabelsPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request_reviewers"
+            },
+            "payload": {
+              "$ref": "#/$defs/RequestReviewersPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "merge_pr"
+            },
+            "payload": {
+              "$ref": "#/$defs/MergePrPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/OutboxEnqueueEnvelopeBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "rerun_failed_jobs"
+            },
+            "payload": {
+              "$ref": "#/$defs/RerunFailedJobsPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ]
+        }
+      ]
+    }
+  ],
+  "description": "forge-actions §2.1 的入队信封；`kind` 与 `payload` 必须联动。",
+  "title": "OutboxEnqueueEnvelope",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "OutboxEnqueueEnvelopeBase": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id_act"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/IdempotencyKey"
+        },
+        "project_id": {
+          "$ref": "#/$defs/Id_prj"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        "kind": {
+          "$ref": "#/$defs/ForgeActionKind"
+        },
+        "payload": true,
+        "requires_approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id_apr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id_act"
+          }
+        },
+        "priority": {
+          "$ref": "#/$defs/Priority"
+        },
+        "not_before": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "epoch": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "enqueued_by": {
+          "$ref": "#/$defs/EnqueuedBy"
+        }
+      },
+      "required": [
+        "id",
+        "idempotency_key",
+        "project_id",
+        "delivery_id",
+        "kind",
+        "payload",
+        "depends_on",
+        "priority",
+        "epoch",
+        "enqueued_by"
+      ],
+      "description": "仅用于生成 `OutboxEnqueueEnvelope` schema 的公共字段；不参与 serde。\n\n`kind`/`payload` 先用最宽类型占位，具体的 kind/payload 联动由外层 `oneOf`\n分支约束；`additionalProperties: false` 与 raw 解码的严格性一致。",
+      "additionalProperties": false
+    },
+    "Id_act": {
+      "type": "string",
+      "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "IdempotencyKey": {
+      "type": "string",
+      "pattern": "^gk1_[a-z2-7]{26}$"
+    },
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "ForgeActionKind": {
+      "type": "string",
+      "enum": [
+        "push_branch",
+        "create_pr",
+        "update_pr",
+        "upsert_status_comment",
+        "create_comment",
+        "reply_review_thread",
+        "resolve_review_thread",
+        "create_issue",
+        "update_issue",
+        "close_issue",
+        "add_labels",
+        "request_reviewers",
+        "merge_pr",
+        "rerun_failed_jobs"
+      ]
+    },
+    "Id_apr": {
+      "type": "string",
+      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Priority": {
+      "type": "string",
+      "enum": [
+        "high",
+        "normal",
+        "low"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "EnqueuedBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "module": {
+          "$ref": "#/$defs/EnqueuedByModule"
+        },
+        "causation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id_evt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "module"
+      ]
+    },
+    "EnqueuedByModule": {
+      "type": "string",
+      "enum": [
+        "engine",
+        "guardian"
+      ],
+      "description": "入队模块。规格书写 `{ module: \"engine\" | \"guardian\" }`。"
+    },
+    "Id_evt": {
+      "type": "string",
+      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "PushBranchPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "base_ref": {
+          "type": "string"
+        },
+        "worktree_id": {
+          "$ref": "#/$defs/Id_wtr"
+        },
+        "local_head_oid": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "expected_tree_oid": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "expected_remote_oid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "validation_ref": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "transport": {
+          "$ref": "#/$defs/PushTransport"
+        },
+        "force": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "branch",
+        "base_ref",
+        "worktree_id",
+        "local_head_oid",
+        "expected_tree_oid",
+        "validation_ref",
+        "transport",
+        "force"
+      ]
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "PushTransport": {
+      "type": "string",
+      "enum": [
+        "git",
+        "api"
+      ]
+    },
+    "CreatePrPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "head": {
+          "type": "string"
+        },
+        "base": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "closes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "expected_head_oid": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "maintainer_can_modify": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "head",
+        "base",
+        "title",
+        "body",
+        "draft",
+        "closes",
+        "expected_head_oid",
+        "maintainer_can_modify"
+      ]
+    },
+    "UpdatePrPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "pull_number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "repo",
+        "pull_number"
+      ]
+    },
+    "PrState": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed"
+      ]
+    },
+    "UpsertStatusCommentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "target": {
+          "$ref": "#/$defs/CommentTarget"
+        },
+        "slot": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "head_sha": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StatusCommentItem"
+          }
+        }
+      },
+      "required": [
+        "repo",
+        "target",
+        "slot",
+        "revision",
+        "head_sha",
+        "title",
+        "items"
+      ]
+    },
+    "CommentTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/CommentTargetType"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "number"
+      ]
+    },
+    "CommentTargetType": {
+      "type": "string",
+      "enum": [
+        "pr",
+        "issue"
+      ]
+    },
+    "StatusCommentItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/StatusCommentState"
+        },
+        "label": {
+          "type": "string"
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "label"
+      ]
+    },
+    "StatusCommentState": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "passed",
+        "failed",
+        "skipped",
+        "blocked"
+      ]
+    },
+    "CreateCommentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "target": {
+          "$ref": "#/$defs/CommentTarget"
+        },
+        "client_ref": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "target",
+        "client_ref",
+        "body"
+      ]
+    },
+    "ReplyReviewThreadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "pull_number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "thread_node_id": {
+          "type": "string"
+        },
+        "in_reply_to_comment_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "pull_number",
+        "thread_node_id",
+        "in_reply_to_comment_id",
+        "body"
+      ]
+    },
+    "ResolveReviewThreadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "pull_number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "thread_node_id": {
+          "type": "string"
+        },
+        "expected_comment_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string",
+          "description": "仅用于审计，不进幂等键。"
+        },
+        "fixed_in_oid": {
+          "$ref": "#/$defs/GitOid"
+        }
+      },
+      "required": [
+        "repo",
+        "pull_number",
+        "thread_node_id",
+        "expected_comment_count",
+        "reason",
+        "fixed_in_oid"
+      ]
+    },
+    "CreateIssuePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "client_ref": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "assignees": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "milestone": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "required": [
+        "repo",
+        "client_ref",
+        "title",
+        "body",
+        "labels",
+        "assignees"
+      ]
+    },
+    "UpdateIssuePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "spec_block_markdown": {
+          "type": "string"
+        },
+        "expected_block_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`null` 表示正文里还没有 Gantry 规格块（首次写入）。",
+          "default": null
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "labels": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "spec_block_markdown"
+      ]
+    },
+    "CloseIssuePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state_reason": {
+          "$ref": "#/$defs/IssueStateReason"
+        },
+        "require_merged_pr": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "state_reason"
+      ]
+    },
+    "IssueStateReason": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "not_planned"
+      ]
+    },
+    "AddLabelsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "labels"
+      ]
+    },
+    "RequestReviewersPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "pull_number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "team_reviewers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "repo",
+        "pull_number",
+        "reviewers",
+        "team_reviewers"
+      ]
+    },
+    "MergePrPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "pull_number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expected_head_sha": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "merge_method": {
+          "$ref": "#/$defs/MergeMethod"
+        },
+        "mode": {
+          "$ref": "#/$defs/MergeMode"
+        },
+        "commit_title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "commit_message": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "repo",
+        "pull_number",
+        "expected_head_sha",
+        "merge_method",
+        "mode"
+      ]
+    },
+    "MergeMethod": {
+      "type": "string",
+      "enum": [
+        "merge",
+        "squash",
+        "rebase"
+      ]
+    },
+    "MergeMode": {
+      "type": "string",
+      "enum": [
+        "auto"
+      ],
+      "description": "`mode` 目前只定义 `auto`；其他合并队列模式见 forge-actions OQ-1，未冻结前拒绝。"
+    },
+    "RerunFailedJobsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "run_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "expected_run_attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "head_sha": {
+          "$ref": "#/$defs/GitOid"
+        }
+      },
+      "required": [
+        "repo",
+        "run_id",
+        "expected_run_attempt",
+        "head_sha"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "ports::OutboxEnqueueEnvelope"
+}

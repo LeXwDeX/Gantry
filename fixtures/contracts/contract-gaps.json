@@ -1,0 +1,76 @@
+{
+  "generated_by": "manual; consumed by cargo xtask schemas --check",
+  "gaps": [
+    {
+      "id": "G-03",
+      "summary": "ConfigView.injection 形状未定义（egress-control §4.6 只有空对象示例）；生成器把该属性替换为拒绝型 schema",
+      "source": "docs/interfaces/egress-control.md#46",
+      "affects": [
+        "schemas/egress/config-view.json"
+      ]
+    },
+    {
+      "id": "G-04",
+      "summary": "forge drift 示例有丰富字段，core 只有无载荷的 DriftKind；drift schema 拒绝而不是伪造",
+      "source": "docs/interfaces/forge-actions.md#74",
+      "affects": [
+        "schemas/forge/drift.json",
+        "schemas/events/forge.drift_detected.json"
+      ]
+    },
+    {
+      "id": "G-05",
+      "summary": "core §7.5 的 14 个事件 data 形状未定；每个事件文件生成拒绝型 schema + x-gantry-unresolved",
+      "source": "docs/m0-contract-gaps.md",
+      "affects": [
+        "schemas/events/attempt.progress.json 等 14 个文件"
+      ]
+    },
+    {
+      "id": "G-13",
+      "summary": "egress-control §4.4 暂存示例的 request_id 为 25 位，core Ulid schema 要求 26 位；示例按 example 登记（原文与类型不一致）",
+      "source": "docs/interfaces/egress-control.md#44",
+      "affects": [
+        "fixtures/contracts/blocks/egress-control/L227.json"
+      ]
+    },
+    {
+      "id": "G-15",
+      "summary": "api.md §4.5 的 Message 示例 id 不是合法 26 位 ULID；示例按 example 登记，不能作为实现通过证据",
+      "source": "docs/interfaces/api.md#45",
+      "affects": [
+        "fixtures/contracts/blocks/api/L554.json"
+      ]
+    }
+  ],
+  "fixed": [
+    {
+      "id": "G-01",
+      "summary": "OutboxAction.payload 已改为按 kind 解码的 ActionPayload；新增 schemas/forge/outbox-action.json"
+    },
+    {
+      "id": "G-02",
+      "summary": "Proposal.params 已按 kind 收窄为 4 个强类型变体；proposals.schema.json 使用判别 oneOf"
+    },
+    {
+      "id": "G-14",
+      "summary": "ProposalsMode 已实现 worker-protocol §4.2 的 \"forbidden\" / {allowed_kinds,max} 线上形状；job/spec 夹具恢复 verify"
+    },
+    {
+      "id": "G-16",
+      "summary": "delivery.stage_changed 的 stage_status 已按 data-model §5.2 改为必填，并同步 OpenAPI 与夹具"
+    },
+    {
+      "id": "G-17",
+      "summary": "inbox.raised 已按 notify.md §7.3 统一为唯一 {item, supersedes?} 形状，移除扁平 InboxItem 的 untagged 兼容"
+    },
+    {
+      "id": "G-06",
+      "summary": "新增 ports::OutboxEnqueueEnvelope：独立可序列化/JsonSchema 的入队信封，含 enqueued_by；OutboxAction 仍不含该字段，ActorCtx 端口签名未变"
+    },
+    {
+      "id": "G-07",
+      "summary": "config.md §12 聚合文档按 8/6 个 resource 的生产 schema 与 *Patch 类型逐资源验证；不生成新 wrapper，示例省略字段的 catalog 仍标 partial"
+    }
+  ]
+}

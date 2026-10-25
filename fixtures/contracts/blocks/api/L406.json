@@ -1,0 +1,9 @@
+{
+  "id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+  "repo": "acme/web",
+  "installation_id": 48213907,
+  "bot_user_id": 9988776,
+  "default_branch": "main",
+  "allowed_merge_methods": ["squash", "merge"],
+  "merge_queue_enabled": false
+}

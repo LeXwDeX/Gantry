@@ -1,0 +1,77 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_prj"
+    },
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "installation_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "bot_user_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "default_branch": {
+      "type": "string"
+    },
+    "allowed_merge_methods": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MergeMethod"
+      }
+    },
+    "merge_queue_enabled": {
+      "type": "boolean"
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "repo",
+    "installation_id",
+    "bot_user_id",
+    "default_branch",
+    "allowed_merge_methods",
+    "merge_queue_enabled",
+    "created_at",
+    "updated_at"
+  ],
+  "description": "`project.added` / `project.updated`：data-model §3 的实体字段。",
+  "title": "ProjectEventData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "MergeMethod": {
+      "type": "string",
+      "enum": [
+        "merge",
+        "squash",
+        "rebase"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "project.updated",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

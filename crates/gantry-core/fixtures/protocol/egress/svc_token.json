@@ -1,0 +1,15 @@
+{
+  "request": {
+    "issued_to": { "process": "gantryd", "pid": 4182, "started_at": "2026-10-24T08:00:01.004Z" },
+    "ttl_s": 86400
+  },
+  "response": {
+    "svc_token_id": "svt_01JBX5A2C4E6G8J1L3N5Q7S9UW",
+    "svc_token": "gst1_Zt4Kp9Qm2Wx7Rb5Nc8Hv1Lj3Fd6Gs0Ay2Eu4Io6Ok8P",
+    "model_base_urls": {
+      "anthropic": "http://127.0.0.1:8082/s/gst1_Zt4Kp9Qm2Wx7Rb5Nc8Hv1Lj3Fd6Gs0Ay2Eu4Io6Ok8P/anthropic"
+    },
+    "expires_at": "2026-10-25T08:00:01.120Z",
+    "revoked_previous": ["svt_01JBWZ8M2P4R6T8V0X2Z4B6D8F"]
+  }
+}

@@ -1,0 +1,360 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "allow_globs": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "actions": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "add_labels": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "change_repo_settings": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "close_issue": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "create_comment": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "create_issue": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "create_pr": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "delete_branch": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "force_push": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "merge_pr": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "publish_release": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "push_branch": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "push_outside_prefix": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "reply_review_thread": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "request_reviewers": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "rerun_failed_jobs": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "resolve_review_thread": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "resolve_review_thread_human": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "update_issue": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "update_pr": {
+          "$ref": "#/$defs/Disposition"
+        },
+        "upsert_status_comment": {
+          "$ref": "#/$defs/Disposition"
+        }
+      }
+    },
+    "unlisted_action": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UnlistedDisposition"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "paths": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/PathRulePatch"
+      }
+    },
+    "escalation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EscalationPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "approval": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApprovalPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "patch": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PatchLimitsPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "title": "PoliciesPatch",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Disposition": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "approve",
+        "deny"
+      ]
+    },
+    "UnlistedDisposition": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "deny"
+      ]
+    },
+    "PathRulePatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "globs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PathDisposition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PathDisposition": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "deny"
+      ]
+    },
+    "EscalationPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rules": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/$defs/EscalationRule"
+          }
+        }
+      }
+    },
+    "EscalationRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "$ref": "#/$defs/EscalationWhen"
+        },
+        "raise_to": {
+          "$ref": "#/$defs/EscalationLevel"
+        }
+      },
+      "required": [
+        "when",
+        "raise_to"
+      ]
+    },
+    "EscalationWhen": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WhenPaths"
+        },
+        {
+          "$ref": "#/$defs/WhenDiff"
+        },
+        {
+          "$ref": "#/$defs/WhenLabels"
+        }
+      ]
+    },
+    "WhenPaths": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "paths"
+      ]
+    },
+    "WhenDiff": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "diff": {
+          "$ref": "#/$defs/DiffThreshold"
+        }
+      },
+      "required": [
+        "diff"
+      ]
+    },
+    "DiffThreshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "files_gte": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "lines_gte": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "WhenLabels": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "labels"
+      ]
+    },
+    "EscalationLevel": {
+      "type": "string",
+      "enum": [
+        "Medium",
+        "High",
+        "Max"
+      ]
+    },
+    "ApprovalPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ttl_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "PatchLimitsPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_files": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_changed_lines": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_file_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-resource": "policies"
+}

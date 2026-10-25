@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "sandbox_model_base": {
+      "type": "string"
+    },
+    "connect_proxy_url": {
+      "type": "string"
+    },
+    "loopback_model_base": {
+      "type": "string"
+    },
+    "registry_base": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "sandbox_model_base",
+    "connect_proxy_url",
+    "loopback_model_base"
+  ],
+  "title": "EndpointsResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::EndpointsResponse"
+}

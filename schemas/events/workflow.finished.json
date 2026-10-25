@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "$ref": "#/$defs/WorkflowStatus"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "WorkflowFinishedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "WorkflowStatus": {
+      "type": "string",
+      "enum": [
+        "running",
+        "paused",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "workflow.finished",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

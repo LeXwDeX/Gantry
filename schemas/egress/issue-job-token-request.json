@@ -1,0 +1,174 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "job_id": {
+      "$ref": "#/$defs/Id_att"
+    },
+    "sandbox_id": {
+      "$ref": "#/$defs/Id_sbx"
+    },
+    "project_id": {
+      "$ref": "#/$defs/Id_prj"
+    },
+    "ledger": {
+      "$ref": "#/$defs/LedgerRef"
+    },
+    "tier": {
+      "$ref": "#/$defs/SandboxTier"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tokens_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "token_weights": {
+      "$ref": "#/$defs/TokenWeights"
+    },
+    "wall_time_s": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "config_rev": {
+      "$ref": "#/$defs/Seq"
+    }
+  },
+  "required": [
+    "job_id",
+    "sandbox_id",
+    "project_id",
+    "ledger",
+    "tier",
+    "provider",
+    "profile",
+    "groups",
+    "tokens_total",
+    "token_weights",
+    "wall_time_s",
+    "config_rev"
+  ],
+  "title": "IssueJobTokenRequest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_sbx": {
+      "type": "string",
+      "pattern": "^sbx_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "LedgerRef": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string",
+              "const": "delivery"
+            },
+            "id": {
+              "$ref": "#/$defs/Id_dlv"
+            }
+          },
+          "required": [
+            "subject",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string",
+              "const": "conversation"
+            },
+            "id": {
+              "$ref": "#/$defs/Id_cnv"
+            },
+            "day": {
+              "$ref": "#/$defs/Date"
+            }
+          },
+          "required": [
+            "subject",
+            "id",
+            "day"
+          ]
+        }
+      ],
+      "description": "台账引用：交付台账或会话台账（含 UTC 日期，P-58）。"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_cnv": {
+      "type": "string",
+      "pattern": "^cnv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "SandboxTier": {
+      "type": "string",
+      "enum": [
+        "planner",
+        "worker"
+      ],
+      "description": "沙盒内只用 planner / worker 两类。"
+    },
+    "TokenWeights": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_read": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "cache_read",
+        "cache_write"
+      ]
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::IssueJobTokenRequest"
+}

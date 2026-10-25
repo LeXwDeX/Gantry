@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "svc_token_id": {
+      "$ref": "#/$defs/SvcTokenId"
+    },
+    "state": {
+      "$ref": "#/$defs/JobTokenState"
+    },
+    "revoked_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "svc_token_id",
+    "state",
+    "revoked_at"
+  ],
+  "title": "RevokeSvcTokenResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SvcTokenId": {
+      "type": "string",
+      "pattern": "^svt_[0-9A-Z]{26}$"
+    },
+    "JobTokenState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "revoked"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::RevokeSvcTokenResponse"
+}

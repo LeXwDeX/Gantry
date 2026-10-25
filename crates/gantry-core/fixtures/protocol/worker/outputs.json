@@ -1,0 +1,75 @@
+{
+  "plan": {
+    "kind": "plan",
+    "steps": [
+      {
+        "id": "s1",
+        "title": "Fix the offset computation in paginate()",
+        "detail": "Use (page - 1) * per_page when computing the offset.",
+        "files": ["src/api/items.rs"],
+        "depends_on": [],
+        "verification": "cargo test -p api items::pagination"
+      },
+      {
+        "id": "s2",
+        "title": "Add regression tests for the last page",
+        "detail": "Cover 21 rows with per_page=10, pages 1 to 3.",
+        "files": ["tests/items_pagination.rs"],
+        "depends_on": ["s1"],
+        "verification": "cargo test --workspace"
+      }
+    ],
+    "risks": [
+      { "severity": "low", "description": "Clients may rely on the old zero-based behaviour.", "mitigation": "Check API docs and existing callers." }
+    ],
+    "assumptions": ["page numbers are 1-based"],
+    "blocking_questions": [],
+    "touched_paths_estimate": ["src/api/**", "tests/**"]
+  },
+  "review_security": {
+    "kind": "review",
+    "perspective": "security",
+    "verdict": "REVISE",
+    "rationale": "The pagination helper trusts a client-supplied per_page without an upper bound.",
+    "blocking_reasons": [],
+    "findings": [
+      {
+        "id": "f1",
+        "severity": "major",
+        "category": "security",
+        "title": "Unbounded per_page allows resource exhaustion",
+        "description": "paginate() uses per_page as given; a request with per_page=10000000 loads the whole table into memory.",
+        "location": { "path": "src/api/items.rs", "line_start": 41, "line_end": 48, "side": "head" },
+        "evidence": "let limit = params.per_page;",
+        "suggested_fix": "Clamp per_page to a configured maximum such as 100.",
+        "confidence": "high",
+        "in_scope": true
+      }
+    ]
+  },
+  "arbiter": {
+    "kind": "arbiter",
+    "verdict": "REVISE",
+    "round": 1,
+    "rationale": "One security finding is upheld; the style finding is a duplicate of an existing lint rule.",
+    "blocking_reasons": [],
+    "rulings": [
+      {
+        "finding_ref": { "node_id": "nod_01JBX3G7K9M1N3P5Q7R9S1T3VW", "finding_id": "f1" },
+        "ruling": "upheld",
+        "severity_final": "major",
+        "duplicate_of": null,
+        "reason": "Reproducible; the bound is missing on the only public entry point."
+      }
+    ],
+    "required_changes": [
+      {
+        "id": "c1",
+        "description": "Clamp per_page to a configured maximum and add a test.",
+        "finding_refs": [{ "node_id": "nod_01JBX3G7K9M1N3P5Q7R9S1T3VW", "finding_id": "f1" }]
+      }
+    ],
+    "pr_summary": "One blocking issue remains: per_page is unbounded (src/api/items.rs). Everything else looks good.",
+    "escalate": { "needed": false, "reason_code": null }
+  }
+}

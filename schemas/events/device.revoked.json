@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "device_id": {
+      "$ref": "#/$defs/Id_dev"
+    },
+    "cert_serials": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "remaining_approvers": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "via": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "device_id",
+    "cert_serials",
+    "remaining_approvers"
+  ],
+  "description": "`device.revoked`（pki.md §7.5）。",
+  "title": "DeviceRevokedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_dev": {
+      "type": "string",
+      "pattern": "^dev_[0-9A-HJKMNP-TV-Z]{26}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "device.revoked",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

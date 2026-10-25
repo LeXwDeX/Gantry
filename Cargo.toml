@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["apps"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+schemars = "1.2"
+thiserror = "2"
+async-trait = "0.1"
+futures-core = "0.3"
+sha2 = "0.10"
+serde_jcs = "0.2"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+time = "0.3"

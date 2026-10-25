@@ -1,0 +1,8 @@
+{
+  "repo": "acme/shop-api",
+  "number": 42,
+  "spec_block_markdown": "### 验收标准\n- [ ] 当总数恰为页大小整数倍时，最后一页不再多出一页\n- [ ] 新增回归测试覆盖 size=10,total=20",
+  "expected_block_hash": null,
+  "title": null,
+  "labels": null
+}

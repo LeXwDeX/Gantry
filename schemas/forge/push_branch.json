@@ -1,0 +1,85 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "base_ref": {
+      "type": "string"
+    },
+    "worktree_id": {
+      "$ref": "#/$defs/Id_wtr"
+    },
+    "local_head_oid": {
+      "$ref": "#/$defs/GitOid"
+    },
+    "expected_tree_oid": {
+      "$ref": "#/$defs/GitOid"
+    },
+    "expected_remote_oid": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GitOid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "validation_ref": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "transport": {
+      "$ref": "#/$defs/PushTransport"
+    },
+    "force": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "repo",
+    "branch",
+    "base_ref",
+    "worktree_id",
+    "local_head_oid",
+    "expected_tree_oid",
+    "validation_ref",
+    "transport",
+    "force"
+  ],
+  "title": "PushBranchPayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "PushTransport": {
+      "type": "string",
+      "enum": [
+        "git",
+        "api"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "PushBranchPayload",
+  "x-gantry-action-kind": "push_branch"
+}

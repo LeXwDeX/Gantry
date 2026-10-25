@@ -1,0 +1,8 @@
+{
+  "base": "main",
+  "head": "gantry/42-fix-pagination",
+  "title": "Fix pagination off-by-one in /orders",
+  "body": "Fixes the off-by-one when page size divides total count.",
+  "draft": false,
+  "closes": [42]
+}

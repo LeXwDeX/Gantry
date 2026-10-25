@@ -1,0 +1,248 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "level_cap": {
+      "$ref": "#/$defs/Level"
+    },
+    "level_effective": {
+      "$ref": "#/$defs/Level"
+    },
+    "origin": {
+      "$ref": "#/$defs/DeliveryOrigin"
+    },
+    "source_message_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_msg"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/IssueRef"
+      }
+    },
+    "budget": {
+      "$ref": "#/$defs/DeliveryBudget"
+    },
+    "config_rev": {
+      "$ref": "#/$defs/Seq"
+    }
+  },
+  "required": [
+    "title",
+    "level_cap",
+    "level_effective",
+    "origin",
+    "issues",
+    "budget",
+    "config_rev"
+  ],
+  "description": "`delivery.created`（engine.md §11 的最小字段；core §7.5 仍记录完整交付单元缺口）。",
+  "title": "DeliveryCreatedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Level": {
+      "type": "string",
+      "enum": [
+        "None",
+        "Low",
+        "Medium",
+        "High",
+        "Max",
+        "Ultimate"
+      ],
+      "description": "线上档位值：`\"None\"`…`\"Ultimate\"`。"
+    },
+    "DeliveryOrigin": {
+      "type": "string",
+      "enum": [
+        "conversation",
+        "github_label",
+        "github_command"
+      ]
+    },
+    "Id_msg": {
+      "type": "string",
+      "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "IssueRef": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "title": {
+          "$ref": "#/$defs/UntrustedText"
+        },
+        "state": {
+          "$ref": "#/$defs/IssueState"
+        },
+        "state_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "synced_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "repo",
+        "number",
+        "node_id",
+        "title",
+        "state",
+        "synced_at"
+      ]
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "UntrustedText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "source",
+        "truncated"
+      ],
+      "description": "来自 GitHub、沙盒或其他外部来源的文本。\n\n刻意不实现 `Deref<Target = str>`、`Display`、`AsRef<str>`；取内容必须调用\n[`UntrustedText::as_untrusted_str`]，`Debug` 不输出正文。"
+    },
+    "IssueState": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "DeliveryBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "template": {
+          "type": "string"
+        },
+        "limits": {
+          "$ref": "#/$defs/BudgetLimits"
+        }
+      },
+      "required": [
+        "template",
+        "limits"
+      ],
+      "description": "`delivery.created.data.budget`：台账创建时固化的模板与限额（P-57）。"
+    },
+    "BudgetLimits": {
+      "type": "object",
+      "properties": {
+        "tokens_by_tier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "planner": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "utility": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "worker": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          }
+        },
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "会话台账的每日上限（`levels.none.daily_tokens`）；交付台账为 `null`。",
+          "default": null
+        },
+        "nodes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rounds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wall_time": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "concurrency": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "forge_writes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tokens_by_tier",
+        "nodes",
+        "rounds",
+        "wall_time",
+        "concurrency",
+        "forge_writes"
+      ]
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "delivery.created",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

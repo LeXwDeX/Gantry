@@ -1,0 +1,776 @@
+{
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "$ref": "#/$defs/WorkerProtocol"
+    },
+    "job_id": {
+      "$ref": "#/$defs/Id_att"
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "project_id": {
+      "$ref": "#/$defs/Id_prj"
+    },
+    "delivery_id": {
+      "$ref": "#/$defs/Id_dlv"
+    },
+    "workflow": {
+      "$ref": "#/$defs/JobWorkflow"
+    },
+    "node": {
+      "$ref": "#/$defs/JobNode"
+    },
+    "attempt": {
+      "$ref": "#/$defs/JobAttempt"
+    },
+    "context": {
+      "$ref": "#/$defs/JobContext"
+    },
+    "execution": {
+      "$ref": "#/$defs/JobExecution"
+    },
+    "task": {
+      "$ref": "#/$defs/JobTask"
+    },
+    "workspace": {
+      "$ref": "#/$defs/JobWorkspace"
+    },
+    "isolation": {
+      "$ref": "#/$defs/JobIsolation"
+    },
+    "materials": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobMaterial"
+      },
+      "default": []
+    },
+    "upstream": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/UpstreamRef"
+      },
+      "default": []
+    },
+    "targets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/JobTarget"
+      },
+      "default": []
+    },
+    "constraints": {
+      "$ref": "#/$defs/JobConstraints"
+    },
+    "output": {
+      "$ref": "#/$defs/JobOutput"
+    }
+  },
+  "required": [
+    "protocol",
+    "job_id",
+    "created_at",
+    "project_id",
+    "delivery_id",
+    "workflow",
+    "node",
+    "attempt",
+    "context",
+    "execution",
+    "task",
+    "workspace",
+    "isolation",
+    "constraints",
+    "output"
+  ],
+  "description": "`/gantry/job.json`。顶层与多数对象容忍未知字段；`constraints.*` 与 `output.*` 严格\n（worker-protocol §4.2 的兼容规则）。",
+  "title": "JobSpec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "WorkerProtocol": {
+      "type": "string",
+      "const": "gantry-worker/1"
+    },
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "JobWorkflow": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id_wfl"
+        },
+        "graph_rev": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "graph_rev"
+      ]
+    },
+    "Id_wfl": {
+      "type": "string",
+      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "JobNode": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id_nod"
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "exec": {
+          "$ref": "#/$defs/Exec"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "exec",
+        "required"
+      ]
+    },
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Role": {
+      "type": "string",
+      "pattern": "^(plan|build|verify|single|reasoner|arbiter|summarize|admission|heal|answer|intent|classify|review:[a-z][a-z0-9_-]*)$"
+    },
+    "Exec": {
+      "type": "string",
+      "enum": [
+        "sandbox",
+        "sandbox_ro",
+        "direct"
+      ]
+    },
+    "JobAttempt": {
+      "type": "object",
+      "properties": {
+        "n": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "n"
+      ]
+    },
+    "JobContext": {
+      "type": "object",
+      "properties": {
+        "level_effective": {
+          "$ref": "#/$defs/Level"
+        },
+        "revision_round": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "previous_attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PreviousAttempt"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "level_effective",
+        "revision_round"
+      ]
+    },
+    "Level": {
+      "type": "string",
+      "enum": [
+        "None",
+        "Low",
+        "Medium",
+        "High",
+        "Max",
+        "Ultimate"
+      ],
+      "description": "线上档位值：`\"None\"`…`\"Ultimate\"`。"
+    },
+    "PreviousAttempt": {
+      "type": "object",
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/Id_att"
+        },
+        "failure_class": {
+          "$ref": "#/$defs/FailureClass"
+        },
+        "failure_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "attempt_id",
+        "failure_class"
+      ]
+    },
+    "FailureClass": {
+      "type": "string",
+      "enum": [
+        "timeout",
+        "exec_failed",
+        "verdict_fail",
+        "policy_denied",
+        "cancelled",
+        "budget_exhausted",
+        "infra_error"
+      ]
+    },
+    "FailureDetail": {
+      "type": "string",
+      "pattern": "^[a-z0-9_.:-]{1,200}$"
+    },
+    "JobExecution": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        },
+        "model": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "$ref": "#/$defs/Effort"
+        },
+        "agent_options": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "agent 专有、不透明；适配层按白名单校验，只能收紧 constraints。",
+          "default": {}
+        }
+      },
+      "required": [
+        "agent",
+        "tier",
+        "model",
+        "reasoning_effort"
+      ]
+    },
+    "AgentId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "Tier": {
+      "type": "string",
+      "enum": [
+        "utility",
+        "planner",
+        "worker"
+      ]
+    },
+    "Effort": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "description": "推理强度（`JobSpec.execution.reasoning_effort`）。"
+    },
+    "JobTask": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "output_language": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "title",
+        "instructions"
+      ]
+    },
+    "JobWorkspace": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "base_sha": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "pr_base_sha": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "path",
+        "repo",
+        "base_sha"
+      ]
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "JobIsolation": {
+      "type": "object",
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "description": "32 位十六进制；每个 job 随机。"
+        },
+        "begin": {
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nonce",
+        "begin",
+        "end"
+      ]
+    },
+    "JobMaterial": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MaterialKind"
+        },
+        "source": {
+          "$ref": "#/$defs/MaterialSource"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "original_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "source",
+        "path",
+        "sha256",
+        "bytes",
+        "truncated",
+        "original_bytes"
+      ]
+    },
+    "MaterialKind": {
+      "type": "string",
+      "enum": [
+        "issue_body",
+        "issue_comment",
+        "pr_body",
+        "pr_comment",
+        "review_comment",
+        "review_thread",
+        "ci_log",
+        "commit_message",
+        "dependency_doc",
+        "file_excerpt",
+        "upstream_output"
+      ]
+    },
+    "MaterialSource": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/RepoSlug"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "item_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "required": [
+        "repo",
+        "number"
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "UpstreamRef": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/Id_nod"
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/Id_att"
+        },
+        "dir": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ref": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "node_id",
+        "role",
+        "attempt_id",
+        "dir",
+        "files",
+        "ref"
+      ]
+    },
+    "JobTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TargetKind"
+        },
+        "ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "handle",
+        "kind",
+        "ref"
+      ]
+    },
+    "TargetKind": {
+      "type": "string",
+      "enum": [
+        "review_thread",
+        "issue",
+        "pr"
+      ]
+    },
+    "JobConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "$ref": "#/$defs/ToolConstraints"
+        },
+        "paths": {
+          "$ref": "#/$defs/PathConstraints"
+        },
+        "limits": {
+          "$ref": "#/$defs/JobLimits"
+        },
+        "patch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PatchLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`output.patch` 不是 `forbidden` 时必填。",
+          "default": null
+        }
+      },
+      "required": [
+        "tools",
+        "paths",
+        "limits"
+      ]
+    },
+    "ToolConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "edit": {
+          "type": "boolean"
+        },
+        "shell": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "edit",
+        "shell"
+      ]
+    },
+    "PathConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "approval_required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "allow",
+        "deny"
+      ],
+      "description": "JobSpec 的路径规则快照；同时是 `PatchFacts.job_paths` 的类型。"
+    },
+    "JobLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wall_time_s": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "idle_timeout_s": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_turns": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tokens_total": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "wall_time_s",
+        "idle_timeout_s",
+        "max_turns",
+        "tokens_total"
+      ]
+    },
+    "PatchLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_files": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_bytes",
+        "max_files"
+      ]
+    },
+    "JobOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "structured_schema": {
+          "$ref": "#/$defs/StructuredSchema"
+        },
+        "patch": {
+          "$ref": "#/$defs/PatchMode"
+        },
+        "report": {
+          "$ref": "#/$defs/ReportMode"
+        },
+        "proposals": {
+          "$ref": "#/$defs/ProposalsMode"
+        }
+      },
+      "required": [
+        "structured_schema",
+        "patch",
+        "report",
+        "proposals"
+      ]
+    },
+    "StructuredSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "`gantry.worker.output.<schema>/<major>`。"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      },
+      "required": [
+        "id",
+        "path",
+        "sha256"
+      ]
+    },
+    "PatchMode": {
+      "type": "string",
+      "enum": [
+        "required",
+        "optional",
+        "forbidden"
+      ]
+    },
+    "ReportMode": {
+      "type": "string",
+      "enum": [
+        "required",
+        "optional"
+      ]
+    },
+    "ProposalsMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "forbidden"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "allowed_kinds": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ProposalKind"
+              }
+            },
+            "max": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "allowed_kinds",
+            "max"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ProposalKind": {
+      "type": "string",
+      "enum": [
+        "open_pr",
+        "reply_review_thread",
+        "resolve_review_thread",
+        "escalate"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "worker::JobSpec"
+}

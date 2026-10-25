@@ -1,0 +1,55 @@
+{
+  "type": "object",
+  "properties": {
+    "svc_token_id": {
+      "$ref": "#/$defs/SvcTokenId"
+    },
+    "svc_token": {
+      "$ref": "#/$defs/SvcToken"
+    },
+    "model_base_urls": {
+      "$ref": "#/$defs/ModelBaseUrls"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "revoked_previous": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SvcTokenId"
+      }
+    }
+  },
+  "required": [
+    "svc_token_id",
+    "svc_token",
+    "model_base_urls",
+    "expires_at",
+    "revoked_previous"
+  ],
+  "title": "IssueSvcTokenResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SvcTokenId": {
+      "type": "string",
+      "pattern": "^svt_[0-9A-Z]{26}$"
+    },
+    "SvcToken": {
+      "type": "string",
+      "pattern": "^gst1_[A-Za-z0-9_-]{43}$"
+    },
+    "ModelBaseUrls": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "含 `job_token` 的基址表；`Debug` 只输出 provider 键。"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::IssueSvcTokenResponse"
+}

@@ -1,0 +1,112 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "scope": {
+      "$ref": "#/$defs/SettingsScope"
+    },
+    "resource": {
+      "$ref": "#/$defs/SettingsResource"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "base_rev": {
+      "$ref": "#/$defs/Seq"
+    },
+    "value": {
+      "default": null
+    },
+    "relaxes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "secret_changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SecretChange"
+      }
+    }
+  },
+  "required": [
+    "scope",
+    "resource",
+    "schema_version",
+    "base_rev",
+    "relaxes",
+    "secret_changes"
+  ],
+  "description": "`settings.updated`（config.md §2.3）。`value` 是已剥离 secret 的稀疏文档；\n项目 `DELETE` 时为 `null`。",
+  "title": "SettingsUpdatedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SettingsScope": {
+      "type": "string",
+      "enum": [
+        "global",
+        "project"
+      ]
+    },
+    "SettingsResource": {
+      "type": "string",
+      "enum": [
+        "models",
+        "levels",
+        "policies",
+        "guardian",
+        "sandbox",
+        "egress",
+        "notify",
+        "github"
+      ]
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "SecretChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/SecretName"
+        },
+        "op": {
+          "$ref": "#/$defs/SecretChangeOp"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "ref",
+        "op",
+        "version"
+      ],
+      "description": "`secret_changes[]` 的元素：只有名字、操作与版本号（无值、无哈希）。"
+    },
+    "SecretName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "SecretChangeOp": {
+      "type": "string",
+      "enum": [
+        "set",
+        "rotate",
+        "delete"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-validated-by": "events::validate_event_data (SecretRef 位置禁止 value)",
+  "x-gantry-event-type": "settings.updated",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

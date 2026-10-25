@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "worktree_id": {
+      "$ref": "#/$defs/Id_wtr"
+    },
+    "branch": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "worktree_id",
+    "branch"
+  ],
+  "title": "WorktreeRemovedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "worktree.removed",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

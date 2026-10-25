@@ -1,0 +1,14 @@
+{
+  "repo": "acme/shop-api",
+  "target": { "type": "pr", "number": 57 },
+  "slot": "delivery_status",
+  "revision": 7,
+  "head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486",
+  "title": "Gantry 状态",
+  "items": [
+    { "id": "build", "state": "passed", "label": "实现与本地校验" },
+    { "id": "ci", "state": "running", "label": "CI", "detail": "2/5 个 check 已完成" },
+    { "id": "review", "state": "pending", "label": "评审" },
+    { "id": "merge", "state": "blocked", "label": "合并", "detail": "等待用户在 GitHub 上 approve" }
+  ]
+}

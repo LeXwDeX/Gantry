@@ -1,0 +1,149 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_sbx"
+    },
+    "driver": {
+      "type": "string"
+    },
+    "trust": {
+      "$ref": "#/$defs/SandboxTrust"
+    },
+    "image_digest": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "limits": {
+      "$ref": "#/$defs/SandboxLimits"
+    },
+    "status": {
+      "$ref": "#/$defs/SandboxStatus"
+    },
+    "worktree_snapshot": {
+      "$ref": "#/$defs/WorktreeSnapshot"
+    },
+    "egress_profile": {
+      "type": "string"
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "driver",
+    "trust",
+    "image_digest",
+    "limits",
+    "status",
+    "worktree_snapshot",
+    "egress_profile",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "Sandbox",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_sbx": {
+      "type": "string",
+      "pattern": "^sbx_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "SandboxTrust": {
+      "type": "string",
+      "enum": [
+        "trusted",
+        "untrusted"
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "SandboxLimits": {
+      "type": "object",
+      "properties": {
+        "cpu_cores": {
+          "type": "number",
+          "format": "double"
+        },
+        "mem_mb": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "disk_mb": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "pids": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "wall_time_s": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cpu_cores",
+        "mem_mb",
+        "disk_mb",
+        "pids",
+        "wall_time_s"
+      ]
+    },
+    "SandboxStatus": {
+      "type": "string",
+      "enum": [
+        "created",
+        "running",
+        "stopped",
+        "destroyed",
+        "lost"
+      ]
+    },
+    "WorktreeSnapshot": {
+      "type": "object",
+      "properties": {
+        "mirror": {
+          "type": "string"
+        },
+        "base_sha": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "pr_base_sha": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "mirror",
+        "base_sha"
+      ]
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "entities::Sandbox",
+  "x-gantry-api": "not exposed by client API"
+}

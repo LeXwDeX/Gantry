@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "issued_to": {
+      "$ref": "#/$defs/IssuedTo"
+    },
+    "ttl_s": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0,
+      "default": null
+    }
+  },
+  "required": [
+    "issued_to"
+  ],
+  "title": "IssueSvcTokenRequest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "IssuedTo": {
+      "type": "object",
+      "properties": {
+        "process": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "started_at": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "process",
+        "pid",
+        "started_at"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::IssueSvcTokenRequest"
+}

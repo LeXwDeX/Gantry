@@ -1,0 +1,81 @@
+{
+  "allow_globs": ["**"],
+  "actions": {
+    "merge_pr": "approve",
+    "force_push": "approve",
+    "push_outside_prefix": "approve",
+    "resolve_review_thread_human": "deny",
+    "delete_branch": "deny",
+    "publish_release": "deny",
+    "change_repo_settings": "deny",
+    "push_branch": "auto",
+    "create_pr": "auto",
+    "update_pr": "auto",
+    "upsert_status_comment": "auto",
+    "create_comment": "auto",
+    "reply_review_thread": "auto",
+    "resolve_review_thread": "auto",
+    "create_issue": "auto",
+    "update_issue": "auto",
+    "close_issue": "auto",
+    "add_labels": "auto",
+    "request_reviewers": "auto",
+    "rerun_failed_jobs": "auto"
+  },
+  "unlisted_action": "approve",
+  "paths": {
+    "workflows": { "globs": [".github/workflows/**"], "disposition": "deny" },
+    "dependency_manifests": {
+      "globs": [
+        "package.json", "**/package.json", "Cargo.toml", "**/Cargo.toml",
+        "pyproject.toml", "**/pyproject.toml", "requirements*.txt",
+        "go.mod", "**/go.mod", "Gemfile", "pom.xml", "build.gradle*"
+      ],
+      "disposition": "approve"
+    },
+    "lockfiles": {
+      "globs": [
+        "package-lock.json", "**/package-lock.json", "pnpm-lock.yaml", "**/pnpm-lock.yaml",
+        "yarn.lock", "**/yarn.lock", "Cargo.lock", "**/Cargo.lock",
+        "poetry.lock", "**/poetry.lock", "uv.lock", "**/uv.lock",
+        "go.sum", "**/go.sum", "Gemfile.lock", "**/Gemfile.lock"
+      ],
+      "disposition": "approve"
+    },
+    "sensitive_files": {
+      "globs": [".env", ".env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.npmrc"],
+      "disposition": "deny"
+    },
+    "repo_meta": {
+      "globs": [
+        ".github/actions/**", ".github/CODEOWNERS", "CODEOWNERS",
+        ".github/dependabot.yml", ".devcontainer/**"
+      ],
+      "disposition": "approve"
+    }
+  },
+  "escalation": {
+    "enabled": true,
+    "rules": {
+      "sensitive_paths": {
+        "when": { "paths": ["**/auth/**", "**/security/**", "**/crypto/**", "**/migrations/**"] },
+        "raise_to": "Max"
+      },
+      "large_diff": {
+        "when": { "diff": { "files_gte": 30, "lines_gte": 1000 } },
+        "raise_to": "High"
+      },
+      "risk_labels": {
+        "when": { "labels": ["security", "breaking-change", "risk:high"] },
+        "raise_to": "Max"
+      }
+    }
+  },
+  "approval": { "ttl_s": 86400 },
+  "patch": {
+    "max_files": 200,
+    "max_bytes": 5000000,
+    "max_changed_lines": 10000,
+    "max_file_bytes": 1000000
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "resource": "levels",
+  "scope": "global",
+  "rev": 18236,
+  "value": { "high": { "budget": { "nodes": 30 } } },
+  "warnings": []
+}

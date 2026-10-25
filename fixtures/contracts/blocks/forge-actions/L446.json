@@ -1,0 +1,9 @@
+{
+  "repo": "acme/shop-api",
+  "pull_number": 57,
+  "expected_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+  "merge_method": "squash",
+  "mode": "auto",
+  "commit_title": "Fix pagination off-by-one in /orders (#57)",
+  "commit_message": "Closes #42"
+}

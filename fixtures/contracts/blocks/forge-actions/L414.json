@@ -1,0 +1,6 @@
+{
+  "repo": "acme/shop-api",
+  "number": 42,
+  "state_reason": "completed",
+  "require_merged_pr": 57
+}

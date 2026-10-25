@@ -1,0 +1,257 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_bdg"
+    },
+    "subject": {
+      "$ref": "#/$defs/BudgetSubject",
+      "description": "线上形态为 `\"delivery\"` / `\"conversation\"` 字符串。"
+    },
+    "delivery_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "conversation_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_cnv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "project_id": {
+      "$ref": "#/$defs/Id_prj"
+    },
+    "day": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Date"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "template": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "limits": {
+      "$ref": "#/$defs/BudgetLimits"
+    },
+    "used": {
+      "$ref": "#/$defs/BudgetUsed"
+    },
+    "config_rev": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Seq"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "subject",
+    "project_id",
+    "limits",
+    "used",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "BudgetLedger",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_bdg": {
+      "type": "string",
+      "pattern": "^bdg_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "BudgetSubject": {
+      "type": "string",
+      "enum": [
+        "delivery",
+        "conversation"
+      ]
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_cnv": {
+      "type": "string",
+      "pattern": "^cnv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "Date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "BudgetLimits": {
+      "type": "object",
+      "properties": {
+        "tokens_by_tier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "planner": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "utility": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "worker": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          }
+        },
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "会话台账的每日上限（`levels.none.daily_tokens`）；交付台账为 `null`。",
+          "default": null
+        },
+        "nodes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rounds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wall_time": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "concurrency": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "forge_writes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tokens_by_tier",
+        "nodes",
+        "rounds",
+        "wall_time",
+        "concurrency",
+        "forge_writes"
+      ]
+    },
+    "BudgetUsed": {
+      "type": "object",
+      "properties": {
+        "tokens_by_tier": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "planner": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "utility": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "worker": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          }
+        },
+        "nodes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "attempts": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rounds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wall_time": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "forge_writes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tokens_by_tier",
+        "nodes",
+        "attempts",
+        "rounds",
+        "wall_time",
+        "forge_writes"
+      ]
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "entities::BudgetLedger"
+}

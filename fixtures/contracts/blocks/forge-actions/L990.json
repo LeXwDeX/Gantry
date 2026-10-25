@@ -1,0 +1,24 @@
+{
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "write",
+    "pull_requests": "write",
+    "issues": "write",
+    "checks": "read",
+    "actions": "write",
+    "merge_queues": "read"
+  },
+  "default_events": [
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "pull_request_review_thread",
+    "issue_comment",
+    "issues",
+    "check_suite",
+    "check_run",
+    "merge_group",
+    "push",
+    "repository"
+  ]
+}

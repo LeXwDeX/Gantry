@@ -1,0 +1,24 @@
+[package]
+name = "gantry-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 领域核心类型：ID、时间、严格 JSON、实体、状态机与契约基础类型"
+
+[features]
+default = []
+testing = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+serde_jcs.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

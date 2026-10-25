@@ -1,0 +1,18 @@
+{
+  "status": {
+    "protocol": "gantry-egress-control/1",
+    "applied_rev": 18240,
+    "health": "ok",
+    "detail": null,
+    "unresolved_secret_refs": [],
+    "active_jobs": 3,
+    "active_svc_tokens": 1,
+    "usage_head": "90212"
+  },
+  "endpoints": {
+    "sandbox_model_base": "http://10.89.0.1:8081",
+    "connect_proxy_url": "http://10.89.0.1:3128",
+    "loopback_model_base": "http://127.0.0.1:8082",
+    "registry_base": null
+  }
+}

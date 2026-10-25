@@ -1,0 +1,13 @@
+{
+  "latest_rev": 18238,
+  "modules": {
+    "models": { "applied_rev": 18200, "health": "ok", "unresolved_secret_refs": [] },
+    "engine": { "applied_rev": 18236, "health": "ok", "unresolved_secret_refs": [] },
+    "policy": { "applied_rev": 18200, "health": "ok", "unresolved_secret_refs": [] },
+    "guardian": { "applied_rev": 18150, "health": "ok", "unresolved_secret_refs": [] },
+    "sandbox": { "applied_rev": 18100, "health": "ok", "unresolved_secret_refs": [] },
+    "egress": { "applied_rev": 18050, "health": "ok", "unresolved_secret_refs": [] },
+    "notify": { "applied_rev": 17900, "health": "ok", "unresolved_secret_refs": [] },
+    "forge": { "applied_rev": 17800, "health": "degraded", "detail": "fixture-only health", "unresolved_secret_refs": [] }
+  }
+}

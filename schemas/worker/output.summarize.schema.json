@@ -1,0 +1,1123 @@
+{
+  "$ref": "#/$defs/SummarizeOutput",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "summarize"
+    }
+  },
+  "required": [
+    "kind"
+  ],
+  "$defs": {
+    "PlanStep": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "verification": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "detail",
+        "verification"
+      ]
+    },
+    "PlanRisk": {
+      "type": "object",
+      "properties": {
+        "severity": {
+          "$ref": "#/$defs/PlanRiskSeverity"
+        },
+        "description": {
+          "type": "string"
+        },
+        "mitigation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "description",
+        "mitigation"
+      ]
+    },
+    "PlanRiskSeverity": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "BlockingQuestion": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question"
+      ]
+    },
+    "PlanOutput": {
+      "type": "object",
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          }
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanRisk"
+          },
+          "default": []
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "blocking_questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockingQuestion"
+          },
+          "default": []
+        },
+        "touched_paths_estimate": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "steps"
+      ]
+    },
+    "StepStatusEntry": {
+      "type": "object",
+      "properties": {
+        "step_id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/StepStatus"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step_id",
+        "status",
+        "note"
+      ]
+    },
+    "StepStatus": {
+      "type": "string",
+      "enum": [
+        "done",
+        "partial",
+        "skipped"
+      ]
+    },
+    "CheckRunEntry": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "outcome": {
+          "$ref": "#/$defs/CheckOutcome"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "exit_code",
+        "outcome",
+        "summary"
+      ]
+    },
+    "CheckOutcome": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "error",
+        "skipped"
+      ]
+    },
+    "BuildOutput": {
+      "type": "object",
+      "properties": {
+        "changes_summary": {
+          "type": "string"
+        },
+        "steps_status": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StepStatusEntry"
+          },
+          "default": []
+        },
+        "checks_run": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckRunEntry"
+          },
+          "default": []
+        },
+        "known_issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "no_change_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "changes_summary"
+      ]
+    },
+    "Verdict": {
+      "type": "string",
+      "enum": [
+        "ACCEPT",
+        "REVISE",
+        "REJECT",
+        "BLOCKED"
+      ]
+    },
+    "BlockingReason": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/BlockingReasonCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "BlockingReasonCode": {
+      "type": "string",
+      "enum": [
+        "missing_info",
+        "env_unavailable",
+        "conflicting_inputs",
+        "out_of_scope",
+        "other"
+      ]
+    },
+    "Finding": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "category": {
+          "$ref": "#/$defs/FindingCategory"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindingLocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "suggested_fix": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "in_scope": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "severity",
+        "category",
+        "title",
+        "description",
+        "confidence",
+        "in_scope"
+      ]
+    },
+    "FindingSeverity": {
+      "type": "string",
+      "enum": [
+        "blocker",
+        "major",
+        "minor",
+        "nit"
+      ]
+    },
+    "FindingCategory": {
+      "type": "string",
+      "enum": [
+        "security",
+        "correctness",
+        "reliability",
+        "performance",
+        "maintainability",
+        "test",
+        "docs",
+        "style",
+        "other"
+      ]
+    },
+    "FindingLocation": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line_start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        },
+        "line_end": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        },
+        "side": {
+          "$ref": "#/$defs/FindingSide"
+        }
+      },
+      "required": [
+        "path",
+        "side"
+      ]
+    },
+    "FindingSide": {
+      "type": "string",
+      "enum": [
+        "head",
+        "base"
+      ]
+    },
+    "Confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "VerifyCheck": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "outcome": {
+          "$ref": "#/$defs/CheckOutcome"
+        },
+        "duration_s": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "evidence": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "command",
+        "exit_code",
+        "outcome",
+        "duration_s",
+        "evidence"
+      ]
+    },
+    "PlanCoverage": {
+      "type": "object",
+      "properties": {
+        "step_id": {
+          "type": "string"
+        },
+        "satisfied": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step_id",
+        "satisfied",
+        "evidence"
+      ]
+    },
+    "VerifyOutput": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "blocking_reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockingReason"
+          },
+          "default": []
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "default": []
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VerifyCheck"
+          }
+        },
+        "plan_coverage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanCoverage"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "verdict",
+        "rationale",
+        "checks"
+      ],
+      "description": "gate 公共字段（`verify` / `review` / `arbiter`）。"
+    },
+    "ReviewOutput": {
+      "type": "object",
+      "properties": {
+        "perspective": {
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "blocking_reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockingReason"
+          },
+          "default": []
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "perspective",
+        "verdict",
+        "rationale"
+      ],
+      "description": "gate 公共字段（`verify` / `review` / `arbiter`）。"
+    },
+    "ReasonerScenario": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "predicted_outcome": {
+          "$ref": "#/$defs/PredictedOutcome"
+        },
+        "likelihood": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "failure_points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FailurePoint"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "path",
+        "predicted_outcome",
+        "likelihood"
+      ]
+    },
+    "PredictedOutcome": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "fail",
+        "unknown"
+      ]
+    },
+    "FailurePoint": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "location",
+        "reason"
+      ]
+    },
+    "PlanAdjustment": {
+      "type": "object",
+      "properties": {
+        "step_id": {
+          "type": "string"
+        },
+        "change": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step_id",
+        "change",
+        "reason"
+      ]
+    },
+    "ReasonerOutput": {
+      "type": "object",
+      "properties": {
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReasonerScenario"
+          }
+        },
+        "plan_adjustments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanAdjustment"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "scenarios"
+      ]
+    },
+    "ArbiterRulingEntry": {
+      "type": "object",
+      "properties": {
+        "finding_ref": {
+          "$ref": "#/$defs/FindingRef"
+        },
+        "ruling": {
+          "$ref": "#/$defs/ArbiterRuling"
+        },
+        "severity_final": {
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "duplicate_of": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindingRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_ref",
+        "ruling",
+        "severity_final",
+        "reason"
+      ]
+    },
+    "FindingRef": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/Id_nod"
+        },
+        "finding_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "finding_id"
+      ]
+    },
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "ArbiterRuling": {
+      "type": "string",
+      "enum": [
+        "upheld",
+        "dismissed",
+        "downgraded",
+        "duplicate"
+      ]
+    },
+    "RequiredChange": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "finding_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FindingRef"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "finding_refs"
+      ]
+    },
+    "EscalationFlag": {
+      "type": "object",
+      "properties": {
+        "needed": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "needed"
+      ]
+    },
+    "ArbiterOutput": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "blocking_reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockingReason"
+          },
+          "default": []
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "default": []
+        },
+        "round": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rulings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArbiterRulingEntry"
+          }
+        },
+        "required_changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RequiredChange"
+          },
+          "default": []
+        },
+        "pr_summary": {
+          "type": "string"
+        },
+        "escalate": {
+          "$ref": "#/$defs/EscalationFlag"
+        }
+      },
+      "required": [
+        "verdict",
+        "rationale",
+        "round",
+        "rulings",
+        "pr_summary",
+        "escalate"
+      ],
+      "description": "gate 公共字段（`verify` / `review` / `arbiter`）。"
+    },
+    "MissingItem": {
+      "type": "object",
+      "properties": {
+        "aspect": {
+          "$ref": "#/$defs/MissingAspect"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "aspect",
+        "question"
+      ]
+    },
+    "MissingAspect": {
+      "type": "string",
+      "enum": [
+        "acceptance_criteria",
+        "scope",
+        "constraints",
+        "repro_steps",
+        "other"
+      ]
+    },
+    "RefinedSpec": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "body_markdown": {
+          "type": "string"
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "title",
+        "body_markdown",
+        "acceptance_criteria"
+      ]
+    },
+    "AdmissionOutput": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        },
+        "blocking_reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockingReason"
+          },
+          "default": []
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MissingItem"
+          },
+          "default": []
+        },
+        "refined_spec": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefinedSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "risk_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "verdict"
+      ]
+    },
+    "SummaryFinding": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "category": {
+          "$ref": "#/$defs/FindingCategory"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindingLocation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "suggested_fix": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        },
+        "in_scope": {
+          "type": "boolean"
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FindingRef"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "severity",
+        "category",
+        "title",
+        "description",
+        "confidence",
+        "in_scope",
+        "source_refs"
+      ]
+    },
+    "SummarizeOutput": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SummaryFinding"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "IntentKind": {
+      "type": "string",
+      "enum": [
+        "task",
+        "query",
+        "control"
+      ]
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "IntentOutput": {
+      "type": "object",
+      "properties": {
+        "intent": {
+          "$ref": "#/$defs/IntentKind"
+        },
+        "delivery_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id_dlv"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "needs_code": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "intent",
+        "needs_code"
+      ]
+    },
+    "AnswerRef": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line_start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        },
+        "line_end": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "AnswerOutput": {
+      "type": "object",
+      "properties": {
+        "answer_markdown": {
+          "type": "string"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnswerRef"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "answer_markdown"
+      ]
+    },
+    "ClassifyTarget": {
+      "type": "string",
+      "enum": [
+        "ci_classification",
+        "event_line",
+        "status_answer",
+        "commit_message",
+        "status_checklist",
+        "notification"
+      ]
+    },
+    "CiClassification": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/CiCategory"
+        },
+        "in_pr_scope": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "$ref": "#/$defs/Confidence"
+        }
+      },
+      "required": [
+        "category",
+        "in_pr_scope",
+        "confidence"
+      ]
+    },
+    "CiCategory": {
+      "type": "string",
+      "enum": [
+        "lint",
+        "type",
+        "test",
+        "build",
+        "infra",
+        "flaky",
+        "unknown"
+      ]
+    },
+    "ClassifyOutput": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/ClassifyTarget"
+        },
+        "text": {
+          "type": "string"
+        },
+        "classification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CiClassification"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "target",
+        "text"
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "worker::StructuredOutput",
+  "x-gantry-projection": {
+    "from": "worker::StructuredOutput",
+    "tag": "kind",
+    "const": "summarize"
+  }
+}

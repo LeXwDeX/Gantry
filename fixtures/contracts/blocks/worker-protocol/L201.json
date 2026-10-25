@@ -1,0 +1,87 @@
+{
+  "protocol": "gantry-worker/1",
+  "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+  "created_at": "2026-10-24T12:40:58.004Z",
+  "project_id": "prj_01JBX2C7Q5N8D4F6G9H3K1M0PA",
+  "delivery_id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD",
+  "workflow": { "id": "wfl_01JBX3F2K8M4N6P1Q3R5S7T9VX", "graph_rev": 1 },
+  "node": { "id": "nod_01JBX3G5H7J9K2M4N6P8Q1R3S5", "role": "build", "exec": "sandbox", "required": true },
+  "attempt": { "n": 1 },
+  "context": { "level_effective": "Medium", "revision_round": 0, "previous_attempts": [] },
+  "execution": {
+    "agent": "claude-code",
+    "tier": "worker",
+    "model": "claude-sonnet-5-5",
+    "reasoning_effort": "medium",
+    "agent_options": {}
+  },
+  "task": {
+    "title": "Fix off-by-one in pagination of GET /api/items",
+    "instructions": "Implement the plan found under inputs/upstream. Keep the change minimal and add regression tests. Do not modify CI configuration or dependency manifests.",
+    "output_language": "zh-CN"
+  },
+  "workspace": {
+    "path": "/gantry/work",
+    "repo": "acme/widgets",
+    "base_sha": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+    "pr_base_sha": null
+  },
+  "isolation": {
+    "nonce": "3f9a1c7e5b2d4a60c8e1f7a2b9d04c35",
+    "begin": "<<<GANTRY-UNTRUSTED-BEGIN nonce={nonce} id={id} kind={kind} source={source} truncated={truncated}>>>",
+    "end": "<<<GANTRY-UNTRUSTED-END nonce={nonce} id={id}>>>"
+  },
+  "materials": [
+    {
+      "id": "mat-001",
+      "kind": "issue_body",
+      "source": { "repo": "acme/widgets", "number": 5, "item_id": null },
+      "path": "/gantry/inputs/materials/mat-001.txt",
+      "sha256": "sha256:a1c17679fd08a9521fe95ad479614fdd6a3ed048c337e7005f8827f3bec2318b",
+      "bytes": 2051,
+      "truncated": false,
+      "original_bytes": 1840
+    },
+    {
+      "id": "mat-002",
+      "kind": "issue_comment",
+      "source": { "repo": "acme/widgets", "number": 5, "item_id": 2481733095 },
+      "path": "/gantry/inputs/materials/mat-002.txt",
+      "sha256": "sha256:dcca958d73c4800eb83b1f3612cd9f7860f385c59cfe8f4b2dc605064b84fdf6",
+      "bytes": 835,
+      "truncated": false,
+      "original_bytes": 610
+    }
+  ],
+  "upstream": [
+    {
+      "node_id": "nod_01JBX3G0A1B2C3D4E5F6G7H8J9",
+      "role": "plan",
+      "attempt_id": "att_01JBX3Z1P2Q3R4S5T6V7W8X9Y0",
+      "dir": "/gantry/inputs/upstream/nod_01JBX3G0A1B2C3D4E5F6G7H8J9/",
+      "files": ["result.json", "report.md"],
+      "ref": "sha256:b5c7112ed154fa7b01b0870ca4c67957cdc1c252a75ff320c4d4286e7adccc11"
+    }
+  ],
+  "targets": [],
+  "constraints": {
+    "tools": { "edit": true, "shell": true },
+    "paths": {
+      "allow": ["src/**", "tests/**", "docs/**"],
+      "deny": [".git/**", ".github/workflows/**"],
+      "approval_required": ["Cargo.toml", "Cargo.lock", "package.json", "package-lock.json"]
+    },
+    "limits": { "wall_time_s": 1800, "idle_timeout_s": 300, "max_turns": 60, "tokens_total": 800000 },
+    "patch": { "max_bytes": 5000000, "max_files": 200 }
+  },
+  "output": {
+    "structured_schema": {
+      "id": "gantry.worker.output.build/1",
+      "path": "/gantry/inputs/output.schema.json",
+      "sha256": "sha256:3f9fab9a1fa6705bf39ab80590d0274f5ee16077712206883e799c5022a6a45d"
+    },
+    "patch": "required",
+    "report": "required",
+    "proposals": { "allowed_kinds": ["open_pr", "escalate"], "max": 3 }
+  }
+}

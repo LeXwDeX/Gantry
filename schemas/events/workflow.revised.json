@@ -1,0 +1,86 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "graph_rev": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string"
+    },
+    "round": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "added": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NodeDescriptor"
+      }
+    },
+    "superseded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id_nod"
+      }
+    }
+  },
+  "required": [
+    "graph_rev",
+    "reason",
+    "round",
+    "added",
+    "superseded"
+  ],
+  "description": "`workflow.revised`（engine.md §11）：`graph_rev` 单调递增，`added[]` 复用节点描述，\n`superseded[]` 是被替换节点 ID（文档写“被替换节点”，未给元素类型）。",
+  "title": "WorkflowRevisedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "NodeDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "critical": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "role",
+        "depends_on",
+        "required",
+        "critical"
+      ],
+      "description": "`workflow.created` / `revised` 里的节点描述（engine.md §11）。"
+    },
+    "Role": {
+      "type": "string",
+      "pattern": "^(plan|build|verify|single|reasoner|arbiter|summarize|admission|heal|answer|intent|classify|review:[a-z][a-z0-9_-]*)$"
+    },
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "workflow.revised",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

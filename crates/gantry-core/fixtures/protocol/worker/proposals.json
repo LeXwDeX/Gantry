@@ -1,0 +1,27 @@
+{
+  "protocol": "gantry-worker/1",
+  "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+  "proposals": [
+    {
+      "id": "p1",
+      "kind": "open_pr",
+      "target": null,
+      "params": {
+        "title": "fix: off-by-one in GET /api/items pagination",
+        "body": "Fixes the last-page truncation reported in #5. Adds two regression tests.",
+        "draft": false
+      },
+      "rationale": "Change complete; workspace tests pass."
+    },
+    {
+      "id": "p2",
+      "kind": "escalate",
+      "target": null,
+      "params": {
+        "inbox_kind": "decision_needed",
+        "message": "The API docs describe page numbers as zero-based; confirm that 1-based is intended before merging."
+      },
+      "rationale": "The spec and the docs disagree."
+    }
+  ]
+}

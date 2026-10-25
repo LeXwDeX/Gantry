@@ -1,0 +1,128 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "device_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dev"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "changed": {
+      "$ref": "#/$defs/DeviceChanged"
+    },
+    "via": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "host_uid": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0,
+      "default": null
+    },
+    "sudo_user": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "changed"
+  ],
+  "description": "`device.updated`（pki.md §7.5、OQ-K12）。",
+  "title": "DeviceUpdatedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_dev": {
+      "type": "string",
+      "pattern": "^dev_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "DeviceChanged": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoleChange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cert_serial": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "pubkey_fpr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "RoleChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/DeviceRole"
+        },
+        "to": {
+          "$ref": "#/$defs/DeviceRole"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ]
+    },
+    "DeviceRole": {
+      "type": "string",
+      "enum": [
+        "viewer",
+        "operator",
+        "approver"
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "device.updated",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

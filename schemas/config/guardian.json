@@ -1,0 +1,142 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "triage": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "approval_needed": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "bot_finding_invalid": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "bot_finding_valid": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "budget_exhausted": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "ci_failure_in_scope": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "design_or_api_change": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "mechanical_conflict": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "nit": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "push_after_approval": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "repeated_or_no_progress": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "scope_expanding_fix": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "security_finding": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "touches_protected_path": {
+          "$ref": "#/$defs/TriageAction"
+        },
+        "unknown": {
+          "$ref": "#/$defs/TriageAction"
+        }
+      }
+    },
+    "no_progress": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NoProgressPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status_checklist": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StatusChecklistPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "patrol_interval_s": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "title": "GuardianPatch",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "TriageAction": {
+      "type": "string",
+      "enum": [
+        "silent_fix",
+        "silent_reply",
+        "batch",
+        "escalate"
+      ]
+    },
+    "NoProgressPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "same_class_repeats": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "stalled_rounds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "StatusChecklistPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "min_update_interval_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-resource": "guardian"
+}

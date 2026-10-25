@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sandbox_id": {
+      "$ref": "#/$defs/Id_sbx"
+    },
+    "final_status": {
+      "$ref": "#/$defs/SandboxStatus"
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "sandbox_id",
+    "final_status",
+    "reason"
+  ],
+  "description": "`sandbox.destroyed`（sandbox.md §11）。",
+  "title": "SandboxDestroyedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_sbx": {
+      "type": "string",
+      "pattern": "^sbx_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "SandboxStatus": {
+      "type": "string",
+      "enum": [
+        "created",
+        "running",
+        "stopped",
+        "destroyed",
+        "lost"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "sandbox.destroyed",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}
