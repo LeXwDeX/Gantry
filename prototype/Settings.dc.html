@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Gantry 设置</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#0E1014}
+a{color:#58A6FF}a:hover{color:#79B8FF}
+button,select{font:inherit;color:inherit}
+button:focus-visible,select:focus-visible{outline:2px solid #58A6FF;outline-offset:1px}
+</style>
+</helmet>
+<div style="min-height: 100vh; display: flex; flex-direction: column; background: #0E1014; color: #E6E8EB; font-family: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif; font-size: 13px">
+
+  <header style="display: flex; align-items: center; gap: 12px; padding: 0 12px; min-height: 44px; flex-wrap: wrap; background: #111418; border-bottom: 1px solid #22272E">
+    <button onClick="{{back}}" style="display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid #2A3038; background: transparent; color: #A9B1BA; cursor: pointer; font-size: 12.5px">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M7.5 2.5L4 6l3.5 3.5"></path></svg>返回工作区</button>
+    <span style="font-weight: 600">设置</span>
+    <sc-if value="{{dirty}}" hint-placeholder-val="{{false}}"><span style="font-size: 12px; color: #E3B341">有未保存的改动</span></sc-if>
+    <span style="margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: #A9B1BA; font-family: 'JetBrains Mono', monospace"><span style="width: 7px; height: 7px; border-radius: 50%; background: #3FB950"></span>ubuntu-01 · 已连接</span>
+  </header>
+
+  <sc-if value="{{confirmLeave}}" hint-placeholder-val="{{false}}">
+    <div role="alertdialog" aria-label="放弃未保存的改动" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; background: #2A1F12; border-bottom: 1px solid #5A4A1E; font-size: 12.5px">
+      <span style="color: #E3B341">有未保存的改动，离开会丢失。</span>
+      <button onClick="{{leaveAnyway}}" style="height: 26px; padding: 0 10px; border-radius: 6px; border: 0; background: #F0883E; color: #0E1014; font-weight: 600; cursor: pointer; font-size: 12px">放弃改动并返回</button>
+      <button onClick="{{stay}}" style="height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid #2F353D; background: transparent; cursor: pointer; font-size: 12px">继续编辑</button>
+    </div>
+  </sc-if>
+
+  <div style="display: flex; flex-wrap: wrap; flex: 1">
+    <nav aria-label="设置分类" style="flex: 1 1 200px; box-sizing: border-box; padding: 12px 10px; border-right: 1px solid #22272E; background: #111418; display: flex; flex-direction: column; gap: 2px">
+      <sc-for list="{{navGroups}}" as="g" hint-placeholder-count="3">
+        <span style="padding: 10px 8px 6px; font-size: 11px; color: #8B949E; letter-spacing: 0.4px">{{g.title}}</span>
+        <sc-for list="{{g.items}}" as="it" hint-placeholder-count="3">
+          <button onClick="{{it.pick}}" aria-current="{{it.aria}}" style="text-align: left; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; cursor: pointer; {{it.style}}">{{it.label}}</button>
+        </sc-for>
+      </sc-for>
+    </nav>
+
+    <main style="flex: 999 1 560px; min-width: 0; box-sizing: border-box; padding: 20px 24px; display: flex; flex-direction: column; gap: 22px">
+
+      <sc-if value="{{isModels}}" hint-placeholder-val="{{true}}">
+        <div style="display: flex; flex-direction: column; gap: 6px; max-width: 980px">
+          <h1 style="margin: 0; font-size: 18px; font-weight: 600">模型</h1>
+          <span style="color: #8B949E; line-height: 1.6">三类模型分工，保存在服务端，对所有项目生效；项目可在左侧「项目」里覆盖。提供方凭据只存在服务端，桌面端不保存。</span>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; max-width: 980px">
+          <sc-for list="{{tiers}}" as="t" hint-placeholder-count="3">
+            <section style="border: 1px solid #2A3038; border-radius: 10px; background: #151920; padding: 14px; display: flex; flex-direction: column; gap: 12px">
+              <div style="display: flex; align-items: center; gap: 8px">
+                <span style="font-size: 11px; font-weight: 600; color: {{t.color}}; border: 2px solid {{t.color}}; border-radius: 4px; padding: 0 6px">{{t.short}}</span>
+                <span style="font-weight: 600">{{t.name}}</span>
+              </div>
+              <span style="font-size: 12px; color: #A9B1BA; line-height: 1.6">{{t.desc}}</span>
+              <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">模型
+                <select onChange="{{markDirty}}" style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-family: 'JetBrains Mono', monospace; font-size: 12px">
+                  <sc-for list="{{t.models}}" as="o" hint-placeholder-count="2"><option>{{o}}</option></sc-for>
+                </select>
+              </label>
+              <label style="display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8B949E">推理深度
+                <select onChange="{{markDirty}}" style="height: 32px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-size: 12px">
+                  <sc-for list="{{t.efforts}}" as="o" hint-placeholder-count="3"><option>{{o}}</option></sc-for>
+                </select>
+              </label>
+              <sc-if value="{{t.hasOverride}}" hint-placeholder-val="{{false}}"><span style="font-size: 11.5px; color: #8B949E">{{t.override}}</span></sc-if>
+            </section>
+          </sc-for>
+        </div>
+
+        <section style="display: flex; flex-direction: column; gap: 8px; max-width: 980px">
+          <h2 style="margin: 0; font-size: 14px; font-weight: 600">每个档位里三类模型各做什么</h2>
+          <div style="overflow-x: auto; border: 1px solid #22272E; border-radius: 10px">
+            <table style="width: 100%; min-width: 680px; border-collapse: collapse; font-size: 12.5px">
+              <thead>
+                <tr style="text-align: left; color: #8B949E; font-size: 11px; letter-spacing: 0.4px; background: #111418">
+                  <th style="padding: 8px 12px; font-weight: 500">档位</th>
+                  <th style="padding: 8px 12px; font-weight: 500">大脑</th>
+                  <th style="padding: 8px 12px; font-weight: 500">干活</th>
+                  <th style="padding: 8px 12px; font-weight: 500">打杂</th>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{levelRows}}" as="r" hint-placeholder-count="6">
+                  <tr>
+                    <td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace">{{r.lv}}</td>
+                    <td style="padding: 8px 12px; border-top: 1px solid #1A1E24">{{r.p}}</td>
+                    <td style="padding: 8px 12px; border-top: 1px solid #1A1E24">{{r.w}}</td>
+                    <td style="padding: 8px 12px; border-top: 1px solid #1A1E24">{{r.u}}</td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </sc-if>
+
+      <sc-if value="{{isProject}}" hint-placeholder-val="{{false}}">
+        <div style="display: flex; flex-direction: column; gap: 6px; max-width: 980px">
+          <h1 style="margin: 0; font-size: 18px; font-weight: 600">项目 · <span style="font-family: 'JetBrains Mono', monospace">{{projName}}</span></h1>
+          <span style="color: #8B949E; line-height: 1.6">这里只列项目可以覆盖的键。未覆盖的继承全局；安全相关的键只能收紧，不能放宽。</span>
+        </div>
+        <div style="overflow-x: auto; border: 1px solid #22272E; border-radius: 10px; max-width: 980px">
+          <table style="width: 100%; min-width: 640px; border-collapse: collapse; font-size: 12.5px">
+            <thead>
+              <tr style="text-align: left; color: #8B949E; font-size: 11px; letter-spacing: 0.4px; background: #111418">
+                <th style="padding: 8px 12px; font-weight: 500">设置</th>
+                <th style="padding: 8px 12px; font-weight: 500">全局</th>
+                <th style="padding: 8px 12px; font-weight: 500">本项目</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{projRows}}" as="r" hint-placeholder-count="4">
+                <tr>
+                  <td style="padding: 8px 12px; border-top: 1px solid #1A1E24">{{r.k}}<sc-if value="{{r.tightenOnly}}" hint-placeholder-val="{{false}}"><span style="margin-left: 6px; font-size: 11px; color: #8B949E">（只能收紧）</span></sc-if></td>
+                  <td style="padding: 8px 12px; border-top: 1px solid #1A1E24; font-family: 'JetBrains Mono', monospace; color: #A9B1BA">{{r.g}}</td>
+                  <td style="padding: 6px 12px; border-top: 1px solid #1A1E24">
+                    <select onChange="{{markDirty}}" aria-label="{{r.k}}" style="height: 28px; padding: 0 8px; border-radius: 6px; border: 1px solid #2A3038; background: #0F1216; font-size: 12px">
+                      <sc-for list="{{r.opts}}" as="o" hint-placeholder-count="2"><option>{{o}}</option></sc-for>
+                    </select>
+                  </td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{isOther}}" hint-placeholder-val="{{false}}">
+        <h1 style="margin: 0; font-size: 18px; font-weight: 600">{{pageTitle}}</h1>
+        <span style="color: #8B949E">原型未展开这一页。配置键见 docs/interfaces/config.md。</span>
+      </sc-if>
+
+      <div style="display: flex; flex-direction: column; gap: 8px; max-width: 980px">
+        <span style="font-size: 12px; color: #8B949E">涉及凭据或放宽安全的改动，保存时需要审批设备签名；新配置从下一个节点开始生效，运行中的节点不受影响。</span>
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+          <button onClick="{{save}}" style="height: 32px; padding: 0 14px; border-radius: 6px; border: 0; background: #58A6FF; color: #0E1014; font-weight: 600; cursor: pointer">保存</button>
+          <button style="height: 32px; padding: 0 14px; border-radius: 6px; border: 1px solid #2F353D; background: transparent; cursor: pointer">测试连接</button>
+          <sc-if value="{{hasSaved}}" hint-placeholder-val="{{false}}"><span role="status" style="font-size: 12px; color: #3FB950">已保存（rev 18235）。4 个沙盒运行中，新配置从它们的下一个节点开始生效。</span></sc-if>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"onClose":{"editor":null},"startPage":{"editor":null},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { page: props.startPage || 'models', dirty: false, confirmLeave: false, saved: false };
+  }
+  renderVals() {
+    const S = this.state;
+    const close = () => { if (this.props.onClose) this.props.onClose(); };
+    const go = page => () => this.setState({ page, saved: false });
+    const item = (page, label) => ({ label, pick: go(page), aria: S.page === page ? 'page' : 'false',
+      style: S.page === page ? 'background: #1C2128; color: #E6E8EB;' : 'background: transparent; color: #C9D1D9;' });
+    const navGroups = [
+      { title: '服务端', items: [item('models', '模型'), item('levels', '档位与预算'), item('github', 'GitHub App'), item('sandbox', '沙盒与出网'), item('policies', '危险动作策略'), item('guardian', '后台守护')] },
+      { title: '项目', items: [item('project:gantry', 'gantry'), item('project:specgit', 'specgit'), item('project:graphagent', 'graphagent')] },
+      { title: '本机', items: [item('devices', '设备与证书'), item('appearance', '外观')] },
+    ];
+    const titles = { levels: '档位与预算', github: 'GitHub App', sandbox: '沙盒与出网', policies: '危险动作策略', guardian: '后台守护', devices: '设备与证书', appearance: '外观' };
+    const tiers = [
+      { short: '大脑', name: '大脑模型', color: '#A371F7', desc: '理解意图、规划拆图、需求准入、reasoner 预演、arbiter 裁决。量少、要准。', models: ['claude-opus-5-5', 'claude-fable-5-1'], efforts: ['xhigh', 'high', 'max'], hasOverride: false, override: '' },
+      { short: '干活', name: '干活模型', color: '#39C5CF', desc: '在沙盒内实现、修复、担任各 review 视角。主力产量。', models: ['claude-sonnet-5-5', 'claude-opus-5-5'], efforts: ['随档位', 'medium', 'high'], hasOverride: true, override: '被 1 个项目覆盖：specgit' },
+      { short: '打杂', name: '打杂模型', color: '#8B949E', desc: '事件摘要、CI 日志分类、提交说明、状态类问答。量大、要便宜。', models: ['claude-haiku-5-5', 'claude-sonnet-5-5'], efforts: ['low', 'none', 'medium'], hasOverride: false, override: '' },
+    ];
+    const levelRows = [
+      { lv: 'None', p: '理解意图', w: '只读沙盒中回答涉及代码的问题', u: '回答状态类问题' },
+      { lv: 'Low', p: '理解意图', w: '单节点实现', u: '提交说明、状态摘要' },
+      { lv: 'Medium', p: '理解意图、规划', w: 'build / verify、单 reviewer', u: '状态清单' },
+      { lv: 'High', p: '+ 需求准入、汇总 review', w: '实现 + 多角色 review', u: '事件摘要' },
+      { lv: 'Max', p: '+ reasoner 预演、arbiter 裁决', w: '实现 + 对抗 review', u: '事件摘要' },
+      { lv: 'Ultimate', p: '+ 拆 Milestone、每个 PR 裁决', w: '多交付并行，每个按 Max', u: '事件摘要' },
+    ];
+    const projId = S.page.startsWith('project:') ? S.page.slice(8) : '';
+    const PROJ = {
+      gantry: [['默认档位上限', 'Medium', ['继承全局', 'Low', 'High', 'Max'], false], ['干活模型', 'claude-sonnet-5-5', ['继承全局', 'claude-opus-5-5'], false], ['预算模板', '按档位', ['继承全局', '收紧 20%'], true], ['额外需审批的路径', '—', ['crates/gantry-pki/**', '无'], true]],
+      specgit: [['默认档位上限', 'Medium', ['High', '继承全局', 'Max'], false], ['干活模型', 'claude-sonnet-5-5', ['claude-opus-5-5', '继承全局'], false], ['预算模板', '按档位', ['继承全局', '收紧 20%'], true], ['额外需审批的路径', '—', ['无', 'runtime/**'], true]],
+      graphagent: [['默认档位上限', 'Medium', ['Low', '继承全局', 'High'], false], ['干活模型', 'claude-sonnet-5-5', ['继承全局', 'claude-opus-5-5'], false], ['预算模板', '按档位', ['继承全局', '收紧 20%'], true], ['额外需审批的路径', '—', ['无', 'packages/core/src/dag/**'], true]],
+    };
+    const projRows = (PROJ[projId] || []).map(([k, g, opts, t]) => ({ k, g, opts, tightenOnly: t }));
+    return {
+      navGroups, tiers, levelRows, projRows, projName: projId,
+      isModels: S.page === 'models', isProject: !!projId, isOther: S.page !== 'models' && !projId, pageTitle: titles[S.page] || '',
+      dirty: S.dirty, confirmLeave: S.confirmLeave, hasSaved: S.saved,
+      markDirty: () => this.setState({ dirty: true, saved: false }),
+      save: () => this.setState({ dirty: false, saved: true }),
+      back: () => { if (S.dirty) this.setState({ confirmLeave: true }); else close(); },
+      leaveAnyway: () => { this.setState({ dirty: false, confirmLeave: false }); close(); },
+      stay: () => this.setState({ confirmLeave: false }),
+    };
+  }
+}
+</script>
+</body>
+</html>
