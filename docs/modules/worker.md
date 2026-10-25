@@ -2,6 +2,14 @@
 
 > 状态：设计 v0.1 · 里程碑：M1 起（M2 / M3 增量） · 泳道：`exec`（见 [milestones.md](../milestones.md)） · crate / 目录：`crates/gantry-worker/`（一个 crate、两个产物：**库** = 服务端侧 `WorkerAdapter` 声明；**二进制** `gantry-worker` = 沙盒内的执行者）
 
+> **协作扩展边界（提议）** —— 多工作树协作的完整语义见 [collaboration.md](../collaboration.md)；**设计提案，待单独契约批准，不替换本文现行规格**。
+>
+> - 协作请求只能出现在完成且已通过校验的最终产物中；stdout 仍只是展示通道，不作为请求、控制或权限通道。
+> - 其他树提供的材料只按不可信数据进入 prompt，保留服务端写好的隔离标记；不因此改变工具、权限、输出路径或 schema。
+> - 运行中的 worker 不接收追加指令：stdin 只在启动时传入固定 prompt，新输入只能进入下一次尚未准备的 Attempt。
+> - 不读取其他工作树，不直接联系服务端；不调用 `supply_spec`、审批、设置或控制。
+> - 协议新增字段、`source` 取值与状态只记为待契约冻结的需求；`/1` 不得假借现有 `file_excerpt.source` 表达跨树来源。
+
 `worker` 是 [Worker 协议](../interfaces/worker-protocol.md) 在沙盒内的执行者：读 JobSpec、驱动 agent CLI（第一实现是 Claude Code headless，decisions P-07）、按约定写出 `out/` 四件套、打进度事件、按退出码约定退出。协议与 agent 无关：Codex 等后续适配只新增一个适配层和一个 `execution.agent` 取值（W7）。
 
 > 标注 **[提议]** 的是本文为了能写出接口与测试而给的默认，骨架没定；标注 **需核实** 的是作者没有确认的外部行为（Claude Code CLI 的标志与配置语法）；标注 OQ-W*n* 的点见 §13，实现者不得自行拍板。

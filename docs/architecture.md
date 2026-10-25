@@ -277,6 +277,18 @@ sequenceDiagram
 - merge 时两者都要满足：先满足 GitHub 规则（必需 review、check、merge queue），再凭 Gantry 审批执行 merge。
 - 审批后若有新推送，审批失效，重新进入评审。守护在已审批的 PR 上**不得**静默推送。
 
+### 7.5 多工作树协作（目标设计，提案）
+
+D-14 与 D-15 记录了用户目标：项目主对话统筹多个工作树并行；同项目 agent 可只读观察、通信和跨树文件阅读。具体机制仍是待契约批准的提案（P-83–P-86，Q-13 未确认），不是当前实现默认，也不改变 I1–I8。
+
+- **独立任务并行**：每个任务保留独立 Delivery、Worktree、Workflow、Attempt、预算和范围；主对话统筹不是共享执行上下文。现行单消息单 Delivery、`source_message_id` 幂等、多 `refs` `Ambiguous` 不变。
+- **服务端中介**：观察、消息和跨树读取都经 `engine` 编排、`repo` 快照、`sandbox` 包装、`store` 保存状态；用户显式授权是上限，范围包括协作 delivery、可观察字段、文件路径及快照；服务端计划只能在此上限内分配已授权目标、排序和收窄，不能自行纳入整个项目或新增路径，路径存在也不等于授权。身份只由运行上下文派生。中介与不跨树写是从沙盒只计算与工作树隔离推导的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 另行拍板的机制。
+- **只读边界**：同树仍单写者（租约 + fence），`sandbox_ro` 读固定副本；跨树只读用户授权的已发布快照，内部结果 CAS 读取也受同一授权检查，无跨树写。消息在目标原节点、原 `graph_rev` 的下一次正常调度中绑定，是保守提案，不是命令或已批准结论；当前 Attempt 正常结束不等于目标 node / workflow / delivery 终结，失败或取消不转投后续 Attempt。
+- **组合验证**：独立组合验证绑定固定候选 / 基线 SHA、契约版本和结果树摘要；分别通过不等于组合通过，组合通过也不是审批。`policy`、Forge Outbox 与 GitHub 规则保留。
+- **档位不变**：基础协作不以 Ultimate 为前提；Ultimate 仍只用于大目标自动拆分和依赖统筹，None 仍纯问答、不创建交付。
+
+契约批准前不新增路由、字段、事件或端口。本轮 UI / shell 不新增路由或 IPC，不代表未来可依赖既有路由实现跨树功能；G1 契约批准后另行定义。详见 [collaboration.md](collaboration.md#多工作树协作目标设计)；门槛见 [milestones.md](milestones.md#协作扩展提议契约批准后)。
+
 ## 8. 档位、阶段与图
 
 档位是**上限**：引擎在规格阶段按风险评估给出 `level_effective` 初值（≤ `level_cap`），之后可在上限内按风险自动加码（例如改动触及 auth 路径时插入对抗 review 节点），只升不自动降，不能超过上限；需要超过时上报（`escalation`），交付单元停在当前阶段等待用户（P-57）。
@@ -364,5 +376,6 @@ sequenceDiagram
 | [interfaces/](interfaces/) | 客户端 API、Worker 协议、Forge 动作、配置 schema、Egress 控制面 |
 | [modules/](modules/) | 每个模块的规格书 |
 | [prototype.md](prototype.md) | 界面原型说明 |
+| [collaboration.md](collaboration.md) | 多工作树协作的目标设计（待契约批准的提案） |
 | [milestones.md](milestones.md) | 可并行开发的里程碑 |
 | [design.md](design.md) | 设计讨论记录（历史） |

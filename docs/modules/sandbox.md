@@ -2,6 +2,13 @@
 
 > 状态：设计 v0.1 · 里程碑：M1 起（M2 / M3 增量） · 泳道：`exec`（见 [milestones.md](../milestones.md)） · crate / 目录：`crates/gantry-sandbox/`
 
+> **协作扩展边界（提议）** —— 多工作树协作的完整语义见 [collaboration.md](../collaboration.md)；**设计提案，待单独契约批准，不替换本文现行规格**。
+>
+> - 跨树材料只作为服务端中介提供的固定快照进入 `SandboxSpec`；本模块不挂载其他工作树，也不接受指向其他树的活动路径。
+> - 输入在 `stage` 时一次性固定；运行中不改 `job.json` / `inputs`。`inputs/READY` 仍只是就绪标记，不携带数据。
+> - 先停后取：停止并确认无残留进程后才 `collect`；stdout 只用于展示，材料与产物一律按不可信数据处理。
+> - 本提案不新增挂载、容器面方法或引擎面方法。
+
 `sandbox` 把一次 Attempt 关进一个一次性、只读根、无凭据、只能经 Egress 出网的容器里运行，监督它直到停止，再按白名单取回产物并销毁。它是 [Worker 协议](../interfaces/worker-protocol.md) 在服务端一侧的执行者：沙盒与服务端之间只有文件、worker 的 stdout 和运行时信号（decisions P-15）。
 
 > 标注 **[提议]** 的是本文为了能写出接口与测试而给的默认，骨架没定；标注 **需核实** 的是作者没有确认的外部行为（Podman / gVisor / 内核）；标注 OQ-S*n* 的点见 §13，实现者不得自行拍板。

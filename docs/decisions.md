@@ -1,6 +1,8 @@
 # 决策记录
 
 > 每条决策有唯一编号和状态。**已确定** = 用户拍板；**提议** = 助手提出、用户未确认，可被推翻；**待决** = 需要用户决定。实现时以"已确定"为硬约束，"提议"为默认值。
+>
+> 例外：`## 待契约批准提案（非默认）` 中的 P-83–P-86 尚未获契约批准，不是当前实现默认，也不改变 M0 / M1 的契约、端口、替身或退出标准；接线前须单独批准契约 PR。
 
 ## 已确定
 
@@ -19,6 +21,10 @@
 | D-11 | 界面工程化、现代、紧凑；未来手机版用 UIKit，且手机端只给 agent 发消息 | 用户 |
 | D-12 | 对话不显示 agent 与用户头像；未来用气泡边框颜色区分 agent 种类 | 用户 |
 | D-13 | 先落地设计文档，按模块拆分，使 agent 能凭模块规格独立开发 | 用户 |
+| D-14 | 项目主对话统筹多个工作树并行 | 用户 |
+| D-15 | 同项目 agent 间可只读观察、通信和跨树文件阅读 | 用户 |
+
+D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计算与工作树隔离推导出的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 行新增的用户机制决定；机制见待契约批准提案节的 P-83–P-86。
 
 ## 提议（默认采用，可推翻）
 
@@ -109,6 +115,19 @@ P-47–P-70 来自[第二轮裁决](reviews/2026-10-24-rulings-round2.md)（产�
 | P-81 | **M0 替身清单加入 `MemorySecrets`**：`secrets` 的读写 trait 与内存实现在 M0 冻结与交付，供 `forge`、`pki`、`egress`、`api` 与 `secrets` 并行开发 | `secrets` 与它的使用方在 M1 同期开发 |
 | P-82 | **桌面端消息带 `level_cap` 且 `@` 的是已有交付**：视为对该交付调整上限，等同 `PATCH /v1/deliveries/{id}`（产生 `delivery.level_changed`，预算模板不变，P-57）；界面在发送前提示改动影响（"上限 X → Y；已触发的闸门不撤销"）。值与该交付当前上限相同则不变。手机档案忽略 `level_cap` | 原型已这样交互，此前只有 `conversation` 的临时处理 |
 
+## 待契约批准提案（非默认）
+
+以下条目尚未获契约批准，不是当前实现默认，也不改变 M0 / M1 的契约、端口、替身或退出标准；接线前须单独批准契约 PR。每项只留摘要，完整边界与负例见 [collaboration.md](collaboration.md)。
+
+| # | 摘要 | 详见 |
+| --- | --- | --- |
+| P-83 | **基础并行与独立上下文**：独立并行是现行基线；新增协作待契约批准；同一交付的状态推进由单 actor 串行，图内就绪节点按 DAG、锁与并发 / 预算闸并行；主对话统筹不是共享执行上下文；基础协作不依赖 Ultimate。 | [§1 结论与边界](collaboration.md#1-结论与边界)、[§3 目标模型与授权](collaboration.md#3-目标模型与授权) |
+| P-84 | **服务端中介与下一尝试投递**：engine / repo / sandbox / store 中介；用户显式授权是上限，计划只可分配、排序和收窄（含 delivery、node、可观察字段、路径 / 快照），delivery 授权不自动覆盖其全部 node；消息仅作原节点原 `graph_rev` 下一次正常调度 Attempt 的不可信材料，不注入运行中；已投递以 worker 实际启动且消息在该 Attempt 固定输入内为准，不是 `attempt.started` 事件或 `submit` 受理；目标 node / workflow / delivery 终结、节点替换或图版本变化时不转投，无下一次正常调度时有限等待后过期，不自建 Attempt；当前 Attempt 正常结束不等于目标终结，失败或取消不转投后续 Attempt；接收、组装输入、实际启动前检查；撤权覆盖已受理未启动 job，启动许可与撤权按有序决策处理。 | [§3 目标模型与授权](collaboration.md#3-目标模型与授权)、[§4 只读观察](collaboration.md#4-只读观察)、[§5 消息：下一尝试投递](collaboration.md#5-消息下一尝试投递) |
+| P-85 | **固定快照只读**：仅读用户授权、同项目、已发布且服务端验证产生的快照，按 commit + 相对路径 + digest 固定；路径存在不等于授权，SHA / CAS 摘要不是权限；不读活跃工作树或 `/gantry/work/`；不跟随 symlink / submodule，不执行读到的文本；CAS 是内部无鉴权字节存储，调用方 `engine` / `api` 在 `open` / `stat` 前校验同项目、用户授权与 snapshot 映射，不给沙盒直接入口。 | [§6 跨树文件只读](collaboration.md#6-跨树文件只读) |
+| P-86 | **独立组合验证**：engine 编排、repo 固定源、sandbox 独立临时副本、store 持久化证据；绑定候选 / 基线 SHA、契约版本、组合顺序与结果树摘要；分别通过不等于组合通过；变化即过期；对明确参加组合交付的目标，缺失 / 失败 / 过期证据阻止推进或写入合并动作，用户审批不能覆盖组合失败；组合通过不是审批，保留 `policy`、Forge Outbox 与 GitHub 规则，默认不自动合并；与 policy / Forge 的接线待 G1。 | [§7 独立组合验证](collaboration.md#7-独立组合验证) |
+
+P-83–P-86 只记录目标设计提案，均待契约批准，不作为当前实现默认，也不改变 M0 / M1 的契约、端口、替身或退出标准；详见 [collaboration.md](collaboration.md)。
+
 ## 待决
 
 | # | 问题 | 推荐 | 影响 |
@@ -124,4 +143,5 @@ P-47–P-70 来自[第二轮裁决](reviews/2026-10-24-rulings-round2.md)（产�
 | Q-09 | 仓库中的二进制资源（图片、字体、数据文件等）如何供给：补丁格式不携带二进制（P-68 一律拒绝），需要改二进制文件的任务目前无法完成 | 第一版一律拒绝并上报；M3 起"经审批放行"：worker 在 `out/` 另交二进制清单与内容（受大小上限约束），`repo` 校验后进入补丁审批 `patch_apply_protected` | worker-protocol、`repo`、`policy`、`worker` |
 | Q-10 | 第一台配对的设备是手机档案时怎么办：P-76 规定手机档案至多 `operator`，此时系统没有 approver，而 P-66 的安装引导期在"第一台设备配对"时就结束 | 安装引导期改为持续到第一台**桌面**设备配对；第一台桌面设备成为 approver；在此之前配对的手机为 `operator` | `pki`、`api`、`deploy`、P-23、P-66 |
 | Q-11 | `budget_exhausted` 的 `raise_cap` 选项（P-79）追加多少预算、记什么事件：预算模板在创建时按 `level_cap` 固定（P-57），追加方式此前未定（config OQ-10） | 每选一次把耗尽维度的上限追加一份该档模板的原值（如 `rounds` 3 → 6），新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`）；operator 即可，不需要签名，只在桌面档案 | `engine`、`notify`、`desktop-ui`、data-model、config |
-| Q-12 | 结果对象（补丁、`result_ref`）的读取路由：`patch_apply_protected` 审批要签补丁摘要，但客户端拿不到补丁内容（补丁尚未提交，GitHub 上也看不到），只能"盲签"；`manual_action` 的 workflow 补丁也没有下载入口（api.md OQ-11、desktop-shell OQ-S9） | 新增 `GET /v1/results/{sha256}`（viewer，仅桌面档案，M2；按内容寻址返回原始字节，大小上限同 `policies.patch.max_bytes`，客户端校验 `sha256` 后按不可信文本渲染）；补丁审批单在取不到内容时不允许签名 | `api`、`desktop-shell`、`desktop-ui`、`engine`（CAS 保留期）、M2 退出标准"签名批准后才提交推送" |
+| Q-12 | 结果对象（补丁、`result_ref`）的读取路由：`patch_apply_protected` 审批要签补丁摘要，但客户端拿不到补丁内容（补丁尚未提交，GitHub 上也看不到），只能"盲签"；`manual_action` 的 workflow 补丁也没有下载入口（api.md OQ-11、desktop-shell OQ-S9） | 新增 `GET /v1/results/{sha256}`（viewer，仅桌面档案，M2；按内容寻址返回原始字节，大小上限同 `policies.patch.max_bytes`，客户端校验 `sha256` 后按不可信文本渲染）；补丁审批单在取不到内容时不允许签名。无论路由形态，`engine` / `api` 读取内部 CAS 前须校验同项目、用户授权与已发布快照映射，未授权对外不确认对象存在，不给沙盒直接入口，不以 digest 当权限 | `api`、`desktop-shell`、`desktop-ui`、`engine`（CAS 保留期）、M2 退出标准"签名批准后才提交推送"；该权限前置待 G1 冻结，Q-12 仍未决 |
+| Q-13 | 同项目 agent 之间是否需要在运行中即时通信（而不是只在下一次尝试投递） | 推荐只在下一次尝试投递（P-84）：不注入运行中 Attempt，未答复前不算已确认 | 协作契约、`core::ports`、worker 协议、desktop 呈现；不解决 Q-01–Q-12 |

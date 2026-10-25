@@ -2,6 +2,13 @@
 
 > 状态：设计 v0.1 · 里程碑：M1 起交付，M3 完成 · 泳道：`fe-desktop`（见 [milestones.md](../milestones.md)） · crate / 目录：`apps/desktop/src`（WebView 前端）
 
+> **协作扩展边界（提议）** —— 多工作树协作的完整语义见 [collaboration.md](../collaboration.md)；**设计提案，待单独契约批准，不替换本文现行规格**。
+>
+> - 沿用现有对话、关系地图、工作树与检视器呈现协作：只显示用户授权的结构化状态、可公开摘要、来源与投递状态，不显示私有思维链或未公开材料。
+> - 本轮不增加文件浏览器或跨树源码查看，也不新增 IPC 命令或路由；现行 48 条路由白名单不变。这不表示未来能靠既有路由实现跨树功能：跨树路由与 IPC 须在 G1 契约批准后另行定义。
+> - 消息与源文件仍按不可信文本渲染；界面不提供跨树的权限、审批或控制捷径；路径存在不等于授权。
+> - 前端沿用用户已定的 React + TypeScript + Vite，不是本提案的新选型；状态管理库仍待决（OQ-U1），§7.1 的状态层与框架解耦要求不变。
+
 对话为中心的工程编排工作台与设置浮层：只显示服务端事实与运行状态，所有读写都经 [`desktop-shell`](desktop-shell.md) 的白名单命令；界面规格见 [prototype.md](../prototype.md)，本文把它的每条交互规则落到组件、状态与调用。
 
 ## 1. 职责
@@ -129,7 +136,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 
 ### 7.1 技术形态与目录
 
-- TypeScript（`strict`）+ 一个声明式组件框架。**框架与状态库未选定**（OQ-U1）；本文要求状态层（`sync/`、`store/`、`render/` 的纯逻辑）**不依赖框架**，以便单测与换框架。
+- React + TypeScript（`strict`）+ Vite（用户已定的现有前端栈，不是本提案的新选型）。状态管理库仍未选定（OQ-U1）；本文要求状态层（`sync/`、`store/`、`render/` 的纯逻辑）**不依赖具体框架，也不依赖具体状态库**，以便单测与更换。
 - 目录：
 
   | 目录 | 内容 |
@@ -656,7 +663,7 @@ M1–M4 里不属于界面的标准（沙盒隔离、webhook 去重、崩溃恢�
 
 | # | 问题 | 本文的临时处理 | 影响 |
 | --- | --- | --- | --- |
-| OQ-U1 | 前端框架与状态库未选（architecture §10 只写"TypeScript 前端"） | 状态层与渲染规则不依赖框架（§7.1） | 全模块 |
+| OQ-U1 | 状态管理库未选（React + TypeScript + Vite 是用户已定的现有前端栈，不在本提案重新选型） | 状态层与渲染规则不依赖框架，也不依赖具体状态库（§7.1） | 全模块 |
 | OQ-U2 | **已决：见裁决 C10 / P-56**（新增 `POST /v1/deliveries/{delivery_id}/pause`、`/resume`、`POST /v1/nodes/{node_id}/retry`，operator，幂等键必带；事件 `delivery.paused`、`delivery.resumed`、`node.retry_requested`）。原问题：暂停 / 继续 / 重试失败节点没有路由也没有事件 | 已落实到 R-41、§7.5、§12 | — |
 | OQ-U3 | **审批单"改动"（文件列表、增删行、命中策略的文件与原因）没有数据源**：api.md 没有 PR 改动 / 补丁内容的路由，`Delivery` 里也没有 | 显示"服务端未提供改动明细"+ GitHub commit 链接；"策略命中"一栏不显示 | api.md、`policy`、`repo` |
 | OQ-U4 | 合并闸门所需字段不足：必需 review 数、分支保护状态、`main` 的最近 CI 不在 `Project` / `PullRequestRef` 里 | §7.8 的临时规则（`required_ok`、`mergeable_state`、`review_state`）；`main` 基线只显示分支名与工作树数 | data-model、`forge` |

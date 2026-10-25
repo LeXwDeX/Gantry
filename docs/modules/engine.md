@@ -2,6 +2,15 @@
 
 > 状态：设计 v0.1 · 里程碑：M1（Low 档）→ M2（Medium / High、准入、预算）→ M3（Max）→ M4（Ultimate） · 泳道：`be-engine` · crate / 目录：`crates/gantry-engine`
 
+> **协作扩展边界（提议）** —— 多工作树协作的完整语义见 [collaboration.md](../collaboration.md)；**设计提案，待单独契约批准，不替换本文现行规格**。
+>
+> - 执行上下文与预算仍按交付单元独立；跨交付并行是现有基础能力，不限于 `Ultimate`。`Ultimate` 只增加父交付单元的自动拆分与依赖统筹。
+> - 一条消息至多对应一个交付单元、`source_message_id` 幂等、多目标 `Ambiguous` 均不变；多目标展开与控制需单独冻结。
+> - 协作请求的注入（提案）只发生在接收方下一次正常调度、且该 Attempt 尚未准备的输入中，一次；固定 `graph_rev`、节点与实际 attempt，不修改运行中的 `job.json` / `inputs`，不自动重试、恢复或扩大预算。
+> - 目标已终结或请求陈旧时拒绝或过期，不转投；已投递不等于已读或已执行。
+> - 组合验证（提案）是独立步骤：固定所有候选 head、base 与契约版本，任一变化即过期重验。不跨树修改，不自动 merge，也不替代 `policy`、审批或 Forge Outbox。
+> - 协作协议的字段、状态与请求生成归契约与 `worker`；本模块只按获批的注入点接收已冻结的请求。
+
 引擎把"档位（Level） + GitHub 证据"变成"阶段内的图 + 阶段推进"：按档位展开图，把节点调度到沙盒（Sandbox）或直接调用，按预算熔断，让交付单元（Delivery）沿阶段机前进，遇到需要人的事就上报。它是 `delivery.*`、`workflow.*`、`node.*`、`attempt.*` 事件的唯一写入者，也是沙盒尝试 `budget.*` 事件的写入者（直接调用的用量由 `models` 写，含 None 档的会话台账，P-58）。
 
 ## 1. 职责
