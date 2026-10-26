@@ -23,7 +23,7 @@
 6. **预算**：交付单元创建时按 `level_cap` 固化预算台账（BudgetLedger，P-57）；预留、记账（按 `levels.token_weights` 加权，P-70）、检查、耗尽（`budget.exhausted`）。None 档挂在会话上的临时图记入会话台账（P-58）。
 7. **档位实际值与自动加码**（P-57）：在规格阶段按风险评估给出 `level_effective` 初值（≤ `level_cap`）；之后只在上限内按 `policies.escalation` 抬高，不自动降；超过上限则上报 `escalation`（P-63）并暂停等人；已触发的闸门永不撤销。
 8. **上报**：创建与关闭引擎产生的上报项（InboxItem），并保持"阶段状态（`stage_status`）与未决上报项"一致。
-9. **出站队列（Outbox）入队**：经 `core::ports::OutboxPort::enqueue_in`（[forge.md §6](forge.md)，与决策事件同事务）入队 `push_branch`、`create_pr`、`update_issue`、`close_issue`、`merge_pr`、`update_pr`、评审摘要评论等；只入队，不执行（I2）。
+9. **出站队列（Outbox）入队**：经 `core::ports::OutboxPort::enqueue_in`（[forge.md §6](forge.md)，与"决定入队的那次决策"同事务，两段式判定见 §7.14.1）入队 `push_branch`、`create_pr`、`update_issue`、`close_issue`、`merge_pr`、`update_pr`、评审摘要评论等；只入队，不执行（I2）。
 10. **审批流程**：入队前向 `policy` 取判定（`PolicyPort::decide_action`，结果写入 `requires_approval`，P-62）；合并前请求 Gantry 审批（Approval），审批授予后入队 `merge_pr`；审批在执行前由 `forge` 消费，执行终态失败需要新审批（P-54）；审批失效即回评审（I3）。
 11. **崩溃恢复**：重启后从事件日志重建状态，接管未终结的尝试，保证不重复入队、不重复提交。
 12. **对外控制面**：为 `conversation` 提供创建 / 定位交付单元、补规格、代码问答；为 `api` 实现 `DeliveryControl`（调档、放弃、暂停、继续、重试节点，[api.md §6.3](api.md)，P-56）；为 `guardian` 实现 `HealPort`（`request_heal`）与 `ClassifyPort`（`classify_ci` / `classify_finding`）（M2，P-60；§6）。
@@ -202,7 +202,7 @@ pub trait GraphTemplate: Send + Sync {
     fn level(&self) -> Level;
     /// 阶段图；该阶段没有 agent 图（如 Low 的 spec / review）返回 None。
     fn stage_graph(&self, stage: Stage, cx: &TemplateCx) -> Result<Option<GraphSpec>, TemplateError>;
-    /// 一轮修正所需追加的子图（有界迭代，§7.5）。
+    /// 一轮修正所需追加的子图（有界迭代，§7.5）。`TemplateCx` 与 `ExitRule` 的字段见 §7.14.7。
     fn revise_graph(&self, stage: Stage, cx: &TemplateCx, round: u32) -> Result<GraphSpec, TemplateError>;
 }
 
@@ -225,6 +225,7 @@ pub enum VerdictRule { None, Single(NodeKey), Fold(Vec<NodeKey>), Arbiter(NodeKe
 
 /// 状态归约 + 决策：纯函数，给定当前状态与一个输入，返回要执行的决策。
 /// 所有"决定"都在这里发生，副作用由执行器按决策列表执行（§7.1）。
+/// `Input`、`DecideEnv`、`Decision` 的变体、字段与前置条件见 §7.14。
 pub fn decide(state: &DeliveryState, input: &Input, env: &DecideEnv) -> Vec<Decision>;
 
 /// tier / exec 固定搭配（architecture §9）。模板、实例化与恢复都只通过它取值。
@@ -259,7 +260,7 @@ AttemptRunner 报告（尝试进展 / 终结）───────────
                               │ 2. decide(state, input) -> Vec<Decision>（纯函数，无 IO）│
                               │ 3. tx.append(事件…)；InboxPort::raise(Some(tx), …)；     │
                               │    OutboxPort::enqueue_in(tx, …)                     │
-                              │ 4. tx.advance_cursor("engine", seq)；commit            │
+                              │ 4. commit（游标由 EventRouter 按低水位推进，§7.14.1） │
                               └───────────────────────────────────────────────────┘
                                                   │ 提交之后
                                                   ▼
@@ -269,7 +270,7 @@ AttemptRunner 报告（尝试进展 / 终结）───────────
 要点：
 
 - **每个活跃交付单元一个串行执行体（actor）**：交付单元内严格串行，交付单元之间并行；全局只有一个调度器（派发队列与在途 `submit` 上限）。
-- **决策在事务内、副作用在提交后**：`store` 是单写者，`WriteTx` 里先读后写不会被他人插入（[store.md §6.1](store.md)），因此不需要额外的乐观版本守卫；事务内只做 CPU 计算（`decide` 是纯函数），不做外部 IO，也不 `await` 无界的东西。事务内追加的事件由 `core` 的状态机校验，非法迁移得到 `TransitionError`（暴露契约缺口，core.md §7.4）。Outbox 入队经 `OutboxPort::enqueue_in` 与决策事件**同事务**（`WriteTx` 作为 `TxHandle` 传入，入队只做校验与插入，不做外部 IO）；外部副作用（起沙盒、调模型、拉取材料）在提交之后发起；它们都是幂等的，崩溃后由 `decide(Tick)` 重新派生同样的请求补上（§7.13）。
+- **决策在事务内、副作用在提交后**：`store` 是单写者，`WriteTx` 里先读后写不会被他人插入（[store.md §6.1](store.md)），因此不需要额外的乐观版本守卫；事务内只做 CPU 计算（`decide` 是纯函数），不做外部 IO，也不 `await` 无界的东西。事务内追加的事件由 `core` 的状态机校验，非法迁移得到 `TransitionError`（暴露契约缺口，core.md §7.4）。Outbox 入队经 `OutboxPort::enqueue_in` 与"决定入队的那次决策"**同事务**（`WriteTx` 作为 `TxHandle` 传入，入队只做校验与插入，不做外部 IO；`policy` 判定在前一次决策之后作为副作用取得，见 §7.14.1）；外部副作用（起沙盒、调模型、拉取材料）在提交之后发起；它们都是幂等的，崩溃后由 `decide(Tick)` 重新派生同样的请求补上（§7.13）。
 - **决策幂等**：`decide` 对同一状态与同一输入返回相同结果；每个决策都带前置条件（例如"节点仍为 `pending`"），状态已前进则不产生重复事件。
 - **ID 在事件里**：节点 / 尝试 / 工作流 ID 在决策时生成并写进事件，恢复时从事件读取，不重新生成。
 - **读写分离**：读 `Delivery` / `Workflow` / `Node` / `Attempt` / `BudgetLedger` / PR 与 Issue 快照用 `store` 投影；写一律走事件。
@@ -308,6 +309,8 @@ pub struct Evidence {                       // 退出证据的本地记录，全
 }
 ```
 
+`AttemptState`、`OpenInbox`、`RoundRecord` 的字段，以及 `DeliveryState` 为决策补足的字段（`outbox`、`approvals`、`locks` 等）见 §7.14.4。
+
 `tier` / `exec` 永远由 `role_binding` 填，不接受模板或事件里的其他值（测试强制，§12）。`critical` 与 `required` 不是 data-model Node 字段，只记在 `workflow.created` / `workflow.revised` 的节点描述里（OQ-12）。
 
 `workflow.created` / `workflow.revised` 的 `NodeDescriptor` 必须带 `node_id`（`nod_…`），与 `node.*` 事件使用同一 ID；否则事件日志无法重建 `WorkflowState.nodes` 映射。
@@ -340,7 +343,7 @@ tier / exec 的固定搭配见 [architecture §9](../architecture.md#9-三类模
 
 - `Workflow` 与阶段运行一一对应：每次进入一个有 agent 图的阶段就新建一个 Workflow（`graph_rev = 1`）；`propose`、`merge`、`closed` 没有 agent 图，不建 Workflow。计划是独立阶段（P-55）：计划阶段图 = `plan`（Max 起加 `reasoner`）；实现阶段图 = `build → verify`（Low 为 `single`）；准入图 = `admission`（仅 High 及以上）。
 - None 档代码问答（P-58）：`answer` 节点所在的 Workflow 挂在会话上（`delivery_id = None`、`conversation_id` 必填、`stage` 为空），不属于任何交付单元的阶段机。
-- 节点的 `depends_on` 满足条件：每个 `required` 依赖已 `succeeded`，且每个非 `required` 依赖已进入终态。`required` 依赖终态失败（重试耗尽）→ 下游 `skipped`，Workflow `failed`，上报（§7.8）。
+- 节点的 `depends_on` 满足条件：每个 `required` 依赖已 `succeeded`，且每个非 `required` 依赖已进入终态。`required` 依赖终态失败（重试耗尽）→ 上报（§7.8）；下游保持 `pending`、Workflow 保持 `running`，等人工重试（P-56）或放弃 / 重新规划后才 `cancelled`（core 中节点没有 `pending → skipped`，Workflow `failed` 无出边；§7.14.5）。
 - `exec = sandbox` 的节点需要工作树写权锁，`sandbox_ro` 与 `direct` 不需要（§7.7）。
 - 视角清单、critical 标注、`required` 取值为 [提议]，见 OQ-5。
 
@@ -559,7 +562,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | 其他 `policy.*` | 重试 1 次并带"缩小改动"反馈；仍被拒 → 上报（OQ-15） |
 | `verdict.*` | 不是失败，进入 §7.5 |
 
-每个节点的尝试数上限 `MAX_ATTEMPTS_PER_NODE`（内部常量，建议 3；没有对应配置键，OQ-9）；耗尽 → 节点 `failed`，`required` 节点失败则 Workflow `failed` 并上报 `escalation`（`reason_code = attempt_failed`，`payload.attempt_id`、`failure_detail`）。
+每个节点的尝试数上限 `MAX_ATTEMPTS_PER_NODE`（内部常量，建议 3；没有对应配置键，OQ-9）；耗尽 → 节点 `failed`，`required` 节点失败则上报 `escalation`（Workflow 不结束，见 §7.4 通则）（`reason_code = attempt_failed`，`payload.attempt_id`、`failure_detail`）。
 
 ### 7.9 预算
 
@@ -634,7 +637,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 ### 7.12 Outbox 入队与审批流程
 
-引擎只入队，经 `OutboxPort::enqueue_in(tx, EnqueueRequest)`（[forge.md §6](forge.md)），与决策事件**同一事务**。幂等键由 `core` 按 [forge-actions §2.2](../interfaces/forge-actions.md) 派生，引擎提供 `kind`、`payload`、`requires_approval`、`depends_on`、`priority`、`epoch`、`enqueued_by = {module: "engine", causation_id}`；重复入队返回已有行（`created = false`）。Outbox 临时错误由 `forge` 留在 `queued` 退避，终态 `failed` 才发 `outbox.failed`（P-53）；人工重试 = 引擎以 `epoch + 1` 创建新动作（例如用户 `retry` 后重新 `create_pr`），需要审批的动作同时需要新审批（P-54）。
+引擎只入队，经 `OutboxPort::enqueue_in(tx, EnqueueRequest)`（[forge.md §6](forge.md)），与"决定入队的那次决策"**同一事务**；`decide_action` 不能在引擎事务内调用，判定与入队是两段（§7.14.1）。幂等键由 `core` 按 [forge-actions §2.2](../interfaces/forge-actions.md) 派生，引擎提供 `kind`、`payload`、`requires_approval`、`depends_on`、`priority`、`epoch`、`enqueued_by = {module: "engine", causation_id}`；重复入队返回已有行（`created = false`）。Outbox 临时错误由 `forge` 留在 `queued` 退避，终态 `failed` 才发 `outbox.failed`（P-53）；人工重试 = 引擎以 `epoch + 1` 创建新动作（例如用户 `retry` 后重新 `create_pr`），需要审批的动作同时需要新审批（P-54）。
 
 **每个动作入队前先过 `PolicyPort::decide_action`**（I3，P-62：判定在入队时做，结果写入 `requires_approval`；`forge` 不读策略，只在执行前消费审批）：`Allow { approval }` → 入队，`requires_approval` 取其 `approval`；`NeedsApproval { spec, pending }` → 无 `pending` 则 `request_approval(spec, ctx)`，并上报 `approval_needed`，审批 `granted` 后再次 `decide_action`；`Deny { reason, report }` → 不入队，按 `report`（`ReportHint`）上报。`EnqueueError::ApprovalRequired` 视为引擎缺陷（说明漏了判定）；`PermissionMissing` → 上报 `app_permission_missing`。
 
@@ -656,16 +659,392 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 ### 7.13 并发模型、持久化与恢复
 
-- **运行时**：tokio。`EventRouter`（一个任务）用 `events().tail` 订阅 `store`，持久化游标 `engine`（与决策同事务 `advance_cursor`）；按 `delivery_id`（事件的 `subject` / `correlation_id`）分发到 `DeliveryActor` 邮箱（None 档临时图按 `conversation_id` 分发到会话执行体）；`AttemptRunner` 是每个尝试一个任务，驱动 `SandboxService` / `models` 并向执行体回报；`Scheduler` 单例持有派发队列与在途计数。
-- **持久化**：引擎没有自己的表。事件 + 游标同事务；"事件已处理"靠决策幂等而不是游标精确一次。
+- **运行时**：tokio。`EventRouter`（一个任务）用 `events().tail` 订阅 `store`，持久化游标 `engine`（按各执行体已处理 `seq` 的低水位推进，§7.14.1）；按 §7.14.2 的路由表分发到 `DeliveryActor` 邮箱（None 档临时图按 `conversation_id` 分发到会话执行体）；`AttemptRunner` 是每个尝试一个任务，驱动 `SandboxService` / `models` 并向执行体回报；`Scheduler` 单例持有派发队列与在途计数。
+- **持久化**：引擎没有自己的表。游标按低水位推进、落后于实际处理进度（§7.14.1）；"事件已处理"靠决策幂等而不是游标精确一次。
 - **启动恢复**：
-  1. 读所有非终结交付单元的投影，折叠游标之后的事件，重建 `DeliveryState`；
+  1. 读所有非终结交付单元，以及仍有未清理资源的 `abandoned` / `closed` 交付单元（排队中的 Outbox、未终结尝试、活跃审批、未移除的工作树）的投影，折叠游标之后的事件，重建 `DeliveryState`；
   2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`（worker-protocol §3.5）：仍在运行 → 继续监督；已退出 → 直接 `collect` 并走终结管线；已不存在 → 终结为 `infra_error`（`infra.lost`）并按 §7.8 重试；`direct` 尝试没有沙盒，按 `infra.lost` 重试；终结后 `release`；再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
   3. 终结管线内的补丁提交幂等：先查 `attempt.finished` 是否已存在 `result_tree`，再由 `repo` 按 `refs/gantry/attempt/<job_id>` 查已有提交，已存在则不重复提交；
-  4. 对每个交付单元补一次 `decide(Tick)`：应有未建的 Workflow / 悬空的上报项（`dedup_key` 相同则 `Deduped`）都会被补齐（Outbox 入队与决策同事务，不会悬空）；
+  4. 对每个交付单元补一次 `decide(Tick)`：应有未建的 Workflow / 悬空的上报项（`dedup_key` 相同则 `Deduped`）都会被补齐（阶段事件与入队之间的崩溃窗口由 §7.14.1 的期望动作集合补齐；同一幂等键不会重复）；
   5. 锁租约过期的工作树由 `repo` 回收；引擎重新 `acquire_lock` 取得新的 `LockToken`。
 - **关闭客户端不影响任务**：引擎不依赖任何客户端连接。
 - **settings 热加载**：订阅 `settings.updated`；持有 `ArcSwap<EffectiveSettings>`（含 `config_rev`），在两次决策之间原子切换，不在一次决策途中切换；创建类键（`levels.*`）只在创建交付单元时读取，判定类键（`policies.escalation`）每次求值读当前值；向 `status` 报告 `applied_rev`（config §2.6）。
+
+### 7.14 决策器类型：`Input`、`DecideEnv`、`Decision`（#58）
+
+本节给出 §6 `decide` 签名与 §7.2 `DeliveryState` 里只到名字的类型的字段与变体。它们是 crate 内部类型（不进 `core::ports`，替身不实现），但 M1 验收测试（§12.2）直接构造它们，因此按契约对待：改字段要走契约 PR，不在实现 PR 里顺手改。外部可见的只有它们产出的事件、上报项与 Outbox 行，形状仍以 `schemas/` 为准。
+
+#### 7.14.1 执行循环、纯度与收敛
+
+`decide` 不做 IO、不读时钟、不取随机数；同一 `(state, input, env)` 必得同一 `Vec<Decision>`（§12.2 决策纯度）。决策分三类：**事务内决策**（`Append` / `Raise` / `Resolve` / `Enqueue`）与本次决策同一提交；**副作用**（`Effect`）在提交后发起，结果以 `Input::Report` 回流；**`Reply`** 只回给命令调用方，不落盘。
+
+执行体对每个输入：
+
+1. 打开 `WriteTx`，`tx.read()` 折叠得到 `DeliveryState`；调 `decide(state, input, env)`。
+2. 按序执行事务内决策；任何一步失败整笔回滚、不发副作用、不回 `Reply`。成功则提交。
+3. 提交后：把 `Reply` 交给调用方；对每个 `Effect` 先把它的 `EffectKey` 记入执行体内存里的**在途集合**（`env.inflight`），再发起。该副作用的 `Report`（含 `Done` 与 `EffectFailed`）到达时从在途集合移除；`ScheduleTimer` 的键在对应 `Tick(Timer)` 到达时移除。
+4. **收敛**：只要上一步产出过事务内决策，就对新状态再调用 `decide(state', Tick(Settle), env')`；某一轮不再产出事务内决策即停（此轮产出的副作用照常发起）。上限 `MAX_SETTLE = 16` 轮，超过视为引擎缺陷：记错误日志、`status` 报 `degraded`、停止为该交付单元决策；不写事件、不上报（词表里没有此码，P-79）。
+
+保证收敛与幂等的三条规则：
+
+- **一切前置条件写在 `decide` 里**（7.14.5 表）。每个 `Effect` 的前置条件都包含"其 `EffectKey` 不在 `env.inflight`"；在途集合不持久化，崩溃后为空，于是 `Tick(Recover)` 恰好把未完成的副作用重新发一遍，而副作用本身幂等（`submit` 按 `job_id`、`release` / `cancel`、`create_worktree`、`acquire_lock` 同持有者重入均幂等，sandbox.md §6.1、repo.md §7.6）。
+- **期望动作集合**：Outbox 动作不靠"刚才发生了什么"决定，而由纯函数 `expected_actions(state) -> BTreeMap<ActionKey, ActionIntent>` 从状态推出（例如阶段为 `propose` 且有 `candidate_head` → 期望一条 `push_branch`）。`JudgeAction` 只为"期望中、`outbox` 里没有、未在途、未被本进程判过 `Deny`"的意图产出；`Enqueue` 回流时再核对该意图仍在期望集合中（用户中途放弃则不入队）。
+- **判定是两段式的**：`PolicyPort::decide_action` / `request_approval` 没有事务参数且自身写事件（`policy.denied`、`approval.requested`），不能在引擎的单写者事务里调用。所以 `decide` 先产出 `Effect::JudgeAction`，判定作为 `Report::ActionJudged` 回流后再产出 `Enqueue`、`Effect::RequestApproval` 或 `Raise`。因此"入队与决策同事务"（§1 第 9 条、§7.1、§7.12）在本节之后的含义是：**入队与"决定入队的那次决策"同事务**；阶段事件（如 T6 的 `stage_changed`）与入队之间存在一个崩溃窗口，由期望动作集合在 `Tick(Recover)` 时补齐，幂等键保证不重复（§7.13 第 4 步"不会悬空"指的是这一点）。`Deny` 的意图记入执行体内存的 `env.denied`，本进程内不再重判，收到 `settings.updated` 时清空（策略可能已改）；重启后至多重判一次（`policy.denied` 由 `policy` 去重）。
+
+**事件游标**：§7.1 第 4 步改为由 `EventRouter` 推进。各执行体按 `seq` 顺序处理各自的输入并在提交后向路由器回报已处理到的 `seq`。低水位 = 仍有"已投递未处理完"事件的执行体中最小的未处理 `seq` − 1；没有积压时取路由器已读到的最大 `seq`（含不投给任何执行体的事件）。路由器以低水位推进持久游标 `engine`，空闲执行体不拖住游标。崩溃后从低水位重放，重复投递由前置条件消化。执行体自己的事务不再 `advance_cursor`。
+
+`create_delivery`（T1）不经 `decide`：此时还没有 `DeliveryState`，由 `Engine::create_delivery` 直接写 `delivery.created`；提交后执行体用 `Tick(Settle)` 推进 T2 / T2b。None 档 `run_answer` 的会话临时图使用同一组 `Input` / `Decision` 类型，状态为 `AnswerState { workflow: WorkflowState, ledger: BudgetLedger, conversation_id }`，决策函数 `decide_answer` 只覆盖调度、尝试与记账，不涉及阶段机（P-58）。
+
+#### 7.14.2 `Input`
+
+```rust
+pub enum Input {
+    Command(Command),        // 调用方已鉴权；带 ActorCtx（P-78）；结果经 Decision::Reply 返回
+    Event(Observed),         // 路由表（下）投给本交付单元的已提交事件
+    Report(EffectReport),    // 提交后副作用的结果
+    Tick(TickReason),        // 不带新事实，只按当前状态重新求值
+}
+
+pub enum Command {
+    SetLevelCap { cap: Level, ctx: ActorCtx },                       // §6 DeliveryControl（P-82）
+    Abandon { reason: Option<String>, ctx: ActorCtx },               // T13
+    Pause { ctx: ActorCtx },
+    Resume { ctx: ActorCtx },
+    RetryNode { node_id: NodeId, ctx: ActorCtx },                    // P-56
+    SupplySpec { inbox_id: InboxId, message: MessageRef, ctx: ActorCtx }, // M2：T4 答复
+    RequestHeal(HealRequest),                                        // M2：HealPort（P-60）
+    Classify(ClassifyRequest),                                       // M2：ClassifyPort
+}
+pub enum ClassifyRequest { Ci(CiClassifyRequest), Finding(FindingClassifyRequest) } // core::ports::engine
+
+pub struct Observed { pub seq: Seq, pub id: EventId, pub actor: Actor, pub data: ObservedData }
+pub enum ObservedData {
+    /// forge.pr_synchronized / pr_updated / check_suite_completed / check_run_completed / pr_merged /
+    /// pr_closed / pr_reopened / base_advanced / issue_closed / drift_detected / synced
+    Forge(ForgeEventData),                                         // core::forge；结构字段可信，文本是 UntrustedText
+    OutboxSucceeded { action_id: ActionId, github_ref: GithubRef },
+    OutboxFailed { action_id: ActionId, code: OutboxFailureCode },
+    OutboxCancelled { action_id: ActionId, reason: CancelReason },
+    ApprovalRequested { approval_id: ApprovalId, action: ApprovalAction, subject_digest: SubjectDigest },
+    Approval { approval_id: ApprovalId, status: ApprovalStatus },  // granted / consumed / invalidated / expired / denied
+    /// item：路由器按 inbox_id 从投影联查的原上报项快照（含 kind、reason_code、target_level、node_id 等）。
+    /// 折叠 inbox.resolved 会把该项移出 open_inbox，执行选项所需的上下文只能随输入带入。
+    InboxResolved { inbox_id: InboxId, resolution: InboxResolution, option_id: Option<OptionId>, item: Option<OpenInbox> },
+    InboxDismissed { inbox_id: InboxId },                          // 只记录，不解除阻塞（§7.11）
+    PatchValidated(PatchValidatedData),
+    PatchRejected(PatchRejectedData),
+    WorktreeCreated { worktree_id: WorktreeId, branch: String, base_sha: GitOid },
+    WorktreeLocked { worktree_id: WorktreeId, holder: LockHolder, lease_until: Timestamp, fence: Seq },
+    WorktreeUnlocked { worktree_id: WorktreeId },
+    SettingsUpdated { rev: Seq },
+}
+
+pub enum TickReason {
+    Settle,                                   // 7.14.1 第 4 步
+    Recover,                                  // §7.13 第 4 步
+    Timer { at: Timestamp, kind: TimerKind },
+}
+pub enum TimerKind { RetryBackoff { node_id: NodeId }, LeaseCheck { worktree_id: WorktreeId }, LockRenew { worktree_id: WorktreeId }, RecoveryScan }
+```
+
+`ObservedData` 是对 `schemas/events/*.json` 已校验 `data` 的解码，**不新增事件字段**；`Outbox*` 的 `kind` / `ActionKey` 由投影按 `action_id` 联查，`WorktreeLocked.fence` 取该事件自身的 `seq`（repo.md §7.6）。
+
+**路由表**（`EventRouter` 按事件类型决定投给谁，不按 `actor` 过滤）：
+
+| 事件 | 归属交付单元 | 作为 `Input::Event` 投递？ |
+| --- | --- | --- |
+| `delivery.*`、`workflow.*`、`node.*`、`attempt.*`、`budget.*` | `subject` / `data.delivery_id` | 否：引擎自己写的事件只折叠进状态，不回投（无回声） |
+| `inbox.raised` | `item.delivery_id` | 否：只折叠进 `open_inbox` |
+| `inbox.resolved` / `dismissed` | 投影按 `inbox_id` 联查 | 是 |
+| `outbox.succeeded` / `failed` / `cancelled` | 投影按 `action_id` 联查 `delivery_id` | 是；`outbox.enqueued` / `executing` 只折叠 |
+| `approval.requested` / `granted` / `consumed` / `invalidated` / `expired` / `denied` | 审批的 `delivery_id` | 是（含 `policy` 以引擎 `ActorCtx` 写的 `requested`） |
+| `patch.validated` / `rejected` | 按 `job_id` → 尝试 → 交付单元 | 是 |
+| `worktree.created` / `locked` / `unlocked` / `removed` | `created` / `locked` 取 `data.delivery_id`；`unlocked` / `removed` 的 data 无此字段，按工作树投影以 `worktree_id` 联查 | 是（含 `repo` 以引擎 `ActorCtx` 写的） |
+| `forge.*` | `forge` 的绑定结果（forge.md §7 第 5 步：`forge_effect_index` → `Delivery.pr` / `issues` 投影） | 是；未绑定的不投 |
+| `settings.updated` | 无（`subject = settings`） | 是：广播给**所有**活跃执行体，用于 §9"配置修复后恢复派发" |
+| 其余 | — | 否 |
+
+```rust
+pub enum EffectReport {
+    ActionJudged { key: ActionKey, decision: ActionDecision },          // PolicyPort::decide_action
+    ApprovalRequested { key: ActionKey, approval: ApprovalId },          // PolicyPort::request_approval
+    WorktreeReady { worktree_id: WorktreeId },                           // RepoService::create_worktree（另有 worktree.created 事件）
+    LockAcquired { node_id: NodeId, token: LockToken },                  // RepoService::acquire_lock
+    LockBusy { node_id: NodeId, holder: LockHolder, until: Option<Timestamp> },
+    ReconcileDone { target: ReconcileTarget },                           // ForgeReader::reconcile_now
+    Done { key: EffectKey },                                             // 没有专门结果的副作用成功完成（ReleaseLock、RenewLock、ReleaseSandbox、CancelAttempt、RemoveWorktree、InvalidateApproval、CancelOutbox）
+    AttemptFinalized(Finalized),                                         // AttemptRunner 走完 §7.8 终结管线
+    EffectFailed { key: EffectKey, error: EffectErrorClass },
+}
+pub enum EffectErrorClass {
+    Retryable,                                // 退避后由 Timer 重新求值
+    PermissionMissing,                        // → escalation(app_permission_missing)
+    Defect { what: &'static str },            // 引擎缺陷（InvalidSpec、ApprovalRequired 等）→ 记错误并上报 escalation(attempt_failed)
+}
+
+/// AttemptRunner 走完 V1–V6 后的结论；只含可信事实与已校验结构化输出的摘要。
+pub struct Finalized {
+    pub attempt_id: AttemptId,
+    pub node_id: NodeId,
+    pub status: AttemptStatus,                       // succeeded / failed / cancelled
+    pub failure_class: Option<FailureClass>,
+    pub failure_detail: Option<FailureDetail>,       // worker-protocol §9
+    pub result_ref: Option<Sha256Digest>,
+    pub usage_metered: TokenUsage,                   // Egress 计量，不是自报（W3）
+    pub weighted_tokens: u64,
+    pub wall_time_s: u64,                            // JobOutcome.timings
+    pub verdict: Option<Verdict>,                    // 只有判定节点（§7.3）
+    pub patch: PatchResult,
+    pub proposals: Vec<ProposalOutcome>,
+    pub signals: OutputSignals,
+}
+pub enum PatchResult {
+    None,                                            // 角色禁止补丁或未产出
+    NoChange,                                        // OQ-15
+    Committed { commit: GitOid, tree: GitOid, sha256: Sha256Digest },   // Validated(allow) + commit_patch
+    Held { sha256: Sha256Digest, tree: GitOid },     // Validated(needs_approval)，M2
+    Denied { report: Option<ReportHint>, patch: PatchRef }, // Validated(deny)，附补丁引用（P-48）
+    Rejected { reason: PatchRejectReason },          // repo 机械拒绝
+    BaseConflict { branch_head: GitOid },            // 不 rebase，以新 base 重派
+}
+/// `open_pr` 只在 `kind = open_pr` 且 `decision = Accepted` 时带上该提议（文本是模型产出，作数据交 forge 净化）。
+pub struct ProposalOutcome { pub proposal_id: String, pub decision: ProposalDecision, pub open_pr: Option<Proposal> }
+pub struct OutputSignals {
+    pub blocking_questions: bool,                    // plan：非空 → spec_needed（M2）
+    pub missing: Vec<MissingAspect>,                 // admission REVISE（M2）
+    pub arbiter_escalate: bool,                      // M3
+    pub fingerprints: BTreeSet<FindingFingerprint>,  // blocker / major finding 指纹（7.14.4）
+}
+```
+
+`Finalized` 由 `decide` 写成 `attempt.finished`、`budget.charged`、`node.finished`（§7.8"终结"行）。字段来源都已在 worker-protocol §5–§9 与 `core::ports` 定义；`decide` 不读 CAS 原文。
+
+#### 7.14.3 `DecideEnv`
+
+```rust
+pub struct DecideEnv<'a> {
+    pub now: Timestamp,                       // 执行体在打开事务前取一次
+    pub seed: DecideSeed,                     // 32 字节；= sha256(delivery_id ‖ 输入身份 ‖ state.last_seq)
+    pub settings: &'a EngineSettings,         // EffectiveSettings 中引擎读取的子集（§10）及其 config_rev
+    pub models: &'a ModelTable,               // models.resolve 的结果表，键 =（purpose, level, tier, critical）；限本项目，设置切换时重算
+    pub templates: &'a TemplateRegistry,      // 已登记的 GraphTemplate（§7.4），纯函数
+    pub level_policy: &'a dyn LevelPolicy,    // §6，纯函数
+    pub reservation: &'a dyn ReservationPolicy, // §6，纯函数
+    pub sandbox_capacity: u32,                // SandboxService::capacity() 的快照，用于并发闸 2
+    pub inflight: &'a BTreeSet<EffectKey>,    // 在途副作用（执行体内存，7.14.1）
+    pub denied: &'a BTreeSet<ActionKey>,      // 本进程内已判 Deny 的意图（7.14.1）
+    pub consts: EngineConsts,                 // MAX_ATTEMPTS_PER_NODE、退避、租约余量、MAX_SETTLE（§10）
+}
+impl DecideEnv<'_> {
+    /// 确定性 ID：时间部分 = now，随机 80 位 = sha256(seed ‖ 计数器) 截断。
+    /// 每次 decide 只在入口调用一次，所得 IdMint 在本次决策内按可变引用传递，计数器单调。
+    pub fn mint(&self) -> IdMint;
+}
+
+/// 副作用的身份：用于在途去重、DecideSeed 与 EffectFailed 回报。
+pub enum EffectKey {
+    Judge(ActionKey), Approval(ActionKey), Worktree(DeliveryId), RemoveWorktree(WorktreeId),
+    Lock(WorktreeId), Renew(WorktreeId, Seq), Unlock(WorktreeId, Seq), Run(AttemptId), Cancel(AttemptId), Release(AttemptId),
+    Invalidate(ApprovalId), CancelOutbox(ActionId), Reconcile(ReconcileTarget), Timer(TimerKind),
+}
+```
+
+"输入身份"取值：`Command` 用 `ctx.request_id`；`Event` 用事件 ID；`Report` 用其 `EffectKey`；`Tick` 用 `TickReason` 的规范化编码。`EngineSettings` 在两次决策之间整体切换（§7.13 热加载），一次决策只看一份；`models` 中缺所需表项（`NotConfigured`）时，`decide` 不派发并走 §9 的 `models_not_configured` 上报。
+
+#### 7.14.4 `DeliveryState` 的补全字段
+
+§7.2 结构保留，补足以下类型与字段。除标注"内存"的以外，全部能从事件日志与 `store` 投影重建；`pr`、`issues` 来自 `store` 的 GitHub 快照投影（I4），`pr` 的绑定取 `create_pr` 的 `outbox.succeeded.github_ref.pr`。
+
+```rust
+pub struct AttemptState {
+    pub id: AttemptId, pub n: u32, pub exec: Exec,
+    pub status: AttemptStatus,                      // attempt.started → running；attempt.finished → 终态
+    pub base_sha: GitOid, pub tokens_reserved: u64, pub wall_time_s: u64, pub config_rev: Seq,
+    pub started_at: Timestamp, pub finished_at: Option<Timestamp>,
+    pub failure_class: Option<FailureClass>, pub failure_detail: Option<FailureDetail>,
+    pub result_ref: Option<Sha256Digest>, pub result_tree: Option<GitOid>,
+    pub result_commit: Option<GitOid>,              // 见 7.14.6 契约缺口 E1
+    pub after_retry_request: u32,                   // 自该节点最近一次 node.retry_requested 起的序号（1 起）；自动重试上限按它计
+}
+/// 下一次自动重试的最早时间 = finished_at + 退避(n)；抖动以 sha256(attempt_id) 为种子，确定性推出，不存。
+pub fn retry_not_before(a: &AttemptState, consts: &EngineConsts) -> Option<Timestamp>;
+
+pub struct OpenInbox {
+    pub id: InboxId,
+    pub kind: InboxKind,
+    pub reason_code: Option<ReasonCode>,            // data-model 词表（P-79）
+    pub dedup_key: DedupKey,
+    pub raised_by: RaisedBy,                        // Engine | Guardian | Other；只有 Engine 的计入 waiting_human / blocked
+    pub effect: Blocking,                           // WaitingHuman | Blocked | None（warn 级不阻塞）
+    pub node_id: Option<NodeId>, pub attempt_id: Option<AttemptId>, pub approval_id: Option<ApprovalId>,
+    pub target_level: Option<Level>,                // level_cap_exceeded 的 upgrade 目标
+    pub options: Vec<OptionId>,                     // inbox.resolved 的 option_id 必须在其中，否则忽略并记错误
+    pub raised_seq: Seq,
+}
+pub struct RoundRecord {
+    pub workflow_id: WorkflowId, pub stage: Stage, pub round: u32,
+    pub verdict: Verdict,
+    pub judged_head: Option<GitOid>,
+    pub fingerprints: BTreeSet<FindingFingerprint>, // 见 7.14.6 契约缺口 E2
+}
+/// sha256(category ‖ 0x00 ‖ location.path)，十六进制；只到文件不含行号（§7.5）。
+/// 存摘要而不存原文：finding 是模型产出的不可信文本，不进事件日志（I5）。
+pub struct FindingFingerprint(Sha256Digest);
+```
+
+`DeliveryState` 另加（与 §7.2 并列；§7.2 的 `config_rev` 类型统一为 `Seq`）：
+
+| 字段 | 类型 | 来源 |
+| --- | --- | --- |
+| `title` | `String` | `delivery.created` |
+| `abandon_cause` | `Option<AbandonCause>` | `delivery.abandoned.reason`：`pr_closed` → `PrClosedUnmerged`，`issue_not_planned` → `IssueNotPlanned`，其余 → `UserAbandoned`；T15 只认 `PrClosedUnmerged`（core `next_stage_with_abandon`） |
+| `stage_entered` | `(Seq, Timestamp, Option<String>)` | 最近一次 `delivery.stage_changed`（或 `delivery.created`）的 `seq`、`ts` 与 `reason`；"本阶段内"类前置条件都以它为界 |
+| `outbox` | `BTreeMap<ActionKey, OutboxState>` | `outbox.enqueued`（`action` 含 `kind`、`epoch`、幂等键）/ `succeeded` / `failed` / `cancelled`；`OutboxState = { action_id, kind, epoch, status, failure_code? }` |
+| `approvals` | `BTreeMap<ApprovalId, ApprovalLite>` | `approval.requested`（本交付单元）及后续状态事件；`ApprovalLite = { action, subject_digest, status }` |
+| `locks` | `BTreeMap<WorktreeId, LockLite>` | `worktree.locked` / `unlocked`；`LockLite = { holder, lease_until, fence }`。`LockToken` 可由 `{worktree_id, holder, delivery_id, fence, lease_until}` 重建（repo.md §7.6），重启后无需重新取锁即可续租或释放；租约已过期则重新 `AcquireLock` |
+| `lock_owner` | `BTreeMap<WorktreeId, NodeId>` | **内存**：执行体在 `Report::LockAcquired` 时记下锁是为哪个节点取的；重启后为空，由 `Tick(Recover)` 按"有未终结 sandbox 尝试的节点"重新认领 |
+| `worktree` | `Option<WorktreeInfo>` | `worktree.created`（含 `branch`、`base_sha`）设置，`worktree.removed` 清空；首个 `single` / `build` 的 `base_sha` 取它，不再单独 `resolve` |
+| `last_seq` | `Seq` | 折叠到的最后一条事件 |
+
+`Evidence` 补 `candidate_tree: Option<GitOid>`（`push_branch.expected_tree_oid`）与 `stage_verdicts: BTreeMap<WorkflowId, Verdict>`（按 `VerdictRule` 折叠后的阶段结论）。
+
+**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，M1 内不自增：Outbox 终态失败后的上报 `escalation(outbox_failed:*)` 在 P-79 词表里没有选项，用户"决定重试"（§9）目前没有入口，见 7.14.6 E6；在此之前终态失败的动作只能以放弃收场。`create_pr` 的期望意图只用状态里已有的确定字段（交付单元标题、模板正文、绑定 Issue），`open_pr` 提议的标题 / 正文待 E5 落地后再并入，否则崩溃恢复时推出的意图与崩溃前不同，幂等键对不上。
+
+#### 7.14.5 `Decision`
+
+```rust
+pub enum Decision {
+    // —— 事务内：按序执行，与本次决策同一提交 ——
+    Append(NewEvent),                                         // 经 core 校验与状态机；非法迁移 = TransitionError（缺陷）
+    Raise(RaiseRequest),                                      // InboxPort::raise(Some(tx))；dedup_key 见 §7.11
+    Resolve { target: ResolveTarget, how: Resolution },       // InboxPort::resolve(Some(tx))（R4）
+    Enqueue(EnqueueRequest),                                  // OutboxPort::enqueue_in(tx)；只在拿到 Allow 之后
+    // —— 只回给命令调用方，不落盘 ——
+    Reply(Result<(), CommandRejection>),                      // InvalidState / Validation / NotSupportedYet
+    // —— 提交后：幂等副作用，结果经 Input::Report 回流 ——
+    Effect(Effect),
+}
+
+pub enum Effect {
+    EnsureWorktree { branch: BranchName, base_ref: String, base_sha: GitOid }, // T2 / T5（§7.12 分支名）
+    RemoveWorktree { worktree_id: WorktreeId, lock: Option<LockToken> }, // T12 / T13 释放工作树；lock 为空时执行器先以 engine 身份取锁再删（remove_worktree 需要 LockToken）
+    AcquireLock { worktree_id: WorktreeId, node_id: NodeId, holder: LockHolder, lease_s: u64 },
+    ReleaseLock { token: LockToken },
+    RenewLock { token: LockToken, lease_s: u64 },             // Timer(LockRenew) 到期时；每半个租约一次（§7.7）
+    RunAttempt(AttemptPlan),                                  // attempt.started 已提交后；Recover 时对未终结尝试重发
+    CancelAttempt { attempt_id: AttemptId, why: CancelWhy },
+    ReleaseSandbox { attempt_id: AttemptId },                 // attempt.finished 已提交后
+    JudgeAction { key: ActionKey, request: ActionRequest },   // PolicyPort::decide_action
+    RequestApproval { key: ActionKey, spec: ApprovalSpec },
+    InvalidateApproval { approval_id: ApprovalId, reason: InvalidateReason },
+    CancelOutbox { action_id: ActionId, reason: CancelReason }, // OutboxPort::cancel（无事务参数）
+    ReconcileNow { target: ReconcileTarget },                 // T11、HeadMismatch、drift 后刷新快照
+    ScheduleTimer { at: Timestamp, kind: TimerKind },
+}
+
+/// RunAttempt 的全部输入；AttemptRunner 不再回读状态。
+pub struct AttemptPlan {
+    pub attempt_id: AttemptId, pub node_id: NodeId, pub workflow_id: WorkflowId,
+    pub role: Role, pub exec: Exec, pub critical: bool, pub n: u32,
+    pub base_sha: GitOid, pub pr_base_sha: Option<GitOid>,
+    pub tokens_total: u64, pub wall_time_s: u64,               // 与 attempt.started 一致
+    pub model: ResolvedModel,                                  // models.md 的 resolve 结果
+    pub upstream: Vec<NodeId>,                                 // 由 Runner 取其最近成功尝试的 result_ref
+    pub previous: Vec<(AttemptId, FailureClass, Option<FailureDetail>)>, // JobSpec context.previous_attempts
+    pub instructions: TrustedInstructions,                     // 角色模板 + user_text（I5，W5）；引擎内部新类型，只能由这两者构造
+    pub refs: Vec<Ref>,                                        // 供 ForgeReader::discussion 取材料（P-59）
+    pub lock: Option<LockToken>,                               // exec = sandbox 时必填（commit_patch 要它）
+    pub resume: bool,                                          // Recover 重发：Runner 先 SandboxService::recover，job 从未被受理才 submit（E4）
+}
+```
+
+**派发总闸** `may_dispatch(state)`：阶段非终态 ∧ `stage_status = running`（即未暂停、无引擎创建的阻塞上报、未 `blocked`）∧ 无未关闭的 `budget_exhausted` 上报。下表凡涉及派发的行都先要求它成立。
+
+**每个决策的前置条件**（不满足就不产出，这是幂等的来源；每个 `Effect` 还隐含"`EffectKey` 不在 `env.inflight`"）：
+
+| 决策 | 前置条件（全部满足） | 典型触发 |
+| --- | --- | --- |
+| `Append(delivery.stage_changed)` | 阶段非终态，或为 T15（阶段 `abandoned` 且 `abandon_cause = PrClosedUnmerged`）；§7.6 对应行的守卫成立；core 转移表有边 | `Tick(Settle)`、`Observed` |
+| T10 `review → merge` 另需 | 若本阶段因 `base_advanced` 进入（`stage_entered.reason`），快照 `pr.synced_at > stage_entered.ts`（对账已回）；否则只产出 `Effect(ReconcileNow)` | `Report::ReconcileDone`、`Observed(forge.synced)` |
+| `Append(delivery.level_changed, kind = cap)` | `cap ≠ None`、≠ 当前上限、阶段非终态；否则 `Reply(Err)`，同值 `Reply(Ok)` | `Command::SetLevelCap`、`inbox.resolved(upgrade)`（取输入里 `item.target_level`；`item` 缺失或无 `target_level` → 记错误、不动作） |
+| `Append(delivery.level_changed, kind = effective)` | 新值 > 当前且 ≤ `level_cap`（只升，P-57） | 加码求值（§7.10），M2 |
+| `Append(delivery.paused / resumed)` | 未暂停 / 已暂停；阶段非终态 | `Command::Pause` / `Resume` |
+| `Append(delivery.abandoned)` | 阶段非终态 | T13 / T14 |
+| 放弃收尾（每项独立派生，可重放） | 阶段为 `abandoned`，且对应资源尚未清理：`pending` / `queued` 节点 → `node.finished(cancelled)`；`running` 的 Workflow → `workflow.finished(cancelled)`；未终结尝试 → `CancelAttempt`；`outbox` 中仍 `queued` 的动作 → `CancelOutbox`；`approvals` 中本交付单元 `pending` / `granted` 的审批 → `InvalidateApproval`；PR 仍 open → `update_pr(closed)` 进入期望动作集合；尝试全部终结且 `worktree` 非空 → `RemoveWorktree`（锁已释放时由执行器先取锁）。收尾不依赖"刚刚放弃"这一输入，所以在 `delivery.abandoned` 提交后崩溃，也能由 `Tick(Recover)` 重新派生。`forge` 的出站执行器不会因交付单元已放弃而跳过排队动作（forge.md §7.8），因此 `CancelOutbox` 是唯一防线 | 同一决策内的 `Tick(Settle)`、`Tick(Recover)` |
+| `Append(workflow.created)` + `budget.charged(nodes)` | 当前阶段有 agent 图；**自 `stage_entered` 以来尚未建过该阶段的 Workflow**（修正轮与 Low 的 `replan` 显式新建，见下）；追加后 `used.nodes ≤ limits.nodes`（否则走耗尽，§7.9）；ID 由 `mint` 生成 | 进入阶段后的 `Tick(Settle)` |
+| `Append(workflow.finished)` | 全部 `required` 节点 `succeeded` → `succeeded`；放弃或 `replan` 取代 → `cancelled`。**`required` 节点终态失败时不 finish**：下游保持 `pending`、Workflow 保持 `running`，等人工重试或放弃（core 中 Workflow `failed` 无出边，节点也没有 `pending → skipped`） | `Tick(Settle)` |
+| `Append(node.queued)` | 节点 `pending`；依赖已满足（§7.4 通则）；`may_dispatch` | `Tick(Settle)` |
+| `Effect(EnsureWorktree)` | 当前阶段需要写工作树（Low 起的 `implement`）且 `worktree` 为空 | `Tick(Settle)` |
+| `Effect(AcquireLock)` | `exec = sandbox`，且节点处于可派发状态：`queued`，或 `running` 且上一尝试已终结、`retry_not_before ≤ now`、`after_retry_request < MAX_ATTEMPTS_PER_NODE`（自动重试）；本节点当前没有有效锁（见下）；`worktree` 已建；`locks` 中无他人未过期租约；`lock_owner` 中该工作树未被本交付单元的其他节点占用（同持有者重入在 repo 是续租，交付单元内的互斥由引擎保证）；`may_dispatch` | `Tick(Settle)`、`LockBusy` 后的 `Timer(LeaseCheck)`、`Timer(RetryBackoff)` |
+| `Append(node.started)` + `Append(attempt.started)` + `budget.charged(attempts)`；提交后 `Effect(RunAttempt)` | `may_dispatch`；节点 `queued`（每次从 `queued` 派发都写 `node.started`），或 `running` 且上一尝试已终结、`retry_not_before ≤ now`；`after_retry_request < MAX_ATTEMPTS_PER_NODE`；并发闸 1、2 通过；`exec = sandbox` 时本节点持有**有效锁**——`lock_owner` 指向本节点，且 `locks` 中该工作树的持有者为 `engine`、`fence` 与执行体内存中的令牌一致、`lease_until > now`；`reservation.reserve(...) > 0`；`models` 有表项 | `Tick(Settle)`、`Report::LockAcquired`、`Timer(RetryBackoff)` |
+| `Effect(RunAttempt { resume: true })` | 尝试有 `attempt.started` 无 `attempt.finished` | `Tick(Recover)` |
+| `Append(attempt.finished)` + `budget.charged`（tokens / wall_time）+ `node.finished`（节点因此进入终态时） | 该尝试无 `attempt.finished`；`Finalized.attempt_id` 匹配 | `Report::AttemptFinalized` |
+| `Effect(ReleaseSandbox)`、`Effect(ReleaseLock)` | 对应 `attempt.finished` 已提交；锁不再被其他未终结尝试使用。执行体在 `ReleaseLock` 发出时清除 `lock_owner` 中该项，所以自动重试必须重新 `AcquireLock` 拿新令牌，不会复用已释放的令牌 | 同上，及 `Tick(Recover)` |
+| `Append(node.retry_requested)` + `Resolve`（该节点的 `escalation(attempt_failed)`，`Resolution::System`） | 节点 `failed`、交付单元非终态；否则 `Reply(Err(InvalidState))`。同一决策关闭该上报，`stage_status` 回到 `running`，重试才能通过派发总闸 | `Command::RetryNode` |
+| `Resolve`（`escalation(models_not_configured)`） | 收到 `settings.updated` 后 `env.models` 已有所需表项 | `Observed(SettingsUpdated)` |
+| `Append(budget.charged(forge_writes))` | `outbox.succeeded` 的动作属于本交付单元且尚未记账 | `Observed(OutboxSucceeded)` |
+| `Append(budget.exhausted)` + `Raise(budget_exhausted)` | 某维度 `used ≥ limit`，**或**下一步必须的动作只因该维度不足而无法产出（例如进入阶段要建的图需要 `k` 个节点而 `used.nodes + k > limit.nodes`；追加一轮时 `rounds` / `nodes` 不够；预留结果为零）；且本阶段尚无同维度 `budget.exhausted`。`data` 仍为 `{dimension, limit, used}`，与"已用尽"共用同一形状；不出现"追加一半的图"（§7.5） | 记账后或前置条件因预算不满足时的 `Tick(Settle)` |
+| `Effect(JudgeAction)` | 意图 ∈ `expected_actions(state)`；`outbox` 无该 `ActionKey`；不在 `env.denied`；需审批的动作在 `approvals` 中无同主体 `pending` | `Tick(Settle)` |
+| `Enqueue` | `Report::ActionJudged` 为 `Allow`；意图仍 ∈ `expected_actions`；`outbox` 仍无该键；`depends_on` 指向的动作已在 `outbox` | `Report::ActionJudged` |
+| `Effect(RequestApproval)` | 判定为 `NeedsApproval` 且 `pending = None` | `Report::ActionJudged` |
+| `Raise(approval_needed)` | 阶段为 `merge`；`approvals` 中有本交付单元 `pending` 的审批，且 `open_inbox` 中没有带该 `approval_id` 的项（覆盖崩溃窗口与 T11 后回到 `merge`） | `Report::ApprovalRequested`、`Observed(ApprovalRequested)`、`Tick(Settle)` |
+| `Raise(*)`（其余） | §7.11 对应情形成立；`open_inbox` 中无同 `dedup_key` 项。`Deny` 的上报取 `ReportHint`；`merge_pr` 无 `ReportHint` 时用 `merge_denied_by_policy`；其他动作见 7.14.6 E3 | 各情形 |
+| `Resolve` | `open_inbox` 中有对应项，且解除条件成立（节点重试成功、审批失效、GitHub 上已处理、`supersedes`） | `Observed`、`Tick(Settle)` |
+| Low 档 `inbox.resolved(replan)` | 当前 `low.implement` 的 `workflow.finished(cancelled)` + 其未终结节点 `node.finished(cancelled)` + 新 `low.implement` 的 `workflow.created`，同一决策完成；阶段不变（data-model："Low 档重新实现"） | `Observed(InboxResolved)` |
+
+M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 收到时返回 `Reply(Err(NotSupportedYet))`，不静默返回空。
+
+#### 7.14.6 依赖的契约缺口（需单独契约 PR）
+
+`DeliveryState` 必须能只从事件重建（§7.13）。以下几处现有契约不够，本节不自行加字段，列出供契约 PR 处理：
+
+| # | 缺口 | 需要 | 影响里程碑 |
+| --- | --- | --- | --- |
+| E1 | 本地提交的 `commit_oid` 不在任何事件里（repo.md OQ-R2）。T6 的 `push_branch.local_head_oid` = `Evidence.candidate_head` 无法从日志重建 | `attempt.finished` 增加可选 `result_commit`（有补丁且 `status = succeeded` 时必填，与 `result_tree` 同时出现） | **M1（阻塞端到端与"重启一致"）** |
+| E2 | 无进展检测的 finding 指纹没有落盘处 | 判定节点的 `node.finished` 增加可选 `fingerprints[]`（`FindingFingerprint` 十六进制，≤ 64 条，只在 `REVISE` / `REJECT` 时出现） | M2 / M3（M1 无轮次，`round_history` 恒空） |
+| E3 | `PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报（policy.md 未规定何时省略 `report`） | 二选一：policy.md 规定对 `engine` 发起的动作 `Deny` 必带 `ReportHint`；或 data-model 词表增加通用码 | M1（`merge_pr` 以外的动作） |
+| E5 | `open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态；§7.12 要求 `create_pr` 的 `title` / `body` 取自它 | `attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），执行器据 `result_ref` 从 CAS 取原文填入意图（内容寻址，恢复后一致） | M1（体验；未落地时用模板标题与正文，不阻塞） |
+| E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
+| E4 | `SandboxService::recover` 需区分"job 从未被受理"与"受理后丢失"，`RunAttempt { resume: true }` 才能避免把未起沙盒的尝试判成 `infra.lost` | sandbox.md §6.1 的 `recover` 结果增加"未知 job"一类 | M1（"重启一致"） |
+
+E1、E4 批准前，M1 实现可在测试里用 `FakeRepo` 的确定性 `commit_oid`（= f(`job_id`, `tree`)）与 `FakeSandboxService` 的受理记录推进，但 §12.2"重启一致"在 E1、E4 落地前不能宣布通过。
+
+#### 7.14.7 `GraphTemplate` 的 `TemplateCx` 与 `ExitRule`
+
+```rust
+pub struct TemplateCx {
+    pub level_effective: Level,               // 实例化时的值；Workflow.template 按它取（§7.4）
+    pub perspectives: Vec<String>,            // 视角清单（§10 常量，OQ-5）
+    pub revision: Option<RevisionCx>,         // 修正形态（§7.5）
+}
+pub struct RevisionCx { pub round: u32, pub feedback_from: Vec<NodeKey> } // 修正 build 的上游：本轮判定节点
+
+pub enum ExitRule {
+    RequiredSucceeded,                        // plan：全部 required 节点 succeeded，且全部非 required 节点已进入终态（T5）。
+                                              // "非 R"只表示失败不阻塞，不表示未跑完也可跳过：Max 的 reasoner 是 build 的上游，必须先终结
+    PatchCommitted { node: NodeKey },         // Low implement：该节点 succeeded 且 PatchResult::Committed（T6）
+    VerdictAccept { head: HeadBinding },      // 阶段结论 ACCEPT，且结论所基于的 head 满足绑定
+}
+pub enum HeadBinding {
+    None,                                     // spec 的 admission（T3）
+    Candidate,                                // implement 的 verify：基于 Evidence.candidate_head（T6）
+    PrHead,                                   // review：Evidence.judged_head = 快照 head_sha（T10 的图内部分）
+}
+```
+
+| 档位 / 阶段图 | `ExitRule` | 满足后的触发器 |
+| --- | --- | --- |
+| `low.implement` | `PatchCommitted { node: "single" }` | `PatchValidated`（T6） |
+| `*.plan` | `RequiredSucceeded`（含非 R 节点已终结） | `PlanProduced`（T5） |
+| `*.implement`（Medium 起） | `VerdictAccept { head: Candidate }` | `PatchValidated`（T6） |
+| `high.spec` / `max.spec` | `VerdictAccept { head: None }` | `AdmissionAccept`（T3） |
+| `*.review`（Medium 起） | `VerdictAccept { head: PrHead }` | 与 CI 条件合取后 `ReviewAcceptCiGreen`（T10） |
+
+`ExitRule` 只判断"图内证据"；CI、PR 状态、未决上报项等图外守卫仍按 §7.6 表在 `decide` 里检查。Low 的 `review` 没有图，T10 只看 CI。
+
+#### 7.14.8 M1 必须实现的子集
+
+M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`EffectReport` 全部；`Effect` 除补丁审批路径的 `InvalidateApproval` 外全部；`PatchResult` 除 `Held` 外全部；`OutputSignals` 恒为默认值；`ExitRule::PatchCommitted`。§12.2"上报幂等"列出的 `upgrade` / `narrow` / `fix` 选项在 M1 不由引擎产生对应上报项，测试以注入的 `inbox.raised` / `inbox.resolved` 事件覆盖其执行路径。其余变体在 M2 / M3 启用前收到时：命令返回 `Reply(Err(NotSupportedYet))`，其他输入返回空并记日志（失败闭合，W8）。
 
 ## 8. 不变式与安全要求
 
@@ -695,7 +1074,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | `sandbox.create / stage` 失败（`infra.*`） | 新沙盒重试，受 `MAX_ATTEMPTS_PER_NODE` 约束 |
 | 终结管线中 `repo` 不可用 | 尝试保持"待终结"，退避重试 V5；`collect` 的结果是幂等的，重复执行得到同一内容寻址对象 |
 | 引擎在 `collect` 之后 / 提交之前崩溃 | 重启后重走终结管线；提交幂等（§7.13） |
-| 引擎在入队之后崩溃 | 入队与决策事件同事务，要么都在要么都不在；都在则重放得到同一幂等键 |
+| 引擎在入队之后崩溃 | 入队与决定入队的那次决策同事务，要么都在要么都不在；阶段事件已提交而入队未发生时，`Tick(Recover)` 按期望动作集合重新判定并入队，幂等键相同（§7.14.1） |
 | `outbox.failed`（终态）`precondition_failed(head_changed)` 于 `merge_pr` | 不盲重试；回 `review`（T11），head 变了就是新证据 |
 | `outbox.failed` `existing_pr` | 人手开了同名分支的 PR：上报 `escalation`，不覆盖 |
 | `outbox.failed` `not_mergeable` | 留在 `merge`，上报 `escalation`（`outbox_failed:not_mergeable`，GitHub 返回的原因是不可信文本，放进 evidence） |
@@ -713,7 +1092,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | None 档会话台账超 `levels.none.daily_tokens` | `run_answer` 返回 `BudgetExhausted`，不派发（P-58） |
 | 审批 `expired` / `denied` | 关闭对应上报项；`expired` 且仍满足 T10 → 重新请求审批；`denied` → 回 `review` 并上报 `decision_needed`（prototype §2.7："拒绝"把交付退回评审） |
 | 预算耗尽 | §7.9 |
-| `required` 节点终态失败 | Workflow `failed`，下游 `skipped`，上报 `escalation` |
+| `required` 节点终态失败 | 上报 `escalation`；Workflow 与下游保持原状，等人工重试或放弃（§7.4 通则） |
 | 配置回滚 / 收紧使进行中的判定变严 | 按 config §2.6：判定类键下一次判定起生效，不追溯 |
 | 孤儿沙盒、悬空锁 | 恢复扫描 + `sandbox` 巡检；锁租约到期由 `repo` 回收 |
 
@@ -803,7 +1182,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - [ ] **base 前移**：`merge` 阶段注入 `forge.base_advanced`（`affected_prs` 含本 PR）→ `merge → review(reason = base_advanced)`；快照刷新后条件满足则回到 `merge`；`merge` 之外的阶段不受影响。
 - [ ] **关闭客户端任务继续**：全程没有任何订阅者 / 客户端，交付单元照常推进到 `closed`；之后新订阅者从任意游标回放得到的事件序列与实时一致。
 - [ ] **上报幂等**：重放同一决策，`InboxPort::raise` 因 `dedup_key` 相同返回 `Deduped`，收件箱只有一项；`dismiss` 一个阻塞项后 `stage_status` 不变、引擎不推进；`choose` 产生的 `inbox.resolved(option_id)` 驱动 `abandon` / `replan` / `upgrade` / `narrow` / `done` / `fix`；`raise_cap` 在 Q-11 定案后补用例。
-- [ ] **release**：每个 `attempt.finished` 落库后恰调用一次 `SandboxService::release`；重启后对存活 `job_id` 调 `sweep_orphans`。
+- [ ] **release**：每个 `attempt.finished` 落库后调用 `SandboxService::release`：进程不重启时恰一次，跨重启至少一次且幂等（sandbox.md §12 的 `release` 幂等），未终结的尝试从不被 `release`；重启后对存活 `job_id` 调 `sweep_orphans`。
 - [ ] **重启一致**：在每个崩溃点（`delivery.created` 后、`attempt.started` 后、`collect` 后提交前、提交后 `attempt.finished` 前、入队后、`outbox.succeeded` 后）杀掉引擎并重建，最终状态与不崩溃一致；`outbox` 表中同一幂等键只有一行；同一 `job_id` 只有一个本地提交；没有重复的 `attempt.started`。
 - [ ] **不重复创建 PR**：重放 T6 的决策得到相同的 `create_pr` 幂等键（与 `FakeForge` 联测：崩溃发生在"GitHub 已创建、本地未记录"时不新增 PR）。
 - [ ] **受保护路径**：`FakeRepo` 对 `.github/workflows/x.yml` 补丁返回 `deny(policy.path_protected:workflows)` → 尝试 `failed(policy_denied, policy.path_protected:workflows)`；写 `decision_needed`（`payload.kind = manual_action`）且附补丁引用；对 `Cargo.lock` 补丁写 `escalation`（`policy.path_protected:lockfiles`）且 `payload.evidence` 含 `patch.rejected` 引用；两者都无任何 Outbox 行、不自动重试、`stage_status = waiting_human`（P-48）。
@@ -820,7 +1199,9 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - [ ] **无 GitHub 依赖**：`cargo tree -p gantry-engine` 不含 `gantry-forge`、`gantry-sandbox` 的容器面与任何 GitHub 客户端 crate（端口经 `core::ports`）；测试中 `FakeForge` 只通过 `OutboxPort` / `ForgeReader` 被驱动。
 - [ ] **PR 关闭与重开**（P-55）：`merge` 阶段注入 `pr_closed`（未合并）→ `abandoned(reason = pr_closed)`；再注入 `pr_reopened` → `review`；用户放弃造成的 `abandoned` 收到 `pr_reopened` 不迁移。
 - [ ] **事件形状**：引擎在以上所有场景发出的事件通过 `schemas/events/*.json` 校验。
-- [ ] **决策纯度**：属性测试——同一 `(state, input)` 调用两次 `decide` 结果相同；对同一输入重复应用不产生重复事件。
+- [ ] **决策纯度**：属性测试——同一 `(state, input, env)` 调用两次 `decide` 结果相同（含 `mint` 产生的 ID）；对同一输入重复应用不产生重复事件；`Tick(Settle)` 在 `MAX_SETTLE` 内收敛到空列表（§7.14.1）。
+- [ ] **两段式判定**：在 `JudgeAction` 发出后、`ActionJudged` 回流前杀掉引擎，重启后 `Tick(Recover)` 重新判定并入队，`outbox` 同一幂等键只有一行（§7.14.1）。
+- [ ] **前置条件表**：§7.14.5 表中每一行至少一条正例与一条"前置条件不满足 → 不产出"的反例。
 - [ ] **设置热加载**：`settings.updated` 在两次决策之间生效；进行中的决策使用旧值；`status.applied_rev` 更新。
 
 ### 12.3 M2 验收
@@ -872,7 +1253,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | OQ-9 | （(b) **已决：见裁决 C24 / P-70**——`levels.token_weights`；(f) 中 Medium / High **已决：见裁决 C29**——`nodes` 建议值上调；其余未决）预算：(a) 预留 / 回收规则（worker-protocol OQ-14）；(b) P-44 说权重是配置项，config.md 没有权重键且 OQ-7 称不加权（core OQ-10、egress OQ-E4 同问）；(c) 耗尽后的处置（追加预算？）；(d) 节点尝试次数没有上限键；(e) utility 辅助调用是否为节点（本规格：引擎自己的不是，`guardian` 的 `classify` 是）、utility 层耗尽是否应阻塞交付；(f) 建议默认预算下 Medium / High 的 `nodes` 先于 `rounds` 耗尽（§7.4 末表），guardian.md G-OQ-15 指出 Low 的 `nodes = 4` 也易被 `heal` / `classify` 先耗尽；(g) `admission` 追问轮次不占 `rounds`，是否需要单独上限；(h) `direct` 调用的 `budget.charged` 由 `models` 写（egress.md §6.3）、沙盒尝试由引擎写，台账是两个写入方 | 平分预留、权重取 `levels.token_weights`、仅放弃 / 调档、`MAX_ATTEMPTS_PER_NODE = 3`、不加上限 | 成本控制 |
 | OQ-10 | **已决：见裁决 C13 / P-59（`engine` 依赖 `forge`，只用 `ForgeReader` 按需读取 Issue / PR 正文与评论，作为不可信文本，不进快照）**。原问题：材料来源：worker-protocol §4.4 要求引擎"从 forge 的快照取原始文本"，但 data-model 快照只有标题，forge.md 的 `ForgeReader` 也只有快照与 CI 日志 / 改动文件 / 线程 / 注解的实时读（forge.md F-OQ-6），没有 Issue 正文与评论；architecture §4 引擎不依赖 `forge`。Issue 正文 / 评论 / CI 日志由谁读取、放在哪里 | 已落实到 §3、§7.8（`ForgeReader::discussion`） | 准入、规划、评审的输入 |
 | OQ-11 | （`answer` 部分**已决：见裁决 C12 / P-58**——`Workflow.delivery_id` 可空并带 `conversation_id`，用量记入会话台账，每日上限 `levels.none.daily_tokens`；`heal` 的挂靠仍未决）没有交付单元的节点：`answer`（None 档）与 `heal`——`Workflow.delivery_id` 必填；None 档没有台账，`answer` 的 token 封顶无处可取。`heal` 应挂在哪个 Workflow | `heal`：每轮单独的 `stage = review` Workflow（`<level>.heal`）；`answer` 按 P-58 落实到 §6、§7.9 | `conversation`、`guardian` |
-| OQ-12 | （暂停 / 继续事件**已决：P-56**；`Workflow.status` 示例**已决：C26**，统一为 `succeeded`）事件 / 实体缺口：台账创建无事件（暂放 `delivery.created.data`）；`Delivery.pr` 绑定由哪个事件投影；消息与交付单元的关联无事件；`critical` / `required` 不是 Node 字段；worker-protocol §1 责任表未列 V3 / V4 / 分类归属 | 见各处标注 | `schemas/events`、data-model |
+| OQ-12 | （暂停 / 继续事件**已决：P-56**；`Workflow.status` 示例**已决：C26**，统一为 `succeeded`；`Delivery.pr` 绑定取 `create_pr` 的 `outbox.succeeded.github_ref.pr`、提交 OID 与 finding 指纹的落盘处见 §7.14.6 E1 / E2，待契约 PR）事件 / 实体缺口：台账创建无事件（暂放 `delivery.created.data`）；`Delivery.pr` 绑定由哪个事件投影；消息与交付单元的关联无事件；`critical` / `required` 不是 Node 字段；worker-protocol §1 责任表未列 V3 / V4 / 分类归属 | 见各处标注 | `schemas/events`、data-model |
 | OQ-13 | ~~上报词表：`reason_code` 与选项 `id`~~ | 已决：见 decisions.md P-79（词表固定在 data-model）；`dismiss` 阻塞项不解除 `waiting_human`（§7.11）；`raise_cap` 的追加量待决（Q-11） | — |
 | OQ-14 | base 前移后：forge-actions 没有 update-branch / rebase 动作，分支 `behind` / `dirty` 时无手段；审批是否随 base 前移失效；`merge_pr.merge_method` 由引擎还是 `forge` 填；仓库没有必需 check 时 `checks.required_ok` 是否为真（T10 依赖它，由 `forge` 定义） | 回 `review` 刷新快照；审批不因 base 前移失效；`merge_method` 取仓库允许方法与 forge 默认优先级的交集 | `merge` 阶段 |
 | OQ-15 | `build` / `single` 无补丁（`no_change_reason`）如何处理；非受保护路径的 `deny` 是否一律上报（worker-protocol OQ-5） | 无补丁 → `escalation(no_change)`；其他 `deny` 重试 1 次后上报 | 体验 |
