@@ -356,7 +356,7 @@ stateDiagram-v2
 | `project.added` / `project.updated` | 项目绑定、仓库设置快照变化（设置覆盖变更不用它，见 `settings.updated`） |
 | `settings.updated` | 某 `(scope, resource)` 设置写入；全局写入时 `subject` 为字面量 `settings`、`project_id` 为 `null`（[config.md §2.3](interfaces/config.md)） |
 | `conversation.created` | 项目主对话创建 |
-| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.abandoned` | 交付单元生命周期（`stage_changed` 的 `data` 含新 `stage_status`；`level_changed` 来自 `PATCH`、桌面消息带 `level_cap` 指向已有交付单元（P-82）、`upgrade` 选项或自动加码） |
+| `delivery.created` / `delivery.stage_changed` / `delivery.level_changed` / `delivery.abandoned` | 交付单元生命周期（`stage_changed` 的 `data` 含新 `stage_status`；`level_changed` 来自 `PATCH`、桌面消息带 `level_cap` 指向已有交付单元（P-82）、`upgrade` 选项或自动加码；`kind = cap` 的应用同时派生 `level_effective = min(原值, 新上限)`，不另写 `effective` 下降事件，见 engine.md §11） |
 | `delivery.paused` / `delivery.resumed` | 用户暂停 / 继续交付单元（P-56） |
 | `workflow.created` / `workflow.revised` / `workflow.finished` | 图创建、改写、结束（含挂在会话上的临时图，此时 `subject` 为 `wfl_…`、`data.conversation_id` 非空）；结束时 `data.status` 取 `Workflow.status` 的终态值 |
 | `node.queued` / `node.started` / `node.finished` / `node.superseded` | 节点 |

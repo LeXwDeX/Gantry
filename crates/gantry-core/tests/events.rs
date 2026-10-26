@@ -159,6 +159,18 @@ fn every_valid_fixture_passes_validation() {
     }
 }
 
+/// 用户压低上限只写 `kind = cap` 下降；`effective` 下降一律拒绝（engine.md §11，#48）。
+#[test]
+fn level_changed_cap_may_fall_but_effective_only_rises() {
+    let ty = EventType::DeliveryLevelChanged;
+    let cap_down = json!({"from": "High", "to": "Low", "kind": "cap", "reason": "user"});
+    validate_event_data(&ty, &cap_down).unwrap();
+    let effective_down =
+        json!({"from": "High", "to": "Low", "kind": "effective", "reason": "user"});
+    let error = validate_event_data(&ty, &effective_down).unwrap_err();
+    assert!(error.pointer.contains("/to"), "{error:?}");
+}
+
 #[test]
 fn undefined_events_are_rejected_with_schema_id() {
     let cases = cases();

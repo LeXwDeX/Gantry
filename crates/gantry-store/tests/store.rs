@@ -1705,3 +1705,40 @@ async fn sync_and_async_entries_share_one_gate() {
         .expect("sync writer was not woken after the async writer released");
     thread.join().unwrap();
 }
+
+/// 压低上限只写 `kind = cap`；投影派生 `level_effective = min(原值, 新上限)`（engine.md §11，#48）。
+#[tokio::test]
+async fn lowering_cap_clamps_effective_in_projection() {
+    let store = store().await;
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(delivery_created()).await.unwrap(); // cap High, effective Medium
+    for (from, to) in [("High", "Low"), ("Low", "High")] {
+        tx.append(event(
+            "delivery.level_changed",
+            DELIVERY,
+            json!({"from": from, "to": to, "kind": "cap", "reason": "user"}),
+        ))
+        .await
+        .unwrap();
+    }
+    // 原值 Medium 已被派生为 Low：以 Medium 为 from 的 effective 事件不再匹配。
+    let stale = tx
+        .append(event(
+            "delivery.level_changed",
+            DELIVERY,
+            json!({"from": "Medium", "to": "High", "kind": "effective", "reason": "escalation:auth_paths"}),
+        ))
+        .await;
+    assert!(
+        matches!(stale, Err(gantry_store::StoreError::PreconditionFailed(_))),
+        "{stale:?}"
+    );
+    tx.append(event(
+        "delivery.level_changed",
+        DELIVERY,
+        json!({"from": "Low", "to": "High", "kind": "effective", "reason": "escalation:auth_paths"}),
+    ))
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
