@@ -668,6 +668,8 @@ fn temp_dir() -> PathBuf {
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<(), CaError> {
+    #[cfg(not(unix))]
+    let _ = (path, mode);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

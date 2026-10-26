@@ -77,6 +77,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: 升级 npm（规避 npm 10 的 Exit handler 故障）
+        run: npm install -g npm@11
       - name: 安装前端依赖
         working-directory: apps/desktop
         run: npm ci --no-audit --no-fund
