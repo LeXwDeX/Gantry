@@ -76,11 +76,13 @@ M1 已按 `docs/modules/engine.md` 实现事件写入与控制面；真实端到
 - 本机模拟合并留下的本地分支 `tmp/merge-sim`（只含已推送提交的合并），删除需你确认；
 - 主检出 `docs/m0-contract-review` 上有不属于本轮的未提交改动（`docs/collaboration.md`、`docs/milestones.md`、`.serena/`），以及 `/private/var/folders/.../opencode/` 下 20 余个旧工作树，本轮未动。
 
-顺带发现、未处理：桌面场景适配器（`apps/desktop/src/ipc/scenario/adapter.ts`）发出的 `delivery.level_changed` data 为 `{delivery_id, level_cap}`，与契约 `{from, to, kind, reason}` 不符，归 `fe-desktop` 泳道。
+顺带发现、未处理（已开 #75）：桌面场景适配器（`apps/desktop/src/ipc/scenario/adapter.ts`）发出的 `delivery.level_changed` data 为 `{delivery_id, level_cap}`，与契约 `{from, to, kind, reason}` 不符，归 `fe-desktop` 泳道。
 
 ## 后续规划（2026-10-26 起，按顺序；每步单独授权）
 
 原则不变：契约先于实现、一个 PR 一件事、待决项不自行拍板、替身通过不等于真实环境通过。
+
+**协作方式（2026-10-26 起）**：Claude 负责指挥与评审，开发按 GitHub 里程碑与 issue 推进。每完成一个里程碑回来做一次**里程碑评审**：对照本节与 issue 的完成标准检查已合入代码，纠偏、查错，必要时调整框架结构；评审结论与下一轮的里程碑和 issue 再写回本文件。当前里程碑：[M1.1 决策器：契约补缺与 decide 实现](https://github.com/LeXwDeX/gantry/milestone/1)（阶段 1、2）。阶段 3 起的里程碑在 M1.1 评审时再开。
 
 ### 阶段 0：合并本轮四个 PR
 
@@ -90,21 +92,21 @@ M1 已按 `docs/modules/engine.md` 实现事件写入与控制面；真实端到
 
 | 序 | 缺口 | 改动面 | 完成标准 | 阻塞 |
 | --- | --- | --- | --- | --- |
-| 1 | E1 `attempt.finished.result_commit` | `core/events.rs`、`schemas/events/attempt.finished.json`、夹具正反例、engine.md §11、repo.md OQ-R2 | `status = succeeded` 且有补丁时必填，与 `result_tree` 同现；反例：有 tree 无 commit 被拒 | **M1 端到端、重启一致** |
-| 2 | E4 `SandboxService::recover` 区分"未受理 / 受理后丢失" | `core::ports::sandbox`、`FakeSandboxService`、sandbox.md §6.1 | 替身一致性测试覆盖两种结果 | M1 重启一致 |
-| 3 | E3 `Deny { report: None }` 的上报码 | policy.md §6（推荐：对 `engine` 发起的动作 `Deny` 必带 `ReportHint`）或 data-model 词表 | 二选一由用户定；`FakePolicy` 同步 | M1 失败路径 |
-| 4 | E6 Outbox 终态失败后的重做入口 | data-model 上报词表（推荐给 `outbox_failed:*` 加 `retry` / `abandon` 选项）、notify、api | 选 `retry` → 新 `epoch` 的动作与新审批 | M1 失败路径 |
-| 5 | E5 `attempt.finished.accepted_open_pr` | 同 E1 | 执行器据 `result_ref` 从 CAS 取提议原文填入 `create_pr` | 不阻塞（先用模板） |
-| 6 | E2 `node.finished.fingerprints[]` | 同 E1 | ≤ 64 条，仅 `REVISE` / `REJECT` | M2 |
+| 1 | E1 `attempt.finished.result_commit`（#64） | `core/events.rs`、`schemas/events/attempt.finished.json`、夹具正反例、engine.md §11、repo.md OQ-R2 | `status = succeeded` 且有补丁时必填，与 `result_tree` 同现；反例：有 tree 无 commit 被拒 | **M1 端到端、重启一致** |
+| 2 | E4 `SandboxService::recover` 区分"未受理 / 受理后丢失"（#65） | `core::ports::sandbox`、`FakeSandboxService`、sandbox.md §6.1 | 替身一致性测试覆盖两种结果 | M1 重启一致 |
+| 3 | E3 `Deny { report: None }` 的上报码（#66，需拍板） | policy.md §6（推荐：对 `engine` 发起的动作 `Deny` 必带 `ReportHint`）或 data-model 词表 | 二选一由用户定；`FakePolicy` 同步 | M1 失败路径 |
+| 4 | E6 Outbox 终态失败后的重做入口（#67，需拍板） | data-model 上报词表（推荐给 `outbox_failed:*` 加 `retry` / `abandon` 选项）、notify、api | 选 `retry` → 新 `epoch` 的动作与新审批 | M1 失败路径 |
+| 5 | E5 `attempt.finished.accepted_open_pr`（#68） | 同 E1 | 执行器据 `result_ref` 从 CAS 取提议原文填入 `create_pr` | 不阻塞（先用模板） |
+| 6 | E2 `node.finished.fingerprints[]`（M2，暂不开 issue） | 同 E1 | ≤ 64 条，仅 `REVISE` / `REJECT` | M2 |
 
 ### 阶段 2：`be-engine` 实现 `decide`（契约批准后，按切片各一 PR）
 
-1. **类型与状态折叠**：§7.14 的类型落到 `crates/gantry-engine`；投影补 `outbox`、`approvals`、`locks`、`open_inbox`、`stage_entered`、`abandon_cause`、`worktree`、`Evidence`。验收：从夹具事件序列重建的 `DeliveryState` 与逐字段期望一致。
-2. **Low 正常路径的纯决策**：T2 → 建 `low.implement` → 派发 → `Finalized(Committed)` → T6 → `expected_actions` 出 `push_branch` / `create_pr` → T8 → T10（只等 CI）→ 合并审批两段式 → T12。验收：§12.2"端到端（替身）""合并需要审批"在纯函数层面通过。
-3. **执行体与路由**：`DeliveryActor`、在途集合、收敛循环、`EventRouter` 路由表与低水位游标。验收：§12.2"决策纯度""两段式判定""关闭客户端任务继续"。
-4. **`AttemptRunner` 与终结管线**：接 `FakeSandboxService`、`FakeRepo`、`FakePolicy`；V1–V6 与失败分类。验收：§12.2"失败分类优先级""重试策略""自报不驱动状态""JobSpec 隔离""材料来源""预算与计量""受保护路径"。
-5. **控制面与异常路径**：暂停 / 继续 / 重试 / 放弃、T11 / T14 / T15、`base_advanced` 对账。验收：§12.2 对应条目。
-6. **崩溃点矩阵**：§12.2"重启一致""不重复创建 PR""release"。依赖 E1、E4 已落地。
+1. **类型与状态折叠**（#69）：§7.14 的类型落到 `crates/gantry-engine`；投影补 `outbox`、`approvals`、`locks`、`open_inbox`、`stage_entered`、`abandon_cause`、`worktree`、`Evidence`。验收：从夹具事件序列重建的 `DeliveryState` 与逐字段期望一致。
+2. **Low 正常路径的纯决策**（#70）：T2 → 建 `low.implement` → 派发 → `Finalized(Committed)` → T6 → `expected_actions` 出 `push_branch` / `create_pr` → T8 → T10（只等 CI）→ 合并审批两段式 → T12。验收：§12.2"端到端（替身）""合并需要审批"在纯函数层面通过。
+3. **执行体与路由**（#71）：`DeliveryActor`、在途集合、收敛循环、`EventRouter` 路由表与低水位游标。验收：§12.2"决策纯度""两段式判定""关闭客户端任务继续"。
+4. **`AttemptRunner` 与终结管线**（#72）：接 `FakeSandboxService`、`FakeRepo`、`FakePolicy`；V1–V6 与失败分类。验收：§12.2"失败分类优先级""重试策略""自报不驱动状态""JobSpec 隔离""材料来源""预算与计量""受保护路径"。
+5. **控制面与异常路径**（#73）：暂停 / 继续 / 重试 / 放弃、T11 / T14 / T15、`base_advanced` 对账。验收：§12.2 对应条目。
+6. **崩溃点矩阵**（#74）：§12.2"重启一致""不重复创建 PR""release"。依赖 E1、E4 已落地。
 
 每片都附上 §7.14.5 前置条件表中对应行的正例与反例。
 
