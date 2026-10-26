@@ -756,12 +756,12 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | `delivery.level_changed` | `from`、`to`、`kind`（`cap` / `effective`）、`reason`（`user` / `initial_risk` / `escalation:<rule_id>`）；`effective` 只升（P-57） |
 | `delivery.paused` / `delivery.resumed` | `by`、`status_before`（paused）/ `status_after`（resumed）（P-56） |
 | `delivery.abandoned` | `reason`、`by` |
-| `workflow.created` | `stage`（临时图为空）、`template`、`graph_rev`、`nodes[]`（`key`、`role`、`depends_on`、`required`、`critical`）、`delivery_id` 或 `conversation_id`（P-58） |
+| `workflow.created` | `stage`（临时图为空）、`template`、`graph_rev`、`nodes[]`（`node_id`、`key`、`role`、`depends_on`、`required`、`critical`）、`delivery_id` 或 `conversation_id`（P-58） |
 | `workflow.revised` | `graph_rev`、`reason`（`revise` / `escalation:<rule_id>` / `supply_spec`）、`round`、`added[]`、`superseded[]` |
 | `workflow.finished` | `status` |
 | `node.queued` / `started` / `finished` / `superseded` | `node_id`、`status`、`verdict`、`superseded_by` |
 | `node.retry_requested` | `node_id`、`by`（P-56） |
-| `attempt.started` | `attempt_id`、`n`、`provider`、`model`、`reasoning_effort`、`config_rev`、`base_sha`、`tokens_total`、`wall_time_s` |
+| `attempt.started` | `attempt_id`、`node_id`、`n`、`provider`、`model`、`reasoning_effort`、`config_rev`、`base_sha`、`tokens_total`、`wall_time_s` |
 | `attempt.finished` | `status`、`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`served_by` |
 | `attempt.progress` | 采样节流后的展示字段 |
 | `budget.charged`（引擎写的部分） | `dimension`、`tier?`、`delta`（含加权值）、`used_after`、`source = {kind, id}`、`delivery_id` 或 `conversation_id`；`direct` 调用的 token 由 `models` 写 |
