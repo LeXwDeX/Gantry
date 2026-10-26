@@ -1,12 +1,106 @@
 {
-  "title": "approval.invalidated data (contract undefined)",
-  "not": {},
-  "x-gantry-unresolved": {
-    "reason": "core §7.5 / docs/m0-contract-gaps.md 未定义该事件的 data 形状；M0 显式拒绝，不猜测字段",
-    "source": "docs/m0-contract-gaps.md",
-    "rejects_all_data": true
-  },
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "const": "head_changed"
+        },
+        "previous_head_sha": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "current_head_sha": {
+          "$ref": "#/$defs/GitOid"
+        }
+      },
+      "required": [
+        "reason",
+        "previous_head_sha",
+        "current_head_sha"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "const": "pr_closed"
+        }
+      },
+      "required": [
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "const": "pr_merged"
+        }
+      },
+      "required": [
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "const": "delivery_abandoned"
+        }
+      },
+      "required": [
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "const": "attempt_superseded"
+        },
+        "previous_attempt_id": {
+          "$ref": "#/$defs/Id_att"
+        },
+        "current_attempt_id": {
+          "$ref": "#/$defs/Id_att"
+        }
+      },
+      "required": [
+        "reason",
+        "previous_attempt_id",
+        "current_attempt_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "const": "owner_cancelled"
+        }
+      },
+      "required": [
+        "reason"
+      ]
+    }
+  ],
+  "title": "ApprovalInvalidatedData",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
   "x-gantry-event-type": "approval.invalidated",
   "x-gantry-envelope": "schemas/entities/event-envelope.json"

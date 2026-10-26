@@ -1,11 +1,1131 @@
 {
-  "title": "forge drift (contract undefined)",
-  "not": {},
-  "x-gantry-unresolved": {
-    "reason": "forge-actions §7.4 给出 drift 示例，但 core 只有无载荷的 ports::forge::DriftKind，没有可生成的形状",
-    "source": "docs/interfaces/forge-actions.md#74-drift-目录",
-    "rejects_all_data": true
-  },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "pr_state_diverged"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/PrStateExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/PrStateActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "head_diverged"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/HeadDivergedExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/HeadDivergedActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "effect_missing"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/EffectMissingExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/EffectMissingActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "orphan_effect"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/MaybeDeliveryId"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/OrphanEffectExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/OrphanEffectActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "issue_state_diverged"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/IssueStateExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/IssueStateActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "review_state_diverged"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/ReviewStateExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/ReviewStateActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "merge_state_diverged"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/MergeStateExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/MergeStateActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "default_branch_changed"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/NullOnly"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/DefaultBranchChangedExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/DefaultBranchChangedActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "installation_unreachable"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/NullOnly"
+        },
+        "target": {
+          "$ref": "#/$defs/DriftTarget"
+        },
+        "expected": {
+          "$ref": "#/$defs/InstallationUnreachableExpected"
+        },
+        "actual": {
+          "$ref": "#/$defs/InstallationUnreachableActual"
+        },
+        "resolution": {
+          "$ref": "#/$defs/DriftResolution"
+        },
+        "synthesized_events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriftSynthesizedEvent"
+          }
+        },
+        "detected_by": {
+          "$ref": "#/$defs/DriftDetectedBy"
+        }
+      },
+      "required": [
+        "kind",
+        "delivery_id",
+        "target",
+        "expected",
+        "actual",
+        "resolution",
+        "synthesized_events",
+        "detected_by"
+      ]
+    }
+  ],
+  "description": "`forge.drift_detected.data`：`kind` 与 expected/actual 分支强绑定。\n\n反序列化只接受这 9 个 `kind`；未知 kind、分支错配、未知字段和缺必填都会失败。",
+  "title": "DriftPayload",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema"
+  "$defs": {
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "DriftTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pr"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "issue"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "type",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "branch"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "repo",
+            "branch"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "repo"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            }
+          },
+          "required": [
+            "type",
+            "repo"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "installation"
+            },
+            "installation_id": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "type",
+            "installation_id"
+          ]
+        }
+      ],
+      "description": "drift 的对象身份。不能用 `ForgeEventTarget` 代替：后者没有 `repo` / `branch`，\n且 `number` / `node_id` 可选。"
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "PrStateExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/PrExpectedState"
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "PrExpectedState": {
+      "type": "string",
+      "enum": [
+        "open"
+      ]
+    },
+    "PrStateActual": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "closed"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "merged"
+            },
+            "merge_commit_sha": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GitOid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ]
+        }
+      ]
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "DriftResolution": {
+      "type": "string",
+      "enum": [
+        "github_wins"
+      ]
+    },
+    "DriftSynthesizedEvent": {
+      "type": "string",
+      "enum": [
+        "pr_closed",
+        "pr_merged",
+        "pr_synchronized",
+        "issue_closed",
+        "issue_reopened",
+        "pr_dequeued"
+      ],
+      "description": "合成事件的 kind；不带 `forge.` 前缀。"
+    },
+    "DriftDetectedBy": {
+      "type": "string",
+      "enum": [
+        "patrol",
+        "startup_sweep",
+        "recovery",
+        "on_demand",
+        "webhook"
+      ]
+    },
+    "HeadDivergedExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "head_sha": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "basis_action": {
+          "$ref": "#/$defs/Id_act"
+        }
+      },
+      "required": [
+        "head_sha",
+        "basis_action"
+      ]
+    },
+    "Id_act": {
+      "type": "string",
+      "pattern": "^act_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "HeadDivergedActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "head_sha": {
+          "$ref": "#/$defs/GitOid"
+        },
+        "pushed_by": {
+          "$ref": "#/$defs/RequiredNullable"
+        }
+      },
+      "required": [
+        "head_sha",
+        "pushed_by"
+      ]
+    },
+    "RequiredNullable": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ForgeActor"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "必填但可为 `null` 的包装；用于区分“字段缺失”和“字段存在但值未知”。\n\n不能写成 `#[serde(transparent)] Option<T>`：serde 会把缺失字段也当成 `None`。"
+    },
+    "ForgeActor": {
+      "type": "object",
+      "properties": {
+        "login": {
+          "type": "string"
+        },
+        "github_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "type": {
+          "$ref": "#/$defs/ForgeActorKind"
+        },
+        "association": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "login",
+        "github_id",
+        "type"
+      ],
+      "description": "GitHub 侧 actor；全部是外部数据。"
+    },
+    "ForgeActorKind": {
+      "type": "string",
+      "enum": [
+        "user",
+        "bot",
+        "app",
+        "unknown"
+      ]
+    },
+    "EffectMissingExpected": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effect": {
+              "type": "string",
+              "const": "status_comment"
+            },
+            "action_id": {
+              "$ref": "#/$defs/Id_act"
+            },
+            "render_digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            }
+          },
+          "required": [
+            "effect",
+            "action_id",
+            "render_digest"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effect": {
+              "type": "string",
+              "const": "branch"
+            },
+            "action_id": {
+              "$ref": "#/$defs/Id_act"
+            }
+          },
+          "required": [
+            "effect",
+            "action_id"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effect": {
+              "type": "string",
+              "const": "pull_request"
+            },
+            "action_id": {
+              "$ref": "#/$defs/Id_act"
+            },
+            "state": {
+              "$ref": "#/$defs/PrExpectedState"
+            }
+          },
+          "required": [
+            "effect",
+            "action_id",
+            "state"
+          ]
+        }
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "EffectMissingActual": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "observation": {
+              "type": "string",
+              "const": "missing"
+            }
+          },
+          "required": [
+            "observation"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "observation": {
+              "type": "string",
+              "const": "content_changed"
+            },
+            "render_digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            }
+          },
+          "required": [
+            "observation",
+            "render_digest"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "observation": {
+              "type": "string",
+              "const": "state_changed"
+            },
+            "state": {
+              "$ref": "#/$defs/PrTerminalState"
+            }
+          },
+          "required": [
+            "observation",
+            "state"
+          ]
+        }
+      ]
+    },
+    "PrTerminalState": {
+      "type": "string",
+      "enum": [
+        "closed",
+        "merged"
+      ]
+    },
+    "MaybeDeliveryId": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "可空但字段必须存在的 `delivery_id`。"
+    },
+    "OrphanEffectExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outbox_action": {
+          "$ref": "#/$defs/NullOnly"
+        }
+      },
+      "required": [
+        "outbox_action"
+      ]
+    },
+    "NullOnly": {
+      "type": "null"
+    },
+    "OrphanEffectActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/OrphanObject"
+        },
+        "github_id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "marker": {
+          "$ref": "#/$defs/ForgeText"
+        }
+      },
+      "required": [
+        "object",
+        "github_id",
+        "node_id",
+        "marker"
+      ]
+    },
+    "OrphanObject": {
+      "type": "string",
+      "enum": [
+        "comment",
+        "pull_request",
+        "issue"
+      ]
+    },
+    "ForgeText": {
+      "type": "string"
+    },
+    "IssueStateExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/IssueState"
+        },
+        "state_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IssueStateReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state"
+      ]
+    },
+    "IssueState": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed"
+      ]
+    },
+    "IssueStateReason": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "not_planned"
+      ]
+    },
+    "IssueStateActual": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "observation": {
+              "type": "string",
+              "const": "state"
+            },
+            "state": {
+              "$ref": "#/$defs/IssueState"
+            },
+            "state_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IssueStateReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "observation",
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "observation": {
+              "type": "string",
+              "const": "deleted"
+            }
+          },
+          "required": [
+            "observation"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "observation": {
+              "type": "string",
+              "const": "transferred"
+            },
+            "to_repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "new_number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "observation",
+            "to_repo",
+            "new_number"
+          ]
+        }
+      ]
+    },
+    "ReviewStateExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review_state": {
+          "$ref": "#/$defs/ReviewState"
+        }
+      },
+      "required": [
+        "review_state"
+      ]
+    },
+    "ReviewState": {
+      "type": "string",
+      "enum": [
+        "none",
+        "approved",
+        "changes_requested"
+      ]
+    },
+    "ReviewStateActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "review_state": {
+          "$ref": "#/$defs/ReviewState"
+        }
+      },
+      "required": [
+        "review_state"
+      ]
+    },
+    "MergeStateExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "in_merge_queue": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "in_merge_queue"
+      ]
+    },
+    "MergeStateActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "in_merge_queue": {
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ForgeText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "in_merge_queue"
+      ]
+    },
+    "DefaultBranchChangedExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_branch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "default_branch"
+      ]
+    },
+    "DefaultBranchChangedActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default_branch": {
+          "type": "string"
+        },
+        "renamed_from": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "旧默认分支名，不是 `RepoSlug`。"
+        }
+      },
+      "required": [
+        "default_branch"
+      ]
+    },
+    "InstallationUnreachableExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reachable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reachable"
+      ]
+    },
+    "InstallationUnreachableActual": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reachable": {
+          "type": "boolean"
+        },
+        "code": {
+          "$ref": "#/$defs/InstallationUnreachableCode"
+        },
+        "http_status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "reachable",
+        "code"
+      ]
+    },
+    "InstallationUnreachableCode": {
+      "type": "string",
+      "enum": [
+        "token_exchange_failed",
+        "repo_not_accessible",
+        "permission_denied",
+        "transport_error"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "forge::DriftPayload"
 }

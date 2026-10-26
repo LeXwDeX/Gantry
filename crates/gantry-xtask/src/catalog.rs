@@ -14,19 +14,23 @@ use gantry_core::entities::{
     Message, Node, OutboxAction, Project, Sandbox, SettingsResource, Workflow, Worktree,
 };
 use gantry_core::events::{
-    ApprovalConsumedData, ApprovalGrantedData, ApprovalRequestedData, AttemptFinishedData,
-    AttemptStartedData, BudgetExhaustedData, ConversationEventData, DeliveryAbandonedData,
-    DeliveryCreatedData, DeliveryLevelChangedData, DeliveryPausedData, DeliveryResumedData,
-    DeliveryStageChangedData, DevicePairedData, DeviceRevokedData, DeviceUpdatedData, Event,
-    EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NodeEventData,
-    NodeRetryRequestedData, OutboxFailedData, OutboxSucceededData, PatchRejectedData,
-    PatchValidatedData, ProjectEventData, SandboxCreatedData, SandboxDestroyedData,
-    SettingsUpdatedData, WorkflowCreatedData, WorkflowFinishedData, WorkflowRevisedData,
-    WorktreeCreatedData, WorktreeLockedData, WorktreeRemovedData, WorktreeUnlockedData,
+    ApprovalConsumedData, ApprovalDeniedData, ApprovalExpiredData, ApprovalGrantedData,
+    ApprovalInvalidatedData, ApprovalRequestedData, AttemptFinishedData, AttemptProgressData,
+    AttemptStartedData, BudgetChargedData, BudgetExhaustedData, ConversationEventData,
+    DeliveryAbandonedData, DeliveryCreatedData, DeliveryLevelChangedData, DeliveryPausedData,
+    DeliveryResumedData, DeliveryStageChangedData, DevicePairedData, DeviceRevokedData,
+    DeviceUpdatedData, Event, EventType, ForgeSyncedData, GuardianEscalatedData,
+    GuardianHealRequestedData, GuardianTriagedData, InboxDismissedData, InboxRaisedData,
+    InboxResolvedData, NodeEventData, NodeRetryRequestedData, OutboxCancelledData,
+    OutboxEnqueuedData, OutboxExecutingData, OutboxFailedData, OutboxSucceededData,
+    PatchRejectedData, PatchValidatedData, PolicyDeniedData, ProjectEventData, SandboxCreatedData,
+    SandboxDestroyedData, SettingsUpdatedData, WorkflowCreatedData, WorkflowFinishedData,
+    WorkflowRevisedData, WorktreeCreatedData, WorktreeLockedData, WorktreeRemovedData,
+    WorktreeUnlockedData,
 };
 use gantry_core::forge::{
     AddLabelsPayload, CloseIssuePayload, CreateCommentPayload, CreateIssuePayload, CreatePrPayload,
-    ForgeEventEnvelope, MergePrPayload, PushBranchPayload, ReplyReviewThreadPayload,
+    DriftPayload, ForgeEventEnvelope, MergePrPayload, PushBranchPayload, ReplyReviewThreadPayload,
     RequestReviewersPayload, RerunFailedJobsPayload, ResolveReviewThreadPayload,
     UpdateIssuePayload, UpdatePrPayload, UpsertStatusCommentPayload,
 };
@@ -216,6 +220,10 @@ fn event_data_schema(ty: EventType) -> Option<Value> {
         E::NodeRetryRequested => schema::for_type::<NodeRetryRequestedData>(),
         E::AttemptStarted => schema::for_type::<AttemptStartedData>(),
         E::AttemptFinished => schema::for_type::<AttemptFinishedData>(),
+        E::AttemptProgress => schema::for_type::<AttemptProgressData>(),
+        E::GuardianTriaged => schema::for_type::<GuardianTriagedData>(),
+        E::GuardianHealRequested => schema::for_type::<GuardianHealRequestedData>(),
+        E::GuardianEscalated => schema::for_type::<GuardianEscalatedData>(),
         E::PatchValidated => schema::for_type::<PatchValidatedData>(),
         E::PatchRejected => schema::for_type::<PatchRejectedData>(),
         E::SandboxCreated => schema::for_type::<SandboxCreatedData>(),
@@ -230,8 +238,17 @@ fn event_data_schema(ty: EventType) -> Option<Value> {
         E::ApprovalRequested => schema::for_type::<ApprovalRequestedData>(),
         E::ApprovalGranted => schema::for_type::<ApprovalGrantedData>(),
         E::ApprovalConsumed => schema::for_type::<ApprovalConsumedData>(),
+        E::ApprovalInvalidated => schema::for_type::<ApprovalInvalidatedData>(),
+        E::ApprovalExpired => schema::for_type::<ApprovalExpiredData>(),
+        E::ApprovalDenied => schema::for_type::<ApprovalDeniedData>(),
+        E::OutboxEnqueued => schema::for_type::<OutboxEnqueuedData>(),
+        E::OutboxExecuting => schema::for_type::<OutboxExecutingData>(),
+        E::OutboxCancelled => schema::for_type::<OutboxCancelledData>(),
         E::OutboxSucceeded => schema::for_type::<OutboxSucceededData>(),
         E::OutboxFailed => schema::for_type::<OutboxFailedData>(),
+        E::ForgeSynced => schema::for_type::<ForgeSyncedData>(),
+        E::BudgetCharged => schema::for_type::<BudgetChargedData>(),
+        E::PolicyDenied => schema::for_type::<PolicyDeniedData>(),
         E::BudgetExhausted => schema::for_type::<BudgetExhaustedData>(),
         E::DevicePaired => schema::for_type::<DevicePairedData>(),
         E::DeviceUpdated => schema::for_type::<DeviceUpdatedData>(),
@@ -249,20 +266,7 @@ fn event_data_schema(ty: EventType) -> Option<Value> {
             );
             value
         }
-        E::AttemptProgress
-        | E::GuardianTriaged
-        | E::GuardianHealRequested
-        | E::GuardianEscalated
-        | E::ApprovalInvalidated
-        | E::ApprovalExpired
-        | E::ApprovalDenied
-        | E::OutboxEnqueued
-        | E::OutboxExecuting
-        | E::OutboxCancelled
-        | E::ForgeSynced
-        | E::ForgeDriftDetected
-        | E::BudgetCharged
-        | E::PolicyDenied => return None,
+        E::ForgeDriftDetected => schema::for_type::<DriftPayload>(),
     })
 }
 
@@ -339,23 +343,10 @@ fn forge() -> Vec<Artifact> {
         value: event_schema,
         openapi: None,
     });
-    // forge-actions §7.4 的 drift 示例有丰富字段，core 只有无载荷的 `DriftKind`；
-    // 形状未定，拒绝而不是伪造 schema。
-    let mut drift = serde_json::json!({
-        "title": "forge drift (contract undefined)",
-        "not": {},
-        "x-gantry-unresolved": {
-            "reason": "forge-actions §7.4 给出 drift 示例，但 core 只有无载荷的 ports::forge::DriftKind，没有可生成的形状",
-            "source": "docs/interfaces/forge-actions.md#74-drift-目录",
-            "rejects_all_data": true,
-        },
-    });
-    schema::finish(&mut drift);
-    all.push(Artifact {
-        path: "schemas/forge/drift.json".to_owned(),
-        value: drift,
-        openapi: None,
-    });
+    all.push(Artifact::typed::<DriftPayload>(
+        "schemas/forge/drift.json",
+        "forge::DriftPayload",
+    ));
     all
 }
 

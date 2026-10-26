@@ -1,11 +1,176 @@
 {
-  "title": "attempt.progress data (contract undefined)",
-  "not": {},
-  "x-gantry-unresolved": {
-    "reason": "core §7.5 / docs/m0-contract-gaps.md 未定义该事件的 data 形状；M0 显式拒绝，不猜测字段",
-    "source": "docs/m0-contract-gaps.md",
-    "rejects_all_data": true
-  },
+  "title": "AttemptProgressData",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "stage"
+        },
+        "stage": {
+          "enum": [
+            "init",
+            "explore",
+            "plan",
+            "edit",
+            "test",
+            "review",
+            "package",
+            "finalize"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "type",
+        "stage",
+        "detail"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "tool"
+        },
+        "phase": {
+          "const": "start"
+        },
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "type",
+        "phase",
+        "call_id",
+        "tool",
+        "summary"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "tool"
+        },
+        "phase": {
+          "const": "end"
+        },
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "type",
+        "phase",
+        "call_id",
+        "tool",
+        "ok",
+        "duration_ms"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "usage"
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "type",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "turns"
+      ]
+    }
+  ],
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
   "x-gantry-event-type": "attempt.progress",

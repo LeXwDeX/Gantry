@@ -16,7 +16,7 @@
 - 正例夹具：`crates/gantry-core/fixtures/events/cases.json`（每个已定义类型一份）。
 - 反例夹具：同文件的 `invalid[]`（未知字段、错误枚举、缺必填、SecretRef 带值）。
 
-## 2. `ContractUndefined`：14 个未定 `data`
+## 2. `ContractUndefined`：14 个未定 `data`（历史状态；2026-10-26 已全部关闭）
 
 | 事件 | 已知来源 | 为什么不能类型化 | 处理 |
 | --- | --- | --- | --- |
@@ -271,3 +271,14 @@
 - B9 的可选字段候选与 retryNode 的 OpenAPI 响应要求不一致，未增加额外兼容路径。
 - 第七轮未修改 `docs/interfaces/**`、`schemas/**` 或端口签名；完整 M0 的既有契约缺口
   不变。
+
+## 9. 契约实现后状态（2026-10-26）
+
+契约文档经 PR #8 / #6 / #9 合入 `main` 后，按 `docs/interfaces/event-data.md`、`config-view-injection.md`、`egress-call-terminal.md`、`forge-drift.md` 完成 M0 类型与校验实现：
+
+- 14 个事件的 `data` 全部类型化；`contract_undefined_types()` 现在为空。`schemas/events/<type>.json` 不再生成拒绝型。
+- `ConfigView.injection` 改为 `InjectionView` / `InjectionCredentialView`；合法非空通过类型校验，非法非空拒绝。M1 控制面仍不启用非空注入。
+- `DriftPayload` 实现 9 种 `kind` 的强类型 `expected` / `actual`；`schemas/forge/drift.json` 与 `forge.drift_detected` 事件 schema 由真实类型生成。`PullRequestReadback` / `IssueReadback` 已定义，端口方法接入仍留给 M1。
+- `contract-gaps.json` 的 G-03 / G-04 / G-05 / G-23 已移入 `fixed`；`gaps` 为空。
+- `forge-actions §7.4` 的 drift 示例仍缺契约必填的 `target.repo`，保留为 `example` skip；这不表示 drift 类型未实现。
+- 目标平台证据仍不完整：macOS / Ubuntu / 契约与 Mock 作业通过，Windows 与 Rust 1.85 未验证。

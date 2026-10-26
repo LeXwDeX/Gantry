@@ -1,12 +1,132 @@
 {
-  "title": "guardian.escalated data (contract undefined)",
-  "not": {},
-  "x-gantry-unresolved": {
-    "reason": "core §7.5 / docs/m0-contract-gaps.md 未定义该事件的 data 形状；M0 显式拒绝，不猜测字段",
-    "source": "docs/m0-contract-gaps.md",
-    "rejects_all_data": true
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "delivery_id": {
+      "$ref": "#/$defs/Id_dlv"
+    },
+    "class": {
+      "$ref": "#/$defs/GuardianTriageClass"
+    },
+    "reason_code": {
+      "$ref": "#/$defs/GuardianReasonCode"
+    },
+    "inbox_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_inb"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "suppressed_duplicate": {
+      "type": "boolean"
+    },
+    "fingerprint": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "round_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
   },
+  "required": [
+    "delivery_id",
+    "class",
+    "reason_code",
+    "suppressed_duplicate"
+  ],
+  "title": "GuardianEscalatedData",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "GuardianTriageClass": {
+      "type": "string",
+      "enum": [
+        "ci_failure_in_scope",
+        "bot_finding_valid",
+        "bot_finding_invalid",
+        "nit",
+        "mechanical_conflict",
+        "security_finding",
+        "touches_protected_path",
+        "scope_expanding_fix",
+        "repeated_or_no_progress",
+        "budget_exhausted",
+        "approval_needed",
+        "push_after_approval",
+        "design_or_api_change",
+        "unknown"
+      ],
+      "description": "守护分流类 id（config.md §6.1）。锁定类出现在 `triage` 里由 V17 拒绝；\nV17 属于 M2，本节点只保证 id 与取值类型正确。"
+    },
+    "GuardianReasonCode": {
+      "type": "string",
+      "enum": [
+        "guardian.security_finding",
+        "guardian.protected_path",
+        "guardian.scope_expanding_fix",
+        "guardian.repeated_problem",
+        "guardian.no_progress",
+        "guardian.budget_exhausted",
+        "guardian.workflow_run_approval",
+        "guardian.push_after_approval",
+        "guardian.design_or_api_change",
+        "guardian.mechanical_conflict",
+        "guardian.ci_failure_escalated",
+        "guardian.nit_escalated",
+        "guardian.bot_finding_escalated",
+        "guardian.ci_out_of_scope",
+        "guardian.ci_low_confidence",
+        "guardian.ci_startup_failure",
+        "guardian.ci_timeout",
+        "guardian.scope_unknown",
+        "guardian.finding_low_confidence",
+        "guardian.human_feedback",
+        "guardian.dequeued",
+        "guardian.heal_failed",
+        "guardian.heal_no_change",
+        "guardian.patch_denied",
+        "guardian.github_write_failed",
+        "guardian.action_denied",
+        "guardian.unknown_event"
+      ],
+      "description": "guardian §7.9 的 27 个上报原因码。"
+    },
+    "Id_inb": {
+      "type": "string",
+      "pattern": "^inb_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Ulid": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
   "x-gantry-event-type": "guardian.escalated",
   "x-gantry-envelope": "schemas/entities/event-envelope.json"

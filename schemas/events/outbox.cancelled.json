@@ -1,12 +1,27 @@
 {
-  "title": "outbox.cancelled data (contract undefined)",
-  "not": {},
-  "x-gantry-unresolved": {
-    "reason": "core §7.5 / docs/m0-contract-gaps.md 未定义该事件的 data 形状；M0 显式拒绝，不猜测字段",
-    "source": "docs/m0-contract-gaps.md",
-    "rejects_all_data": true
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "reason": {
+      "$ref": "#/$defs/OutboxCancelReason"
+    }
   },
+  "required": [
+    "reason"
+  ],
+  "title": "OutboxCancelledData",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "OutboxCancelReason": {
+      "type": "string",
+      "enum": [
+        "superseded",
+        "dependency_failed",
+        "approval_invalid",
+        "manual"
+      ]
+    }
+  },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
   "x-gantry-event-type": "outbox.cancelled",
   "x-gantry-envelope": "schemas/entities/event-envelope.json"
