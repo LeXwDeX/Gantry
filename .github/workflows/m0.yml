@@ -30,9 +30,17 @@ jobs:
           printf '%s\n' "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
       - name: 安装 OpenSSL（Windows）
         if: runner.os == 'Windows'
-        uses: shogo82148/actions-setup-openssl@v1
-        with:
-          version: '3.0.16'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin'),
+            (Join-Path $env:ProgramFiles 'OpenSSL-Win32\bin'),
+            'C:\Program Files\Git\usr\bin'
+          )
+          $bin = $candidates | Where-Object { Test-Path (Join-Path $_ 'openssl.exe') } | Select-Object -First 1
+          if (-not $bin) { throw "OpenSSL executable not found" }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & (Join-Path $bin 'openssl.exe') version
       - name: 检查 OpenSSL
         run: openssl version
       - run: cargo fmt --all -- --check
