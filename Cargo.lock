@@ -217,6 +217,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gantry-engine"
+version = "0.1.0"
+dependencies = [
+ "gantry-core",
+]
+
+[[package]]
 name = "gantry-fakes"
 version = "0.1.0"
 dependencies = [

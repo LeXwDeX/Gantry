@@ -1,0 +1,10 @@
+[package]
+name = "gantry-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 编排引擎（M1 起；当前为已定义模板骨架）"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
