@@ -21,7 +21,7 @@
     "kind",
     "reason"
   ],
-  "description": "`delivery.level_changed`（engine.md §11）：`effective` 只升（P-57）。",
+  "description": "`delivery.level_changed`（engine.md §11）：`kind = effective` 只升（P-57）；`kind = cap`\n可升可降，应用时派生 `level_effective = min(原值, to)`，不另写 `effective` 下降事件（#48）。",
   "title": "DeliveryLevelChangedData",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {

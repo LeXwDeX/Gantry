@@ -1516,7 +1516,8 @@ pub enum LevelChangeKind {
     Effective,
 }
 
-/// `delivery.level_changed`（engine.md §11）：`effective` 只升（P-57）。
+/// `delivery.level_changed`（engine.md §11）：`kind = effective` 只升（P-57）；`kind = cap`
+/// 可升可降，应用时派生 `level_effective = min(原值, to)`，不另写 `effective` 下降事件（#48）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeliveryLevelChangedData {

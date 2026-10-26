@@ -1473,6 +1473,16 @@
       "pointer_contains": "/kind"
     },
     {
+      "type": "delivery.level_changed",
+      "data": {
+        "from": "High",
+        "to": "Low",
+        "kind": "effective",
+        "reason": "user"
+      },
+      "pointer_contains": "/to"
+    },
+    {
       "type": "inbox.resolved",
       "data": {
         "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",

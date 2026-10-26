@@ -147,7 +147,8 @@ pub trait EngineApi: Send + Sync {
 impl DeliveryControl for Engine {
     /// 终结阶段 → `InvalidState`。预算模板在创建时按 `level_cap` 固定，调档不改台账（P-57）；
     /// 用户降上限时 `level_effective` 取 min(原值, 新上限)，已触发的闸门保留；引擎自己从不自动降档。
-    /// `Level::None` 不是合法的交付单元上限 → `Validation`。产生 `delivery.level_changed`；新值等于当前上限 → 不产生事件（P-82）。
+    /// `Level::None` 不是合法的交付单元上限 → `Validation`。产生一条 `delivery.level_changed(kind = cap, reason = user)`；新值等于当前上限 → 不产生事件（P-82）。
+    /// 新上限低于 `level_effective` 时**不**另写 `kind = effective` 事件：投影按 §11 的派生规则取 `level_effective = min(原值, 新上限)`（#48）。
     async fn set_level_cap(&self, ctx: ActorCtx, id: DeliveryId, cap: Level) -> Result<Delivery, ModuleError>;
     /// 任何非终态阶段可用（P-55）。取消运行中尝试、取消排队中的 Outbox 动作、作废该交付单元的活跃补丁审批
     /// （`PolicyPort::invalidate`）、有 PR 则入队 `update_pr(state=closed)`、释放工作树。产生 `delivery.abandoned`。
@@ -753,7 +754,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | --- | --- |
 | `delivery.created` | `title`、`level_cap`、`level_effective`、`origin`、`source_message_id`、`issues[]`、`budget = {template, limits}`、`config_rev` |
 | `delivery.stage_changed` | `from`、`to`、`reason`、`stage_status` |
-| `delivery.level_changed` | `from`、`to`、`kind`（`cap` / `effective`）、`reason`（`user` / `initial_risk` / `escalation:<rule_id>`）；`effective` 只升（P-57） |
+| `delivery.level_changed` | `from`、`to`、`kind`（`cap` / `effective`）、`reason`（`user` / `initial_risk` / `escalation:<rule_id>`）。`kind = effective` 只升（P-57，`core` 校验拒绝 `to < from`）。`kind = cap` 可升可降；应用时 `level_effective` 派生为 min(当前 `level_effective`, `to`)——这是用户压低上限时 `level_effective` 随之下调（api.md §4.4 PATCH、P-82）的**唯一**表达，不另写 `effective` 下降事件；所有投影（`store`、引擎、客户端）必须按同一规则派生（#48） |
 | `delivery.paused` / `delivery.resumed` | `by`、`status_before`（paused）/ `status_after`（resumed）（P-56） |
 | `delivery.abandoned` | `reason`、`by` |
 | `workflow.created` | `stage`（临时图为空）、`template`、`graph_rev`、`nodes[]`（`node_id`、`key`、`role`、`depends_on`、`required`、`critical`）、`delivery_id` 或 `conversation_id`（P-58） |

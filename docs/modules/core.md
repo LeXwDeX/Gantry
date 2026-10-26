@@ -208,7 +208,7 @@ impl ApprovalPayload {
 | Rust 类型 | data-model | 线上形态要点 |
 | --- | --- | --- |
 | `Project` | §3 Project | 不含 `settings_override`（api.md §4.3、§8.2：它只经 settings 路由读写，由 `SettingsDoc` 承载） |
-| `Delivery`、`Stage`、`StageStatus`、`DeliveryOrigin` | §3 Delivery、§4.1 | `Stage`：`spec` / `plan` / `implement` / `propose` / `review` / `merge` / `closed` / `abandoned`；`StageStatus`：`running` / `waiting_human` / `blocked` / `paused` / `done`（P-55）；`level_effective` ≤ `level_cap`，只升不降（P-57）；`DeliveryOrigin`：`conversation` / `github_label` / `github_command`（与 `ForgeOrigin` 不是同一个东西） |
+| `Delivery`、`Stage`、`StageStatus`、`DeliveryOrigin` | §3 Delivery、§4.1 | `Stage`：`spec` / `plan` / `implement` / `propose` / `review` / `merge` / `closed` / `abandoned`；`StageStatus`：`running` / `waiting_human` / `blocked` / `paused` / `done`（P-55）；`level_effective` ≤ `level_cap`；引擎不自动降（P-57），只在用户压低上限时随 `kind = cap` 事件派生为 min(原值, 新上限)（#48）；`DeliveryOrigin`：`conversation` / `github_label` / `github_command`（与 `ForgeOrigin` 不是同一个东西） |
 | `IssueRef`、`PullRequestRef`、`CheckSummary` | §3、§1.1 | `title` 是 `UntrustedText`；`mergeable_state` 保存 GitHub 原值字符串，不枚举；`PullRequestRef.state` 为 `open` / `closed` / `merged` |
 | `Workflow`、`WorkflowStatus` | §3 | `status`：`running` / `paused` / `succeeded` / `failed` / `cancelled`（api.md 示例已改为 `succeeded`，C26）；`delivery_id: Option<DeliveryId>`，为空时必有 `conversation_id`（None 档挂在会话上的临时图，P-58），构造时校验 |
 | `Node`、`Role`、`Tier`、`Exec`、`Verdict` | §3、architecture §9 | `Role::Review(String)` 序列化为 `review:<视角>`，视角匹配 `[a-z][a-z0-9_-]*`；`Verdict` 大写 `ACCEPT` / `REVISE` / `REJECT` / `BLOCKED`；`Tier`：`utility` / `planner` / `worker`；`Exec`：`sandbox` / `sandbox_ro` / `direct`；`role`、`tier`、`exec` 的固定搭配由 `fn role_profile(Role) -> (Tier, Exec)` 给出，构造 `Node` 时校验 |
@@ -554,7 +554,7 @@ crates/gantry-core/
 
 **阶段内状态 `stage_status`**（P-55，规则以 data-model 为准）：进入新阶段 → `running`；需要人回答 / 签名 → `waiting_human`，人处理后回 `running`；闸门 `BLOCKED` 或外部条件不满足 → `blocked`，解除后回 `running`；`delivery.paused` → `paused`（从 `running` / `waiting_human` / `blocked` 进入，记住进入前的值），`delivery.resumed` 回到进入前的值；阶段完成 → `done`（随即被下一阶段的 `running` 取代）；终态阶段恒为 `done`。
 
-**档位 `level_effective`**（P-57）：初值由 `engine` 在规格阶段按风险评估给出，必须 ≤ `level_cap`；之后只能在上限内升、不自动降；已触发的闸门永不撤销。`core` 提供 `fn check_level_change(cap, from, to) -> Result<(), LevelError>`（拒绝降级与越过上限）。
+**档位 `level_effective`**（P-57）：初值由 `engine` 在规格阶段按风险评估给出，必须 ≤ `level_cap`；之后只能在上限内升、不自动降；已触发的闸门永不撤销。`core` 提供 `fn check_level_change(cap, from, to) -> Result<(), LevelError>`（拒绝降级与越过上限），只用于 `kind = effective` 的变化；用户压低上限造成的下调不经它，而由 `kind = cap` 事件按 min 规则派生（engine.md §11，#48）。
 
 **其他状态机**（data-model §4.2–§4.4 及各契约）：
 
@@ -579,7 +579,7 @@ crates/gantry-core/
 | `forge.<kind>` | `forge` | `data` 即 `ForgeEventEnvelope`（forge-actions §6.2–§6.3）；`dedup_key` 进信封外的唯一索引列；`occurred_at` 带毫秒（C26）；`pr_synchronized` 带 `head_epoch`（计数以事件日志为准，P-61） | `subject` 取值（交付单元 / PR / 项目）未定 |
 | `forge.synced` / `forge.drift_detected` | `forge` | drift 形状见 forge-actions §7.4 | `forge.synced` 的 data（快照差异）未定 |
 | `outbox.*` | `forge`、`store` | `outbox.failed.data.code`（forge-actions §2.6），只在终态发（P-53）；`outbox.succeeded` 带 `github_ref`；`upsert_status_comment` 的 `outbox.enqueued` 带 `revision`（P-61） | `enqueued` 需带完整动作（payload、依赖、优先级）才能让投影可重建 |
-| `delivery.*` | `engine`、`api` | `stage_changed` 示意 `{from, to}`（api.md §5.1）；`abandoned` 带可选 `reason`（≤ 500 字符，api.md §4.4）；`paused` / `resumed`（P-56）；`level_changed` 只升（P-57） | `created` 需带完整交付单元与预算台账（模板名按 `level_cap` 固定、limits、`config_rev`）；`stage_changed` 建议带 `trigger` |
+| `delivery.*` | `engine`、`api` | `stage_changed` 示意 `{from, to}`（api.md §5.1）；`abandoned` 带可选 `reason`（≤ 500 字符，api.md §4.4）；`paused` / `resumed`（P-56）；`level_changed`：`kind = effective` 只升（P-57），`kind = cap` 可降且派生 `level_effective = min(原值, 新上限)`（engine.md §11，#48） | `created` 需带完整交付单元与预算台账（模板名按 `level_cap` 固定、limits、`config_rev`）；`stage_changed` 建议带 `trigger` |
 | `workflow.*` / `node.*` | `engine` | `superseded_by`（data-model）；`workflow.revised` 带新 `graph_rev`；`workflow.created` 的 `delivery_id` 可空、此时带 `conversation_id`（P-58）；`node.retry_requested`（P-56） | 节点的创建随 `workflow.created` / `revised` 带入的假设需确认；`Workflow.template` 取值（族名还是阶段模板名，OQ-6） |
 | `attempt.started` / `finished` | `engine` | `started`：实际使用的 provider / model / effort 与 `config_rev`（config.md §2.6）；`finished`：`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`（worker-protocol §3.2、§3.5） | `Attempt` 从 `preparing` 转 `running` 没有对应事件 |
 | `attempt.progress` | `sandbox` / `engine` | 采样后的进度（worker-protocol §7），仅展示 | 形状未定 |
