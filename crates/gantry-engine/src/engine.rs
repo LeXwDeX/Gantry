@@ -4,8 +4,8 @@
 
 use gantry_core::entities::{Actor, Seq, Stage, StageStatus};
 use gantry_core::events::{
-    DeliveryAbandonedData, DeliveryPausedData, DeliveryResumedData, DeliveryStageChangedData,
-    EventType, NewEvent, SchemaError, Subject,
+    DeliveryAbandonedData, DeliveryLevelChangedData, DeliveryPausedData, DeliveryResumedData,
+    DeliveryStageChangedData, EventType, LevelChangeKind, NewEvent, SchemaError, Subject,
 };
 use gantry_core::ids::{DeliveryId, IdError, ProjectId};
 use gantry_core::level::Level;
@@ -33,6 +33,10 @@ pub enum EngineError {
     NotFound,
     #[error("invalid state: {0}")]
     InvalidState(&'static str),
+    #[error("validation: {0}")]
+    Validation(&'static str),
+    #[error("unsupported: {0}")]
+    Unsupported(&'static str),
 }
 
 pub struct StageRequest {
@@ -165,6 +169,40 @@ impl Engine {
             .await
     }
 
+    /// 调整上限：不改变创建时固化的预算模板；降幅低于 `level_effective` 时一并下调。
+    pub async fn set_level_cap(
+        &self,
+        id: DeliveryId,
+        cap: Level,
+        actor: Actor,
+    ) -> Result<DeliveryProjection, EngineError> {
+        if cap == Level::None {
+            return Err(EngineError::Validation("delivery level_cap must not be None"));
+        }
+        let current = self.current(&id).await?;
+        ensure_active(&current)?;
+        if cap == current.level_cap {
+            return Ok(current);
+        }
+        // shortcut: effective 下降需要契约允许，见 issue #48；在此之前只接受不压到 effective 的上限。
+        if cap < current.level_effective {
+            return Err(EngineError::Unsupported(
+                "lowering level_effective needs a contract change",
+            ));
+        }
+        let event = level_changed_event(
+            &current,
+            &actor,
+            current.level_cap,
+            cap,
+            LevelChangeKind::Cap,
+        )?;
+        let mut tx = self.store.begin_write().await?;
+        tx.append(event).await?;
+        tx.commit().await?;
+        self.current(&id).await
+    }
+
     /// 放弃：非终态 → `abandoned`。取消运行中尝试、作废审批与 PR 收尾尚未实现。
     pub async fn abandon(
         &self,
@@ -193,26 +231,55 @@ impl Engine {
         actor: Actor,
         data: &T,
     ) -> Result<DeliveryProjection, EngineError> {
-        let id_text = delivery.id.to_string();
-        let subject = Subject::parse(&id_text)
-            .map_err(|error| SchemaError::shape("/subject", error.to_string()))?;
-        let event = NewEvent {
-            ty,
-            subject,
-            project_id: Some(delivery.project_id),
-            actor,
-            causation_id: None,
-            correlation_id: Some(id_text),
-            data: serde_json::to_value(data)
-                .map_err(|error| SchemaError::shape("/data", error.to_string()))?,
-            dedup_key: None,
-        };
-        event.validate()?;
+        let event = delivery_event(ty, delivery, actor, data)?;
         let mut tx = self.store.begin_write().await?;
         tx.append(event).await?;
         tx.commit().await?;
         self.current(&delivery.id).await
     }
+}
+
+fn level_changed_event(
+    delivery: &DeliveryProjection,
+    actor: &Actor,
+    from: Level,
+    to: Level,
+    kind: LevelChangeKind,
+) -> Result<NewEvent, EngineError> {
+    delivery_event(
+        EventType::DeliveryLevelChanged,
+        delivery,
+        actor.clone(),
+        &DeliveryLevelChangedData {
+            from,
+            to,
+            kind,
+            reason: "user_cap_change".to_owned(),
+        },
+    )
+}
+
+fn delivery_event<T: serde::Serialize>(
+    ty: EventType,
+    delivery: &DeliveryProjection,
+    actor: Actor,
+    data: &T,
+) -> Result<NewEvent, EngineError> {
+    let subject = Subject::parse(&delivery.id.to_string())
+        .map_err(|error| SchemaError::shape("/subject", error.to_string()))?;
+    let event = NewEvent {
+        ty,
+        subject,
+        project_id: Some(delivery.project_id),
+        actor,
+        causation_id: None,
+        correlation_id: Some(delivery.id.to_string()),
+        data: serde_json::to_value(data)
+            .map_err(|error| SchemaError::shape("/data", error.to_string()))?,
+        dedup_key: None,
+    };
+    event.validate()?;
+    Ok(event)
 }
 
 fn ensure_active(delivery: &DeliveryProjection) -> Result<(), EngineError> {
