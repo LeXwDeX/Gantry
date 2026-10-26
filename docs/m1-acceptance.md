@@ -46,7 +46,7 @@ B 级与 C 级之间最大的差别是 GitHub：`FakeGitHub` 只能证明 Gantry
 | --- | --- | --- | --- |
 | GitHub 测试组织 + 1 个测试仓库 | 独立的免费组织；仓库含一个能在 1 分钟内跑完的 Actions 工作流、一个分支保护规则（要求该 check）、一个示例 Issue | 1、4、5 | 不与任何生产组织共用；结束后可删除 |
 | GitHub App | 由 `gantry github setup` 用 Manifest 创建（deploy.md），权限**只取** forge-actions §9.6 的 M1 子集：`metadata:read`、`contents:write`、`pull_requests:write`、`issues:write`、`checks:read`；**不得**含 `workflows`、`administration`（P-48）；只安装到上面的测试仓库 | 1、4、5 | 私钥只进服务端 `secrets`，不进仓库、不进聊天 |
-| webhook 入口 | 隧道或带 TLS 的反向代理到测试主机回环端口（P-65） | 1、4 | 只暴露 webhook 路径 |
+| webhook 入口 | 隧道或带 TLS 的反向代理到测试主机回环端口（P-65）；须先于 App 创建配置好 | 1、4 | 只转发 `/webhook`，以及 App 创建期间的 `/setup/github/callback`（P-65、deploy.md §1 第 4 项；否则 Manifest 流程收不到 `code`） |
 | 模型 API 密钥 | 一把单独的密钥，在提供方控制台设**月度花费上限**（建议 ≤ 20 美元）；只经设置页写入（需 approver 签名，第 7 行同时被验证） | 1 | 不进环境变量文件、不进仓库；验收结束后吊销 |
 | 目标主机 | Ubuntu 24.04 LTS x86_64，≥ 4 vCPU、≥ 8 GiB 内存、`/var/lib` ≥ 20 GiB 可用（deploy.md 建议值）；可 root；cgroup v2 | 1、3、5、8、9 | 一次性主机，验收后重装 |
 | macOS 签名 | Apple Developer ID 证书（签名 + 公证） | 7 的安装包形态 | 证书不进仓库与 CI 日志 |
