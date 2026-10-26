@@ -25,22 +25,6 @@
       "affects": [
         "schemas/events/attempt.progress.json 等 14 个文件"
       ]
-    },
-    {
-      "id": "G-13",
-      "summary": "egress-control §4.4 暂存示例的 request_id 为 25 位，core Ulid schema 要求 26 位；示例按 example 登记（原文与类型不一致）",
-      "source": "docs/interfaces/egress-control.md#44",
-      "affects": [
-        "fixtures/contracts/blocks/egress-control/L227.json"
-      ]
-    },
-    {
-      "id": "G-15",
-      "summary": "api.md §4.5 的 Message 示例 id 不是合法 26 位 ULID；示例按 example 登记，不能作为实现通过证据",
-      "source": "docs/interfaces/api.md#45",
-      "affects": [
-        "fixtures/contracts/blocks/api/L554.json"
-      ]
     }
   ],
   "fixed": [
@@ -95,6 +79,14 @@
     {
       "id": "G-23",
       "summary": "ConfigView.injection 的 serde/schema/Debug 只支持空对象；非空注入仍未定，不猜测结构"
+    },
+    {
+      "id": "G-13",
+      "summary": "egress-control §4.4 暂存示例的 request_id 已改为合法 26 位 ULID；schema 校验通过，按 schema-only 验证（StageSecretRequest 只实现 Serialize）"
+    },
+    {
+      "id": "G-15",
+      "summary": "api.md §4.5 的 Message 示例 id 已改为合法 26 位 ULID；示例仍省略 created_at/updated_at，保持 partial"
     }
   ]
 }
