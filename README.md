@@ -4,9 +4,9 @@
 
 Gantry（龙门架）是 [GraphAgent](https://github.com/LeXwDeX/OpenCode-GraphAgent) 与 [SpecGit](https://github.com/LeXwDeX/SpecGit) 的合并继任者：借鉴 GraphAgent 的 DAG 编排经验与 SpecGit 的"Issue → PR → 验证完成"交付语义，在独立重新设计的运行时上实现，不复用 GraphAgent 的 AGPL 代码。
 
-**状态：M0 统一开发基线，正在验收。** 已有 Rust 领域核心、跨模块端口、内存存储与测试替身，以及可运行的内存模拟接口（Mock API）和浏览器模拟场景（scenario）前端。两者尚未接线，真实前后端联调未验证。
+**状态：M0 统一开发基线已合入，M1 进行中（只完成引擎的局部）。** 已有 Rust 领域核心、跨模块端口、内存存储与测试替身、可运行的内存模拟接口（Mock API）和浏览器模拟场景（scenario）前端，以及引擎的事件写入与控制面。前后端尚未接线，真实前后端联调未验证。
 
-M0 契约尚未冻结，M1 未启动。真实业务、持久化服务和生产鉴权尚未实现；前端不是生产客户端或桌面安装包。当前迭代入口见 [NEXT-STEPS.md](NEXT-STEPS.md)。
+M0 契约文本仍为"送审、尚未批准"。真实业务、持久化服务和生产鉴权尚未实现；前端不是生产客户端或桌面安装包。当前状态与目录入口见 [AGENTS.md](AGENTS.md)，迭代计划见 [NEXT-STEPS.md](NEXT-STEPS.md)。
 
 ## 本地接入
 
@@ -63,7 +63,7 @@ npm run build --prefix apps/desktop
 
 | 文档 | 内容 |
 | --- | --- |
-| [AGENTS.md](AGENTS.md) | agent 入口：文档地图、领取模块的流程、约定 |
+| [AGENTS.md](AGENTS.md) | agent 入口：项目现状、架构与目录入口、开发规约、里程碑收尾 |
 | [docs/architecture.md](docs/architecture.md) | 架构总图与不变式 |
 | [docs/decisions.md](docs/decisions.md) | 已确定 / 提议 / 待决 |
 | [docs/data-model.md](docs/data-model.md) | 数据模型 |
