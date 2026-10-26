@@ -5,6 +5,9 @@
     "attempt_id": {
       "$ref": "#/$defs/Id_att"
     },
+    "node_id": {
+      "$ref": "#/$defs/Id_nod"
+    },
     "n": {
       "type": "integer",
       "format": "uint32",
@@ -38,6 +41,7 @@
   },
   "required": [
     "attempt_id",
+    "node_id",
     "n",
     "provider",
     "model",
@@ -54,6 +58,10 @@
     "Id_att": {
       "type": "string",
       "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Effort": {
       "type": "string",

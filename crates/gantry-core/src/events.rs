@@ -1729,6 +1729,7 @@ impl EventData for NodeRetryRequestedData {
 #[serde(deny_unknown_fields)]
 pub struct AttemptStartedData {
     pub attempt_id: AttemptId,
+    pub node_id: NodeId,
     pub n: u32,
     pub provider: String,
     pub model: String,

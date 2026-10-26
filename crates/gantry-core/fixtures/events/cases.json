@@ -160,6 +160,7 @@
     },
     "attempt.started": {
       "attempt_id": "att_01JB7X4Q9ZK3M8T5V2N7RHC6WY",
+      "node_id": "nod_01JB7M8V5X1Z3N6R9Q2K4W7YZC",
       "n": 1,
       "provider": "anthropic",
       "model": "claude",
