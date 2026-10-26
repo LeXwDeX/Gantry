@@ -1,12 +1,529 @@
 {
-  "title": "policy.denied data (contract undefined)",
-  "not": {},
-  "x-gantry-unresolved": {
-    "reason": "core §7.5 / docs/m0-contract-gaps.md 未定义该事件的 data 形状；M0 显式拒绝，不猜测字段",
-    "source": "docs/m0-contract-gaps.md",
-    "rejects_all_data": true
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "origin": {
+      "$ref": "#/$defs/PolicyOrigin"
+    },
+    "action_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PolicyActionId"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ForgeActionKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PolicyTarget"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "reason_code": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PolicyReasonCode"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "reasons": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/PolicyDeniedReason"
+      },
+      "default": null
+    },
+    "proposal_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "proposal_kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PolicyProposalKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "target_handle": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "subject": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PolicySubject"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "config_rev": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
   },
+  "required": [
+    "origin",
+    "config_rev"
+  ],
+  "title": "PolicyDeniedData",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PolicyOrigin": {
+      "type": "string",
+      "enum": [
+        "action",
+        "patch",
+        "proposal"
+      ]
+    },
+    "PolicyActionId": {
+      "type": "string",
+      "enum": [
+        "push_branch",
+        "create_pr",
+        "update_pr",
+        "upsert_status_comment",
+        "create_comment",
+        "reply_review_thread",
+        "resolve_review_thread",
+        "create_issue",
+        "update_issue",
+        "close_issue",
+        "add_labels",
+        "request_reviewers",
+        "merge_pr",
+        "rerun_failed_jobs",
+        "force_push",
+        "push_outside_prefix",
+        "resolve_review_thread_human",
+        "delete_branch",
+        "publish_release",
+        "change_repo_settings"
+      ]
+    },
+    "ForgeActionKind": {
+      "type": "string",
+      "enum": [
+        "push_branch",
+        "create_pr",
+        "update_pr",
+        "upsert_status_comment",
+        "create_comment",
+        "reply_review_thread",
+        "resolve_review_thread",
+        "create_issue",
+        "update_issue",
+        "close_issue",
+        "add_labels",
+        "request_reviewers",
+        "merge_pr",
+        "rerun_failed_jobs"
+      ]
+    },
+    "PolicyTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pr"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "branch"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "branch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "review_thread"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "thread_node_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number",
+            "thread_node_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "comment_target"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "target": {
+              "$ref": "#/$defs/CommentTarget"
+            },
+            "slot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "target",
+            "slot"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "comment_creation"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "target": {
+              "$ref": "#/$defs/CommentTarget"
+            },
+            "client_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "target",
+            "client_ref"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "issue"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "issue_creation"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "client_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "client_ref"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "run"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "run_id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "run_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pr_creation"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "head": {
+              "type": "string"
+            },
+            "base": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "head",
+            "base"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "patch"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UntrustedText"
+              }
+            },
+            "path_digest": {
+              "$ref": "#/$defs/Sha256Digest"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "paths",
+            "path_digest",
+            "rules"
+          ]
+        }
+      ]
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "CommentTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/CommentTargetType"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "number"
+      ]
+    },
+    "CommentTargetType": {
+      "type": "string",
+      "enum": [
+        "pr",
+        "issue"
+      ]
+    },
+    "UntrustedText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "source",
+        "truncated"
+      ],
+      "description": "来自 GitHub、沙盒或其他外部来源的文本。\n\n刻意不实现 `Deref<Target = str>`、`Display`、`AsRef<str>`；取内容必须调用\n[`UntrustedText::as_untrusted_str`]，`Debug` 不输出正文。"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "PolicyReasonCode": {
+      "type": "string",
+      "enum": [
+        "policy.action_denied",
+        "policy.approval_denied",
+        "policy.approval_consumed",
+        "policy.head_mismatch",
+        "policy.no_validated_patch",
+        "policy.patch_denied",
+        "policy.multiple_approvals_required",
+        "policy.approval_shape_undefined",
+        "policy.approval_chain_unavailable",
+        "policy.patch_not_approved"
+      ]
+    },
+    "PolicyDeniedReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UntrustedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rule_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "code"
+      ]
+    },
+    "PolicyProposalKind": {
+      "type": "string",
+      "enum": [
+        "open_pr",
+        "reply_review_thread",
+        "resolve_review_thread",
+        "escalate"
+      ]
+    },
+    "PolicySubject": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GitOid"
+        },
+        {
+          "$ref": "#/$defs/Sha256Digest"
+        }
+      ]
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
   "x-gantry-event-type": "policy.denied",
   "x-gantry-envelope": "schemas/entities/event-envelope.json"

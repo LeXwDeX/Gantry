@@ -1202,6 +1202,207 @@
         "default_branch": "main",
         "renamed_from": "acme/old"
       }
+    },
+    "attempt.progress": {
+      "v": 1,
+      "seq": 2,
+      "type": "stage",
+      "stage": "edit",
+      "detail": "reading src/api/items.rs"
+    },
+    "guardian.triaged": {
+      "event_ref": {
+        "source": "forge",
+        "kind": "check_suite_completed",
+        "dedup_key": "check_suite:acme/web:1122334455:2026-10-24T12:44:10Z",
+        "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+      },
+      "action": "silent_fix",
+      "class": "ci_failure_in_scope",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "rule": "K-13",
+      "also_matched": [],
+      "config_rev": 18240,
+      "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+      "action_ids": []
+    },
+    "guardian.heal_requested": {
+      "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "task": "ci_failure",
+      "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+      "problems": [
+        {
+          "fingerprint": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+          "kind": "ci_failure_in_scope"
+        }
+      ],
+      "batch_included": [],
+      "request_digest": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+      "config_rev": 18240
+    },
+    "guardian.escalated": {
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "class": "unknown",
+      "reason_code": "guardian.unknown_event",
+      "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+      "suppressed_duplicate": false,
+      "fingerprint": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+      "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD"
+    },
+    "approval.invalidated": {
+      "reason": "head_changed",
+      "previous_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+      "current_head_sha": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b"
+    },
+    "approval.expired": {},
+    "approval.denied": {
+      "reason": "先别合"
+    },
+    "outbox.enqueued": {
+      "action": {
+        "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+        "kind": "create_pr",
+        "payload": {
+          "repo": "acme/shop-api",
+          "head": "gantry/42-fix-pagination",
+          "base": "main",
+          "title": "Fix pagination off-by-one in /orders",
+          "body": "Fixes the off-by-one when page size divides total count.",
+          "draft": false,
+          "closes": [
+            42
+          ],
+          "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+          "maintainer_can_modify": false
+        },
+        "target": "pr:gantry/42-fix-pagination->main",
+        "intent": {
+          "base": "main",
+          "head": "gantry/42-fix-pagination",
+          "title": "Fix pagination off-by-one in /orders",
+          "body": "Fixes the off-by-one when page size divides total count.",
+          "draft": false,
+          "closes": [
+            42
+          ]
+        },
+        "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+        "requires_approval": null,
+        "depends_on": [],
+        "priority": "normal",
+        "not_before": null,
+        "epoch": 0,
+        "coalesce_key": null,
+        "enqueued_by": {
+          "module": "engine",
+          "causation_id": null
+        }
+      }
+    },
+    "outbox.executing": {
+      "attempts": 1,
+      "replay": false
+    },
+    "outbox.cancelled": {
+      "reason": "manual"
+    },
+    "forge.synced": {
+      "target": {
+        "type": "pr",
+        "number": 57,
+        "node_id": "PR_kwDOabc123_example"
+      },
+      "source": "reconcile",
+      "changes": [
+        {
+          "field": "mergeable_state",
+          "from": "clean",
+          "to": "dirty"
+        },
+        {
+          "field": "checks",
+          "from": {
+            "passed": 12,
+            "failed": 0,
+            "pending": 1,
+            "required_ok": true
+          },
+          "to": {
+            "passed": 12,
+            "failed": 1,
+            "pending": 0,
+            "required_ok": false
+          }
+        }
+      ],
+      "synced_at": "2026-10-24T12:41:03.120Z"
+    },
+    "budget.charged": {
+      "ledger": {
+        "subject": "delivery",
+        "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"
+      },
+      "dimension": "tokens_by_tier",
+      "tier": "worker",
+      "delta": 32600,
+      "used_after": 123456,
+      "source": {
+        "kind": "attempt",
+        "attempt_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD"
+      },
+      "usage": {
+        "input_tokens": 18200,
+        "output_tokens": 2400,
+        "cache_read_tokens": 9000,
+        "cache_write_tokens": 1200,
+        "requests": 1
+      },
+      "weighted_tokens": 32600,
+      "weight_audit": {
+        "basis": "job_token",
+        "config_rev": 18240,
+        "weights": {
+          "input": 1.0,
+          "output": 5.0,
+          "cache_read": 0.1,
+          "cache_write": 1.25
+        }
+      }
+    },
+    "policy.denied": {
+      "origin": "action",
+      "action_id": "push_branch",
+      "kind": "push_branch",
+      "target": {
+        "kind": "branch",
+        "repo": "acme/shop-api",
+        "branch": "gantry/42-fix-pagination"
+      },
+      "reason_code": "policy.action_denied",
+      "subject": "d7d018f867d6c5b78e82906386420d45a4d84486",
+      "config_rev": 18240
+    },
+    "forge.drift_detected": {
+      "kind": "head_diverged",
+      "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+      "target": { "type": "pr", "repo": "acme/shop-api", "number": 57 },
+      "expected": {
+        "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "basis_action": "act_01JBA1H5T7XA3P9C2E6J8M1QWD"
+      },
+      "actual": {
+        "head_sha": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b",
+        "pushed_by": {
+          "login": "alice",
+          "github_id": 1234567,
+          "type": "user",
+          "association": null
+        }
+      },
+      "resolution": "github_wins",
+      "synthesized_events": ["pr_synchronized"],
+      "detected_by": "patrol"
     }
   },
   "invalid": [
@@ -1293,22 +1494,666 @@
         }
       },
       "pointer_contains": "/target"
+    },
+    {
+      "type": "attempt.progress",
+      "data": {
+        "v": 2,
+        "seq": 2,
+        "type": "stage",
+        "stage": "edit",
+        "detail": "x"
+      },
+      "pointer_contains": "/v"
+    },
+    {
+      "type": "attempt.progress",
+      "data": {
+        "v": 1,
+        "seq": 2,
+        "type": "stage",
+        "stage": "edit"
+      },
+      "pointer_contains": "/detail"
+    },
+    {
+      "type": "attempt.progress",
+      "data": {
+        "v": 1,
+        "seq": 3,
+        "type": "tool",
+        "phase": "start",
+        "call_id": "c1",
+        "tool": "Bash",
+        "summary": "x",
+        "ok": true
+      },
+      "pointer_contains": "/ok"
+    },
+    {
+      "type": "guardian.triaged",
+      "data": {
+        "event_ref": {
+          "source": "forge",
+          "kind": "check_suite_completed",
+          "dedup_key": "k"
+        },
+        "action": "finalize",
+        "class": "nit",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "rule": "K-13",
+        "also_matched": [],
+        "config_rev": 1,
+        "action_ids": []
+      },
+      "pointer_contains": "/class"
+    },
+    {
+      "type": "guardian.triaged",
+      "data": {
+        "event_ref": {
+          "source": "forge",
+          "kind": "check_suite_completed",
+          "dedup_key": "k"
+        },
+        "action": "batch",
+        "class": "nit",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "rule": "K-13",
+        "also_matched": [],
+        "config_rev": 1,
+        "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+        "action_ids": []
+      },
+      "pointer_contains": "/round_id"
+    },
+    {
+      "type": "guardian.triaged",
+      "data": {
+        "event_ref": {
+          "source": "settlement",
+          "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+        },
+        "action": "round_closed",
+        "outcome": "pushed",
+        "class": "ci_failure_in_scope",
+        "head_before": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "failing_before": [],
+        "progress": null,
+        "stalled_rounds": 0,
+        "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "rule": "H-02",
+        "also_matched": [],
+        "config_rev": 1,
+        "action_ids": []
+      },
+      "pointer_contains": "/progress"
+    },
+    {
+      "type": "guardian.heal_requested",
+      "data": {
+        "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "task": "ci_failure",
+        "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "problems": [],
+        "batch_included": [],
+        "request_digest": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+        "config_rev": 1
+      },
+      "pointer_contains": "/problems"
+    },
+    {
+      "type": "guardian.heal_requested",
+      "data": {
+        "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "task": "ci_failure",
+        "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "problems": [
+          {
+            "fingerprint": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+            "kind": "ci_failure_in_scope"
+          }
+        ],
+        "batch_included": [
+          "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a"
+        ],
+        "request_digest": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+        "config_rev": 1
+      },
+      "pointer_contains": "/batch_included/0"
+    },
+    {
+      "type": "guardian.escalated",
+      "data": {
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "class": "unknown",
+        "reason_code": "guardian.unknown_event",
+        "suppressed_duplicate": false
+      },
+      "pointer_contains": "/inbox_id"
+    },
+    {
+      "type": "guardian.escalated",
+      "data": {
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "class": "security_finding",
+        "reason_code": "guardian.unknown_event",
+        "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+        "suppressed_duplicate": false
+      },
+      "pointer_contains": "/reason_code"
+    },
+    {
+      "type": "approval.invalidated",
+      "data": {
+        "reason": "head_changed",
+        "previous_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "current_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+      },
+      "pointer_contains": "/current_head_sha"
+    },
+    {
+      "type": "approval.invalidated",
+      "data": {
+        "reason": "pr_closed",
+        "previous_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+      },
+      "pointer_contains": "/previous_head_sha"
+    },
+    {
+      "type": "approval.expired",
+      "data": {
+        "previous_status": "pending"
+      },
+      "pointer_contains": "/previous_status"
+    },
+    {
+      "type": "approval.denied",
+      "data": {
+        "reason": null
+      },
+      "pointer_contains": "/reason"
+    },
+    {
+      "type": "approval.denied",
+      "data": {
+        "reason": "x",
+        "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"
+      },
+      "pointer_contains": "/device_id"
+    },
+    {
+      "type": "outbox.enqueued",
+      "data": {
+        "action": {
+          "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+          "kind": "create_pr",
+          "payload": {
+            "repo": "acme/shop-api",
+            "head": "gantry/42-fix-pagination",
+            "base": "main",
+            "title": "Fix pagination off-by-one in /orders",
+            "body": "Fixes the off-by-one when page size divides total count.",
+            "draft": false,
+            "closes": [
+              42
+            ],
+            "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+            "maintainer_can_modify": false
+          },
+          "target": "pr:other",
+          "intent": {
+            "base": "main",
+            "head": "gantry/42-fix-pagination",
+            "title": "Fix pagination off-by-one in /orders",
+            "body": "Fixes the off-by-one when page size divides total count.",
+            "draft": false,
+            "closes": [
+              42
+            ]
+          },
+          "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+          "requires_approval": null,
+          "depends_on": [],
+          "priority": "normal",
+          "not_before": null,
+          "epoch": 0,
+          "coalesce_key": null,
+          "enqueued_by": {
+            "module": "engine",
+            "causation_id": null
+          }
+        }
+      },
+      "pointer_contains": "/action/target"
+    },
+    {
+      "type": "outbox.enqueued",
+      "data": {
+        "action": {
+          "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+          "kind": "create_pr",
+          "payload": {
+            "repo": "acme/shop-api",
+            "head": "gantry/42-fix-pagination",
+            "base": "main",
+            "title": "Fix pagination off-by-one in /orders",
+            "body": "Fixes the off-by-one when page size divides total count.",
+            "draft": false,
+            "closes": [
+              42
+            ],
+            "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+            "maintainer_can_modify": false
+          },
+          "target": "pr:gantry/42-fix-pagination->main",
+          "intent": {
+            "base": "main",
+            "head": "gantry/42-fix-pagination",
+            "title": "Fix pagination off-by-one in /orders",
+            "body": "Fixes the off-by-one when page size divides total count.",
+            "draft": false,
+            "closes": [
+              42
+            ]
+          },
+          "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+          "requires_approval": null,
+          "depends_on": [],
+          "priority": "normal",
+          "not_before": null,
+          "epoch": 0,
+          "enqueued_by": {
+            "module": "engine",
+            "causation_id": null
+          }
+        }
+      },
+      "pointer_contains": "/action/coalesce_key"
+    },
+    {
+      "type": "outbox.enqueued",
+      "data": {
+        "action": {
+          "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+          "kind": "create_pr",
+          "payload": {
+            "repo": "acme/shop-api",
+            "head": "gantry/42-fix-pagination",
+            "base": "main",
+            "title": "Fix pagination off-by-one in /orders",
+            "body": "Fixes the off-by-one when page size divides total count.",
+            "draft": false,
+            "closes": [
+              42
+            ],
+            "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+            "maintainer_can_modify": false
+          },
+          "target": "pr:gantry/42-fix-pagination->main",
+          "intent": {
+            "base": "main",
+            "head": "gantry/42-fix-pagination",
+            "title": "Fix pagination off-by-one in /orders",
+            "body": "Fixes the off-by-one when page size divides total count.",
+            "draft": false,
+            "closes": [
+              42
+            ]
+          },
+          "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+          "requires_approval": null,
+          "depends_on": [
+            "act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+            "act_01JBA1F3Q9TX2N7B5D8H0M4RVC"
+          ],
+          "priority": "normal",
+          "not_before": null,
+          "epoch": 0,
+          "coalesce_key": null,
+          "enqueued_by": {
+            "module": "engine",
+            "causation_id": null
+          }
+        }
+      },
+      "pointer_contains": "/action/depends_on/1"
+    },
+    {
+      "type": "outbox.executing",
+      "data": {
+        "attempts": 0,
+        "replay": false
+      },
+      "pointer_contains": "/attempts"
+    },
+    {
+      "type": "outbox.executing",
+      "data": {
+        "attempts": 1
+      },
+      "pointer_contains": "/replay"
+    },
+    {
+      "type": "outbox.cancelled",
+      "data": {},
+      "pointer_contains": "/reason"
+    },
+    {
+      "type": "outbox.cancelled",
+      "data": {
+        "reason": "cancel_requested"
+      },
+      "pointer_contains": "/reason"
+    },
+    {
+      "type": "forge.synced",
+      "data": {
+        "target": {
+          "type": "pr",
+          "number": 57,
+          "node_id": "n"
+        },
+        "source": "reconcile",
+        "changes": [],
+        "synced_at": "2026-10-24T12:41:03.120Z"
+      },
+      "pointer_contains": "/changes"
+    },
+    {
+      "type": "forge.synced",
+      "data": {
+        "target": {
+          "type": "pr",
+          "number": 57,
+          "node_id": "n"
+        },
+        "source": "reconcile",
+        "changes": [
+          {
+            "field": "draft",
+            "from": false,
+            "to": false
+          }
+        ],
+        "synced_at": "2026-10-24T12:41:03.120Z"
+      },
+      "pointer_contains": "/changes/0/to"
+    },
+    {
+      "type": "forge.synced",
+      "data": {
+        "target": {
+          "type": "issue",
+          "number": 57,
+          "node_id": "n"
+        },
+        "source": "reconcile",
+        "changes": [
+          {
+            "field": "head_sha",
+            "from": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+            "to": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b"
+          }
+        ],
+        "synced_at": "2026-10-24T12:41:03.120Z"
+      },
+      "pointer_contains": "/changes/0/field"
+    },
+    {
+      "type": "forge.synced",
+      "data": {
+        "target": {
+          "type": "pr",
+          "number": 57,
+          "node_id": "n"
+        },
+        "source": "reconcile",
+        "changes": [
+          {
+            "field": "title",
+            "from": "x",
+            "to": "y"
+          }
+        ],
+        "synced_at": "2026-10-24T12:41:03.120Z"
+      },
+      "pointer_contains": "/changes/0/from"
+    },
+    {
+      "type": "forge.synced",
+      "data": {
+        "target": {
+          "type": "pr",
+          "number": 57,
+          "node_id": "n"
+        },
+        "source": "reconcile",
+        "changes": [
+          {
+            "field": "checks",
+            "from": {
+              "passed": 1,
+              "failed": 0,
+              "pending": 0
+            },
+            "to": {
+              "passed": 1,
+              "failed": 1,
+              "pending": 0,
+              "required_ok": false
+            }
+          }
+        ],
+        "synced_at": "2026-10-24T12:41:03.120Z"
+      },
+      "pointer_contains": "/changes/0/from/required_ok"
+    },
+    {
+      "type": "budget.charged",
+      "data": {
+        "ledger": {
+          "subject": "delivery",
+          "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"
+        },
+        "dimension": "nodes",
+        "delta": 0,
+        "used_after": 1,
+        "source": {
+          "kind": "node",
+          "node_id": "nod_01JBX7A1B2C3D4E5F6G7H8J9K0"
+        }
+      },
+      "pointer_contains": "/delta"
+    },
+    {
+      "type": "budget.charged",
+      "data": {
+        "ledger": {
+          "subject": "delivery",
+          "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"
+        },
+        "dimension": "tokens_by_tier",
+        "tier": "worker",
+        "delta": 1,
+        "used_after": 1,
+        "source": {
+          "kind": "attempt",
+          "attempt_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD"
+        },
+        "weighted_tokens": 1,
+        "weight_audit": {
+          "basis": "job_token",
+          "config_rev": 1,
+          "weights": {
+            "input": 1.0,
+            "output": 5.0,
+            "cache_read": 0.1,
+            "cache_write": 1.25
+          }
+        }
+      },
+      "pointer_contains": "/usage"
+    },
+    {
+      "type": "budget.charged",
+      "data": {
+        "ledger": {
+          "subject": "delivery",
+          "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"
+        },
+        "dimension": "tokens_by_tier",
+        "tier": "worker",
+        "delta": 1,
+        "used_after": 1,
+        "source": {
+          "kind": "node",
+          "node_id": "nod_01JBX7A1B2C3D4E5F6G7H8J9K0"
+        },
+        "usage": {
+          "input_tokens": 1,
+          "output_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "requests": 1
+        },
+        "weighted_tokens": 1,
+        "weight_audit": {
+          "basis": "job_token",
+          "config_rev": 1,
+          "weights": {
+            "input": 1.0,
+            "output": 5.0,
+            "cache_read": 0.1,
+            "cache_write": 1.25
+          }
+        }
+      },
+      "pointer_contains": "/source"
+    },
+    {
+      "type": "policy.denied",
+      "data": {
+        "origin": "action",
+        "action_id": "push_branch",
+        "kind": "create_pr",
+        "target": {
+          "kind": "branch",
+          "repo": "acme/shop-api",
+          "branch": "b"
+        },
+        "reason_code": "policy.action_denied",
+        "config_rev": 1
+      },
+      "pointer_contains": "/kind"
+    },
+    {
+      "type": "policy.denied",
+      "data": {
+        "origin": "action",
+        "action_id": "delete_branch",
+        "kind": "push_branch",
+        "target": {
+          "kind": "branch",
+          "repo": "acme/shop-api",
+          "branch": "b"
+        },
+        "reason_code": "policy.action_denied",
+        "config_rev": 1
+      },
+      "pointer_contains": "/action_id"
+    },
+    {
+      "type": "policy.denied",
+      "data": {
+        "origin": "patch",
+        "action_id": "push_branch",
+        "target": {
+          "kind": "patch",
+          "repo": "acme/shop-api",
+          "paths": [
+            {
+              "text": "Cargo.lock",
+              "source": "sandbox:patch_path",
+              "truncated": false
+            }
+          ],
+          "path_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "rules": [
+            "lockfiles"
+          ]
+        },
+        "reasons": [
+          {
+            "code": "policy.path_protected:lockfiles"
+          }
+        ],
+        "config_rev": 1,
+        "subject": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "pointer_contains": "/action_id"
+    },
+    {
+      "type": "policy.denied",
+      "data": {
+        "origin": "patch",
+        "target": {
+          "kind": "patch",
+          "repo": "acme/shop-api",
+          "paths": [
+            {
+              "text": "Cargo.lock",
+              "source": "sandbox:patch_path",
+              "truncated": false
+            }
+          ],
+          "path_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "rules": [
+            "lockfiles"
+          ]
+        },
+        "reasons": [],
+        "config_rev": 1,
+        "subject": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "pointer_contains": "/reasons"
+    },
+    {
+      "type": "policy.denied",
+      "data": {
+        "origin": "proposal",
+        "proposal_id": "p2",
+        "proposal_kind": "reply_review_thread",
+        "target": {
+          "kind": "pr",
+          "repo": "acme/shop-api",
+          "number": 1
+        },
+        "reason_code": "policy.approval_denied",
+        "config_rev": 1
+      },
+      "pointer_contains": "/target"
+    },
+    {
+      "type": "policy.denied",
+      "data": {
+        "origin": "action",
+        "action_id": "push_branch",
+        "kind": "push_branch",
+        "target": {
+          "kind": "branch",
+          "repo": "acme/shop-api",
+          "branch": "b"
+        },
+        "reason_code": "policy.action_denied",
+        "subject": "not-a-digest",
+        "config_rev": 1
+      },
+      "pointer_contains": "/subject"
     }
   ],
-  "contract_undefined": [
-    "attempt.progress",
-    "guardian.triaged",
-    "guardian.heal_requested",
-    "guardian.escalated",
-    "approval.invalidated",
-    "approval.expired",
-    "approval.denied",
-    "outbox.enqueued",
-    "outbox.executing",
-    "outbox.cancelled",
-    "forge.synced",
-    "forge.drift_detected",
-    "budget.charged",
-    "policy.denied"
-  ]
+  "contract_undefined": []
 }

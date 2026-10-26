@@ -579,7 +579,8 @@ async fn outbox_retry_stays_queued_and_terminal_fails() {
 }
 
 #[tokio::test]
-async fn contract_undefined_events_cannot_be_appended() {
+async fn empty_defined_events_are_rejected_but_not_undefined() {
+    assert!(gantry_core::events::contract_undefined_types().is_empty());
     let store = store().await;
     let mut tx = store.begin_write().await.unwrap();
     let error = tx
@@ -590,10 +591,8 @@ async fn contract_undefined_events_cannot_be_appended() {
         ))
         .await
         .unwrap_err();
-    assert!(
-        matches!(error, StoreError::InvalidEvent(ref error) if error.code == SchemaErrorCode::ContractUndefined)
-    );
-    assert!(error.is_contract_undefined());
+    assert!(matches!(error, StoreError::InvalidEvent(_)));
+    assert!(!error.is_contract_undefined());
     tx.rollback().await.unwrap();
 }
 

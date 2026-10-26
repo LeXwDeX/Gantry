@@ -1,32 +1,6 @@
 {
   "generated_by": "manual; consumed by cargo xtask schemas --check",
-  "gaps": [
-    {
-      "id": "G-03",
-      "summary": "ConfigView.injection 的非空形状仍未定义（egress-control §4.6 只有空对象示例）；Rust/schema 只接受空对象，拒绝非空",
-      "source": "docs/interfaces/egress-control.md#46",
-      "affects": [
-        "schemas/egress/config-view.json"
-      ]
-    },
-    {
-      "id": "G-04",
-      "summary": "forge drift 示例有丰富字段，core 只有无载荷的 DriftKind；drift schema 拒绝而不是伪造",
-      "source": "docs/interfaces/forge-actions.md#74",
-      "affects": [
-        "schemas/forge/drift.json",
-        "schemas/events/forge.drift_detected.json"
-      ]
-    },
-    {
-      "id": "G-05",
-      "summary": "core §7.5 的 14 个事件 data 形状未定；每个事件文件生成拒绝型 schema + x-gantry-unresolved",
-      "source": "docs/m0-contract-gaps.md",
-      "affects": [
-        "schemas/events/attempt.progress.json 等 14 个文件"
-      ]
-    }
-  ],
+  "gaps": [],
   "fixed": [
     {
       "id": "G-01",
@@ -87,6 +61,22 @@
     {
       "id": "G-15",
       "summary": "api.md §4.5 的 Message 示例 id 已改为合法 26 位 ULID；示例仍省略 created_at/updated_at，保持 partial"
+    },
+    {
+      "id": "G-03",
+      "summary": "ConfigView.injection 已按 config-view-injection 契约实现 InjectionView/InjectionCredentialView；合法非空通过类型校验，非法非空拒绝；M1 控制面仍不启用"
+    },
+    {
+      "id": "G-04",
+      "summary": "DriftPayload 已实现 9 种 kind 的强类型 expected/actual 与公共信封；schemas/forge/drift.json 与 forge.drift_detected 事件 schema 由真实类型生成"
+    },
+    {
+      "id": "G-05",
+      "summary": "14 个事件 data 已全部定义；contract_undefined_types 为空，事件 schema 不再生成拒绝型"
+    },
+    {
+      "id": "G-23",
+      "summary": "ConfigView.injection 不再只接受空对象；settings 侧补丁与 V10/V11/V13 语义未改"
     }
   ]
 }

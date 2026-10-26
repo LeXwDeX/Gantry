@@ -7,7 +7,11 @@ use std::sync::Arc;
 use gantry_core::egress::ConfigView;
 use gantry_core::entities::{Approval, Card};
 use gantry_core::events::{
-    validate_event_data, ApprovalRequestedData, EventData, EventType, SettingsUpdatedData, Subject,
+    validate_event_data, ApprovalDeniedData, ApprovalExpiredData, ApprovalRequestedData,
+    AttemptProgressData, BudgetChargedData, EventData, EventType, ForgeSyncedData,
+    GuardianEscalatedData, GuardianHealRequestedData, GuardianReasonCode, GuardianTriageClass,
+    GuardianTriagedData, OutboxCancelReason, OutboxEnqueuedData, OutboxExecutingData,
+    PolicyDeniedData, PolicyReasonCode, PolicyTarget, SettingsUpdatedData, Subject,
 };
 use gantry_core::forge::ForgeEventEnvelope;
 use gantry_core::ids::{Clock, Entropy, IdError, IdGen, Prj, ProjectId, Ulid};
@@ -547,25 +551,625 @@ fn config_view(injection: Value) -> Value {
 }
 
 #[test]
-fn config_view_only_accepts_an_empty_injection_object() {
+fn config_view_accepts_valid_injection_and_rejects_invalid() {
     let empty: ConfigView =
         serde_json::from_value(config_view(json!({}))).expect("empty injection");
     assert!(empty.injection.is_empty());
     assert!(serde_json::to_value(&empty).is_ok());
     assert!(format!("{empty:?}").contains("redacted"));
 
-    let non_empty = config_view(json!({ "npm": { "credential": { "secret_ref": "x" } } }));
+    let mut valid = config_view(json!({
+        "npm": {
+            "hosts": ["npm.corp.example"],
+            "kind": "bearer",
+            "credential": { "secret_ref": "registry.npm.corp" }
+        }
+    }));
+    valid["groups"] = json!({ "npm": { "hosts": ["npm.corp.example"] } });
+    valid["profiles"] = json!({ "default": { "groups": ["npm"] } });
+    let parsed: ConfigView = serde_json::from_value(valid).expect("valid non-empty injection");
+    assert_eq!(parsed.injection.len(), 1);
+    assert_eq!(
+        parsed.injection["npm"].credential.secret_ref.as_str(),
+        "registry.npm.corp"
+    );
+    assert!(serde_json::to_value(&parsed).is_ok());
+    assert!(format!("{parsed:?}").contains("redacted"));
+    assert!(!format!("{parsed:?}").contains("registry.npm.corp"));
+
+    let invalid = config_view(json!({
+        "npm": {
+            "hosts": ["npm.corp.example"],
+            "kind": "bearer",
+            "header": "x-api-key",
+            "credential": { "secret_ref": "registry.npm.corp" }
+        }
+    }));
     assert!(
-        serde_json::from_value::<ConfigView>(non_empty).is_err(),
-        "non-empty injection is not defined in M0"
+        serde_json::from_value::<ConfigView>(invalid).is_err(),
+        "bearer with an explicit header is invalid"
     );
 
-    let mut view = empty;
-    view.injection
-        .insert("npm".to_owned(), json!({ "secret": "should-not-print" }));
-    assert!(serde_json::to_value(&view).is_err());
-    assert!(!format!("{view:?}").contains("should-not-print"));
-
     let schema = schema::<ConfigView>();
-    assert_eq!(schema["properties"]["injection"]["maxProperties"], 0);
+    assert!(
+        schema["properties"]["injection"]
+            .get("maxProperties")
+            .is_none(),
+        "non-empty injection is now defined"
+    );
+    assert_eq!(
+        schema["properties"]["injection"]["propertyNames"]["pattern"],
+        "^[a-z0-9][a-z0-9._-]{0,63}$"
+    );
+    assert_eq!(
+        schema["$defs"]["InjectionView"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        schema["$defs"]["InjectionView"]["properties"]["hosts"]["minItems"],
+        1
+    );
+    assert_eq!(
+        schema["$defs"]["InjectionCredentialView"]["additionalProperties"],
+        false
+    );
+}
+
+fn required_fields(schema: &Value) -> Vec<String> {
+    schema["required"]
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn attempt_progress_schema_and_tool_branches_are_strict() {
+    let schema = schema::<AttemptProgressData>();
+    let branches = schema["oneOf"].as_array().expect("attempt branches");
+    assert_eq!(branches.len(), 4);
+    let stage = branches
+        .iter()
+        .find(|branch| branch["properties"]["type"]["const"] == "stage")
+        .expect("stage branch");
+    assert!(required_fields(stage).contains(&"detail".to_owned()));
+    let tool_start = branches
+        .iter()
+        .find(|branch| {
+            branch["properties"]["type"]["const"] == "tool"
+                && branch["properties"]["phase"]["const"] == "start"
+        })
+        .expect("tool start branch");
+    assert!(required_fields(tool_start).contains(&"summary".to_owned()));
+    assert!(required_fields(tool_start).contains(&"call_id".to_owned()));
+
+    let valid = json!({"v":1,"seq":2,"type":"stage","stage":"edit","detail":"x"});
+    validate_event_data(&EventType::AttemptProgress, &valid).expect("valid stage");
+    for invalid in [
+        json!({"v":1,"seq":2,"type":"stage","stage":"edit","detail":"x","attempt_id":"att_01JBX4Q9ZK3M8T5V2N7RHC6WYD"}),
+        json!({"v":1,"seq":3,"type":"tool","phase":"start","call_id":"c1","tool":"Bash","summary":"x","ok":true}),
+        json!({"v":1,"seq":3,"type":"tool","phase":"end","call_id":"c1","tool":"Bash","ok":true,"duration_ms":1,"summary":"x"}),
+        json!({"v":1,"seq":5,"type":"usage","input_tokens":1,"output_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"turns":0,"detail":"x"}),
+    ] {
+        assert!(
+            validate_event_data(&EventType::AttemptProgress, &invalid).is_err(),
+            "invalid progress accepted: {invalid}"
+        );
+    }
+}
+
+#[test]
+fn guardian_reason_and_class_vocabularies_are_closed() {
+    let reasons = schema::<GuardianReasonCode>();
+    assert_eq!(reasons["enum"].as_array().expect("reason enum").len(), 27);
+    let classes = schema::<GuardianTriageClass>();
+    assert_eq!(classes["enum"].as_array().expect("class enum").len(), 14);
+
+    let valid = schema::<GuardianTriagedData>();
+    assert_eq!(
+        valid["properties"]["action"]["$ref"],
+        "#/$defs/GuardianTriageAction"
+    );
+    assert_eq!(
+        valid["$defs"]["GuardianTriageAction"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .len(),
+        7
+    );
+}
+
+fn triaged_round_closed() -> Value {
+    json!({
+        "event_ref": {"source":"settlement","head_sha":"f2c03d84a858156b0121130fd1ec2f391aa90865"},
+        "action": "round_closed",
+        "outcome": "pushed",
+        "class": "ci_failure_in_scope",
+        "head_before": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "head_after": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b",
+        "failing_before": [],
+        "failing_after": [],
+        "progress": "done",
+        "stalled_rounds": 0,
+        "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "rule": "H-02",
+        "also_matched": [],
+        "config_rev": 18240,
+        "action_ids": []
+    })
+}
+
+#[test]
+fn guardian_triaged_and_escalated_fail_closed() {
+    let round = triaged_round_closed();
+    validate_event_data(&EventType::GuardianTriaged, &round).expect("valid round_closed");
+
+    let mut invalid = round.clone();
+    invalid["progress"] = json!(null);
+    assert!(validate_event_data(&EventType::GuardianTriaged, &invalid).is_err());
+
+    let mut invalid = round.clone();
+    invalid["fingerprint"] =
+        json!("sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a");
+    assert!(validate_event_data(&EventType::GuardianTriaged, &invalid).is_err());
+
+    let mut invalid = round.clone();
+    invalid.as_object_mut().unwrap().remove("progress");
+    assert!(validate_event_data(&EventType::GuardianTriaged, &invalid).is_err());
+
+    let mut invalid = json!({
+        "event_ref": {"source":"forge","kind":"check_suite_completed","dedup_key":"k"},
+        "action": "finalize",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "rule": "K",
+        "also_matched": [],
+        "config_rev": 1,
+        "action_ids": [],
+        "progress": null
+    });
+    assert!(validate_event_data(&EventType::GuardianTriaged, &invalid).is_err());
+    invalid.as_object_mut().unwrap().remove("progress");
+    validate_event_data(&EventType::GuardianTriaged, &invalid).expect("valid finalize");
+
+    let invalid = json!({
+        "event_ref": {"source":"forge","kind":"check_suite_completed","dedup_key":"k"},
+        "action": "finalize",
+        "class": "nit",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "rule": "K-13",
+        "also_matched": [],
+        "config_rev": 1,
+        "action_ids": []
+    });
+    assert!(validate_event_data(&EventType::GuardianTriaged, &invalid).is_err());
+
+    let escalated = json!({
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "class": "unknown",
+        "reason_code": "guardian.unknown_event",
+        "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+        "suppressed_duplicate": false
+    });
+    let typed: GuardianEscalatedData =
+        serde_json::from_value(escalated.clone()).expect("typed escalation");
+    typed.validate().expect("valid escalation");
+    validate_event_data(&EventType::GuardianEscalated, &escalated).expect("valid escalation data");
+
+    let invalid = json!({
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "class": "security_finding",
+        "reason_code": "guardian.unknown_event",
+        "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+        "suppressed_duplicate": false
+    });
+    let error = validate_event_data(&EventType::GuardianEscalated, &invalid).unwrap_err();
+    assert!(error.pointer.contains("/reason_code"));
+}
+
+#[test]
+fn guardian_heal_requested_validates_problem_sets() {
+    let valid = json!({
+        "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "task": "nit_batch",
+        "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "problems": [
+            {"fingerprint":"sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a","kind":"nit"},
+            {"fingerprint":"sha256:1d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a","kind":"nit"}
+        ],
+        "batch_included": ["sha256:1d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a"],
+        "request_digest": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+        "config_rev": 18240
+    });
+    let typed: GuardianHealRequestedData =
+        serde_json::from_value(valid.clone()).expect("typed heal request");
+    typed.validate().expect("valid heal request");
+    validate_event_data(&EventType::GuardianHealRequested, &valid).expect("valid heal request");
+
+    let mut invalid = valid.clone();
+    invalid["problems"][0]["kind"] = json!("ci_failure_in_scope");
+    invalid["batch_included"] =
+        json!(["sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a"]);
+    assert!(validate_event_data(&EventType::GuardianHealRequested, &invalid).is_err());
+
+    let mut invalid = valid;
+    invalid["problems"] = json!([]);
+    assert!(validate_event_data(&EventType::GuardianHealRequested, &invalid).is_err());
+}
+
+#[test]
+fn approval_shapes_are_closed_and_head_changes_require_two_heads() {
+    let invalidated = json!({
+        "reason": "head_changed",
+        "previous_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+        "current_head_sha": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b"
+    });
+    validate_event_data(&EventType::ApprovalInvalidated, &invalidated).expect("valid head_changed");
+
+    let mut invalid = invalidated;
+    invalid["current_head_sha"] = invalid["previous_head_sha"].clone();
+    assert!(validate_event_data(&EventType::ApprovalInvalidated, &invalid).is_err());
+
+    validate_event_data(&EventType::ApprovalExpired, &json!({})).expect("valid expired");
+    assert!(validate_event_data(
+        &EventType::ApprovalExpired,
+        &json!({"expired_at": "2026-10-24T12:41:03.120Z"})
+    )
+    .is_err());
+
+    let denied = json!({"reason": "先别合"});
+    let typed: ApprovalDeniedData = serde_json::from_value(denied.clone()).expect("typed denied");
+    typed.validate().expect("valid denied");
+    validate_event_data(&EventType::ApprovalDenied, &denied).expect("valid denied");
+    let error =
+        validate_event_data(&EventType::ApprovalDenied, &json!({"reason": null})).unwrap_err();
+    assert_eq!(error.pointer, "/reason");
+
+    let schema = schema::<ApprovalExpiredData>();
+    assert_eq!(schema["maxProperties"], 0);
+}
+
+fn outbox_enqueued_fixture() -> Value {
+    json!({
+        "action": {
+            "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+            "kind": "create_pr",
+            "payload": {
+                "repo": "acme/shop-api",
+                "head": "gantry/42-fix-pagination",
+                "base": "main",
+                "title": "Fix pagination off-by-one in /orders",
+                "body": "Fixes the off-by-one when page size divides total count.",
+                "draft": false,
+                "closes": [42],
+                "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+                "maintainer_can_modify": false
+            },
+            "target": "pr:gantry/42-fix-pagination->main",
+            "intent": {
+                "base": "main",
+                "head": "gantry/42-fix-pagination",
+                "title": "Fix pagination off-by-one in /orders",
+                "body": "Fixes the off-by-one when page size divides total count.",
+                "draft": false,
+                "closes": [42]
+            },
+            "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+            "requires_approval": null,
+            "depends_on": [],
+            "priority": "normal",
+            "not_before": null,
+            "epoch": 0,
+            "coalesce_key": null,
+            "enqueued_by": {"module": "engine", "causation_id": null}
+        }
+    })
+}
+
+#[test]
+fn outbox_enqueued_binds_kind_payload_target_and_intent() {
+    let valid = outbox_enqueued_fixture();
+    let typed: OutboxEnqueuedData = serde_json::from_value(valid.clone()).expect("typed enqueue");
+    typed.validate().expect("valid enqueue");
+    assert_eq!(
+        serde_json::to_value(&typed).expect("round-trip serialization"),
+        valid
+    );
+    validate_event_data(&EventType::OutboxEnqueued, &valid).expect("valid event data");
+
+    let mut invalid = valid.clone();
+    invalid["action"]["target"] = json!("pr:other");
+    assert!(validate_event_data(&EventType::OutboxEnqueued, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["action"]["intent"]["closes"] = json!([7]);
+    assert!(validate_event_data(&EventType::OutboxEnqueued, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["action"]
+        .as_object_mut()
+        .unwrap()
+        .remove("requires_approval");
+    assert!(serde_json::from_value::<OutboxEnqueuedData>(invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["action"]["enqueued_by"]
+        .as_object_mut()
+        .unwrap()
+        .remove("causation_id");
+    assert!(serde_json::from_value::<OutboxEnqueuedData>(invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["action"]["coalesce_key"] = json!("coalesce");
+    assert!(validate_event_data(&EventType::OutboxEnqueued, &invalid).is_err());
+
+    let mut invalid = valid;
+    invalid["action"]["kind"] = json!("push_branch");
+    assert!(serde_json::from_value::<OutboxEnqueuedData>(invalid).is_err());
+
+    let executing = json!({"attempts": 1, "replay": false});
+    let typed: OutboxExecutingData =
+        serde_json::from_value(executing.clone()).expect("typed executing");
+    typed.validate().expect("valid executing");
+    validate_event_data(&EventType::OutboxExecuting, &executing).expect("valid executing");
+    assert!(validate_event_data(
+        &EventType::OutboxExecuting,
+        &json!({"attempts":0,"replay":false})
+    )
+    .is_err());
+
+    let cancelled = schema::<OutboxCancelReason>();
+    assert_eq!(cancelled["enum"].as_array().unwrap().len(), 4);
+    validate_event_data(&EventType::OutboxCancelled, &json!({"reason":"manual"}))
+        .expect("valid cancel");
+    assert!(validate_event_data(&EventType::OutboxCancelled, &json!({})).is_err());
+}
+
+#[test]
+fn forge_synced_rejects_cross_target_and_untyped_changes() {
+    let valid = json!({
+        "target": {"type":"pr","number":57,"node_id":"PR_kwDOabc123_example"},
+        "source": "webhook",
+        "changes": [
+            {"field":"checks","from":{"passed":12,"failed":0,"pending":1,"required_ok":true},"to":{"passed":12,"failed":1,"pending":0,"required_ok":false}}
+        ],
+        "synced_at": "2026-10-24T12:41:03.120Z"
+    });
+    validate_event_data(&EventType::ForgeSynced, &valid).expect("valid synced");
+    let typed: ForgeSyncedData = serde_json::from_value(valid.clone()).expect("typed synced");
+    typed.validate().expect("valid synced event");
+
+    let mut invalid = valid.clone();
+    invalid["target"] = json!({"type":"issue","number":57,"node_id":"n"});
+    assert!(validate_event_data(&EventType::ForgeSynced, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["changes"][0]["from"] = json!({"passed":1,"failed":0,"pending":0});
+    assert!(validate_event_data(&EventType::ForgeSynced, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["changes"] = json!([{"field":"title","from":"x","to":"y"}]);
+    assert!(validate_event_data(&EventType::ForgeSynced, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["changes"] = json!([{"field":"draft","from":false,"to":false}]);
+    assert!(validate_event_data(&EventType::ForgeSynced, &invalid).is_err());
+
+    let mut invalid = valid;
+    invalid["changes"] = json!([
+        {"field":"draft","from":false,"to":true},
+        {"field":"draft","from":false,"to":true}
+    ]);
+    assert!(validate_event_data(&EventType::ForgeSynced, &invalid).is_err());
+}
+
+fn budget_token_fixture() -> Value {
+    json!({
+        "ledger": {"subject":"delivery","id":"dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"},
+        "dimension": "tokens_by_tier",
+        "tier": "worker",
+        "delta": 32600,
+        "used_after": 123456,
+        "source": {"kind":"attempt","attempt_id":"att_01JBX4Q9ZK3M8T5V2N7RHC6WYD"},
+        "usage": {"input_tokens":18200,"output_tokens":2400,"cache_read_tokens":9000,"cache_write_tokens":1200,"requests":1},
+        "weighted_tokens": 32600,
+        "weight_audit": {"basis":"job_token","config_rev":18240,"weights":{"input":1.0,"output":5.0,"cache_read":0.1,"cache_write":1.25}}
+    })
+}
+
+#[test]
+fn budget_charged_checks_dimension_source_and_settlement_evidence() {
+    let valid = budget_token_fixture();
+    let typed: BudgetChargedData = serde_json::from_value(valid.clone()).expect("typed budget");
+    typed.validate().expect("valid budget charge");
+    validate_event_data(&EventType::BudgetCharged, &valid).expect("valid budget event");
+
+    let mut invalid = valid.clone();
+    invalid["source"] = json!({"kind":"node","node_id":"nod_01JBX7A1B2C3D4E5F6G7H8J9K0"});
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["weighted_tokens"] = json!(1);
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["weight_audit"] = json!({"basis":"svc_records","record_count":0,"weight_revs":[{"config_rev":1,"weighted_tokens":32600}],"records_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"});
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["tier"] = json!(null);
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+
+    let mut invalid = valid.clone();
+    invalid["usage"]["attempt_id"] = json!("att_01JBX4Q9ZK3M8T5V2N7RHC6WYD");
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+
+    let direct_call = json!({
+        "ledger": {"subject":"conversation","id":"cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ","day":"2026-10-24"},
+        "dimension": "tokens_by_tier",
+        "tier": "utility",
+        "delta": 11062,
+        "used_after": 21062,
+        "source": {"kind":"direct_call","call_id":"01JBX5D2F4H6K8M0P2R4T6V8XZ"},
+        "usage": {"input_tokens":6402,"output_tokens":820,"cache_read_tokens":5600,"cache_write_tokens":0,"requests":2},
+        "weighted_tokens": 11062,
+        "weight_audit": {
+            "basis":"svc_records","record_count":2,"first_seq":90211,"last_seq":90212,
+            "weight_revs":[{"config_rev":18240,"weighted_tokens":11062}],
+            "records_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        }
+    });
+    validate_event_data(&EventType::BudgetCharged, &direct_call).expect("valid direct call");
+
+    let mut invalid = direct_call.clone();
+    invalid["weight_audit"] = valid["weight_audit"].clone();
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+
+    let mut invalid = direct_call.clone();
+    invalid["weight_audit"]["record_count"] = json!(0);
+    invalid["weight_audit"]
+        .as_object_mut()
+        .unwrap()
+        .remove("first_seq");
+    invalid["weight_audit"]
+        .as_object_mut()
+        .unwrap()
+        .remove("last_seq");
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+
+    let mut zero_records = direct_call;
+    zero_records["delta"] = json!(0);
+    zero_records["weighted_tokens"] = json!(0);
+    zero_records["weight_audit"] = json!({
+        "basis":"svc_records",
+        "record_count":0,
+        "weight_revs":[],
+        "records_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    });
+    assert!(validate_event_data(&EventType::BudgetCharged, &zero_records).is_err());
+
+    let invalid = json!({
+        "ledger": {"subject":"delivery","id":"dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"},
+        "dimension":"nodes","delta":0,"used_after":1,
+        "source":{"kind":"node","node_id":"nod_01JBX7A1B2C3D4E5F6G7H8J9K0"}
+    });
+    assert!(validate_event_data(&EventType::BudgetCharged, &invalid).is_err());
+}
+
+#[test]
+fn policy_denied_separates_action_patch_and_proposal_origins() {
+    let action = json!({
+        "origin":"action","action_id":"push_branch","kind":"push_branch",
+        "target":{"kind":"branch","repo":"acme/shop-api","branch":"gantry/42-fix-pagination"},
+        "reason_code":"policy.action_denied",
+        "subject":"d7d018f867d6c5b78e82906386420d45a4d84486",
+        "config_rev":18240
+    });
+    let typed: PolicyDeniedData = serde_json::from_value(action.clone()).expect("typed action");
+    typed.validate().expect("valid action denial");
+    validate_event_data(&EventType::PolicyDenied, &action).expect("valid action event");
+
+    let mut invalid = action.clone();
+    invalid["kind"] = json!("create_pr");
+    assert!(validate_event_data(&EventType::PolicyDenied, &invalid).is_err());
+
+    let mut invalid = action;
+    invalid["action_id"] = json!("delete_branch");
+    assert!(validate_event_data(&EventType::PolicyDenied, &invalid).is_err());
+
+    let patch = json!({
+        "origin":"patch",
+        "target":{
+            "kind":"patch","repo":"acme/shop-api",
+            "paths":[{"text":"Cargo.lock","source":"sandbox:patch_path","truncated":false}],
+            "path_digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "rules":["lockfiles"]
+        },
+        "reasons":[{"code":"policy.path_protected:lockfiles","path":{"text":"Cargo.lock","source":"sandbox:patch_path","truncated":false},"rule_id":"lockfiles"}],
+        "config_rev":18240,
+        "subject":"sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    });
+    validate_event_data(&EventType::PolicyDenied, &patch).expect("valid patch denial");
+
+    let mut invalid = patch.clone();
+    invalid["subject"] = json!("d7d018f867d6c5b78e82906386420d45a4d84486");
+    assert!(validate_event_data(&EventType::PolicyDenied, &invalid).is_err());
+
+    let mut invalid = patch.clone();
+    invalid["reasons"][0]["code"] = json!("policy.not_a_reason");
+    assert!(validate_event_data(&EventType::PolicyDenied, &invalid).is_err());
+
+    let proposal = json!({
+        "origin":"proposal","proposal_id":"p2","proposal_kind":"reply_review_thread",
+        "target_handle":"thread-1","reason_code":"policy.approval_denied","config_rev":18240
+    });
+    validate_event_data(&EventType::PolicyDenied, &proposal).expect("valid proposal denial");
+
+    let mut invalid = proposal;
+    invalid["target"] = json!({"kind":"pr","repo":"acme/shop-api","number":1});
+    assert!(validate_event_data(&EventType::PolicyDenied, &invalid).is_err());
+
+    let targets = schema::<PolicyTarget>();
+    assert_eq!(
+        targets["oneOf"].as_array().expect("target branches").len(),
+        10
+    );
+    let reasons = schema::<PolicyReasonCode>();
+    assert_eq!(
+        reasons["enum"].as_array().expect("policy reasons").len(),
+        10
+    );
+}
+
+#[test]
+fn every_new_event_data_type_generates_a_schema() {
+    assert_eq!(
+        schema::<AttemptProgressData>()["title"],
+        "AttemptProgressData"
+    );
+    assert_eq!(
+        schema::<GuardianTriagedData>()["title"],
+        "GuardianTriagedData"
+    );
+    assert_eq!(
+        schema::<GuardianHealRequestedData>()["title"],
+        "GuardianHealRequestedData"
+    );
+    assert_eq!(
+        schema::<GuardianEscalatedData>()["title"],
+        "GuardianEscalatedData"
+    );
+    assert_eq!(
+        schema::<gantry_core::events::ApprovalInvalidatedData>()["title"],
+        "ApprovalInvalidatedData"
+    );
+    assert_eq!(
+        schema::<ApprovalExpiredData>()["title"],
+        "ApprovalExpiredData"
+    );
+    assert_eq!(
+        schema::<ApprovalDeniedData>()["title"],
+        "ApprovalDeniedData"
+    );
+    assert_eq!(
+        schema::<OutboxEnqueuedData>()["title"],
+        "OutboxEnqueuedData"
+    );
+    assert_eq!(
+        schema::<OutboxExecutingData>()["title"],
+        "OutboxExecutingData"
+    );
+    assert_eq!(
+        schema::<gantry_core::events::OutboxCancelledData>()["title"],
+        "OutboxCancelledData"
+    );
+    assert_eq!(schema::<ForgeSyncedData>()["title"], "ForgeSyncedData");
+    assert_eq!(schema::<BudgetChargedData>()["title"], "BudgetChargedData");
+    assert_eq!(schema::<PolicyDeniedData>()["title"], "PolicyDeniedData");
 }

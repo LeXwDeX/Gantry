@@ -19,7 +19,7 @@ use crate::entities::{
     tagged_payload_schema, ForgeActionKind, IssueRef, OutboxAction, OutboxActionError,
     OutboxStatus, Priority, PullRequestRef,
 };
-use crate::forge::{ActionPayload, PrHead};
+use crate::forge::{ActionPayload, ForgeActor, PrHead};
 use crate::ids::{ActionId, ApprovalId, DeliveryId, EventId, ProjectId};
 use crate::text::UntrustedText;
 use crate::time::Timestamp;
@@ -440,7 +440,10 @@ pub struct ReconcileReport {
 }
 
 /// forge-actions §7.4 的 drift 目录。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum DriftKind {
     PrStateDiverged,
     HeadDiverged,
@@ -451,6 +454,57 @@ pub enum DriftKind {
     MergeStateDiverged,
     DefaultBranchChanged,
     InstallationUnreachable,
+}
+
+impl DriftKind {
+    pub const ALL: [Self; 9] = [
+        Self::PrStateDiverged,
+        Self::HeadDiverged,
+        Self::EffectMissing,
+        Self::OrphanEffect,
+        Self::IssueStateDiverged,
+        Self::ReviewStateDiverged,
+        Self::MergeStateDiverged,
+        Self::DefaultBranchChanged,
+        Self::InstallationUnreachable,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PrStateDiverged => "pr_state_diverged",
+            Self::HeadDiverged => "head_diverged",
+            Self::EffectMissing => "effect_missing",
+            Self::OrphanEffect => "orphan_effect",
+            Self::IssueStateDiverged => "issue_state_diverged",
+            Self::ReviewStateDiverged => "review_state_diverged",
+            Self::MergeStateDiverged => "merge_state_diverged",
+            Self::DefaultBranchChanged => "default_branch_changed",
+            Self::InstallationUnreachable => "installation_unreachable",
+        }
+    }
+}
+
+/// 回读 PR 的合并与关闭事实；`None` 表示该路径没有来源，按契约不得合成。
+///
+/// 字段来自 `docs/interfaces/forge-drift.md` §4.4.1。M0 只定义类型，不改
+/// `ForgeReader` 的现有快照读取签名，也不新增端口方法。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PullRequestReadback {
+    pub head_sha: GitOid,
+    pub base_ref: String,
+    #[serde(default)]
+    pub closed_by: Option<ForgeActor>,
+    #[serde(default)]
+    pub merged_by: Option<ForgeActor>,
+    #[serde(default)]
+    pub via_merge_queue: Option<bool>,
+}
+
+/// 回读 Issue 的关闭事实；`None` 表示没有来源。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IssueReadback {
+    #[serde(default)]
+    pub closed_by: Option<ForgeActor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

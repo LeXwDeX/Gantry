@@ -1,12 +1,385 @@
 {
-  "title": "forge.synced data (contract undefined)",
-  "not": {},
-  "x-gantry-unresolved": {
-    "reason": "core §7.5 / docs/m0-contract-gaps.md 未定义该事件的 data 形状；M0 显式拒绝，不猜测字段",
-    "source": "docs/m0-contract-gaps.md",
-    "rejects_all_data": true
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "target": {
+      "$ref": "#/$defs/ForgeSyncedTarget"
+    },
+    "source": {
+      "$ref": "#/$defs/ForgeEventSource"
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ForgeSyncedChange"
+      }
+    },
+    "synced_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
   },
+  "required": [
+    "target",
+    "source",
+    "changes",
+    "synced_at"
+  ],
+  "title": "ForgeSyncedData",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ForgeSyncedTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/ForgeSyncedTargetKind"
+        },
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "number",
+        "node_id"
+      ]
+    },
+    "ForgeSyncedTargetKind": {
+      "type": "string",
+      "enum": [
+        "pr",
+        "issue"
+      ]
+    },
+    "ForgeEventSource": {
+      "type": "string",
+      "enum": [
+        "webhook",
+        "reconcile"
+      ]
+    },
+    "ForgeSyncedChange": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "state"
+            },
+            "from": {
+              "$ref": "#/$defs/ForgeSyncedState"
+            },
+            "to": {
+              "$ref": "#/$defs/ForgeSyncedState"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "state_reason"
+            },
+            "from": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IssueStateReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IssueStateReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "field"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "title"
+            },
+            "from": {
+              "$ref": "#/$defs/UntrustedText"
+            },
+            "to": {
+              "$ref": "#/$defs/UntrustedText"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "head_sha"
+            },
+            "from": {
+              "$ref": "#/$defs/GitOid"
+            },
+            "to": {
+              "$ref": "#/$defs/GitOid"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "base_ref"
+            },
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "base_sha"
+            },
+            "from": {
+              "$ref": "#/$defs/GitOid"
+            },
+            "to": {
+              "$ref": "#/$defs/GitOid"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "draft"
+            },
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "mergeable_state"
+            },
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "in_merge_queue"
+            },
+            "from": {
+              "type": "boolean"
+            },
+            "to": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "checks"
+            },
+            "from": {
+              "$ref": "#/$defs/CheckSummary"
+            },
+            "to": {
+              "$ref": "#/$defs/CheckSummary"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "const": "review_state"
+            },
+            "from": {
+              "$ref": "#/$defs/ReviewState"
+            },
+            "to": {
+              "$ref": "#/$defs/ReviewState"
+            }
+          },
+          "required": [
+            "field",
+            "from",
+            "to"
+          ]
+        }
+      ]
+    },
+    "ForgeSyncedState": {
+      "type": "string",
+      "enum": [
+        "open",
+        "closed",
+        "merged"
+      ]
+    },
+    "IssueStateReason": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "not_planned"
+      ]
+    },
+    "UntrustedText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "source",
+        "truncated"
+      ],
+      "description": "来自 GitHub、沙盒或其他外部来源的文本。\n\n刻意不实现 `Deref<Target = str>`、`Display`、`AsRef<str>`；取内容必须调用\n[`UntrustedText::as_untrusted_str`]，`Debug` 不输出正文。"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "CheckSummary": {
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "required_ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "pending",
+        "required_ok"
+      ]
+    },
+    "ReviewState": {
+      "type": "string",
+      "enum": [
+        "none",
+        "approved",
+        "changes_requested"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
   "x-gantry-event-type": "forge.synced",
   "x-gantry-envelope": "schemas/entities/event-envelope.json"

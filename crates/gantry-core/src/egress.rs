@@ -8,8 +8,9 @@
 //! - 含 `job_token` / `svc_token` 的响应用专用的 newtype，`Debug` 一律脱敏；
 //! - 控制面没有任何返回 secret 值的响应类型。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::IpAddr;
 use std::str::FromStr;
 
 use schemars::JsonSchema;
@@ -600,26 +601,198 @@ pub struct EgressProfile {
     pub groups: Vec<String>,
 }
 
+const INJECTION_ID_PATTERN: &str = r"^[a-z0-9][a-z0-9._-]{0,63}$";
+const HOST_PATTERN: &str = r"^(\*\.)?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$";
+const HEADER_PATTERN: &str = r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$";
+
+const FORBIDDEN_INJECTION_HEADERS: &[&str] = &[
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "upgrade",
+];
+
+const GITHUB_HOST_SUFFIXES: &[&str] = &[
+    "github.com",
+    "githubusercontent.com",
+    "githubassets.com",
+    "github.io",
+    "github.dev",
+    "githubapp.com",
+    "githubcopilot.com",
+];
+
+/// `kind` 决定注入头：`bearer` 使用隐式 `Authorization`，`header` 使用显式头名。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectionKind {
+    Bearer,
+    Header,
+}
+
+/// 下发视图中的凭据引用：只有 `secret_ref`，不包含 `value` / `present`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InjectionCredentialView {
+    pub secret_ref: SecretName,
+}
+
+/// `injection.<id>` 的只读下发视图。
+///
+/// 反序列化与序列化都会校验；`Debug` 不含 secret 值。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InjectionView {
+    pub hosts: Vec<String>,
+    pub kind: InjectionKind,
+    pub header: Option<String>,
+    pub credential: InjectionCredentialView,
+}
+
+impl InjectionView {
+    fn final_header(&self) -> &str {
+        match self.kind {
+            InjectionKind::Bearer => "authorization",
+            InjectionKind::Header => self.header.as_deref().expect("header is validated"),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        validate_injection_hosts(&self.hosts)?;
+        match self.kind {
+            InjectionKind::Bearer => {
+                if self.header.is_some() {
+                    return Err("/header: must be omitted when kind is bearer".into());
+                }
+            }
+            InjectionKind::Header => {
+                let Some(header) = self.header.as_deref() else {
+                    return Err("/header: required when kind is header".into());
+                };
+                validate_injection_header(header)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn from_value(value: Value) -> Result<Self, String> {
+        let Some(object) = value.as_object() else {
+            return Err("/: expected object".into());
+        };
+        for key in object.keys() {
+            if !matches!(key.as_str(), "hosts" | "kind" | "header" | "credential") {
+                return Err(format!("/{}: unknown field", escape_pointer_segment(key)));
+            }
+        }
+        let hosts_value = object.get("hosts").ok_or("/hosts: missing field")?;
+        let hosts = parse_injection_hosts(hosts_value)?;
+        let kind_value = object.get("kind").ok_or("/kind: missing field")?;
+        let kind = parse_injection_kind(kind_value)?;
+        let header = parse_injection_header(object.get("header"), kind)?;
+        let credential_value = object
+            .get("credential")
+            .ok_or("/credential: missing field")?;
+        let credential = parse_injection_credential(credential_value)?;
+        let view = Self {
+            hosts,
+            kind,
+            header,
+            credential,
+        };
+        view.validate()?;
+        Ok(view)
+    }
+}
+
+impl Serialize for InjectionView {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("InjectionView", 4)?;
+        state.serialize_field("hosts", &self.hosts)?;
+        state.serialize_field("kind", &self.kind)?;
+        if let Some(header) = &self.header {
+            state.serialize_field("header", header)?;
+        }
+        state.serialize_field("credential", &self.credential)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for InjectionView {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        Self::from_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for InjectionView {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "InjectionView".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let credential = generator.subschema_for::<InjectionCredentialView>();
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hosts", "kind", "credential"],
+            "properties": {
+                "hosts": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "string",
+                        "pattern": HOST_PATTERN,
+                    },
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["bearer", "header"],
+                },
+                "header": {
+                    "type": "string",
+                    "pattern": HEADER_PATTERN,
+                },
+                "credential": credential,
+            },
+            "allOf": [
+                {
+                    "if": {
+                        "properties": { "kind": { "const": "bearer" } },
+                        "required": ["kind"],
+                    },
+                    "then": { "not": { "required": ["header"] } },
+                },
+                {
+                    "if": {
+                        "properties": { "kind": { "const": "header" } },
+                        "required": ["kind"],
+                    },
+                    "then": { "required": ["header"] },
+                },
+            ],
+        })
+    }
+}
+
 /// 配置视图只含引用，不含 secret 值。
 ///
-/// `injection` 的权威依据只有 egress-control §4.6 的示例 `{}`；字段表未定义非空形状
-/// （M2）。因此 M0 只接受空对象：反序列化、序列化与 schema 都拒绝非空内容，
-/// `Debug` 不输出其中的值，不猜测未定义结构。
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// `injection` 的非空形状见 `docs/interfaces/config-view-injection.md`；空对象合法。
+/// 反序列化和序列化都会执行形态、V10、G5、V13 与引用校验。
+#[derive(Clone, PartialEq)]
 pub struct ConfigView {
     pub rev: u64,
     pub providers: BTreeMap<String, ProviderConfig>,
     pub groups: BTreeMap<String, EgressGroup>,
     pub profiles: BTreeMap<String, EgressProfile>,
     pub default_profile: String,
-    #[serde(
-        default,
-        deserialize_with = "empty_injection",
-        serialize_with = "empty_injection_ser"
-    )]
-    #[schemars(schema_with = "empty_injection_schema")]
-    pub injection: BTreeMap<String, Value>,
+    pub injection: BTreeMap<String, InjectionView>,
     pub token_weights: TokenWeights,
 }
 
@@ -631,47 +804,359 @@ impl fmt::Debug for ConfigView {
             .field("groups", &self.groups)
             .field("profiles", &self.profiles)
             .field("default_profile", &self.default_profile)
-            .field("injection", &"<empty only; values redacted>")
+            .field("injection", &"<values redacted>")
             .field("token_weights", &self.token_weights)
             .finish()
     }
 }
 
-fn empty_injection<'de, D>(deserializer: D) -> Result<BTreeMap<String, Value>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let map = BTreeMap::<String, Value>::deserialize(deserializer)?;
-    if map.is_empty() {
-        Ok(map)
-    } else {
-        Err(serde::de::Error::custom(
-            "injection must be an empty object; non-empty shape is undefined in M0",
-        ))
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigViewRaw {
+    rev: u64,
+    providers: BTreeMap<String, ProviderConfig>,
+    groups: BTreeMap<String, EgressGroup>,
+    profiles: BTreeMap<String, EgressProfile>,
+    default_profile: String,
+    #[serde(default)]
+    injection: BTreeMap<String, Value>,
+    token_weights: TokenWeights,
+}
+
+impl<'de> Deserialize<'de> for ConfigView {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = ConfigViewRaw::deserialize(deserializer)?;
+        let mut injection = BTreeMap::new();
+        for (id, value) in raw.injection {
+            let pointer = format!("/injection/{}", escape_pointer_segment(&id));
+            if SecretName::parse(&id).is_err() {
+                return Err(serde::de::Error::custom(format!("{pointer}: invalid id")));
+            }
+            let view = InjectionView::from_value(value)
+                .map_err(|error| serde::de::Error::custom(format!("{pointer}{error}")))?;
+            injection.insert(id, view);
+        }
+        let view = Self {
+            rev: raw.rev,
+            providers: raw.providers,
+            groups: raw.groups,
+            profiles: raw.profiles,
+            default_profile: raw.default_profile,
+            injection,
+            token_weights: raw.token_weights,
+        };
+        validate_config_view(&view).map_err(serde::de::Error::custom)?;
+        Ok(view)
     }
 }
 
-fn empty_injection_ser<S>(value: &BTreeMap<String, Value>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if !value.is_empty() {
-        return Err(serde::ser::Error::custom(
-            "injection must be an empty object; non-empty shape is undefined in M0",
+impl Serialize for ConfigView {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        validate_config_view(self).map_err(serde::ser::Error::custom)?;
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("ConfigView", 7)?;
+        state.serialize_field("rev", &self.rev)?;
+        state.serialize_field("providers", &self.providers)?;
+        state.serialize_field("groups", &self.groups)?;
+        state.serialize_field("profiles", &self.profiles)?;
+        state.serialize_field("default_profile", &self.default_profile)?;
+        state.serialize_field("injection", &self.injection)?;
+        state.serialize_field("token_weights", &self.token_weights)?;
+        state.end()
+    }
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+#[serde(deny_unknown_fields)]
+struct ConfigViewShape {
+    rev: u64,
+    providers: BTreeMap<String, ProviderConfig>,
+    groups: BTreeMap<String, EgressGroup>,
+    profiles: BTreeMap<String, EgressProfile>,
+    default_profile: String,
+    #[serde(default)]
+    injection: BTreeMap<String, InjectionView>,
+    token_weights: TokenWeights,
+}
+
+impl JsonSchema for ConfigView {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ConfigView".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let mut schema = ConfigViewShape::json_schema(generator);
+        if let Some(object) = schema.as_object_mut() {
+            object.insert("title".into(), Value::String("ConfigView".into()));
+            if let Some(injection) = object
+                .get_mut("properties")
+                .and_then(Value::as_object_mut)
+                .and_then(|properties| properties.get_mut("injection"))
+                .and_then(Value::as_object_mut)
+            {
+                injection.insert(
+                    "propertyNames".into(),
+                    serde_json::json!({ "pattern": INJECTION_ID_PATTERN }),
+                );
+            }
+        }
+        schema
+    }
+}
+
+fn parse_injection_hosts(value: &Value) -> Result<Vec<String>, String> {
+    let Some(values) = value.as_array() else {
+        return Err("/hosts: expected array".into());
+    };
+    if values.is_empty() {
+        return Err("/hosts: must not be empty".into());
+    }
+    let mut hosts = Vec::with_capacity(values.len());
+    let mut seen = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        let Some(host) = value.as_str() else {
+            return Err(format!("/hosts/{index}: expected string"));
+        };
+        validate_injection_host(host).map_err(|message| format!("/hosts/{index}: {message}"))?;
+        if seen.insert(host.to_ascii_lowercase()) {
+            hosts.push(host.to_owned());
+        }
+    }
+    Ok(hosts)
+}
+
+fn validate_injection_hosts(hosts: &[String]) -> Result<(), String> {
+    if hosts.is_empty() {
+        return Err("/hosts: must not be empty".into());
+    }
+    let mut seen = BTreeSet::new();
+    for (index, host) in hosts.iter().enumerate() {
+        validate_injection_host(host).map_err(|message| format!("/hosts/{index}: {message}"))?;
+        if !seen.insert(host.to_ascii_lowercase()) {
+            return Err(format!("/hosts/{index}: duplicate host"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_injection_host(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("host must not be empty".into());
+    }
+    if host.len() > 253 {
+        return Err("host must be at most 253 bytes".into());
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return Err("IP literals are not allowed".into());
+    }
+    if host
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '/' | ':' | '?' | '#' | '@' | '\\'))
+    {
+        return Err("host must not contain a scheme, port, path or whitespace".into());
+    }
+    let (wildcard, name) = if let Some(rest) = host.strip_prefix("*.") {
+        (true, rest)
+    } else {
+        if host.contains('*') {
+            return Err("wildcards must be a single leading '*.' label".into());
+        }
+        (false, host)
+    };
+    if wildcard && name.is_empty() {
+        return Err("wildcard host must include a domain".into());
+    }
+    if name.contains('*') {
+        return Err("wildcards must be a single leading '*.' label".into());
+    }
+    let name = name.to_ascii_lowercase();
+    let labels: Vec<&str> = name.split('.').collect();
+    if labels.len() == 4
+        && labels
+            .iter()
+            .all(|label| label.len() <= 3 && label.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err("IP literals are not allowed".into());
+    }
+    for label in labels {
+        if label.is_empty() || label.len() > 63 {
+            return Err("host labels must be 1..=63 characters".into());
+        }
+        let bytes = label.as_bytes();
+        if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+            return Err("host labels must start and end with a letter or digit".into());
+        }
+        if !bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        {
+            return Err("host labels may only contain letters, digits and '-'".into());
+        }
+    }
+    if is_github_host(&name) {
+        return Err("GitHub domains are not allowed".into());
+    }
+    Ok(())
+}
+
+fn is_github_host(host: &str) -> bool {
+    GITHUB_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+}
+
+fn parse_injection_kind(value: &Value) -> Result<InjectionKind, String> {
+    match value.as_str() {
+        Some("bearer") => Ok(InjectionKind::Bearer),
+        Some("header") => Ok(InjectionKind::Header),
+        Some(_) => Err("/kind: expected \"bearer\" or \"header\"".into()),
+        None => Err("/kind: expected string".into()),
+    }
+}
+
+fn parse_injection_header(
+    value: Option<&Value>,
+    kind: InjectionKind,
+) -> Result<Option<String>, String> {
+    match (kind, value) {
+        (InjectionKind::Bearer, None) => Ok(None),
+        (InjectionKind::Bearer, Some(_)) => {
+            Err("/header: must be omitted when kind is bearer".into())
+        }
+        (InjectionKind::Header, None | Some(Value::Null)) => {
+            Err("/header: required when kind is header".into())
+        }
+        (InjectionKind::Header, Some(Value::String(header))) => {
+            validate_injection_header(header)?;
+            Ok(Some(header.clone()))
+        }
+        (InjectionKind::Header, Some(_)) => Err("/header: expected string".into()),
+    }
+}
+
+fn validate_injection_header(header: &str) -> Result<(), String> {
+    if header.is_empty() {
+        return Err("/header: must not be empty".into());
+    }
+    if !header.bytes().all(is_http_token_char) {
+        return Err("/header: must be an HTTP field-name token".into());
+    }
+    let lower = header.to_ascii_lowercase();
+    if FORBIDDEN_INJECTION_HEADERS.contains(&lower.as_str()) {
+        return Err(format!(
+            "/header: {header} is a hop-by-hop or framework header"
         ));
     }
-    value.serialize(serializer)
+    if lower == "authorization" {
+        return Err("/header: Authorization is reserved for kind=bearer".into());
+    }
+    Ok(())
 }
 
-fn empty_injection_schema(_: &mut schemars::SchemaGenerator) -> Schema {
-    schemars::json_schema!({
-        "type": "object",
-        "maxProperties": 0,
-        "x-gantry-unresolved": {
-            "reason": "egress-control §4.6 只给出 `injection: {}` 示例，非空字段表未定义（M2）；M0 只接受空对象",
-            "source": "docs/interfaces/egress-control.md#46-下发配置视图",
+fn is_http_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn parse_injection_credential(value: &Value) -> Result<InjectionCredentialView, String> {
+    let Some(object) = value.as_object() else {
+        return Err("/credential: expected object".into());
+    };
+    for key in object.keys() {
+        if key != "secret_ref" {
+            return Err(format!(
+                "/credential/{}: unknown field",
+                escape_pointer_segment(key)
+            ));
+        }
+    }
+    let Some(secret_ref) = object.get("secret_ref") else {
+        return Err("/credential/secret_ref: missing field".into());
+    };
+    let Some(secret_ref) = secret_ref.as_str() else {
+        return Err("/credential/secret_ref: expected string".into());
+    };
+    let secret_ref = SecretName::parse(secret_ref)
+        .map_err(|error| format!("/credential/secret_ref: {error}"))?;
+    Ok(InjectionCredentialView { secret_ref })
+}
+
+fn validate_config_view(view: &ConfigView) -> Result<(), String> {
+    for (id, injection) in &view.injection {
+        let pointer = format!("/injection/{}", escape_pointer_segment(id));
+        if SecretName::parse(id).is_err() {
+            return Err(format!("{pointer}: invalid id"));
+        }
+        injection
+            .validate()
+            .map_err(|error| format!("{pointer}{error}"))?;
+    }
+    for (id, injection) in &view.injection {
+        let pointer = format!("/injection/{}", escape_pointer_segment(id));
+        for (index, host) in injection.hosts.iter().enumerate() {
+            let covered = view.groups.values().any(|group| {
+                group
+                    .hosts
+                    .iter()
+                    .any(|candidate| host_is_covered(host, candidate))
+            });
+            if !covered {
+                return Err(format!(
+                    "{pointer}/hosts/{index}: host is not covered by any egress group"
+                ));
+            }
+        }
+    }
+    let mut seen = BTreeMap::<(String, String), &str>::new();
+    for (id, injection) in &view.injection {
+        let header = injection.final_header().to_ascii_lowercase();
+        for host in &injection.hosts {
+            if let Some(previous) = seen.insert((host.to_ascii_lowercase(), header.clone()), id) {
+                return Err(format!(
+                    "/injection/{}: duplicate (host, header) with injection {}",
+                    escape_pointer_segment(id),
+                    escape_pointer_segment(previous)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn host_is_covered(host: &str, group_host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let group_host = group_host.to_ascii_lowercase();
+    match group_host.strip_prefix("*.") {
+        Some(suffix) => match host.strip_prefix("*.") {
+            Some(host_suffix) => host_suffix == suffix,
+            None => host
+                .strip_suffix(suffix)
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .is_some_and(|label| !label.is_empty() && !label.contains('.')),
         },
-    })
+        None => host == group_host,
+    }
+}
+
+fn escape_pointer_segment(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

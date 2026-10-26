@@ -528,5 +528,298 @@
       "schema",
       "rust"
     ]
+  },
+  {
+    "id": "event-attempt-progress-v-not-1",
+    "schema": "schemas/events/attempt.progress.json",
+    "rust": "event:attempt.progress",
+    "event_type": "attempt.progress",
+    "data": {
+      "v": 2,
+      "seq": 2,
+      "type": "stage",
+      "stage": "edit",
+      "detail": "x"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "event-guardian-triaged-batch-round",
+    "schema": "schemas/events/guardian.triaged.json",
+    "rust": "event:guardian.triaged",
+    "event_type": "guardian.triaged",
+    "data": {
+      "event_ref": {
+        "source": "forge",
+        "kind": "check_suite_completed",
+        "dedup_key": "k"
+      },
+      "action": "batch",
+      "class": "nit",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "rule": "K",
+      "also_matched": [],
+      "config_rev": 1,
+      "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+      "action_ids": []
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-guardian-heal-empty-problems",
+    "schema": "schemas/events/guardian.heal_requested.json",
+    "rust": "event:guardian.heal_requested",
+    "event_type": "guardian.heal_requested",
+    "data": {
+      "round_id": "01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "task": "ci_failure",
+      "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+      "problems": [],
+      "batch_included": [],
+      "request_digest": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a",
+      "config_rev": 1
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-guardian-escalated-class-reason",
+    "schema": "schemas/events/guardian.escalated.json",
+    "rust": "event:guardian.escalated",
+    "event_type": "guardian.escalated",
+    "data": {
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "class": "security_finding",
+      "reason_code": "guardian.unknown_event",
+      "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+      "suppressed_duplicate": false
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-approval-invalidated-equal-heads",
+    "schema": "schemas/events/approval.invalidated.json",
+    "rust": "event:approval.invalidated",
+    "event_type": "approval.invalidated",
+    "data": {
+      "reason": "head_changed",
+      "previous_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+      "current_head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-approval-expired-nonempty",
+    "schema": "schemas/events/approval.expired.json",
+    "rust": "event:approval.expired",
+    "event_type": "approval.expired",
+    "data": {
+      "previous_status": "pending"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "event-approval-denied-null-reason",
+    "schema": "schemas/events/approval.denied.json",
+    "rust": "event:approval.denied",
+    "event_type": "approval.denied",
+    "data": {
+      "reason": null
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-outbox-enqueued-target-mismatch",
+    "schema": "schemas/events/outbox.enqueued.json",
+    "rust": "event:outbox.enqueued",
+    "event_type": "outbox.enqueued",
+    "data": {
+      "action": {
+        "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+        "kind": "create_pr",
+        "payload": {
+          "repo": "acme/shop-api",
+          "head": "h",
+          "base": "main",
+          "title": "t",
+          "body": "b",
+          "draft": false,
+          "closes": [],
+          "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+          "maintainer_can_modify": false
+        },
+        "target": "pr:wrong",
+        "intent": {
+          "base": "main",
+          "head": "h",
+          "title": "t",
+          "body": "b",
+          "draft": false,
+          "closes": []
+        },
+        "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+        "requires_approval": null,
+        "depends_on": [],
+        "priority": "normal",
+        "not_before": null,
+        "epoch": 0,
+        "coalesce_key": null,
+        "enqueued_by": {
+          "module": "engine",
+          "causation_id": null
+        }
+      }
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-outbox-executing-zero-attempts",
+    "schema": "schemas/events/outbox.executing.json",
+    "rust": "event:outbox.executing",
+    "event_type": "outbox.executing",
+    "data": {
+      "attempts": 0,
+      "replay": false
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-outbox-cancelled-missing-reason",
+    "schema": "schemas/events/outbox.cancelled.json",
+    "rust": "event:outbox.cancelled",
+    "event_type": "outbox.cancelled",
+    "data": {},
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "event-forge-synced-empty-changes",
+    "schema": "schemas/events/forge.synced.json",
+    "rust": "event:forge.synced",
+    "event_type": "forge.synced",
+    "data": {
+      "target": {
+        "type": "pr",
+        "number": 57,
+        "node_id": "n"
+      },
+      "source": "reconcile",
+      "changes": [],
+      "synced_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-forge-synced-issue-head-sha",
+    "schema": "schemas/events/forge.synced.json",
+    "rust": "event:forge.synced",
+    "event_type": "forge.synced",
+    "data": {
+      "target": {
+        "type": "issue",
+        "number": 57,
+        "node_id": "n"
+      },
+      "source": "reconcile",
+      "changes": [
+        {
+          "field": "head_sha",
+          "from": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+          "to": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b"
+        }
+      ],
+      "synced_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-budget-charged-nodes-zero",
+    "schema": "schemas/events/budget.charged.json",
+    "rust": "event:budget.charged",
+    "event_type": "budget.charged",
+    "data": {
+      "ledger": {
+        "subject": "delivery",
+        "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"
+      },
+      "dimension": "nodes",
+      "delta": 0,
+      "used_after": 1,
+      "source": {
+        "kind": "node",
+        "node_id": "nod_01JBX7A1B2C3D4E5F6G7H8J9K0"
+      }
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-policy-denied-kind-mismatch",
+    "schema": "schemas/events/policy.denied.json",
+    "rust": "event:policy.denied",
+    "event_type": "policy.denied",
+    "data": {
+      "origin": "action",
+      "action_id": "push_branch",
+      "kind": "create_pr",
+      "target": {
+        "kind": "branch",
+        "repo": "acme/shop-api",
+        "branch": "b"
+      },
+      "reason_code": "policy.action_denied",
+      "config_rev": 1
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-policy-denied-proposal-target",
+    "schema": "schemas/events/policy.denied.json",
+    "rust": "event:policy.denied",
+    "event_type": "policy.denied",
+    "data": {
+      "origin": "proposal",
+      "proposal_id": "p2",
+      "proposal_kind": "reply_review_thread",
+      "target": {
+        "kind": "pr",
+        "repo": "acme/shop-api",
+        "number": 1
+      },
+      "reason_code": "policy.approval_denied",
+      "config_rev": 1
+    },
+    "should_fail": [
+      "rust"
+    ]
   }
 ]

@@ -27,5 +27,6 @@
 ## 未定形状（不生成夹具、不猜测）
 
 - `forge-actions` §6.3：`pr_updated` / `issue_updated` 的 `changed[]` 逐字段“新值”形状未定义；`Rust` 类型只保留字段名。
-- `egress-control` §4.6：`injection` 只给出 `{}`，结构未定义；M0 以不透明对象承载。
 - `forge-actions` §2.6 / `worker-protocol` §9 的失败子码词表：以字符串承载已知与未知子码，不建封闭枚举。
+
+注：`egress-control` §4.6 的 `injection` 已由 config-view-injection 契约定义，drift 已由 forge-drift 契约定义；本目录仍不为其生成额外夹具，夹具覆盖由事件与 schema 测试承担。

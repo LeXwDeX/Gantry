@@ -30,12 +30,13 @@
     },
     "injection": {
       "type": "object",
-      "maxProperties": 0,
-      "x-gantry-unresolved": {
-        "reason": "egress-control §4.6 只给出 `injection: {}` 示例，非空字段表未定义（M2）；M0 只接受空对象",
-        "source": "docs/interfaces/egress-control.md#46-下发配置视图"
+      "additionalProperties": {
+        "$ref": "#/$defs/InjectionView"
       },
-      "default": {}
+      "default": {},
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+      }
     },
     "token_weights": {
       "$ref": "#/$defs/TokenWeights"
@@ -49,7 +50,6 @@
     "default_profile",
     "token_weights"
   ],
-  "description": "配置视图只含引用，不含 secret 值。\n\n`injection` 的权威依据只有 egress-control §4.6 的示例 `{}`；字段表未定义非空形状\n（M2）。因此 M0 只接受空对象：反序列化、序列化与 schema 都拒绝非空内容，\n`Debug` 不输出其中的值，不猜测未定义结构。",
   "title": "ConfigView",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
@@ -106,6 +106,90 @@
       "required": [
         "groups"
       ]
+    },
+    "InjectionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hosts",
+        "kind",
+        "credential"
+      ],
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^(\\*\\.)?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+          }
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "bearer",
+            "header"
+          ]
+        },
+        "header": {
+          "type": "string",
+          "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+        },
+        "credential": {
+          "$ref": "#/$defs/InjectionCredentialView"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "bearer"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "header"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "header"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "header"
+            ]
+          }
+        }
+      ]
+    },
+    "InjectionCredentialView": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secret_ref": {
+          "$ref": "#/$defs/SecretName"
+        }
+      },
+      "required": [
+        "secret_ref"
+      ],
+      "description": "下发视图中的凭据引用：只有 `secret_ref`，不包含 `value` / `present`。"
     },
     "TokenWeights": {
       "type": "object",

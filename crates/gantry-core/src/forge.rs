@@ -12,12 +12,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::canon::{GitOid, RepoSlug, Sha256Digest};
-use crate::entities::MergeMethod;
+use crate::entities::{IssueState, MergeMethod};
 use crate::ids::{ActionId, DeliveryId, ProjectId, WorktreeId};
 use crate::text::UntrustedText;
 use crate::time::Timestamp;
 
-pub use crate::entities::{ForgeActionKind, ForgeEventKind, ForgeOrigin};
+pub use crate::entities::{
+    ForgeActionKind, ForgeEventKind, ForgeOrigin, ReviewState as ReviewSnapshotState,
+};
 
 // ---------------------------------------------------------------------------
 // 通用事件构件
@@ -1208,3 +1210,853 @@ pub fn action_kinds() -> &'static [ForgeActionKind] {
 /// `pr_updated` / `issue_updated` 的未定新值形状记录，供 schema 生成与测试引用。
 pub const UNDEFINED_CHANGED_VALUES: &str =
     "forge-actions §6.3 未定义 changed[] 的逐字段新值形状；M0 不猜测，只有字段名";
+
+// ---------------------------------------------------------------------------
+// Drift 记录（docs/interfaces/forge-drift.md §4）
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftResolution {
+    GithubWins,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftDetectedBy {
+    Patrol,
+    StartupSweep,
+    Recovery,
+    OnDemand,
+    Webhook,
+}
+
+/// 合成事件的 kind；不带 `forge.` 前缀。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftSynthesizedEvent {
+    PrClosed,
+    PrMerged,
+    PrSynchronized,
+    IssueClosed,
+    IssueReopened,
+    PrDequeued,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallationUnreachableCode {
+    TokenExchangeFailed,
+    RepoNotAccessible,
+    PermissionDenied,
+    TransportError,
+}
+
+/// drift 的对象身份。不能用 `ForgeEventTarget` 代替：后者没有 `repo` / `branch`，
+/// 且 `number` / `node_id` 可选。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum DriftTarget {
+    Pr { repo: RepoSlug, number: u64 },
+    Issue { repo: RepoSlug, number: u64 },
+    Branch { repo: RepoSlug, branch: String },
+    Repo { repo: RepoSlug },
+    Installation { installation_id: i64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PrExpectedState {
+    Open,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PrTerminalState {
+    Closed,
+    Merged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OrphanObject {
+    Comment,
+    PullRequest,
+    Issue,
+}
+
+/// 必填但可为 `null` 的包装；用于区分“字段缺失”和“字段存在但值未知”。
+///
+/// 不能写成 `#[serde(transparent)] Option<T>`：serde 会把缺失字段也当成 `None`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RequiredNullable<T> {
+    Value(T),
+    Null,
+}
+
+impl<T> RequiredNullable<T> {
+    pub fn as_ref(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Null => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+}
+
+/// 只接受 JSON `null` 的字段类型；字段缺失由 [`DriftPayload`] 的解码入口拒绝。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NullOnly;
+
+impl Serialize for NullOnly {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_unit()
+    }
+}
+
+impl<'de> Deserialize<'de> for NullOnly {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match Option::<Value>::deserialize(deserializer)? {
+            None => Ok(Self),
+            Some(_) => Err(serde::de::Error::custom("expected null")),
+        }
+    }
+}
+
+impl JsonSchema for NullOnly {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "NullOnly".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> Schema {
+        schemars::json_schema!({ "type": "null" })
+    }
+}
+
+/// 可空但字段必须存在的 `delivery_id`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MaybeDeliveryId {
+    Delivery(DeliveryId),
+    Null,
+}
+
+impl MaybeDeliveryId {
+    pub fn as_ref(&self) -> Option<&DeliveryId> {
+        match self {
+            Self::Delivery(id) => Some(id),
+            Self::Null => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PrStateExpected {
+    pub state: PrExpectedState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "lowercase", deny_unknown_fields)]
+pub enum PrStateActual {
+    Closed {},
+    Merged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merge_commit_sha: Option<GitOid>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HeadDivergedExpected {
+    pub head_sha: GitOid,
+    pub basis_action: ActionId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HeadDivergedActual {
+    pub head_sha: GitOid,
+    pub pushed_by: RequiredNullable<ForgeActor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "effect", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EffectMissingExpected {
+    StatusComment {
+        action_id: ActionId,
+        render_digest: Sha256Digest,
+    },
+    Branch {
+        action_id: ActionId,
+    },
+    PullRequest {
+        action_id: ActionId,
+        state: PrExpectedState,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "observation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EffectMissingActual {
+    Missing {},
+    ContentChanged { render_digest: Sha256Digest },
+    StateChanged { state: PrTerminalState },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrphanEffectExpected {
+    pub outbox_action: NullOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrphanEffectActual {
+    pub object: OrphanObject,
+    pub github_id: u64,
+    pub node_id: String,
+    pub marker: ForgeText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IssueStateExpected {
+    pub state: IssueState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_reason: Option<IssueStateReason>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "observation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IssueStateActual {
+    State {
+        state: IssueState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state_reason: Option<IssueStateReason>,
+    },
+    Deleted {},
+    Transferred {
+        to_repo: RepoSlug,
+        new_number: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewStateExpected {
+    pub review_state: ReviewSnapshotState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewStateActual {
+    pub review_state: ReviewSnapshotState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MergeStateExpected {
+    pub in_merge_queue: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MergeStateActual {
+    pub in_merge_queue: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ForgeText>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultBranchChangedExpected {
+    pub default_branch: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultBranchChangedActual {
+    pub default_branch: String,
+    /// 旧默认分支名，不是 `RepoSlug`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationUnreachableExpected {
+    pub reachable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationUnreachableActual {
+    pub reachable: bool,
+    pub code: InstallationUnreachableCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PrStateDivergedDrift {
+    pub delivery_id: DeliveryId,
+    pub target: DriftTarget,
+    pub expected: PrStateExpected,
+    pub actual: PrStateActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HeadDivergedDrift {
+    pub delivery_id: DeliveryId,
+    pub target: DriftTarget,
+    pub expected: HeadDivergedExpected,
+    pub actual: HeadDivergedActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EffectMissingDrift {
+    pub delivery_id: DeliveryId,
+    pub target: DriftTarget,
+    pub expected: EffectMissingExpected,
+    pub actual: EffectMissingActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OrphanEffectDrift {
+    pub delivery_id: MaybeDeliveryId,
+    pub target: DriftTarget,
+    pub expected: OrphanEffectExpected,
+    pub actual: OrphanEffectActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IssueStateDivergedDrift {
+    pub delivery_id: DeliveryId,
+    pub target: DriftTarget,
+    pub expected: IssueStateExpected,
+    pub actual: IssueStateActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewStateDivergedDrift {
+    pub delivery_id: DeliveryId,
+    pub target: DriftTarget,
+    pub expected: ReviewStateExpected,
+    pub actual: ReviewStateActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MergeStateDivergedDrift {
+    pub delivery_id: DeliveryId,
+    pub target: DriftTarget,
+    pub expected: MergeStateExpected,
+    pub actual: MergeStateActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DefaultBranchChangedDrift {
+    pub delivery_id: NullOnly,
+    pub target: DriftTarget,
+    pub expected: DefaultBranchChangedExpected,
+    pub actual: DefaultBranchChangedActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationUnreachableDrift {
+    pub delivery_id: NullOnly,
+    pub target: DriftTarget,
+    pub expected: InstallationUnreachableExpected,
+    pub actual: InstallationUnreachableActual,
+    pub resolution: DriftResolution,
+    pub synthesized_events: Vec<DriftSynthesizedEvent>,
+    pub detected_by: DriftDetectedBy,
+}
+
+/// `forge.drift_detected.data`：`kind` 与 expected/actual 分支强绑定。
+///
+/// 反序列化只接受这 9 个 `kind`；未知 kind、分支错配、未知字段和缺必填都会失败。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DriftPayload {
+    PrStateDiverged(PrStateDivergedDrift),
+    HeadDiverged(HeadDivergedDrift),
+    EffectMissing(EffectMissingDrift),
+    OrphanEffect(OrphanEffectDrift),
+    IssueStateDiverged(IssueStateDivergedDrift),
+    ReviewStateDiverged(ReviewStateDivergedDrift),
+    MergeStateDiverged(MergeStateDivergedDrift),
+    DefaultBranchChanged(DefaultBranchChangedDrift),
+    InstallationUnreachable(InstallationUnreachableDrift),
+}
+
+impl DriftPayload {
+    pub fn kind(&self) -> crate::ports::forge::DriftKind {
+        match self {
+            Self::PrStateDiverged(_) => crate::ports::forge::DriftKind::PrStateDiverged,
+            Self::HeadDiverged(_) => crate::ports::forge::DriftKind::HeadDiverged,
+            Self::EffectMissing(_) => crate::ports::forge::DriftKind::EffectMissing,
+            Self::OrphanEffect(_) => crate::ports::forge::DriftKind::OrphanEffect,
+            Self::IssueStateDiverged(_) => crate::ports::forge::DriftKind::IssueStateDiverged,
+            Self::ReviewStateDiverged(_) => crate::ports::forge::DriftKind::ReviewStateDiverged,
+            Self::MergeStateDiverged(_) => crate::ports::forge::DriftKind::MergeStateDiverged,
+            Self::DefaultBranchChanged(_) => crate::ports::forge::DriftKind::DefaultBranchChanged,
+            Self::InstallationUnreachable(_) => {
+                crate::ports::forge::DriftKind::InstallationUnreachable
+            }
+        }
+    }
+
+    pub fn target(&self) -> &DriftTarget {
+        match self {
+            Self::PrStateDiverged(drift) => &drift.target,
+            Self::HeadDiverged(drift) => &drift.target,
+            Self::EffectMissing(drift) => &drift.target,
+            Self::OrphanEffect(drift) => &drift.target,
+            Self::IssueStateDiverged(drift) => &drift.target,
+            Self::ReviewStateDiverged(drift) => &drift.target,
+            Self::MergeStateDiverged(drift) => &drift.target,
+            Self::DefaultBranchChanged(drift) => &drift.target,
+            Self::InstallationUnreachable(drift) => &drift.target,
+        }
+    }
+
+    pub fn delivery_id(&self) -> Option<&DeliveryId> {
+        match self {
+            Self::PrStateDiverged(drift) => Some(&drift.delivery_id),
+            Self::HeadDiverged(drift) => Some(&drift.delivery_id),
+            Self::EffectMissing(drift) => Some(&drift.delivery_id),
+            Self::OrphanEffect(drift) => drift.delivery_id.as_ref(),
+            Self::IssueStateDiverged(drift) => Some(&drift.delivery_id),
+            Self::ReviewStateDiverged(drift) => Some(&drift.delivery_id),
+            Self::MergeStateDiverged(drift) => Some(&drift.delivery_id),
+            Self::DefaultBranchChanged(_) | Self::InstallationUnreachable(_) => None,
+        }
+    }
+
+    pub fn synthesized_events(&self) -> &[DriftSynthesizedEvent] {
+        match self {
+            Self::PrStateDiverged(drift) => &drift.synthesized_events,
+            Self::HeadDiverged(drift) => &drift.synthesized_events,
+            Self::EffectMissing(drift) => &drift.synthesized_events,
+            Self::OrphanEffect(drift) => &drift.synthesized_events,
+            Self::IssueStateDiverged(drift) => &drift.synthesized_events,
+            Self::ReviewStateDiverged(drift) => &drift.synthesized_events,
+            Self::MergeStateDiverged(drift) => &drift.synthesized_events,
+            Self::DefaultBranchChanged(drift) => &drift.synthesized_events,
+            Self::InstallationUnreachable(drift) => &drift.synthesized_events,
+        }
+    }
+
+    /// 程序化构造后的一致性校验；`from_value` 会自动调用。
+    pub fn validate(&self) -> Result<(), DriftValidationError> {
+        match self {
+            Self::PrStateDiverged(drift) => validate_pr_state(drift),
+            Self::HeadDiverged(drift) => validate_head(drift),
+            Self::EffectMissing(drift) => validate_effect_missing(drift),
+            Self::OrphanEffect(drift) => validate_orphan_effect(drift),
+            Self::IssueStateDiverged(drift) => validate_issue_state(drift),
+            Self::ReviewStateDiverged(drift) => validate_review_state(drift),
+            Self::MergeStateDiverged(drift) => validate_merge_state(drift),
+            Self::DefaultBranchChanged(drift) => validate_default_branch(drift),
+            Self::InstallationUnreachable(drift) => validate_installation(drift),
+        }
+    }
+
+    /// 严格解码；未知 kind、分支错配、未知字段和缺必填都返回错误。
+    pub fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+
+    pub fn to_value(&self) -> Result<Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for DriftPayload {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        let Value::Object(mut object) = Value::deserialize(deserializer)? else {
+            return Err(D::Error::custom("drift payload must be an object"));
+        };
+        let kind = object
+            .remove("kind")
+            .ok_or_else(|| D::Error::missing_field("kind"))?;
+        let kind = kind
+            .as_str()
+            .ok_or_else(|| D::Error::custom("drift `kind` must be a string"))?
+            .to_owned();
+        if !object.contains_key("delivery_id") {
+            return Err(D::Error::missing_field("delivery_id"));
+        }
+        let value = Value::Object(object);
+        let payload = match kind.as_str() {
+            "pr_state_diverged" => Self::PrStateDiverged(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "head_diverged" => Self::HeadDiverged(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "effect_missing" => Self::EffectMissing(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "orphan_effect" => Self::OrphanEffect(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "issue_state_diverged" => Self::IssueStateDiverged(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "review_state_diverged" => Self::ReviewStateDiverged(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "merge_state_diverged" => Self::MergeStateDiverged(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "default_branch_changed" => Self::DefaultBranchChanged(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            "installation_unreachable" => Self::InstallationUnreachable(
+                serde_json::from_value(value)
+                    .map_err(|error| D::Error::custom(error.to_string()))?,
+            ),
+            other => return Err(D::Error::custom(format!("unknown drift kind `{other}`"))),
+        };
+        payload
+            .validate()
+            .map_err(|error| D::Error::custom(error.to_string()))?;
+        Ok(payload)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct DriftValidationError {
+    message: String,
+}
+
+impl DriftValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+fn check_events(
+    events: &[DriftSynthesizedEvent],
+    allowed: &[DriftSynthesizedEvent],
+) -> Result<(), DriftValidationError> {
+    if events.len() > 1 {
+        return Err(DriftValidationError::new(
+            "at most one synthesized event is allowed",
+        ));
+    }
+    if let Some(event) = events.first() {
+        if !allowed.contains(event) {
+            return Err(DriftValidationError::new(
+                "synthesized event is not allowed for this drift kind",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_target(
+    target: &DriftTarget,
+    predicate: fn(&DriftTarget) -> bool,
+    message: &'static str,
+) -> Result<(), DriftValidationError> {
+    if predicate(target) {
+        Ok(())
+    } else {
+        Err(DriftValidationError::new(message))
+    }
+}
+
+fn validate_pr_state(drift: &PrStateDivergedDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Pr { .. }),
+        "pr_state_diverged target must be pr",
+    )?;
+    check_events(
+        &drift.synthesized_events,
+        &[
+            DriftSynthesizedEvent::PrClosed,
+            DriftSynthesizedEvent::PrMerged,
+        ],
+    )?;
+    match &drift.actual {
+        PrStateActual::Closed {} => {
+            if drift.synthesized_events.first() == Some(&DriftSynthesizedEvent::PrMerged) {
+                return Err(DriftValidationError::new(
+                    "closed pull request cannot synthesize pr_merged",
+                ));
+            }
+        }
+        PrStateActual::Merged { merge_commit_sha } => {
+            if drift.synthesized_events.first() == Some(&DriftSynthesizedEvent::PrClosed) {
+                return Err(DriftValidationError::new(
+                    "merged pull request cannot synthesize pr_closed",
+                ));
+            }
+            if drift.synthesized_events.first() == Some(&DriftSynthesizedEvent::PrMerged)
+                && merge_commit_sha.is_none()
+            {
+                return Err(DriftValidationError::new(
+                    "pr_merged requires merge_commit_sha",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_head(drift: &HeadDivergedDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Pr { .. }),
+        "head_diverged target must be pr",
+    )?;
+    if drift.expected.head_sha == drift.actual.head_sha {
+        return Err(DriftValidationError::new(
+            "head_diverged requires different expected and actual head_sha",
+        ));
+    }
+    check_events(
+        &drift.synthesized_events,
+        &[DriftSynthesizedEvent::PrSynchronized],
+    )?;
+    if drift.synthesized_events.first() == Some(&DriftSynthesizedEvent::PrSynchronized)
+        && drift.actual.pushed_by.is_null()
+    {
+        return Err(DriftValidationError::new(
+            "pr_synchronized requires pushed_by",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_effect_missing(drift: &EffectMissingDrift) -> Result<(), DriftValidationError> {
+    check_events(&drift.synthesized_events, &[])?;
+    match (&drift.expected, &drift.actual) {
+        (
+            EffectMissingExpected::StatusComment { render_digest, .. },
+            EffectMissingActual::ContentChanged {
+                render_digest: actual_digest,
+            },
+        ) => {
+            require_target(
+                &drift.target,
+                |target| matches!(target, DriftTarget::Pr { .. } | DriftTarget::Issue { .. }),
+                "effect_missing status_comment target must be pr or issue",
+            )?;
+            if render_digest == actual_digest {
+                return Err(DriftValidationError::new(
+                    "content_changed render_digest must differ from expected",
+                ));
+            }
+        }
+        (EffectMissingExpected::StatusComment { .. }, EffectMissingActual::Missing {}) => {
+            require_target(
+                &drift.target,
+                |target| matches!(target, DriftTarget::Pr { .. } | DriftTarget::Issue { .. }),
+                "effect_missing status_comment target must be pr or issue",
+            )?;
+        }
+        (EffectMissingExpected::Branch { .. }, EffectMissingActual::Missing {}) => {
+            require_target(
+                &drift.target,
+                |target| matches!(target, DriftTarget::Branch { .. }),
+                "effect_missing branch target must be branch",
+            )?;
+        }
+        (EffectMissingExpected::PullRequest { .. }, EffectMissingActual::Missing {})
+        | (EffectMissingExpected::PullRequest { .. }, EffectMissingActual::StateChanged { .. }) => {
+            require_target(
+                &drift.target,
+                |target| matches!(target, DriftTarget::Pr { .. }),
+                "effect_missing pull_request target must be pr",
+            )?;
+        }
+        _ => {
+            return Err(DriftValidationError::new(
+                "effect_missing actual does not match expected effect",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_orphan_effect(drift: &OrphanEffectDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Pr { .. } | DriftTarget::Issue { .. }),
+        "orphan_effect target must be pr or issue",
+    )?;
+    check_events(&drift.synthesized_events, &[])?;
+    Ok(())
+}
+
+fn validate_issue_state(drift: &IssueStateDivergedDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Issue { .. }),
+        "issue_state_diverged target must be issue",
+    )?;
+    check_events(
+        &drift.synthesized_events,
+        &[
+            DriftSynthesizedEvent::IssueClosed,
+            DriftSynthesizedEvent::IssueReopened,
+        ],
+    )?;
+    match &drift.actual {
+        IssueStateActual::State { state, .. } => {
+            let expected_event = match state {
+                IssueState::Closed => DriftSynthesizedEvent::IssueClosed,
+                IssueState::Open => DriftSynthesizedEvent::IssueReopened,
+            };
+            if let Some(event) = drift.synthesized_events.first() {
+                if *event != expected_event {
+                    return Err(DriftValidationError::new(
+                        "issue_state_diverged event does not match actual state",
+                    ));
+                }
+            }
+        }
+        IssueStateActual::Deleted {} | IssueStateActual::Transferred { .. } => {
+            if !drift.synthesized_events.is_empty() {
+                return Err(DriftValidationError::new(
+                    "deleted or transferred issue cannot synthesize an event",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_review_state(drift: &ReviewStateDivergedDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Pr { .. }),
+        "review_state_diverged target must be pr",
+    )?;
+    check_events(&drift.synthesized_events, &[])?;
+    Ok(())
+}
+
+fn validate_merge_state(drift: &MergeStateDivergedDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Pr { .. }),
+        "merge_state_diverged target must be pr",
+    )?;
+    if !drift.expected.in_merge_queue {
+        return Err(DriftValidationError::new(
+            "merge_state_diverged expected.in_merge_queue must be true",
+        ));
+    }
+    if drift.actual.in_merge_queue {
+        return Err(DriftValidationError::new(
+            "merge_state_diverged actual.in_merge_queue must be false",
+        ));
+    }
+    check_events(
+        &drift.synthesized_events,
+        &[DriftSynthesizedEvent::PrDequeued],
+    )?;
+    Ok(())
+}
+
+fn validate_default_branch(drift: &DefaultBranchChangedDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Repo { .. }),
+        "default_branch_changed target must be repo",
+    )?;
+    check_events(&drift.synthesized_events, &[])?;
+    if drift.expected.default_branch == drift.actual.default_branch {
+        return Err(DriftValidationError::new(
+            "default_branch_changed requires different default_branch values",
+        ));
+    }
+    if let Some(renamed_from) = &drift.actual.renamed_from {
+        if renamed_from != &drift.expected.default_branch {
+            return Err(DriftValidationError::new(
+                "renamed_from must equal the previous default branch",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_installation(drift: &InstallationUnreachableDrift) -> Result<(), DriftValidationError> {
+    require_target(
+        &drift.target,
+        |target| matches!(target, DriftTarget::Installation { .. }),
+        "installation_unreachable target must be installation",
+    )?;
+    check_events(&drift.synthesized_events, &[])?;
+    if !drift.expected.reachable {
+        return Err(DriftValidationError::new(
+            "installation_unreachable expected.reachable must be true",
+        ));
+    }
+    if drift.actual.reachable {
+        return Err(DriftValidationError::new(
+            "installation_unreachable actual.reachable must be false",
+        ));
+    }
+    Ok(())
+}
