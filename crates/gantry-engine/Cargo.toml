@@ -14,5 +14,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+gantry-fakes = { path = "../gantry-fakes" }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 tokio.workspace = true

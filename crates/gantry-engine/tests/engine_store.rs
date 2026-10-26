@@ -61,7 +61,8 @@ async fn engine() -> Engine {
     let store = Store::open_in_memory(StoreDeps { clock, ids }, &[])
         .await
         .unwrap();
-    Engine::new(store)
+    let inbox = Arc::new(gantry_fakes::inbox::FakeInbox::new_in(store.clone()));
+    Engine::new(store, inbox)
 }
 
 fn empty_filter() -> EventFilter {

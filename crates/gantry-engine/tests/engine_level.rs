@@ -62,7 +62,8 @@ async fn engine(cap: Level, effective: Level) -> (Engine, DeliveryId) {
     let store = Store::open_in_memory(StoreDeps { clock, ids }, &[])
         .await
         .unwrap();
-    let engine = Engine::new(store);
+    let inbox = Arc::new(gantry_fakes::inbox::FakeInbox::new_in(store.clone()));
+    let engine = Engine::new(store, inbox);
     let id = engine
         .create_delivery(new_delivery(cap, effective))
         .await

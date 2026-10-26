@@ -2,7 +2,9 @@
 //!
 //! 决策器、调度与副作用执行仍未实现。
 
-use gantry_core::entities::{Actor, NodeStatus, Seq, Stage, StageStatus};
+use std::sync::Arc;
+
+use gantry_core::entities::{Actor, InboxItem, NodeStatus, Seq, Stage, StageStatus};
 use gantry_core::events::{
     DeliveryAbandonedData, DeliveryLevelChangedData, DeliveryPausedData, DeliveryResumedData,
     DeliveryStageChangedData, EventType, LevelChangeKind, NewEvent, NodeRetryRequestedData,
@@ -12,7 +14,9 @@ use gantry_core::ids::{DeliveryId, IdError, NodeId, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::machines::delivery::StageTrigger;
 use gantry_core::machines::TransitionError;
+use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::engine::TemplateCatalog;
+use gantry_core::ports::inbox::{InboxPort, RaiseError, RaiseRequest};
 use gantry_store::{EventFilter, Store, StoreError};
 
 use crate::create::{created_event, NewDelivery};
@@ -39,6 +43,8 @@ pub enum EngineError {
     Validation(&'static str),
     #[error("unsupported: {0}")]
     Unsupported(&'static str),
+    #[error("inbox: {0}")]
+    Inbox(#[from] RaiseError),
 }
 
 pub struct StageRequest {
@@ -53,15 +59,31 @@ pub struct StageRequest {
 
 pub struct Engine {
     store: Store,
+    inbox: Arc<dyn InboxPort>,
 }
 
 impl Engine {
-    pub fn new(store: Store) -> Self {
-        Self { store }
+    pub fn new(store: Store, inbox: Arc<dyn InboxPort>) -> Self {
+        Self { store, inbox }
     }
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// 上报一项；与调用方的事件写入同一事务时由调用方传入事务，此处自开事务。
+    pub async fn raise_inbox(
+        &self,
+        request: RaiseRequest,
+        ctx: &ActorCtx,
+    ) -> Result<InboxItem, EngineError> {
+        let mut tx = self.store.begin_write().await?;
+        let outcome = self.inbox.raise(Some(&mut tx), request, ctx).await?;
+        tx.commit().await?;
+        Ok(match outcome {
+            gantry_core::ports::inbox::RaiseOutcome::Created(written)
+            | gantry_core::ports::inbox::RaiseOutcome::Deduped(written) => written.item,
+        })
     }
 
     /// `levels.graph_templates` 的已实现部分；M1 只有 Low 的模板族。
