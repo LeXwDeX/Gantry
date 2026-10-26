@@ -1,0 +1,72 @@
+:root {
+  color-scheme: dark;
+
+  --bg: #0e1014;
+  --panel: #111418;
+  --card: #151920;
+  --deep: #0f1216;
+  --divider: #22272e;
+  --control-border: #2a3038;
+  --strong-border: #2f353d;
+  --row-selected: #1c2128;
+  --row-text: #c9d1d9;
+
+  --text: #e6e8eb;
+  --text-secondary: #a9b1ba;
+  --text-muted: #8b949e;
+
+  --run: #58a6ff;
+  --need: #e3b341;
+  --ok: #3fb950;
+  --warn: #f0883e;
+  --idle: #6e7681;
+
+  --planner: #a371f7;
+  --worker: #39c5cf;
+  --utility: #8b949e;
+
+  --need-bg: #3a2e12;
+  --need-border: #5a4a1e;
+  --need-soft: #241e10;
+  --warn-bg: #2a1f12;
+  --focus: #58a6ff;
+
+  --font-sans:
+    "Inter", "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Noto Sans SC Variable", ui-monospace, "SFMono-Regular", Menlo, Consolas,
+    monospace;
+
+  --fs-body: 13px;
+  --fs-small: 12px;
+  --fs-micro: 11px;
+  --fs-title: 18px;
+
+  --topbar-h: 44px;
+  --statusbar-h: 30px;
+  --left-w: 240px;
+  --inspector-w: 300px;
+  --drawer-w: 540px;
+  --settings-nav-w: 200px;
+  --settings-content-w: 980px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --transition-fast: 120ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-fast: 0ms linear;
+  }
+}
