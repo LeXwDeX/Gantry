@@ -54,7 +54,7 @@ M1 已按 `docs/modules/engine.md` 实现事件写入与控制面；真实端到
 - Outbox 执行与审批消费；`PolicyPort` 尚未接入引擎。
 - 终结管线；`waiting_human` / `blocked` 尚无自动切换。
 - `attempt.*` 与 `budget.charged` 的事件写入；`open_inbox` 与轮次历史未完整投影。
-- 真实 GitHub App、模型、Podman、目标主机与代码签名；M1 端到端退出标准全部未验证。
+- 真实 GitHub App、模型、Podman、目标主机与代码签名；M1 端到端退出标准全部未验证。各条标准哪些能在本机替身 / 本机虚拟机上取证、哪些必须有外部资源，以及外部资源最小清单，见 [M1 验收证据分级（提议）](docs/m1-acceptance.md)；眼下的阻塞首先是 `forge` / `repo` / `sandbox` / `egress` / `api` 等泳道尚无实现，而非外部环境。
 
 ## 当前后续顺序
 
