@@ -221,9 +221,11 @@ name = "gantry-engine"
 version = "0.1.0"
 dependencies = [
  "gantry-core",
+ "gantry-store",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

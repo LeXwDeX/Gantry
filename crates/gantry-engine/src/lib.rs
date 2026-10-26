@@ -5,6 +5,7 @@
 
 pub mod budget;
 pub mod create;
+pub mod engine;
 pub mod outbox;
 pub mod projection;
 pub mod stage;
@@ -12,6 +13,7 @@ pub mod template;
 
 pub use budget::{charge, check, ledger_for_delivery, remaining};
 pub use create::{budget_from_level, created_event, NewDelivery};
+pub use engine::{Engine, EngineError};
 pub use outbox::{build as build_outbox, OutboxIntent};
 pub use projection::{
     AttemptProjection, DeliveryProjection, NodeProjection, Projection, ProjectionError,
