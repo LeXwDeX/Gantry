@@ -457,7 +457,7 @@
 
 #### 2.2.5 Forge 事件
 
-**推荐规格，待契约审查。** 本文件只定义 `forge.synced`；它仍为 `ContractUndefined`；以下字段、白名单和合成边界是收敛推荐，不是已批准契约。`forge.drift_detected` 由独立 drift 契约定义，不在本文件。
+**推荐规格，待契约审查。** 本文件只定义 `forge.synced`；它仍为 `ContractUndefined`；以下字段与白名单是收敛推荐，不是已批准契约。`forge.drift_detected` 由独立 drift 契约定义，不在本文件。
 
 ##### 2.2.5.1 `forge.synced`
 
