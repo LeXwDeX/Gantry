@@ -309,6 +309,8 @@ pub struct Evidence {                       // 退出证据的本地记录，全
 
 `tier` / `exec` 永远由 `role_binding` 填，不接受模板或事件里的其他值（测试强制，§12）。`critical` 与 `required` 不是 data-model Node 字段，只记在 `workflow.created` / `workflow.revised` 的节点描述里（OQ-12）。
 
+`workflow.created` / `workflow.revised` 的 `NodeDescriptor` 必须带 `node_id`（`nod_…`），与 `node.*` 事件使用同一 ID；否则事件日志无法重建 `WorkflowState.nodes` 映射。
+
 ### 7.3 角色的引擎属性
 
 tier / exec 的固定搭配见 [architecture §9](../architecture.md#9-三类模型)，此处只补引擎要用的属性：
