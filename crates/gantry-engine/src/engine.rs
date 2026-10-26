@@ -12,6 +12,7 @@ use gantry_core::ids::{DeliveryId, IdError, NodeId, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::machines::delivery::StageTrigger;
 use gantry_core::machines::TransitionError;
+use gantry_core::ports::engine::TemplateCatalog;
 use gantry_store::{EventFilter, Store, StoreError};
 
 use crate::create::{created_event, NewDelivery};
@@ -61,6 +62,13 @@ impl Engine {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// `levels.graph_templates` 的已实现部分；M1 只有 Low 的模板族。
+    pub fn template_catalog(&self) -> TemplateCatalog {
+        TemplateCatalog {
+            templates: vec!["low.single".to_owned()],
+        }
     }
 
     /// 在单个写事务中追加 `delivery.created`；相同 `source_message_id` 不重复追加。
