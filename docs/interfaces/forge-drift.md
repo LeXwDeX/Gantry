@@ -35,7 +35,7 @@
 
 - 依据：`forge-actions §7.2`–`§7.4`、`forge.md §7.5` / `§7.7`、`crates/gantry-core/src/ports/forge.rs::DriftKind`、`schemas/forge/drift.json`、`schemas/events/forge.drift_detected.json`。
 - `DriftTarget`、`InstallationUnreachableCode`、`PullRequestReadback`、`IssueReadback` 都是推荐新增类型，不是现有生产类型。
-- 以下 §4.1–§4.6 承载草案 §4.1–§4.6；只调整了指向具体 PR 编号的措辞，不改变字段与规则。§4.4.2 是补充的去重来源记录，草案未单列。
+- 以下 §4.1–§4.6 承载草案 §4.1–§4.6；只调整了指向具体 PR 编号的措辞，不改变字段与规则。§4.4.2 是补充的去重来源记录，§5 是草案散落验收要求的归并，两者都不新增规则。
 
 ## 4. 推荐规格（逐字承载草案 §4.1–§4.6）
 
