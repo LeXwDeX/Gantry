@@ -17,22 +17,29 @@ use gantry_core::forge::{ActionPayload, AddLabelsPayload};
 use gantry_core::ids::{Act, Apr, Att, Dev, Dlv, Id, IdKind, Prj, Ulid};
 use gantry_core::ports::{
     ActionDecision, ActionFacts, ActionRequest, ActorCtx, ApnsEnvironment, ApprovalSpec,
-    BranchName, ClientProfile, CommitInfo, CommitMessage, CommitPatch, CreateWorktree,
-    DeclaredPatch, DedupKey, DenyReason, Disposition, EnqueueError, EnqueueRequest, EnqueuedBy,
-    EnqueuedByModule, ExecutionCheck, Expect, ForgeReader, GateError, InboxPort, LockError,
-    MirrorWant, OptionId, OutboxPort, PatchApprovalCheck, PatchPermit, PolicyPort, PrRefresher,
-    PushToken, RaiseError, RaiseOutcome, RaiseRequest, ReconcileTarget, RepoError, RepoService,
-    RuleId, SafeSummary, SecretSink, SecretSource, SecretValue, SecretVersion, SecretsError,
-    StoreError, TxHandle, ValidatePatch, WorktreeLocks,
+    BranchName, ClassifyPort, ClientProfile, CommitInfo, CommitMessage, CommitPatch,
+    ConversationService, CreateWorktree, DeclaredPatch, DedupKey, DeliveryControl, DenyReason,
+    Disposition, EgressControl, EnqueueError, EnqueueRequest, EnqueuedBy, EnqueuedByModule,
+    ExecutionCheck, Expect, ForgeReader, GateError, HealPort, InboxPort, LockError, MirrorWant,
+    ModelProvider, OptionId, OutboxPort, PatchApprovalCheck, PatchPermit, PathRuleSet, PolicyPort,
+    PrRefresher, PushToken, RaiseError, RaiseOutcome, RaiseRequest, ReconcileTarget, RepoError,
+    RepoService, RuleId, SafeSummary, SandboxService, SecretSink, SecretSource, SecretValue,
+    SecretVersion, SecretsError, StoreError, TxHandle, ValidatePatch, WorkerAdapter, WorktreeLocks,
 };
 use gantry_core::secret::{Consumer, SecretName};
 use gantry_core::time::Timestamp;
 use gantry_core::worker::{PathConstraints, RepoPath};
+use gantry_fakes::conversation::FakeConversation;
+use gantry_fakes::egress::EgressStub;
+use gantry_fakes::engine::FakeEngine;
 use gantry_fakes::forge::{outbox_conformance, FakeForge, FakeWebhook};
 use gantry_fakes::inbox::{dedup_conformance, FakeInbox};
-use gantry_fakes::policy::{action_conformance, execution_conformance, FakePolicy};
+use gantry_fakes::models::FakeModelProvider;
+use gantry_fakes::policy::{action_conformance, execution_conformance, FakePathRules, FakePolicy};
 use gantry_fakes::repo::{lock_conformance, patch_idempotency_conformance, FakeRepo};
+use gantry_fakes::sandbox::FakeSandboxService;
 use gantry_fakes::secrets::{secrets_conformance, MemorySecretStore, MemorySecrets};
+use gantry_fakes::worker::StubWorkerAdapter;
 
 const MS: u64 = 1_700_000_000_000;
 
@@ -956,17 +963,41 @@ fn fakes_compile_against_their_ports() {
     fn assert_reader<T: ForgeReader>() {}
     fn assert_refresher<T: PrRefresher>() {}
     fn assert_repo<T: RepoService>() {}
+    fn assert_locks<T: WorktreeLocks>() {}
     fn assert_policy<T: PolicyPort>() {}
+    fn assert_path_rules<T: PathRuleSet>() {}
     fn assert_inbox<T: InboxPort>() {}
+    fn assert_secret_source<T: SecretSource>() {}
     fn assert_secret_sink<T: SecretSink>() {}
+    fn assert_egress<T: EgressControl>() {}
+    fn assert_delivery<T: DeliveryControl>() {}
+    fn assert_heal<T: HealPort>() {}
+    fn assert_classify<T: ClassifyPort>() {}
+    fn assert_conversation<T: ConversationService>() {}
+    fn assert_models<T: ModelProvider>() {}
+    fn assert_sandbox<T: SandboxService>() {}
+    fn assert_worker<T: WorkerAdapter>() {}
 
     assert_outbox::<FakeForge>();
     assert_reader::<FakeForge>();
     assert_refresher::<FakeForge>();
     assert_repo::<FakeRepo>();
+    assert_locks::<FakeRepo>();
     assert_policy::<FakePolicy>();
+    assert_path_rules::<FakePathRules>();
     assert_inbox::<FakeInbox>();
+    assert_secret_source::<MemorySecrets>();
     assert_secret_sink::<MemorySecrets>();
+    assert_egress::<EgressStub>();
+    assert_delivery::<FakeEngine>();
+    assert_heal::<FakeEngine>();
+    assert_classify::<FakeEngine>();
+    assert_conversation::<FakeConversation>();
+    assert_models::<FakeModelProvider>();
+    assert_sandbox::<FakeSandboxService>();
+    assert_worker::<StubWorkerAdapter>();
+
+    // AddedLineSource 由调用方（repo）实现，没有独立替身；core/tests/ports.rs 断言其 object-safe。
 }
 
 struct ForeignTx;
