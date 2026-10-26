@@ -60,14 +60,14 @@ Node 工程均按现有锁文件以 `npm ci --offline` 安装，复用本机依�
 
 | 工作 | 当前状态与具体剩余项 | 完成条件 / 前置 |
 | --- | --- | --- |
-| B-01 调用终结 | 草案 §2.2.6.4 已给出推荐；2026-10-26 用户确认调用级关闭、只读 `terminal` 证明与长期最小关闭标记方向。现有 `EgressControl` 针对直接调用只有用量查询，没有调用级关闭屏障 | 随 egress 控制面契约 PR 送审并获批准；契约批准且另获实现授权前，直接调用最终结算、释放和零判定保持阻塞 |
-| 独立契约送审 | G-03 / G-04 / G-05 仍开放；C1 定义除 drift 外 13 个事件，C2 定义注入视图与 B-01 调用终结，C3 定义 9 种 drift 与 `forge.drift_detected`。草案内的权重审计、策略目标 / `ActorCtx`、回读 DTO 与枚举增补也须随对应契约审定 | 已获创建授权；形成关联 Issue 的三份独立待审契约 PR 后，仍需逐份批准。方向确认及草案终审不能代替批准 |
+| B-01 调用终结 | 草案 §2.2.6.4 已给出推荐；2026-10-26 用户确认调用级关闭、只读 `terminal` 证明与长期最小关闭标记方向。已随 PR #6 送审。现有 `EgressControl` 针对直接调用只有用量查询，没有调用级关闭屏障 | 随 egress 控制面契约 PR 送审并获批准；契约批准且另获实现授权前，直接调用最终结算、释放和零判定保持阻塞 |
+| 独立契约送审 | G-03 / G-04 / G-05 仍开放；已创建 Issue #3 / #4 / #2 与 PR #8（13 个事件）、#6（注入视图与 B-01）、#9（drift）。草案内的权重审计、策略目标 / `ActorCtx`、回读 DTO 与枚举增补也随对应契约审定 | 三份 PR 均以 `docs/m0-contract-review` 为送审基线，仍需逐份人工批准；方向确认及草案终审不能代替批准 |
 | M0 类型、校验与生成物 | 14 个事件仍拒绝，非空 `ConfigView.injection` 仍拒绝，drift 仍无载荷实现 | 契约批准且另获实现授权后，按草案 §6.2 补类型、端口、适用替身、正负例、schema 和提取夹具；实际通过后才关闭缺口。真实引擎 / Egress 服务不借此提前实现 |
-| 两处错误示例 | G-13 的 `request_id` 实际为 26 字符但含非法 `L` / `U`，不是登记所写的“25 位”；G-15 的 `Message.id` 后缀为 27 字符。已核对原文和提取夹具，草案说明已纠正 | 已获文档 / 夹具清理授权：修原示例及注解，生成 blocks / manifest，再验证并更新 gap / unverified；只在类型验证通过后转完整验证，不直接删 skip |
-| OpenAPI / core 一致性 | 本轮检查仍给出 13 个实体的人工核对信息；字段必填、未知字段及嵌套约束未全部判定。例如 escalation 的 `evidence` 在 core schema 必填、在 OpenAPI 不必填。另有 5 个 settings 路由的响应夹具跳过逐值校验，文档块仍有 14 个仅 schema、20 个部分验证 | 按权威契约逐项区分允许的视图差异与漂移，为真实差异补回归并按批准写集修正；补齐或明确验收例外。不能把 info 当 warning，也不能由“0 failure”推导完全一致 |
-| 端口与替身验收 | 已有替身使用示例；`crates/gantry-core/tests/ports.rs` 已对 17 个跨模块端口及 2 个辅助 trait 做 `dyn` 兼容断言。`state_fakes.rs` 另有 7 个提供方实现的显式编译断言。已定位 `forge` / `repo` / `policy` / `inbox` / `secrets` 中的 7 个可复用一致性辅助用例，但这些数量不证明全部端口的行为覆盖 | 按端口核对提供方签名、已有使用示例、实现绑定与共享行为用例，只补真实缺口，不重复新增已有 `dyn` 断言；真实提供方在对应里程碑接入同一用例，不把 M1 未实现算成 M0 功能缺陷，也不宣称已通过 |
+| 两处错误示例 | 已由 PR #7 修正并重生成提取夹具：G-13 转为 schema-only（`StageSecretRequest` 只实现 Serialize），G-15 转为 partial（示例仍省略时间字段）；剩余 4 个显式未验证块不变 | 文档与登记已按真实验证结果更新；不再列为待修项。没有把任一示例标成完整验证 |
+| OpenAPI / core 一致性 | 本轮检查仍给出 13 个实体的人工核对信息；字段必填、未知字段及嵌套约束未全部判定。例如 escalation 的 `evidence` 在 core schema 必填、在 OpenAPI 不必填。另有 5 个 settings 路由的响应夹具跳过逐值校验，文档块仍有 15 个仅 schema、21 个部分验证 | 按权威契约逐项区分允许的视图差异与漂移，为真实差异补回归并按批准写集修正；补齐或明确验收例外。不能把 info 当 warning，也不能由“0 failure”推导完全一致 |
+| 端口与替身验收 | 全部替身都有使用示例测试；PR #11 把 `state_fakes.rs` 的编译期绑定从 7 个扩到 18 个，覆盖除 `AddedLineSource`（由 repo 调用方实现）外的端口与 `PathRuleSet`。共享一致性辅助用例仍是 7 个，不证明全部行为覆盖 | 真实提供方在对应里程碑接入同一用例；不把 M1 未实现算成 M0 功能缺陷，也不宣称共享行为已全覆盖 |
 | Mock 录制事件验收（已复核） | `crates/gantry-core/tests/events.rs::api_fixture_events_deserialize_and_validate` 已对 `fixtures/api/events.json` 的 7 条事件做 `Event<Value>` 反序列化、`data` 校验及往返测试。Mock 加载同一夹具；`smoke.test.mjs` 验证监听器启动，`http.test.mjs` 验证游标 / `Last-Event-ID` / 过滤后心跳，本次均复跑通过 | 本机相关证据已具备，无须新增同类测试；本项不再列作代码缺口。结果仅覆盖内存 Mock 与录制夹具，不代表真实前后端联调、目标平台或完整 M0 验收通过 |
-| 目标工具链与平台 | 本机只有 Rust 1.97、Node 26 的证据；Rust 1.85 未安装。现有 CI 配置三系统 Rust stable 与 Node 22，但配置存在不等于执行通过，也没有 Rust 1.85 作业 | 获准后补最低 Rust 版本检查，在目标版本及 Linux / macOS / Windows 上取得可追溯到验收提交的结果；本机新版本通过不替代最低版本或远端证据 |
+| 目标工具链与平台 | 远端 CI 已实际运行 macOS / Ubuntu / Windows；macOS 与契约/Mock 作业通过。Ubuntu 的 TestCA 显式日期用例由 PR #11 在 OpenSSL 3.0 上跳过并输出原因。Rust 1.85 仍无作业；前端 `npm ci` 出现 npm 自身 `Exit handler never called`，待重跑确认 | 仍需取得 Rust 1.85 与三系统完整通过的可追溯结果；本机新版本通过不替代最低版本或远端证据，Ubuntu 跳过分支不当作已通过 |
 
 **不重做或不扩展的事项**：B1–B9、R1 和草案字段对齐已完成；M1 真实服务、桌面原生外壳、
 生产鉴权与前后端联调仍未交付，不属于这次文档收尾。协作扩展 P-83–P-86 及
@@ -93,6 +93,20 @@ Node 工程均按现有锁文件以 `npm ci --offline` 安装，复用本机依�
 本次 schema 检查仍为上述 0 failure、0 warning，6 个显式未验证块及既有人工核对项未减少。
 `docs/m0-contract-proposal.md`、`docs/milestones.md`、`docs/collaboration.md` 的已有修改保持原样；
 本次只纠正本文件的盘点与证据；随后按 2026-10-26 授权送审契约，不据此批准契约或实施。
+
+**送审执行记录（2026-10-26）**：送审基线分支 `docs/m0-contract-review`（`da4610d`，含本文件与草案的授权记录）已推送。五个关联 Issue 与 PR 均已创建，全部待人工审查，未合并、未发布：
+
+| PR | 分支 | 内容 | 关联 |
+| --- | --- | --- | --- |
+| #8 | `docs/m0-event-data` | 13 个事件 `data` 送审文档与 8 处引用 | Issue #3 |
+| #6 | `docs/m0-egress-control` | 注入视图、B-01 调用终结与两处 EOF 引用 | Issue #4 |
+| #9 | `docs/m0-forge-drift` | 9 种 drift 与 `forge.drift_detected.data` | Issue #2 |
+| #7 | `fix/m0-ulid-examples` | 两处非法 ULID 与提取夹具、登记 | Issue #5 |
+| #11 | `fix/m0-fake-port-assertions` | 18 个编译期端口绑定；OpenSSL 3.0 日期能力兼容 | Issue #10 / #12 |
+
+本地门禁：五个分支各自 `cargo xtask schemas --check` 为 0 failure、0 warning；契约分支保持 36 / 14 / 20 / 6，PR #7 为 36 / 15 / 21 / 4。文档围栏、JSON 与链接检查通过；`git diff --check` 无输出。PR #7 另运行 events / schema_regressions / protocols / xtask 测试（14 / 13 / 36 / 2 通过），PR #11 的 state_fakes 10 项与 runtime_fakes 11 项通过。
+
+远端 CI：macOS Rust 与契约/Mock 作业通过。Ubuntu 在基线上因 OpenSSL 3.0 不支持 `-not_before` 失败，PR #11 已加能力探测并在不支持时跳过该分支、输出原因；其余四个 PR 需在 PR #11 合入基线后重新运行。前端检查两次出现 npm 自身 `Exit handler never called`，未定位为代码问题，待重跑。Windows 作业尚未完成。这些结果不构成契约批准或完整 M0 验收。
 
 ## 历史：后端第八轮验收（2026-10-25）
 
