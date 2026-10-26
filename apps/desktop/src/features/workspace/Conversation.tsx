@@ -1,5 +1,5 @@
 import type { ReactNode, RefObject } from "react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   Approval,
   Card,
@@ -36,6 +36,16 @@ import {
 import { Chevron, NeedPill, ToneDot } from "./parts";
 import { Composer } from "./Composer";
 import { InboxActions } from "./InboxActions";
+import {
+  SimulationSummaryList,
+  SimulationTemporary,
+  SimulationToolList,
+  simulationFactsForMessages,
+  useSimulationClient,
+  useSimulationSnapshot,
+  type SimulationMessageFacts,
+} from "./SimulationActivity";
+import { ScenarioControls } from "./ScenarioControls";
 
 export interface ConversationProps {
   projectId: string | null;
@@ -57,6 +67,8 @@ export interface ConversationProps {
   onOpenApproval: (approvalId: string) => void;
   onOpenExternal: (url: string) => void;
   onScrolled: () => void;
+  /** 打开执行图；未接线时计划卡按钮禁用并说明。 */
+  onOpenWorkflow?: (workflowId: string, deliveryId?: string) => void;
 }
 
 export function Conversation({
@@ -79,6 +91,7 @@ export function Conversation({
   onOpenApproval,
   onOpenExternal,
   onScrolled,
+  onOpenWorkflow,
 }: ConversationProps): ReactNode {
   const listRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -94,6 +107,12 @@ export function Conversation({
     (delivery) => delivery.stage !== "closed" && delivery.stage !== "abandoned",
   );
   const emptyChat = data.messages.length === 0;
+  const simulationClient = useSimulationClient(controller);
+  const simulation = useSimulationSnapshot(simulationClient);
+  const simulationFacts = useMemo(
+    () => simulationFactsForMessages(simulation, projectId, data.messages),
+    [simulation, projectId, data.messages],
+  );
 
   useLayoutEffect(() => {
     const element = listRef.current;
@@ -186,6 +205,9 @@ export function Conversation({
 
   return (
     <div className="ws-chat">
+      {import.meta.env.MODE !== "production" && simulationClient ? (
+        <ScenarioControls controller={controller} />
+      ) : null}
       <div
         ref={listRef}
         className="ws-chat__scroll"
@@ -251,11 +273,19 @@ export function Conversation({
                 onReply={onReply}
                 onOpenApproval={onOpenApproval}
                 onOpenExternal={onOpenExternal}
+                onOpenWorkflow={onOpenWorkflow}
+                facts={simulationFacts.get(row.message.id)}
                 onChoose={(itemId, optionId) => void controller.choose(itemId, optionId)}
                 onDismiss={(itemId) => void controller.dismiss(itemId)}
               />
             ) : null,
           )}
+
+          <SimulationTemporary
+            snapshot={simulation}
+            projectId={projectId}
+            messages={data.messages}
+          />
         </div>
       </div>
 
@@ -384,6 +414,8 @@ function MessageRow({
   onReply,
   onOpenApproval,
   onOpenExternal,
+  onOpenWorkflow,
+  facts,
   onChoose,
   onDismiss,
 }: {
@@ -397,6 +429,8 @@ function MessageRow({
   onReply: (deliveryId: string) => void;
   onOpenApproval: (approvalId: string) => void;
   onOpenExternal: (url: string) => void;
+  onOpenWorkflow?: (workflowId: string, deliveryId?: string) => void;
+  facts?: SimulationMessageFacts;
   onChoose: (itemId: string, optionId: string) => void;
   onDismiss: (itemId: string) => void;
 }): ReactNode {
@@ -459,10 +493,17 @@ function MessageRow({
             onSelect={onSelect}
             onReply={onReply}
             onOpenApproval={onOpenApproval}
+            onOpenWorkflow={onOpenWorkflow}
             onChoose={onChoose}
             onDismiss={onDismiss}
           />
         ))}
+        {facts?.activities.length ? (
+          <SimulationToolList activities={facts.activities} />
+        ) : null}
+        {facts?.summaries.length ? (
+          <SimulationSummaryList summaries={facts.summaries} />
+        ) : null}
         {message.refs.length > 0 ? (
           <div className="ws-refs">
             {message.refs.map((ref, index) => (
@@ -529,6 +570,7 @@ function MessageCard({
   onSelect,
   onReply,
   onOpenApproval,
+  onOpenWorkflow,
   onChoose,
   onDismiss,
 }: {
@@ -542,6 +584,7 @@ function MessageCard({
   onSelect: (selection: Selection) => void;
   onReply: (deliveryId: string) => void;
   onOpenApproval: (approvalId: string) => void;
+  onOpenWorkflow?: (workflowId: string, deliveryId?: string) => void;
   onChoose: (itemId: string, optionId: string) => void;
   onDismiss: (itemId: string) => void;
 }): ReactNode {
@@ -552,6 +595,7 @@ function MessageCard({
           card={card as Extract<Card, { kind: "plan" }>}
           delivery={delivery}
           workflows={workflows}
+          onOpenWorkflow={onOpenWorkflow}
         />
       );
     case "summary":
@@ -601,10 +645,12 @@ function PlanCard({
   card,
   delivery,
   workflows,
+  onOpenWorkflow,
 }: {
   card: Extract<Card, { kind: "plan" }>;
   delivery: Delivery | null;
   workflows: Record<string, Workflow>;
+  onOpenWorkflow?: (workflowId: string, deliveryId?: string) => void;
 }): ReactNode {
   const workflow =
     workflows[card.workflow_id] ??
@@ -634,6 +680,19 @@ function PlanCard({
       ) : (
         <p className="ws-muted">工作流详情未载入。</p>
       )}
+      <div className="ws-card__actions">
+        <button
+          type="button"
+          className="btn btn-sm ws-card__action"
+          disabled={!onOpenWorkflow}
+          title={onOpenWorkflow ? undefined : "执行图视图尚未接线"}
+          onClick={() =>
+            onOpenWorkflow?.(card.workflow_id, card.delivery_id)
+          }
+        >
+          查看执行图
+        </button>
+      </div>
     </section>
   );
 }
@@ -739,7 +798,7 @@ function ApprovalCard({
             if (view.id) onOpenApproval(view.id);
           }}
         >
-          审阅并签名…
+          审阅审批…
         </button>
       ) : null}
       {!approval && !item ? (

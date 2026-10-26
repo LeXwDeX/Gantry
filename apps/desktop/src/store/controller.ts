@@ -3,13 +3,17 @@ import {
   type ApiResult,
   type ApprovalSheetModel,
   type ConnectionState,
+  type IdentityStatus,
   type IpcAdapter,
+  type OutboxItem,
   type ProjectUiState,
   type Selection,
   type StreamFrame,
 } from "@/api/shell";
 import type {
   Approval,
+  Attempt,
+  BudgetLedger,
   Conversation,
   Delivery,
   InboxItem,
@@ -107,6 +111,13 @@ export class DesktopController {
   private readonly flushing = new Map<string, Promise<void>>();
   private readonly loadingProjects = new Map<string, Promise<void>>();
   private readonly loadedProjects = new Set<string>();
+  /** 身份代际：重置身份后，旧代际的待发项必须由用户显式处理。 */
+  private identityEpoch = 0;
+  /** 成功重置时的代际阈值：更低代际的旧身份项不得写回存储。 */
+  private isolatedOutboxBeforeEpoch = 0;
+  private identityFingerprint: string | null = null;
+  private readonly outboxIdentity = new Map<string, number>();
+  private resetPending = false;
 
   constructor(ipc: IpcAdapter, options: DesktopControllerOptions = {}) {
     this.ipc = ipc;
@@ -167,6 +178,7 @@ export class DesktopController {
       if (!this.running) return;
       const connection = await this.ipc.connectionState();
       if (!this.running) return;
+      this.noteIdentity(identity);
       this.logEpoch = connection.log_epoch;
       this.setState((state) => ({ ...state, identity, connection }));
       if (this.identityBlocked(identity.state) || this.connectionBlocked(connection.phase)) {
@@ -174,6 +186,8 @@ export class DesktopController {
         else this.setState((state) => ({ ...state, status: "unpaired" }));
         return;
       }
+      // 任何终态之后重新配对都会使旧队列失效；即使身份指纹相同也不再自动发送。
+      if (this.terminal) this.breakOutboxIdentity();
       this.terminal = false;
       await this.hydrate("start");
     } catch (error) {
@@ -215,6 +229,7 @@ export class DesktopController {
    */
   private enterTerminalState(): void {
     if (this.terminal) return;
+    this.breakOutboxIdentity();
     this.terminal = true;
     this.generation += 1;
     this.streamToken += 1;
@@ -240,12 +255,109 @@ export class DesktopController {
       inboxSummary: null,
       approvals: {},
       workflows: {},
+      attemptsByNode: {},
+      budgetsByDelivery: {},
       notice: null,
       resyncing: false,
       lastResyncReason: null,
       ui: requeueSending(state.ui),
     }));
     void this.ipc.eventsClose().catch(() => undefined);
+  }
+
+  /**
+   * 身份重置必须经过控制器：外壳删除本机身份后，旧身份的待发队列
+   * 保留到用户明确丢弃或编辑，不会借新身份自动发送。
+   */
+  async resetIdentity(): Promise<IdentityStatus> {
+    // 外壳清理期间身份仍是 paired；暂停持久化，避免定时器把旧草稿写回。
+    this.resetPending = true;
+    try {
+      const identity = await this.ipc.identityReset();
+      // 先接受已成功的重置，避免连接回读失败后以旧身份回写界面。
+      this.noteIdentity(identity);
+      // 重置成功后现有队列都属于旧身份；即使指纹未变也先定代际并抬高隔离阈值。
+      this.breakOutboxIdentity();
+      this.isolatedOutboxBeforeEpoch = this.identityEpoch;
+      this.setState((state) => ({
+        ...state,
+        identity,
+        ui: Object.fromEntries(
+          Object.entries(state.ui).map(([projectId, ui]) => [
+            projectId,
+            { ...defaultProjectUi(), outbox: ui.outbox },
+          ]),
+        ),
+      }));
+      // 外壳重置后连接已断开；state 帧可能随旧事件流一起消失，因此直接回读真实状态。
+      const connection = await this.ipc.connectionState();
+      this.setState((state) => ({ ...state, connection }));
+      return identity;
+    } finally {
+      this.resetPending = false;
+    }
+  }
+
+  /** 旧身份遗留、当前不会自动发送的待发项数量。 */
+  staleOutboxCount(): number {
+    return Object.values(this.state.ui).reduce(
+      (count, ui) => count + ui.outbox.filter((item) => this.isOutboxStale(item)).length,
+      0,
+    );
+  }
+
+  /** 用户明确丢弃旧身份的待发队列；返回删除项数。 */
+  discardStaleOutbox(): number {
+    let removed = 0;
+    for (const [projectId, ui] of Object.entries(this.state.ui)) {
+      const keep = ui.outbox.filter((item) => {
+        if (!this.isOutboxStale(item)) return true;
+        this.outboxIdentity.delete(item.local_id);
+        removed += 1;
+        return false;
+      });
+      if (keep.length !== ui.outbox.length) {
+        this.updateUi({ outbox: keep }, projectId);
+      }
+    }
+    return removed;
+  }
+
+  isOutboxStale(item: OutboxItem): boolean {
+    const epoch = this.outboxIdentity.get(item.local_id);
+    return epoch !== undefined && epoch < this.identityEpoch;
+  }
+
+  private isOutboxSendable(item: OutboxItem): boolean {
+    return !this.isOutboxStale(item);
+  }
+
+  /** 已成功重置的旧身份项：只留在内存，终态也不能写回存储。 */
+  private isOutboxIsolated(item: OutboxItem): boolean {
+    const epoch = this.outboxIdentity.get(item.local_id);
+    return epoch !== undefined && epoch < this.isolatedOutboxBeforeEpoch;
+  }
+
+  private noteIdentity(identity: IdentityStatus): void {
+    const fingerprint = `${identity.state}|${identity.server_host ?? ""}|${
+      identity.device?.id ?? ""
+    }`;
+    if (this.identityFingerprint !== null && this.identityFingerprint !== fingerprint) {
+      this.breakOutboxIdentity();
+    }
+    this.identityFingerprint = fingerprint;
+  }
+
+  /** 记录现有待发项所属身份，然后开启新一代身份。 */
+  private breakOutboxIdentity(): void {
+    for (const ui of Object.values(this.state.ui)) {
+      for (const item of ui.outbox) {
+        if (!this.outboxIdentity.has(item.local_id)) {
+          this.outboxIdentity.set(item.local_id, this.identityEpoch);
+        }
+      }
+    }
+    this.identityEpoch += 1;
   }
 
   // ---------------------------------------------------------------- 选择与界面状态
@@ -347,7 +459,6 @@ export class DesktopController {
         if (seq !== null) seqs.push(seq);
       }
 
-      const currentProjectId = this.resolveProjectId(projects, focusProjectId);
       let ui = this.state.ui;
       try {
         const stored = await this.ipc.uiStateList();
@@ -358,6 +469,8 @@ export class DesktopController {
         ui = this.state.ui;
       }
 
+      // 读取界面状态期间用户可能已切换项目：按最新选择解析，避免旧响应把它改回去。
+      const currentProjectId = this.resolveProjectId(projects, focusProjectId);
       this.setState((state) => ({
         ...state,
         me,
@@ -367,11 +480,8 @@ export class DesktopController {
       }));
 
       this.loadedProjects.clear();
-      const projectIds = projects.map((project) => project.id);
-      const currentData: Record<string, ProjectData> = {};
-      for (const id of projectIds) currentData[id] = emptyProjectData();
       if (currentProjectId) {
-        const snapshot = await this.hydrateProject(gen, currentProjectId, currentData);
+        const snapshot = await this.hydrateProject(gen, currentProjectId);
         if (gen !== this.generation) return;
         seqs.push(...snapshot.seqs);
         this.loadedProjects.add(currentProjectId);
@@ -403,7 +513,6 @@ export class DesktopController {
 
       this.setState((state) => ({
         ...state,
-        projectData: { ...state.projectData, ...currentData },
         inbox,
         inboxSummary,
         status: "ready",
@@ -446,10 +555,11 @@ export class DesktopController {
   private async hydrateProject(
     gen: number,
     projectId: string,
-    sink: Record<string, ProjectData> = {},
   ): Promise<ProjectSnapshot> {
     const seqs: number[] = [];
     const previous = this.dataFor(projectId);
+    // 读取期间发送成功的消息已确认；提交较早快照时不能把它们覆盖掉。
+    const startedMessageIds = new Set(previous.messages.map((m) => m.id));
     const local: {
       deliveries?: Delivery[];
       worktrees?: Worktree[];
@@ -587,7 +697,17 @@ export class DesktopController {
         settings: local.asOf.settings ?? previous.asOf.settings,
       },
     };
-    sink[projectId] = assembled;
+    // 同一对话内只补回读取开始后才出现的确认消息；同 id 的返回版本仍以快照为准。
+    const current = this.dataFor(projectId);
+    const fetchedIds = new Set(assembled.messages.map((m) => m.id));
+    const confirmed = current.conversation?.id === assembled.conversation?.id
+      ? current.messages.filter(
+          (m) => !startedMessageIds.has(m.id) && !fetchedIds.has(m.id),
+        )
+      : [];
+    if (confirmed.length > 0) {
+      assembled.messages = mergeMessages(assembled.messages, confirmed);
+    }
     this.setProjectData(projectId, assembled);
     if (this.state.connection?.phase === "live") {
       void this.flushOutbox(projectId);
@@ -601,8 +721,7 @@ export class DesktopController {
     if (existing) return existing;
     const gen = this.generation;
     const promise = (async () => {
-      const sink: Record<string, ProjectData> = {};
-      await this.hydrateProject(gen, projectId, sink);
+      await this.hydrateProject(gen, projectId);
       if (gen !== this.generation) return;
       this.loadedProjects.add(projectId);
       void this.prefetchWorkflows(gen, projectId);
@@ -628,7 +747,14 @@ export class DesktopController {
     }
     try {
       await this.ipc.eventsOpen({ afterSeq }, (frame) => {
-        if (token !== this.streamToken || gen !== this.generation) return;
+        // 旧流一律失效；当前流在刷新期间收到不可恢复终态时立即停流并进入未配对。
+        if (token !== this.streamToken) return;
+        if (gen !== this.generation) {
+          if (frame.t === "state" && this.isTerminalPhase(frame.state.phase)) {
+            this.handleFrame(frame);
+          }
+          return;
+        }
         this.handleFrame(frame);
       });
     } catch (error) {
@@ -753,6 +879,8 @@ export class DesktopController {
       inboxSummary: null,
       approvals: {},
       workflows: {},
+      attemptsByNode: {},
+      budgetsByDelivery: {},
       resyncing: true,
       lastResyncReason: reason,
       notice:
@@ -787,17 +915,29 @@ export class DesktopController {
       else if (key === "summary") await this.refreshSummary(gen);
       else if (key === "approvals") await this.refreshApprovals(gen);
       else if (key.startsWith("messages:")) {
-        await this.refreshMessages(gen, key.slice("messages:".length));
+        const projectId = key.slice("messages:".length);
+        if (!this.loadedProjects.has(projectId)) await this.ensureProjectLoaded(projectId);
+        else await this.refreshMessages(gen, projectId);
       } else if (key.startsWith("conversation:")) {
-        await this.refreshConversation(gen, key.slice("conversation:".length));
+        const projectId = key.slice("conversation:".length);
+        if (!this.loadedProjects.has(projectId)) await this.ensureProjectLoaded(projectId);
+        else await this.refreshConversation(gen, projectId);
       } else if (key.startsWith("deliveries:")) {
-        await this.refreshDeliveries(gen, key.slice("deliveries:".length));
+        const projectId = key.slice("deliveries:".length);
+        if (!this.loadedProjects.has(projectId)) await this.ensureProjectLoaded(projectId);
+        else await this.refreshDeliveries(gen, projectId);
       } else if (key.startsWith("worktrees:")) {
-        await this.refreshWorktrees(gen, key.slice("worktrees:".length));
+        const projectId = key.slice("worktrees:".length);
+        if (!this.loadedProjects.has(projectId)) await this.ensureProjectLoaded(projectId);
+        else await this.refreshWorktrees(gen, projectId);
       } else if (key.startsWith("settings:")) {
         await this.refreshDefaultLevel(gen, key.slice("settings:".length));
       } else if (key.startsWith("approval:")) {
         await this.refreshApproval(gen, key.slice("approval:".length));
+      } else if (key.startsWith("attempts:")) {
+        await this.refreshAttempts(gen, key.slice("attempts:".length));
+      } else if (key.startsWith("budget:")) {
+        await this.refreshBudget(gen, key.slice("budget:".length));
       } else if (key.startsWith("workflow:")) {
         await this.refreshWorkflow(key.slice("workflow:".length));
       }
@@ -868,19 +1008,23 @@ export class DesktopController {
   private async refreshMessages(gen: number, projectId: string): Promise<void> {
     const data = this.dataFor(projectId);
     if (!data.conversation) return;
+    const conversationId = data.conversation.id;
     const result = await this.read("messages.list", {
-      conversationId: data.conversation.id,
+      conversationId,
       limit: 50,
       order: "desc",
     });
     if (gen !== this.generation || !result.ok) return;
+    // 读取期间可能已切到新对话或发送成功；按当前缓存合并，避免旧列表覆盖新消息。
+    const current = this.dataFor(projectId);
+    if (current.conversation?.id !== conversationId) return;
     const seq = xEventSeq(result);
-    if (isSnapshotStale(seq, data.asOf.messages)) return;
+    if (isSnapshotStale(seq, current.asOf.messages)) return;
     const items = result.body ? [...result.body.items].reverse() : [];
     const next: ProjectData = {
-      ...data,
-      messages: mergeMessages(data.messages, items),
-      asOf: { ...data.asOf, messages: seq ?? data.asOf.messages },
+      ...current,
+      messages: mergeMessages(current.messages, items),
+      asOf: { ...current.asOf, messages: seq ?? current.asOf.messages },
     };
     this.setProjectData(projectId, next);
   }
@@ -976,8 +1120,13 @@ export class DesktopController {
     }));
   }
 
-  private async refreshWorkflow(deliveryId: string): Promise<void> {
+  private async refreshWorkflow(deliveryIdOrWorkflowId: string): Promise<void> {
     const gen = this.generation;
+    if (deliveryIdOrWorkflowId.startsWith("wfl_")) {
+      await this.loadWorkflow(deliveryIdOrWorkflowId);
+      return;
+    }
+    const deliveryId = deliveryIdOrWorkflowId;
     const projectId = this.projectForDelivery(deliveryId);
     const data = projectId ? this.dataFor(projectId) : null;
     const delivery = data?.deliveries.find((item) => item.id === deliveryId);
@@ -989,12 +1138,54 @@ export class DesktopController {
     if (gen !== this.generation || !result.ok) return;
     const latest = latestWorkflow(result.body?.items ?? []);
     if (!latest) return;
-    const detail = await this.read("workflows.get", { workflowId: latest.id });
+    const detail = await this.read("workflows.get", {
+      workflowId: latest.id,
+      includeSuperseded: true,
+    });
     if (gen !== this.generation || !detail.ok || !detail.body) return;
     const workflow = detail.body;
     this.setState((state) => ({
       ...state,
       workflows: { ...state.workflows, [workflow.id]: workflow },
+    }));
+  }
+
+  private async loadWorkflow(workflowId: string): Promise<void> {
+    const gen = this.generation;
+    const detail = await this.read("workflows.get", {
+      workflowId,
+      includeSuperseded: true,
+    });
+    if (gen !== this.generation || !detail.ok || !detail.body) return;
+    const workflow = detail.body;
+    this.setState((state) => ({
+      ...state,
+      workflows: { ...state.workflows, [workflow.id]: workflow },
+    }));
+  }
+
+  private async refreshAttempts(gen: number, nodeId: string): Promise<void> {
+    const result = await this.fetchAllPages<Attempt>((cursor) =>
+      this.read("attempts.list", { nodeId, order: "asc", cursor, limit: 200 }),
+    );
+    if (gen !== this.generation || result.error) return;
+    const items = dedupeById(result.items).sort((a, b) => a.n - b.n);
+    this.setState((state) => ({
+      ...state,
+      attemptsByNode: { ...state.attemptsByNode, [nodeId]: items },
+    }));
+  }
+
+  private async refreshBudget(gen: number, deliveryId: string): Promise<void> {
+    const result = await this.read("deliveries.budget", { deliveryId });
+    if (gen !== this.generation || !result.ok || !result.body) return;
+    const budget = result.body;
+    this.setState((state) => ({
+      ...state,
+      budgetsByDelivery: {
+        ...state.budgetsByDelivery,
+        [deliveryId]: budget,
+      },
     }));
   }
 
@@ -1041,6 +1232,7 @@ export class DesktopController {
       created_at: new Date(this.options.now()).toISOString(),
       state: "queued",
     };
+    this.outboxIdentity.set(item.local_id, this.identityEpoch);
     const nextOutbox = [...ui.outbox, item];
     this.updateUi(
       {
@@ -1070,7 +1262,13 @@ export class DesktopController {
   }
 
   private async flushAllOutboxes(): Promise<void> {
-    const projects = Object.keys(this.state.ui);
+    const projects = Object.entries(this.state.ui)
+      .filter(([, ui]) =>
+        ui.outbox.some(
+          (item) => item.state === "queued" && this.isOutboxSendable(item),
+        ),
+      )
+      .map(([projectId]) => projectId);
     await Promise.all(projects.map((projectId) => this.flushOutbox(projectId)));
   }
 
@@ -1081,26 +1279,32 @@ export class DesktopController {
       const role = this.state.me?.device.role;
       if (!role) return;
       if (!canQueueSend(role)) {
-        const ui = this.uiFor(projectId);
-        if (ui.outbox.some((item) => item.state === "queued" || item.state === "sending")) {
-          this.updateUi(
-            {
-              outbox: ui.outbox.map((item) =>
-                item.state === "queued" || item.state === "sending"
-                  ? { ...item, state: "failed", error_code: "forbidden_role" }
-                  : item,
-              ),
-            },
-            projectId,
-          );
-        }
+        this.failOutbox(projectId, "forbidden_role");
         return;
       }
       const ui = this.uiFor(projectId);
-      const next = ui.outbox.find((item) => item.state === "queued");
+      const next = ui.outbox.find(
+        (item) => item.state === "queued" && this.isOutboxSendable(item),
+      );
       if (!next) return;
-      const data = this.dataFor(projectId);
-      if (!data.conversation) return;
+      let data = this.dataFor(projectId);
+      if (!data.conversation) {
+        // 后台项目的对话可能尚未加载（刷新 / 重同步后）：先加载再发送。
+        if (!this.state.projects.some((project) => project.id === projectId)) {
+          this.failOutbox(projectId, "not_found");
+          this.notify(errorMessage("not_found"));
+          return;
+        }
+        await this.ensureProjectLoaded(projectId);
+        if (gen !== this.generation || this.isTerminalConnection()) return;
+        data = this.dataFor(projectId);
+        if (!data.conversation) {
+          // 下次刷新或事件仍会重试，不静默丢队列。
+          this.loadedProjects.delete(projectId);
+          this.notify("对话尚未载入，待发送消息已保留；恢复后会重试。");
+          return;
+        }
+      }
       this.markOutbox(projectId, next.local_id, "sending");
       const body = {
         text: next.text,
@@ -1161,6 +1365,9 @@ export class DesktopController {
     const target = projectId ?? this.state.currentProjectId;
     if (!target) return;
     const ui = this.uiFor(target);
+    if (!ui.outbox.some((item) => item.local_id === localId)) return;
+    // 重试是用户对旧身份待发项的明确处置：改用当前身份发送。
+    this.outboxIdentity.set(localId, this.identityEpoch);
     const next = ui.outbox.map((item) =>
       item.local_id === localId
         ? { ...item, state: "queued" as const, error_code: null }
@@ -1177,6 +1384,7 @@ export class DesktopController {
     const ui = this.uiFor(target);
     const item = ui.outbox.find((entry) => entry.local_id === localId);
     if (!item) return;
+    this.outboxIdentity.delete(localId);
     const outbox = ui.outbox.filter((entry) => entry.local_id !== localId);
     this.updateUi(
       {
@@ -1193,9 +1401,27 @@ export class DesktopController {
     const target = projectId ?? this.state.currentProjectId;
     if (!target) return;
     const ui = this.uiFor(target);
+    this.outboxIdentity.delete(localId);
     this.updateUi(
       { outbox: ui.outbox.filter((entry) => entry.local_id !== localId) },
       target,
+    );
+  }
+
+  private failOutbox(projectId: string, code: string): void {
+    const ui = this.uiFor(projectId);
+    if (!ui.outbox.some((item) => item.state === "queued" || item.state === "sending")) {
+      return;
+    }
+    this.updateUi(
+      {
+        outbox: ui.outbox.map((item) =>
+          item.state === "queued" || item.state === "sending"
+            ? { ...item, state: "failed", error_code: code }
+            : item,
+        ),
+      },
+      projectId,
     );
   }
 
@@ -1344,6 +1570,10 @@ export class DesktopController {
         ...data,
         deliveries: mergeDeliveries(data.deliveries, [result.body as Delivery]),
       });
+      await Promise.all([
+        this.refreshWorkflow(deliveryId),
+        this.refreshBudget(this.generation, deliveryId),
+      ]);
     }
   }
 
@@ -1365,10 +1595,12 @@ export class DesktopController {
     }
     if (!result.body) return;
     const node = result.body;
+    let deliveryId: string | null = null;
     this.setState((state) => {
       const workflows = { ...state.workflows };
       for (const [id, workflow] of Object.entries(workflows)) {
         if (workflow.nodes?.some((entry) => entry.id === node.id)) {
+          deliveryId = workflow.delivery_id;
           workflows[id] = {
             ...workflow,
             nodes: workflow.nodes?.map((entry) =>
@@ -1379,6 +1611,13 @@ export class DesktopController {
       }
       return { ...state, workflows };
     });
+    await this.ensureAttempts(node.id);
+    if (deliveryId) {
+      await Promise.all([
+        this.refreshWorkflow(deliveryId),
+        this.refreshBudget(this.generation, deliveryId),
+      ]);
+    }
   }
 
   async approvalPrepare(approvalId: string): Promise<ApprovalSheetModel> {
@@ -1406,7 +1645,7 @@ export class DesktopController {
         ...state,
         approvals: { ...state.approvals, [approval.id]: approval },
       }));
-      await this.refreshAfterWrite();
+      await this.refreshAfterWrite(this.projectForApproval(approval));
     }
     return result;
   }
@@ -1450,7 +1689,7 @@ export class DesktopController {
         ...state,
         approvals: { ...state.approvals, [approval.id]: approval },
       }));
-      await this.refreshAfterWrite();
+      await this.refreshAfterWrite(this.projectForApproval(approval));
     }
     return result;
   }
@@ -1461,6 +1700,41 @@ export class DesktopController {
       return;
     }
     await this.hydrate("refresh");
+  }
+
+  /** 供审批单在模拟操作后读取最新审批；结果进入同一 DesktopState。 */
+  async ensureApproval(approvalId: string): Promise<void> {
+    if (this.isTerminalConnection()) return;
+    await this.refreshApproval(this.generation, approvalId);
+  }
+
+  /** 供 DAG 详情按需读取；结果进入同一 DesktopState。 */
+  async ensureAttempts(nodeId: string): Promise<void> {
+    if (this.isTerminalConnection()) return;
+    await this.refreshAttempts(this.generation, nodeId);
+  }
+
+  async ensureBudget(deliveryId: string): Promise<void> {
+    if (this.isTerminalConnection()) return;
+    await this.refreshBudget(this.generation, deliveryId);
+  }
+
+  async ensureWorkflow(workflowId: string): Promise<void> {
+    if (this.isTerminalConnection()) return;
+    await this.loadWorkflow(workflowId);
+  }
+
+  /** 供检视器在未预取工作流时按交付读取当前图。 */
+  async ensureWorkflowForDelivery(deliveryId: string): Promise<void> {
+    if (this.isTerminalConnection()) return;
+    await this.refreshWorkflow(deliveryId);
+  }
+
+  workflowForDelivery(deliveryId: string): Workflow | null {
+    const candidates = Object.values(this.state.workflows).filter(
+      (workflow) => workflow.delivery_id === deliveryId,
+    );
+    return latestWorkflow(candidates);
   }
 
   signAvailability(
@@ -1525,6 +1799,17 @@ export class DesktopController {
       if (delivery.id === deliveryId) return delivery.project_id;
     }
     return null;
+  }
+
+  private projectForApproval(approval: Approval): string | undefined {
+    if (approval.delivery_id) {
+      const projectId = this.projectForDelivery(approval.delivery_id);
+      if (projectId) return projectId;
+    }
+    return this.state.inbox.find((item) => {
+      const payload = item.payload as { approval_id?: unknown };
+      return payload.approval_id === approval.id;
+    })?.project_id ?? undefined;
   }
 
   deliveryById(deliveryId: string): Delivery | null {
@@ -1599,6 +1884,7 @@ export class DesktopController {
     await Promise.all([
       this.refreshInbox(this.generation),
       this.refreshSummary(this.generation),
+      this.refreshApprovals(this.generation),
     ]);
     const target = projectId ?? this.state.currentProjectId;
     if (target) await this.refreshDeliveries(this.generation, target);
@@ -1615,10 +1901,18 @@ export class DesktopController {
   }
 
   private async persistUi(projectId: string): Promise<void> {
+    // 重置后外壳已删除旧身份的界面状态；停止或迟到的写入不得把它写回。
+    if (this.resetPending || this.state.identity?.state === "unpaired") return;
     const state = this.state.ui[projectId];
     if (!state) return;
+    // 旧身份的待发项只留在当前会话；但尚未重置的终态仍属原身份，照常保存。
+    const outbox = this.isTerminalConnection()
+      ? state.outbox.filter((item) => !this.isOutboxIsolated(item))
+      : state.outbox.filter((item) => !this.isOutboxStale(item));
+    const persisted =
+      outbox.length === state.outbox.length ? state : { ...state, outbox };
     try {
-      await this.ipc.uiStateSet({ projectId, state });
+      await this.ipc.uiStateSet({ projectId, state: persisted });
     } catch {
       // ui_state 写入失败不阻塞界面；下次编辑会再次尝试。
     }

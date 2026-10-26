@@ -48,6 +48,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   "shell.self_check_failed": "服务端数据不一致，无法签名。",
   "shell.key_unavailable": "审批签名密钥不可用，请检查设备密钥或重新配对。",
   "shell.unavailable": "桌面外壳未连接：请在 Tauri 应用内运行。",
+  "shell.pairing_failed": "模拟配对预检失败；未生成密钥或证书，可再次重试。",
 };
 
 export function errorMessage(code: string | null | undefined): string {
@@ -87,7 +88,7 @@ export function settingsIssueMessage(code: string): string {
     case "secret_clear_in_use":
       return "使用中的凭据不能被清空。";
     case "scenario_mode":
-      return "示例模式不提交、不保存。";
+      return "示例模式：本次只修改内存，不提交真实服务。";
     default:
       return "未通过校验。";
   }

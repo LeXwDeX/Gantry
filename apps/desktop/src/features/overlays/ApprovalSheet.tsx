@@ -16,8 +16,9 @@ import type { DesktopController } from "@/store/controller";
 import type { DesktopState } from "@/store/state";
 import { Modal } from "@/a11y/Modal";
 import { isScenarioAdapter } from "@/ipc";
-import { approvalStatus, shortSha, signButtonLabel } from "@/store/sign";
+import { shortSha, signButtonLabel } from "@/store/sign";
 import { UntrustedText } from "@/render";
+import { simulationFor } from "@/features/workspace/SimulationActivity";
 import { ScenarioMark } from "./ScenarioMark";
 import {
   formatDateTime,
@@ -57,6 +58,7 @@ export function ApprovalSheet({
   const [approverName, setApproverName] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const preparedRef = useRef<string | null>(null);
+  const signedRef = useRef(false);
   const aliveRef = useRef(true);
   const prepareSeq = useRef(0);
   const startedRef = useRef(false);
@@ -95,6 +97,7 @@ export function ApprovalSheet({
     setSignError(null);
     setSignDone(null);
     setHandleSpent(false);
+    signedRef.current = false;
     discardPrepared();
     setSheet(null);
     const requestedKey = approvalKeyRef.current;
@@ -176,6 +179,9 @@ export function ApprovalSheet({
       ignoreChangeRef.current = false;
       return;
     }
+    // 签名返回的终态可能被一次过期的 pending 列表刷新短暂覆盖；
+    // 仍保留签名结果，直到用户重新载入。
+    if (signedRef.current && approval?.status === "pending") return;
     if (!preparedRef.current && !sheet) {
       setChanged(true);
       return;
@@ -186,7 +192,7 @@ export function ApprovalSheet({
     setHandleSpent(false);
     setSignError(null);
     setSignDone(null);
-  }, [approvalKey, discardPrepared, sheet]);
+  }, [approval, approvalKey, discardPrepared, sheet]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowTick(Date.now()), 1000);
@@ -234,13 +240,53 @@ export function ApprovalSheet({
   }, [approval, approverName, controller, nowTick, sheet, state.connection, state.me]);
 
   const unsignedGates = sheet ? unsignedGateIssues(sheet.unsigned.pr) : [];
-  const scenario = isScenarioAdapter(controller.ipc);
+  // Keep the demo-only approval affordance out of the production bundle. The
+  // mode constant is folded by Vite before Rollup tree-shaking.
+  const scenario =
+    import.meta.env.MODE !== "production" && isScenarioAdapter(controller.ipc);
+  const simulation = simulationFor(controller);
+  const approvalDelivery = findApprovalDelivery(state, approval);
+  const liveHead =
+    !approval ||
+    approval.target.kind !== "pr" ||
+    approvalDelivery?.pr?.head_sha === approval.subject_digest;
+  const simulateBlockText = !scenario
+    ? null
+    : !simulation
+      ? "应用内模拟边界不可用；生产签名仍被拒绝。"
+      : !approval || approval.status !== "pending"
+        ? "审批已不是待处理状态。"
+        : state.connection?.phase !== "live"
+          ? "连接无效，不能模拟批准。"
+          : state.me?.profile !== "desktop" ||
+              state.me.device.role !== "approver"
+            ? "只有审批设备可以模拟批准。"
+            : !liveHead
+              ? "PR head 已变化，审批载荷不再对应当前代码。"
+              : !sheet ||
+                  sheet.signed.tech.approval_id !== approval.id
+                ? "审批单尚未载入或已变化，请重新载入。"
+                : challengeExpired
+                  ? "确认窗口已过期，请重新载入。"
+                  : expiresLeft !== null && expiresLeft <= 0
+                    ? "审批已过期。"
+                    : "";
+  const canSimulate =
+    scenario && simulation !== null && simulateBlockText === "";
   const signBlocked =
     !availability.ok || handleSpent || unsignedGates.length > 0;
+  // 场景中的非待签审批没有 signature；载荷区只是演示载荷，不能称为已签名。
+  const simulated =
+    scenario &&
+    approval !== null &&
+    approval.status !== "pending" &&
+    approval.signature === null;
   const blockText = handleSpent
-    ? signDone
-      ? "签名请求已返回，签名句柄已使用；如需再次签名请重新载入。"
-      : "签名句柄已丢弃，请重新载入审批单后再核对。"
+    ? simulated
+      ? "本次模拟没有生成签名，也没有可复用的签名句柄；如需重新演示，请重新载入审批单。"
+      : signDone
+        ? "签名请求已返回，签名句柄已使用；如需再次签名请重新载入。"
+        : "签名句柄已丢弃，请重新载入审批单后再核对。"
     : unsignedGates.length > 0
       ? `先在 GitHub 上完成必需的 review 与 checks，才能签名：${unsignedGates.join("；")}。`
       : !availability.ok
@@ -260,15 +306,19 @@ export function ApprovalSheet({
     setSigning(true);
     setSignError(null);
     setSignDone(null);
+    signedRef.current = true;
     ignoreChangeRef.current = true;
     try {
       const result = await controller.approvalSign(sheet.prepared_id);
-      if (!result.ok) ignoreChangeRef.current = false;
+      if (!result.ok) {
+        signedRef.current = false;
+        ignoreChangeRef.current = false;
+      }
       discardPrepared();
       setHandleSpent(true);
       if (result.ok && result.body) {
         setSignDone(
-          `签名请求已返回：${approvalStatus(result.body.status).label}。以服务端状态为准。`,
+          `签名请求已返回：${controller.approvalStatus(result.body).label}。以服务端状态为准。`,
         );
       } else if (result.ok) {
         setSignDone("签名请求已返回；请重新载入审批单查看服务端状态。");
@@ -281,10 +331,36 @@ export function ApprovalSheet({
         setSignError(parseApiFailure(result));
       }
     } catch (failure) {
+      signedRef.current = false;
       ignoreChangeRef.current = false;
       discardPrepared();
       setHandleSpent(true);
       setSignError(ipcErrorText(failure));
+    } finally {
+      setSigning(false);
+    }
+  };
+
+  const handleSimulateApprove = async (): Promise<void> => {
+    if (!approval || !simulation || !canSimulate || signing || denyBusy) return;
+    setSigning(true);
+    setSignError(null);
+    setSignDone(null);
+    ignoreChangeRef.current = true;
+    try {
+      const result = simulation.simulateApproval(approval.id);
+      if (!result.ok) {
+        ignoreChangeRef.current = false;
+        setSignError(result.message ?? "模拟批准被拒绝。");
+        return;
+      }
+      signedRef.current = true;
+      discardPrepared();
+      setHandleSpent(true);
+      setSignDone(
+        "模拟批准已应用：未生成 signature，未调用真实签名或 GitHub；交付已关闭，也没有写入 merge queue。仅修改开发场景内存。",
+      );
+      await controller.ensureApproval(approval.id);
     } finally {
       setSigning(false);
     }
@@ -295,6 +371,21 @@ export function ApprovalSheet({
     setDenyBusy(true);
     setDenyError(null);
     try {
+      if (scenario && simulation) {
+        ignoreChangeRef.current = true;
+        const result = simulation.simulateDenial(approval.id);
+        if (!result.ok) {
+          ignoreChangeRef.current = false;
+          setDenyError(result.message ?? "模拟拒绝被拒绝。");
+          return;
+        }
+        discardPrepared();
+        setSignDone(
+          "模拟拒绝已应用：未生成 signature，未调用真实签名或 GitHub；交付已放弃。仅修改开发场景内存。",
+        );
+        await controller.ensureApproval(approval.id);
+        return;
+      }
       const result = await controller.denyApproval(approval.id);
       if (!result.ok) setDenyError(parseApiFailure(result));
     } catch (failure) {
@@ -419,8 +510,13 @@ export function ApprovalSheet({
 
         {sheet ? (
           <>
-            <section className="ov-approval__signed" aria-label="已签名信息">
-              <h3 className="ov-settings__h3">已签名信息</h3>
+            <section
+              className="ov-approval__signed"
+              aria-label={simulated ? "演示载荷信息" : "已签名信息"}
+            >
+              <h3 className="ov-settings__h3">
+                {simulated ? "待签名载荷（模拟，未生成签名）" : "已签名信息"}
+              </h3>
               <dl className="ov-approval__grid">
                 <dt>动作</dt>
                 <dd>{sheet.signed.action_label}</dd>
@@ -471,7 +567,9 @@ export function ApprovalSheet({
               </p>
 
               <details className="ov-approval__tech">
-                <summary>技术细节（已签名）</summary>
+                <summary>
+                  {simulated ? "技术细节（演示载荷）" : "技术细节（已签名）"}
+                </summary>
                 <dl className="ov-approval__grid">
                   <dt>approval_id</dt>
                   <dd className="ov-mono ov-break">{sheet.signed.tech.approval_id}</dd>
@@ -647,15 +745,35 @@ export function ApprovalSheet({
                 </div>
               ) : null}
 
+              {simulateBlockText ? (
+                <div role="status" className="ov-approval__block">
+                  {simulateBlockText}
+                </div>
+              ) : null}
               <div className="ov-approval__actions">
+                {scenario ? (
+                  <button
+                    type="button"
+                    className="ov-btn ov-btn--primary"
+                    disabled={!canSimulate || signing || denyBusy}
+                    title={!canSimulate ? simulateBlockText ?? undefined : undefined}
+                    onClick={() => void handleSimulateApprove()}
+                  >
+                    {signing ? "正在应用模拟批准…" : "模拟批准（不生成签名）"}
+                  </button>
+                ) : null}
                 <button
                   type="button"
-                  className="ov-btn ov-btn--primary"
+                  className={`ov-btn${scenario ? "" : " ov-btn--primary"}`}
                   disabled={signBlocked || challengeExpired || signing || denyBusy}
                   title={signBlocked ? blockText : undefined}
                   onClick={() => void handleSign()}
                 >
-                  {signing ? "等待系统确认…" : signButtonLabel(platform)}
+                  {signing
+                    ? "等待系统确认…"
+                    : scenario
+                      ? "生产签名批准（示例模式拒绝）"
+                      : signButtonLabel(platform)}
                 </button>
                 <button
                   type="button"
@@ -664,7 +782,7 @@ export function ApprovalSheet({
                   title={!canDeny ? denyBlockText : undefined}
                   onClick={() => void handleDeny()}
                 >
-                  {denyBusy ? "正在拒绝…" : "拒绝"}
+                  {denyBusy ? "正在拒绝…" : scenario ? "模拟拒绝" : "拒绝"}
                 </button>
                 {challengeExpired || !sheet || handleSpent ? (
                   <button
@@ -677,7 +795,9 @@ export function ApprovalSheet({
                 ) : null}
               </div>
               <p className="ov-settings__meta">
-                签名只提交外壳持有的 prepared_id；界面不会伪造签名、配对或保存成功。
+                {scenario
+                  ? "模拟批准只改变开发场景内存中的审批状态，不生成 signature、证书或网络写入；生产签名路径在示例模式始终拒绝。"
+                  : "签名只提交外壳持有的 prepared_id；界面不会伪造签名、配对或保存成功。"}
               </p>
             </section>
           </>
@@ -685,6 +805,20 @@ export function ApprovalSheet({
       </div>
     </Modal>
   );
+}
+
+function findApprovalDelivery(
+  state: DesktopState,
+  approval: Approval | null,
+): import("@/api/types").Delivery | null {
+  if (!approval?.delivery_id) return null;
+  for (const data of Object.values(state.projectData)) {
+    const delivery = data.deliveries.find(
+      (item) => item.id === approval.delivery_id,
+    );
+    if (delivery) return delivery;
+  }
+  return null;
 }
 
 interface TargetRow {

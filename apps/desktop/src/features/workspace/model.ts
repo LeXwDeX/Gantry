@@ -1312,5 +1312,3 @@ export function inboxCountForProject(
     0
   );
 }
-
-

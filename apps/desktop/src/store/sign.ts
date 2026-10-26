@@ -238,8 +238,38 @@ export function approvalStatusLabel(
       }
       return { label: "待签名", tone: "need" };
     }
-    case "granted":
-      return { label: "已签名 · 排队 merge", tone: "run" };
+    case "granted": {
+      // 审批枚举只表示“已批准”；签名与合并进度必须另由事实佐证。
+      const signed =
+        typeof approval.signature === "string" && approval.signature.length > 0;
+      if (options.deliveryStage === "abandoned") {
+        return {
+          label: signed ? "已批准 · 交付已放弃" : "已批准 · 交付已放弃（未签名）",
+          tone: "idle",
+        };
+      }
+      if (options.prState === "merged") {
+        return {
+          label: `已批准 · PR 已合并 ${shortSha(
+            options.headSha ?? approval.subject_digest,
+          )}`,
+          tone: "ok",
+        };
+      }
+      if (options.deliveryStage === "closed") {
+        return {
+          label: signed ? "已批准 · 交付已关闭" : "已批准 · 交付已关闭（未签名）",
+          tone: "ok",
+        };
+      }
+      if (signed) {
+        return { label: "已签名 · 等待合并", tone: "run" };
+      }
+      return {
+        label: "已批准 · 未生成签名",
+        tone: options.deliveryStage === "merge" ? "warn" : "run",
+      };
+    }
     case "consumed":
       if (options.prState === "merged") {
         return {
@@ -263,6 +293,12 @@ export function approvalStatusLabel(
     case "expired":
       return { label: "已过期", tone: "idle" };
     case "denied":
+      if (options.deliveryStage === "abandoned") {
+        return { label: "已拒绝 · 交付已放弃", tone: "idle" };
+      }
+      if (options.deliveryStage === "closed") {
+        return { label: "已拒绝 · 交付已关闭", tone: "idle" };
+      }
       return { label: "已拒绝，回到评审", tone: "idle" };
     default:
       return { label: "未知状态", tone: "idle" };
@@ -276,7 +312,7 @@ export function approvalStatus(
     case "pending":
       return { label: "待签名", tone: "need" };
     case "granted":
-      return { label: "已签名 · 排队 merge", tone: "run" };
+      return { label: "已批准", tone: "run" };
     case "consumed":
       return { label: "已执行", tone: "ok" };
     case "invalidated":

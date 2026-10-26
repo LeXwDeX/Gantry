@@ -1,6 +1,8 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
+test.setTimeout(60_000);
+
 async function openWorkspace(page: Page, scenario = 'default') {
   await page.goto(`/?scenario=${scenario}`);
   await expect(page.locator('#composer')).toBeVisible();
@@ -95,14 +97,21 @@ test('收件箱可用键盘关闭，焦点回到入口', async ({ page }, info) 
 test('审批展示完整摘要，但开发场景不能签名', async ({ page }, info) => {
   await openWorkspace(page);
   await page.getByRole('button', { name: '需要你 · 4', exact: true }).click();
-  await page.getByRole('dialog').getByRole('button', { name: /审阅并签名/ }).first().click();
+  await page.getByRole('dialog').getByRole('button', { name: /审阅审批/ }).first().click();
   const sheet = page.getByRole('dialog');
   await expect(sheet.getByText(/[a-f0-9]{40}/).first()).toBeVisible();
   await expect(sheet.getByText(/未签名信息/)).toBeVisible();
-  await expect(sheet.getByRole('button', { name: /用 (Touch ID|Windows Hello) 签名批准/ })).toBeDisabled();
+  await expect(sheet.getByRole('button', { name: /生产签名批准（示例模式拒绝）/ })).toBeDisabled();
+  await expect(sheet.getByText(/Touch ID|Windows Hello/)).toHaveCount(0);
+  await expect(sheet.getByText(/生产签名路径在示例模式始终拒绝/)).toBeVisible();
   await noOverflow(page);
   await accessible(page);
   await page.screenshot({ path: info.outputPath('approval.png'), fullPage: true });
+  const simulate = sheet.getByRole('button', { name: '模拟批准（不生成签名）' });
+  await expect(simulate).toBeEnabled();
+  await simulate.click();
+  await expect(sheet.getByText(/模拟批准已应用：未生成 signature/)).toBeVisible();
+  await expect(sheet.getByRole('button', { name: /签名批准/ })).toBeDisabled();
 });
 
 test('不可信内容不生成元素、不加载远程图片，链接主机可见', async ({ page }) => {
@@ -128,6 +137,9 @@ test('正式产物在浏览器中关闭运行，不回退示例', async ({ page 
   await expect(page.getByText(/外壳.*(不可用|未连接|未接入|未就绪)/).first()).toBeVisible();
   await expect(page.locator('#composer')).toHaveCount(0);
   await expect(page.getByText('示例数据', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: '开发场景工具' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /开发场景/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /模拟批准/ })).toHaveCount(0);
 });
 
 test('受保护保存清空凭据且不假报成功，未保存离开受拦截', async ({ page }) => {
@@ -144,20 +156,30 @@ test('受保护保存清空凭据且不假报成功，未保存离开受拦截',
   await secret.fill('test-only-not-a-real-key');
   await settings.getByRole('button', { name: '保存', exact: true }).click();
   await expect(secret).toHaveValue('');
-  await expect(settings.getByRole('button', { name: '确认提交', exact: true })).toBeDisabled();
-  await expect(settings.getByText(/已保存（rev/)).toHaveCount(0);
+  const apply = settings.getByRole('button', { name: '模拟应用设置', exact: true });
+  await expect(apply).toBeEnabled();
+  await apply.click();
+  await expect(settings.getByText(/模拟设置已应用/)).toBeVisible();
+  expect(await settings.textContent()).not.toContain('test-only-not-a-real-key');
+  await secret.fill('test-only-dirty-value');
   await settings.getByRole('button', { name: '返回工作区', exact: true }).click();
   await page.getByRole('button', { name: '放弃改动并返回', exact: true }).click();
   await expect(page.locator('#composer')).toHaveValue('返回后仍保留');
 });
 
 for (const phase of ['revoked', 'cert_expired'] as const) {
-  test(`运行中 ${phase} 立即阻塞工作区`, async ({ page }) => {
+  test(`运行中 ${phase} 阻塞工作区，重置后显示未配对`, async ({ page }) => {
     await openWorkspace(page);
     await page.evaluate((next) => window.__GANTRY_SCENARIO__!.setConnection(next), phase);
     await expect(page.locator('#composer')).toHaveCount(0);
     await expect(page.getByText(phase === 'revoked' ? '此设备已被吊销，需要重新配对。' : '证书已过期，需要重新配对。', { exact: true })).toBeVisible();
     await page.evaluate(() => window.__GANTRY_SCENARIO__!.setConnection('live'));
     await expect(page.locator('#composer')).toHaveCount(0);
+    await page.getByRole('button', { name: '重置本机身份…', exact: true }).click();
+    await page.getByRole('button', { name: '确认重置', exact: true }).click();
+    await expect(page.getByText('此设备尚未配对。配对完成后才能载入工作区。', { exact: true })).toBeVisible();
+    await expect(page.getByText('此设备已被吊销，需要重新配对。', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('证书已过期，需要重新配对。', { exact: true })).toHaveCount(0);
+    await noOverflow(page);
   });
 }

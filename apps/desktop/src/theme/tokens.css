@@ -32,10 +32,10 @@
   --focus: #58a6ff;
 
   --font-sans:
-    "Inter", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system,
+    "Inter", "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system,
     "Segoe UI", sans-serif;
   --font-mono:
-    "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas,
+    "JetBrains Mono", "Noto Sans SC Variable", ui-monospace, "SFMono-Regular", Menlo, Consolas,
     monospace;
 
   --fs-body: 13px;

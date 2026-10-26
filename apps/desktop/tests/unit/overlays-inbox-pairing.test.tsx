@@ -49,7 +49,7 @@ describe("InboxOverlay", () => {
       expect(within(specgit).getByText("1 项")).toBeInTheDocument();
 
       fireEvent.click(
-        within(gantry).getByRole("button", { name: "审阅并签名…" }),
+        within(gantry).getByRole("button", { name: "审阅审批…" }),
       );
       expect(onApproval).toHaveBeenCalledWith("apr_gantry_9");
 
@@ -188,7 +188,7 @@ describe("PairingView", () => {
     return { adapter, controller };
   }
 
-  it("提交配对串与设备名；开发外壳不可用时显示错误且不生成确认码", async () => {
+  it("模拟配对：固定测试确认码只来自适配层，配对串用后清空且不生成真实证书", async () => {
     const { controller, adapter } = await unpaired();
     const begin = vi.spyOn(adapter, "pairingBegin");
     try {
@@ -197,6 +197,52 @@ describe("PairingView", () => {
           {(state) => <PairingView controller={controller} state={state} />}
         </Live>,
       );
+      const pairingInput = screen.getByLabelText("配对串");
+      expect(screen.getByText("示例数据")).toBeInTheDocument();
+      expect(
+        screen.getByText(/模拟配对：只在本会话内存中核对设备名与确认码/),
+      ).toBeInTheDocument();
+      fireEvent.change(pairingInput, {
+        target: { value: "gantry+pair://example" },
+      });
+      fireEvent.change(screen.getByLabelText("设备名"), {
+        target: { value: "测试 Mac" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "开始配对" }));
+      expect(await screen.findByText("492 713")).toBeInTheDocument();
+      expect(begin).toHaveBeenCalledWith({
+        pairingString: "gantry+pair://example",
+        deviceName: "测试 Mac",
+      });
+      expect(pairingInput).toHaveValue("");
+      expect(document.body.textContent).not.toContain("gantry+pair://example");
+      expect(document.body.textContent).not.toContain("signature");
+      expect(document.body.textContent).not.toContain("BEGIN CERTIFICATE");
+
+      fireEvent.click(screen.getByRole("button", { name: "不一致" }));
+      await waitFor(() =>
+        expect(screen.getByText(/等待外壳丢弃待定证书/)).toBeInTheDocument(),
+      );
+      expect(controller.getSnapshot().identity?.state).toBe("unpaired");
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("模拟配对失败后回到表单，下一次重试可恢复", async () => {
+    const { controller } = await unpaired();
+    try {
+      render(
+        <Live controller={controller}>
+          {(state) => <PairingView controller={controller} state={state} />}
+        </Live>,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: "模拟下次配对失败" }),
+      );
+      expect(
+        await screen.findByText(/下一次配对预检将模拟失败/),
+      ).toBeInTheDocument();
       fireEvent.change(screen.getByLabelText("配对串"), {
         target: { value: "gantry+pair://example" },
       });
@@ -205,13 +251,15 @@ describe("PairingView", () => {
       });
       fireEvent.click(screen.getByRole("button", { name: "开始配对" }));
       expect(
-        await screen.findByText(/审批签名密钥不可用/),
+        await screen.findByText(/模拟配对预检失败；未生成密钥或证书/),
       ).toBeInTheDocument();
-      expect(begin).toHaveBeenCalledWith({
-        pairingString: "gantry+pair://example",
-        deviceName: "测试 Mac",
+      expect(screen.getByLabelText("配对串")).toHaveValue("");
+
+      fireEvent.change(screen.getByLabelText("配对串"), {
+        target: { value: "gantry+pair://retry" },
       });
-      expect(screen.queryByText(/^\d{6}$/)).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "开始配对" }));
+      expect(await screen.findByText("492 713")).toBeInTheDocument();
     } finally {
       await controller.stop();
     }

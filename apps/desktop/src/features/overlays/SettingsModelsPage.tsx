@@ -13,6 +13,7 @@ import type {
   SettingsCatalogModel,
 } from "@/api/types";
 import type { GuardedWriteArgs, GuardedWritePreview } from "@/api/shell";
+import { isScenarioAdapter } from "@/ipc";
 import { useGuardedWrite } from "./useGuardedWrite";
 import {
   TIERS,
@@ -89,6 +90,7 @@ export function SettingsModelsPage({
   const [conflict, setConflict] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const scenario = isScenarioAdapter(controller.ipc);
   const baselineRevision = useRef(state.settingsRevision);
   const projectsRef = useRef<Project[]>(state.projects);
   const editVersionRef = useRef(0);
@@ -322,9 +324,13 @@ export function SettingsModelsPage({
       const rev = result.headers.x_event_seq;
       await reload(projectsRef.current);
       setSaved(
-        rev
-          ? `已保存（rev ${rev}）。新配置从运行中节点的下一个节点开始生效。`
-          : "已保存。新配置从运行中节点的下一个节点开始生效。",
+        scenario
+          ? rev
+            ? `模拟设置已应用（rev ${rev}），已重新读取。仅写入开发场景内存。新配置从运行中节点的下一个节点开始生效。`
+            : "模拟设置已应用，已重新读取。仅写入开发场景内存。新配置从运行中节点的下一个节点开始生效。"
+          : rev
+            ? `已保存（rev ${rev}）。新配置从运行中节点的下一个节点开始生效。`
+            : "已保存。新配置从运行中节点的下一个节点开始生效。",
       );
       setSecretSpent(false);
       setNeedsReentry(false);
@@ -339,7 +345,7 @@ export function SettingsModelsPage({
       return;
     }
     if (secretSpent) setNeedsReentry(true);
-  }, [conflict, preview, reload, secretSpent, submit]);
+  }, [conflict, preview, reload, scenario, secretSpent, submit]);
 
   const handleReload = useCallback(async () => {
     clear();
@@ -390,6 +396,11 @@ export function SettingsModelsPage({
         <p className="ov-settings__muted">
           三类模型分工，保存在服务端，对所有项目生效；项目可在左侧「项目」里覆盖。提供方凭据只存在服务端，桌面端不保存。
         </p>
+        {scenario ? (
+          <p className="ov-notice ov-notice--info" role="status">
+            开发场景：保存预览与提交只修改内存模型设置并立即回读；不产生真实签名、凭据或网络写入。
+          </p>
+        ) : null}
       </div>
 
       {conflict ? (
@@ -529,6 +540,9 @@ export function SettingsModelsPage({
         <h2 className="ov-settings__h2">提供方凭据（仅服务端）</h2>
         <p className="ov-settings__muted">
           凭据值只写入不读取。输入值仅存在于本组件的局部状态；保存预览发出后立即清空，不进入界面状态存储、日志或持久化。已设置的值永远不显示。
+          {scenario
+            ? " 开发场景只接受测试占位值（含 test / example 等字样），请勿输入真实凭据。"
+            : ""}
         </p>
         {load.models.value.providers.length === 0 ? (
           <p className="ov-settings__muted">服务端未配置模型提供方。</p>
@@ -570,6 +584,11 @@ export function SettingsModelsPage({
                     }
                   />
                 </label>
+                <span className="ov-settings__meta">
+                  {scenario
+                    ? "仅测试占位值，勿输入真实凭据；准备后立即从界面清除。"
+                    : "值只写不读；准备后立即从界面清除，不进入日志或持久化。"}
+                </span>
                 <FieldIssues
                   issues={issuesAt(
                     errors,
@@ -614,6 +633,12 @@ export function SettingsModelsPage({
         <p className="ov-settings__muted">
           涉及凭据或放宽安全的改动，保存时需要审批设备签名；新配置从下一个节点开始生效，运行中的节点不受影响。
         </p>
+        {scenario ? (
+          <p className="ov-settings__meta">
+            开发场景：保存与提交只写入内存并立即回读；不产生真实签名或凭据。生产仍走外壳的
+            dry-run 与审批签名。
+          </p>
+        ) : null}
 
         {localError ? (
           <div role="alert" className="ov-alert">
@@ -680,7 +705,11 @@ export function SettingsModelsPage({
               disabled={!preview.can_submit.ok || phase !== "idle" || conflict}
               onClick={() => void handleSubmit()}
             >
-              {preview.requires_signature ? "签名并提交…" : "确认提交"}
+              {scenario
+                ? "模拟应用设置"
+                : preview.requires_signature
+                  ? "签名并提交…"
+                  : "确认提交"}
             </button>
           ) : (
             <button
@@ -767,7 +796,7 @@ function submitBlockReason(
 ): string {
   switch (reason) {
     case "not_connected":
-      return "无法提交：外壳未连接。示例模式不会提交或保存。";
+      return "无法提交：外壳未连接；真实写入不会发生。";
     case "not_approver":
       return "无法提交：此改动需要审批设备签名，而本机不是审批设备。";
     case "invalid":

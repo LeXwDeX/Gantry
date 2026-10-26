@@ -1,4 +1,6 @@
 import type {
+  Attempt,
+  BudgetLedger,
   Conversation,
   Delivery,
   InboxItem,
@@ -51,6 +53,10 @@ export interface DesktopState {
   inboxSummary: InboxSummary | null;
   approvals: Record<string, Approval>;
   workflows: Record<string, Workflow>;
+  /** 已读取的节点尝试；按节点聚合，旧尝试不覆盖。 */
+  attemptsByNode: Record<string, Attempt[]>;
+  /** 已读取的交付预算台账。 */
+  budgetsByDelivery: Record<string, BudgetLedger>;
   notice: string | null;
   /** `settings.updated` 每来一次 +1，供设置表单感知外部修改。 */
   settingsRevision: number;
@@ -91,6 +97,8 @@ export function initialState(): DesktopState {
     inboxSummary: null,
     approvals: {},
     workflows: {},
+    attemptsByNode: {},
+    budgetsByDelivery: {},
     notice: null,
     settingsRevision: 0,
     resyncing: false,

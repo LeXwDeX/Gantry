@@ -120,7 +120,18 @@ export function ipcErrorText(error: unknown): string {
   return "操作失败，请稍后重试。";
 }
 
+const GENERIC_ISSUE_CODES = new Set([
+  "required",
+  "type",
+  "enum",
+  "range",
+  "unknown_field",
+]);
+
 export function issueText(issue: SettingsIssue): string {
+  if (issue.message && !GENERIC_ISSUE_CODES.has(issue.code)) {
+    return issue.message;
+  }
   switch (issue.code) {
     case "required":
     case "type":
@@ -137,7 +148,7 @@ export function issueText(issue: SettingsIssue): string {
     case "secret_clear_in_use":
       return "使用中的凭据不能被清空。";
     case "scenario_mode":
-      return "示例模式不提交、不保存。";
+      return "示例模式：本次只修改内存，不提交真实服务。";
     case "model_class_mismatch":
       return "模型定位与用途不匹配。";
     case "effort_unsupported":

@@ -4,6 +4,8 @@
  */
 import type {
   Approval,
+  Attempt,
+  BudgetLedger,
   Conversation,
   Delivery,
   Device,
@@ -85,6 +87,10 @@ export interface ScenarioData {
   inbox: InboxItem[];
   approvals: Approval[];
   workflows: Record<string, Workflow>;
+  /** 尝试不可变；重试只追加，不覆盖旧值。 */
+  attempts: Attempt[];
+  /** 按交付单元 ID 索引的只读预算台账。 */
+  budgets: Record<string, BudgetLedger>;
   settings: Record<string, SettingsDocument>;
   projectSettings: Record<string, Record<string, SettingsDocument>>;
   catalog: SettingsCatalog;
@@ -518,7 +524,14 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
       template: "high.implement",
       nodes: [
         node("nod_gantry_5_build", "wfl_gantry_5_build", "build", "running", null),
-        node("nod_gantry_5_verify", "wfl_gantry_5_build", "verify", "pending", null),
+        node(
+          "nod_gantry_5_verify",
+          "wfl_gantry_5_build",
+          "verify",
+          "pending",
+          null,
+          ["nod_gantry_5_build"],
+        ),
       ],
     },
     wfl_gantry_7_review: {
@@ -526,13 +539,29 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
       delivery_id: "dlv_gantry_7",
       conversation_id: null,
       stage: "review",
-      graph_rev: 2,
+      graph_rev: 3,
       status: "running",
       template: "max.review",
       nodes: [
         node("nod_gantry_7_sec", "wfl_gantry_7_review", "review:security", "succeeded", "ACCEPT"),
         node("nod_gantry_7_perf", "wfl_gantry_7_review", "review:performance", "succeeded", "REJECT"),
-        node("nod_gantry_7_arb", "wfl_gantry_7_review", "arbiter", "running", null),
+        node(
+          "nod_gantry_7_perf_old",
+          "wfl_gantry_7_review",
+          "review:performance",
+          "superseded",
+          null,
+          [],
+          "nod_gantry_7_perf",
+        ),
+        node(
+          "nod_gantry_7_arb",
+          "wfl_gantry_7_review",
+          "arbiter",
+          "running",
+          null,
+          ["nod_gantry_7_sec", "nod_gantry_7_perf"],
+        ),
       ],
     },
     wfl_gantry_6_build: {
@@ -581,7 +610,7 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
       resource: "levels",
       scope: "global",
       rev: 18102,
-      value: { default_level: "Medium" },
+      value: levelsValue(),
     },
     models: {
       resource: "models",
@@ -593,71 +622,108 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
       resource: "policies",
       scope: "global",
       rev: 18120,
-      value: {
-        actions: { merge_pr: "approve" },
-        approval: { ttl_s: 86400 },
-      },
+      value: policiesValue(),
+    },
+    guardian: {
+      resource: "guardian",
+      scope: "global",
+      rev: 18131,
+      value: guardianValue(),
+    },
+    sandbox: {
+      resource: "sandbox",
+      scope: "global",
+      rev: 18140,
+      value: sandboxValue(),
+    },
+    egress: {
+      resource: "egress",
+      scope: "global",
+      rev: 18148,
+      value: egressValue(),
+    },
+    notify: {
+      resource: "notify",
+      scope: "global",
+      rev: 18153,
+      value: notifyValue(),
+    },
+    github: {
+      resource: "github",
+      scope: "global",
+      rev: 18160,
+      value: githubValue(),
     },
   };
 
-  const projectSettings: Record<string, Record<string, SettingsDocument>> = {
-    prj_gantry: {
-      levels: {
-        resource: "levels",
+  const projectSettings: Record<string, Record<string, SettingsDocument>> = {};
+  for (const project of projects) {
+    projectSettings[project.id] = {};
+    for (const resource of SETTINGS_RESOURCES) {
+      projectSettings[project.id][resource] = {
+        resource,
         scope: "project",
-        project_id: "prj_gantry",
+        project_id: project.id,
         rev: 0,
         value: null,
-      },
-      models: {
-        resource: "models",
-        scope: "project",
-        project_id: "prj_gantry",
-        rev: 0,
-        value: null,
+      };
+    }
+  }
+  projectSettings.prj_gantry.models = projectDoc("prj_gantry", "models", 7, {
+    worker: {
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      reasoning_effort: "high",
+    },
+  });
+  projectSettings.prj_gantry.levels = projectDoc("prj_gantry", "levels", 5, {
+    none: { daily_tokens: 400_000 },
+    high: {
+      budget: { wall_time_s: 9_000, concurrency: 2 },
+    },
+  });
+  projectSettings.prj_gantry.policies = projectDoc("prj_gantry", "policies", 4, {
+    actions: { create_comment: "deny" },
+    paths: {
+      simulated_auth: {
+        globs: ["**/auth/**"],
+        disposition: "deny",
       },
     },
-    prj_specgit: {
-      levels: {
-        resource: "levels",
-        scope: "project",
-        project_id: "prj_specgit",
-        rev: 0,
-        value: null,
-      },
-      models: {
-        resource: "models",
-        scope: "project",
-        project_id: "prj_specgit",
-        rev: 0,
-        value: null,
-      },
-    },
-    prj_graphagent: {
-      levels: {
-        resource: "levels",
-        scope: "project",
-        project_id: "prj_graphagent",
-        rev: 0,
-        value: null,
-      },
-      models: {
-        resource: "models",
-        scope: "project",
-        project_id: "prj_graphagent",
-        rev: 0,
-        value: null,
-      },
-    },
-  };
+    approval: { ttl_s: 3_600 },
+    patch: { max_files: 100 },
+  });
+  projectSettings.prj_gantry.guardian = projectDoc("prj_gantry", "guardian", 3, {
+    triage: { nit: "escalate" },
+    no_progress: { same_class_repeats: 1 },
+    status_checklist: { enabled: false, min_update_interval_s: 60 },
+  });
+  projectSettings.prj_gantry.sandbox = projectDoc("prj_gantry", "sandbox", 2, {
+    limits: { cpu_cores: 1, mem_mb: 2_048, wall_time_s: 3_000 },
+    devcontainer: { mode: "safe_subset" },
+  });
+  projectSettings.prj_gantry.egress = projectDoc("prj_gantry", "egress", 2, {
+    profiles: { default: { groups: ["model_api", "npm"] } },
+  });
+  projectSettings.prj_specgit.levels = projectDoc("prj_specgit", "levels", 1, {
+    default_level: "High",
+  });
+  projectSettings.prj_graphagent.levels = projectDoc("prj_graphagent", "levels", 1, {
+    default_level: "Low",
+  });
 
   const catalog = buildCatalog();
   const status: SettingsStatus = {
     latest_rev: 18235,
     modules: {
       models: { applied_rev: 18235, health: "ok" },
-      engine: { applied_rev: 18235, health: "ok" },
-      egress: { applied_rev: 18235, health: "ok", unresolved_secret_refs: [] },
+      engine: { applied_rev: 18102, health: "degraded", detail: "等待应用上级档位预算" },
+      policy: { applied_rev: 18120, health: "ok" },
+      guardian: { applied_rev: 18131, health: "ok" },
+      sandbox: { applied_rev: 18140, health: "ok" },
+      egress: { applied_rev: 18148, health: "ok", unresolved_secret_refs: [] },
+      notify: { applied_rev: 18153, health: "ok" },
+      forge: { applied_rev: 18160, health: "ok" },
     },
   };
 
@@ -748,16 +814,21 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     clock_skew_ms: 0,
   };
 
+  const attempts = buildAttempts();
+  const budgets = buildBudgets(deliveries, attempts);
+
   return {
     scenario,
     projects,
     conversations,
-    messages,
+    messages: stampMessages(messages),
     deliveries,
     worktrees,
     inbox,
     approvals,
     workflows,
+    attempts,
+    budgets,
     settings,
     projectSettings,
     catalog,
@@ -775,6 +846,8 @@ function node(
   role: WorkflowNode["role"],
   status: WorkflowNode["status"],
   verdict: WorkflowNode["verdict"],
+  dependsOn: string[] = [],
+  supersededBy: string | null = null,
 ): WorkflowNode {
   return {
     id,
@@ -782,12 +855,53 @@ function node(
     role,
     tier: role.startsWith("review:") ? "worker" : "planner",
     exec: "sandbox",
-    depends_on: [],
+    depends_on: dependsOn,
     required: true,
     status,
     verdict,
-    superseded_by: null,
+    superseded_by: supersededBy,
   };
+}
+
+const SETTINGS_RESOURCES = [
+  "models",
+  "levels",
+  "policies",
+  "guardian",
+  "sandbox",
+  "egress",
+  "notify",
+  "github",
+] as const;
+
+function projectDoc(
+  projectId: string,
+  resource: string,
+  rev: number,
+  value: unknown,
+): SettingsDocument {
+  return {
+    resource,
+    scope: "project",
+    project_id: projectId,
+    rev,
+    value,
+  };
+}
+
+function stampMessages(messages: Record<string, Message[]>): Record<string, Message[]> {
+  const base = Date.parse("2026-10-24T12:00:00.000Z");
+  const result: Record<string, Message[]> = {};
+  for (const [projectId, items] of Object.entries(messages)) {
+    result[projectId] = items.map((message, index) => ({
+      ...message,
+      created_at:
+        message.created_at ??
+        new Date(base + index * 60_000 + (projectId === "prj_specgit" ? 300_000 : 0)).toISOString(),
+      updated_at: message.updated_at ?? undefined,
+    }));
+  }
+  return result;
 }
 
 function buildGantryMessages(unsafe: boolean): Message[] {
@@ -969,6 +1083,93 @@ function buildGantryMessages(unsafe: boolean): Message[] {
   ];
 }
 
+export const SCENARIO_LEVEL_BUDGETS: Record<
+  string,
+  {
+    template: string;
+    utility: number;
+    planner: number;
+    worker: number;
+    nodes: number;
+    rounds: number;
+    wall_time_s: number;
+    concurrency: number;
+    forge_writes: number;
+    forge_writes_per_hour: number;
+  }
+> = {
+  low: {
+    template: "low.single",
+    utility: 100_000,
+    planner: 50_000,
+    worker: 1_000_000,
+    nodes: 6,
+    rounds: 2,
+    wall_time_s: 1_800,
+    concurrency: 1,
+    forge_writes: 30,
+    forge_writes_per_hour: 20,
+  },
+  medium: {
+    template: "medium.plan_build_verify",
+    utility: 200_000,
+    planner: 150_000,
+    worker: 3_000_000,
+    nodes: 20,
+    rounds: 3,
+    wall_time_s: 5_400,
+    concurrency: 2,
+    forge_writes: 60,
+    forge_writes_per_hour: 40,
+  },
+  high: {
+    template: "high.multi_review",
+    utility: 400_000,
+    planner: 300_000,
+    worker: 8_000_000,
+    nodes: 40,
+    rounds: 4,
+    wall_time_s: 10_800,
+    concurrency: 3,
+    forge_writes: 120,
+    forge_writes_per_hour: 60,
+  },
+  max: {
+    template: "max.adversarial",
+    utility: 800_000,
+    planner: 800_000,
+    worker: 20_000_000,
+    nodes: 80,
+    rounds: 6,
+    wall_time_s: 21_600,
+    concurrency: 4,
+    forge_writes: 200,
+    forge_writes_per_hour: 80,
+  },
+  ultimate: {
+    template: "ultimate.milestone",
+    utility: 3_000_000,
+    planner: 3_000_000,
+    worker: 100_000_000,
+    nodes: 400,
+    rounds: 40,
+    wall_time_s: 172_800,
+    concurrency: 4,
+    forge_writes: 1_000,
+    forge_writes_per_hour: 150,
+  },
+};
+
+const EGRESS_GROUPS: Record<string, { hosts: string[] }> = {
+  model_api: { hosts: ["api.anthropic.com"] },
+  npm: { hosts: ["registry.npmjs.org"] },
+  pypi: { hosts: ["pypi.org", "files.pythonhosted.org"] },
+  crates: { hosts: ["crates.io", "index.crates.io", "static.crates.io"] },
+  go: { hosts: ["proxy.golang.org", "sum.golang.org"] },
+  maven: { hosts: ["repo.maven.apache.org", "repo1.maven.org"] },
+  private_npm: { hosts: ["npm.internal.example"] },
+};
+
 function modelsValue(): unknown {
   return {
     providers: {
@@ -982,15 +1183,22 @@ function modelsValue(): unknown {
         },
       },
     },
+    retry: { max_attempts: 3, backoff_ms: 1000 },
     utility: {
       provider: "anthropic",
       model: "claude-haiku-4-5",
       reasoning_effort: "low",
+      fallback: [],
+      request_timeout_s: 60,
+      total_timeout_s: 120,
     },
     planner: {
       provider: "anthropic",
       model: "claude-sonnet-4-5",
       reasoning_effort: "high",
+      fallback: [],
+      request_timeout_s: 300,
+      total_timeout_s: 900,
     },
     worker: {
       provider: "anthropic",
@@ -1002,7 +1210,296 @@ function modelsValue(): unknown {
         high: { default: "medium", critical: "high" },
         max: { default: "high", critical: "max" },
       },
+      fallback: [],
       adapter: "claude-code",
+      request_timeout_s: 600,
+      attempt_wall_s: 3600,
+      max_turns: 60,
+    },
+  };
+}
+
+function levelsValue(): unknown {
+  const level = (name: keyof typeof SCENARIO_LEVEL_BUDGETS): unknown => {
+    const budget = SCENARIO_LEVEL_BUDGETS[name];
+    return {
+      graph_template: budget.template,
+      budget: {
+        tokens_by_tier: {
+          utility: budget.utility,
+          planner: budget.planner,
+          worker: budget.worker,
+        },
+        nodes: budget.nodes,
+        rounds: budget.rounds,
+        wall_time_s: budget.wall_time_s,
+        concurrency: budget.concurrency,
+        forge_writes: budget.forge_writes,
+        forge_writes_per_hour: budget.forge_writes_per_hour,
+      },
+    };
+  };
+  return {
+    default_level: "Medium",
+    token_weights: {
+      input: 1,
+      output: 5,
+      cache_read: 0.1,
+      cache_write: 1.25,
+    },
+    none: { daily_tokens: 500_000 },
+    low: level("low"),
+    medium: level("medium"),
+    high: level("high"),
+    max: level("max"),
+    ultimate: level("ultimate"),
+  };
+}
+
+export interface ActionDefinition {
+  id: string;
+  default: "auto" | "approve" | "deny";
+  allowed: string[];
+  dangerous: boolean;
+  reserved: boolean;
+}
+
+export const ACTION_DEFINITIONS: ActionDefinition[] = [
+  { id: "merge_pr", default: "approve", allowed: ["approve", "deny"], dangerous: true, reserved: false },
+  { id: "force_push", default: "approve", allowed: ["approve", "deny"], dangerous: true, reserved: false },
+  { id: "push_outside_prefix", default: "approve", allowed: ["approve", "deny"], dangerous: true, reserved: false },
+  { id: "resolve_review_thread_human", default: "deny", allowed: ["approve", "deny"], dangerous: true, reserved: false },
+  { id: "delete_branch", default: "deny", allowed: ["approve", "deny"], dangerous: true, reserved: true },
+  { id: "publish_release", default: "deny", allowed: ["approve", "deny"], dangerous: true, reserved: true },
+  { id: "change_repo_settings", default: "deny", allowed: ["approve", "deny"], dangerous: true, reserved: true },
+  { id: "push_branch", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "create_pr", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "update_pr", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "upsert_status_comment", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "create_comment", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "reply_review_thread", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "resolve_review_thread", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "create_issue", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "update_issue", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "close_issue", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "add_labels", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "request_reviewers", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+  { id: "rerun_failed_jobs", default: "auto", allowed: ["auto", "approve", "deny"], dangerous: false, reserved: false },
+];
+
+function policiesValue(): unknown {
+  return {
+    actions: Object.fromEntries(
+      ACTION_DEFINITIONS.map((action) => [action.id, action.default]),
+    ),
+    unlisted_action: "approve",
+    paths: {
+      workflows: {
+        globs: [".github/workflows/**"],
+        disposition: "deny",
+      },
+      dependency_manifests: {
+        globs: [
+          "package.json",
+          "**/package.json",
+          "Cargo.toml",
+          "**/Cargo.toml",
+          "pyproject.toml",
+          "**/pyproject.toml",
+          "requirements*.txt",
+          "go.mod",
+          "**/go.mod",
+          "Gemfile",
+          "pom.xml",
+          "build.gradle*",
+        ],
+        disposition: "approve",
+      },
+      lockfiles: {
+        globs: [
+          "package-lock.json",
+          "**/package-lock.json",
+          "pnpm-lock.yaml",
+          "**/pnpm-lock.yaml",
+          "yarn.lock",
+          "**/yarn.lock",
+          "Cargo.lock",
+          "**/Cargo.lock",
+          "poetry.lock",
+          "**/poetry.lock",
+          "uv.lock",
+          "**/uv.lock",
+          "go.sum",
+          "**/go.sum",
+          "Gemfile.lock",
+          "**/Gemfile.lock",
+        ],
+        disposition: "approve",
+      },
+      sensitive_files: {
+        globs: [".env", ".env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.npmrc"],
+        disposition: "deny",
+      },
+      repo_meta: {
+        globs: [
+          ".github/actions/**",
+          ".github/CODEOWNERS",
+          "CODEOWNERS",
+          ".github/dependabot.yml",
+          ".devcontainer/**",
+        ],
+        disposition: "approve",
+      },
+    },
+    allow_globs: ["**"],
+    escalation: {
+      enabled: true,
+      rules: {
+        sensitive_paths: {
+          when: { paths: ["**/auth/**", "**/security/**", "**/crypto/**", "**/migrations/**"] },
+          raise_to: "Max",
+        },
+        large_diff: {
+          when: { diff: { files_gte: 30, lines_gte: 1000 } },
+          raise_to: "High",
+        },
+        risk_labels: {
+          when: { labels: ["security", "breaking-change", "risk:high"] },
+          raise_to: "Max",
+        },
+      },
+    },
+    approval: { ttl_s: 86_400 },
+    patch: {
+      max_files: 200,
+      max_bytes: 5_000_000,
+      max_changed_lines: 10_000,
+      max_file_bytes: 1_000_000,
+    },
+  };
+}
+
+function guardianValue(): unknown {
+  return {
+    triage: {
+      ci_failure_in_scope: "silent_fix",
+      bot_finding_valid: "silent_fix",
+      bot_finding_invalid: "silent_reply",
+      nit: "batch",
+      mechanical_conflict: "escalate",
+    },
+    no_progress: {
+      same_class_repeats: 2,
+      stalled_rounds: 2,
+    },
+    status_checklist: {
+      enabled: true,
+      min_update_interval_s: 30,
+    },
+    patrol_interval_s: 1_800,
+  };
+}
+
+function sandboxValue(): unknown {
+  return {
+    driver: "podman",
+    runtime: "runsc",
+    base_image:
+      "ghcr.io/lexwdex/gantry-worker@sha256:5b1e68b8a4c9c3f0ed9a0c6f2b8d7e4a1f3c5b7d9e1a2c4b6d8f0a1c3e5b7d9f",
+    limits: {
+      cpu_cores: 2,
+      mem_mb: 4_096,
+      disk_mb: 10_240,
+      pids: 512,
+      wall_time_s: 3_600,
+    },
+    max_concurrent_sandboxes: 6,
+    prewarm: { enabled: false, pool_size: 0 },
+    devcontainer: { mode: "safe_subset" },
+    idle_timeout_s: 300,
+    kill_grace_s: 10,
+    io: {
+      progress: { max_line_bytes: 8_192, max_lines: 20_000, max_rate_per_s: 20 },
+      artifacts: {
+        result_max_bytes: 1_048_576,
+        report_max_bytes: 262_144,
+        proposals_max_bytes: 262_144,
+        proposals_max_count: 20,
+      },
+      materials: { max_item_bytes: 65_536, max_total_bytes: 524_288 },
+      logs_tail_bytes: 1_048_576,
+    },
+  };
+}
+
+function egressValue(): unknown {
+  return {
+    groups: EGRESS_GROUPS,
+    profiles: {
+      default: {
+        groups: ["model_api", "npm", "pypi", "crates", "go", "maven"],
+      },
+      model_only: { groups: ["model_api"] },
+    },
+    default_profile: "default",
+    injection: {
+      private_npm: {
+        hosts: ["npm.internal.example"],
+        kind: "header",
+        header: "x-api-key",
+        credential: {
+          secret_ref: "package.npm.internal",
+          present: false,
+        },
+      },
+    },
+  };
+}
+
+function notifyValue(): unknown {
+  return {
+    channels: {
+      desktop: { enabled: true },
+      mobile_push: { enabled: false },
+    },
+    routes: {
+      urgent: {
+        kinds: [
+          "approval_needed",
+          "security_finding",
+          "budget_exhausted",
+          "escalation",
+        ],
+        channels: ["desktop"],
+      },
+      normal: {
+        kinds: ["decision_needed", "spec_needed"],
+        channels: ["desktop"],
+      },
+    },
+  };
+}
+
+function githubValue(): unknown {
+  return {
+    app: {
+      app_id: 482139,
+      private_key: {
+        secret_ref: "github.app.private_key",
+        present: true,
+      },
+      webhook_secret: {
+        secret_ref: "github.app.webhook_secret",
+        present: true,
+      },
+      webhook_secret_previous: {
+        secret_ref: "github.app.webhook_secret_previous",
+        present: false,
+      },
+    },
+    commit_identity: {
+      name: "gantry[bot]",
+      email: "9988776+gantry[bot]@users.noreply.github.com",
     },
   };
 }
@@ -1015,22 +1512,22 @@ function buildCatalog(): SettingsCatalog {
         "anthropic/claude-haiku-4-5": {
           tools: false,
           reasoning_efforts: ["none", "low", "medium"],
-          context_window: 200000,
+          context_window: 200_000,
         },
         "anthropic/claude-sonnet-4-5": {
           tools: true,
           reasoning_efforts: ["none", "low", "medium", "high", "max"],
-          context_window: 200000,
+          context_window: 200_000,
         },
         "anthropic/claude-sonnet-5": {
           tools: true,
           reasoning_efforts: ["low", "medium", "high", "max"],
-          context_window: 400000,
+          context_window: 400_000,
         },
         "anthropic/claude-opus-4-1": {
           tools: true,
           reasoning_efforts: ["low", "medium", "high", "max"],
-          context_window: 200000,
+          context_window: 200_000,
         },
       },
       adapters: {
@@ -1048,22 +1545,70 @@ function buildCatalog(): SettingsCatalog {
       },
     },
     policies: {
-      actions: {
-        merge_pr: { default: "approve", allowed: ["approve", "deny"], dangerous: true, reserved: false },
-        force_push: { default: "approve", allowed: ["approve", "deny"], dangerous: true, reserved: false },
-        create_pr: { default: "allow", allowed: ["allow", "deny"], dangerous: false, reserved: false },
-      },
+      actions: Object.fromEntries(
+        ACTION_DEFINITIONS.map((action) => [
+          action.id,
+          {
+            default: action.default,
+            allowed: action.allowed,
+            dangerous: action.dangerous,
+            reserved: action.reserved,
+          },
+        ]),
+      ),
     },
     guardian: {
       triage: {
+        ci_failure_in_scope: {
+          default: "silent_fix",
+          allowed: ["silent_fix", "escalate"],
+          locked: false,
+        },
+        bot_finding_valid: {
+          default: "silent_fix",
+          allowed: ["silent_fix", "escalate"],
+          locked: false,
+        },
+        bot_finding_invalid: {
+          default: "silent_reply",
+          allowed: ["silent_reply", "escalate"],
+          locked: false,
+        },
         nit: { default: "batch", allowed: ["batch", "escalate"], locked: false },
+        mechanical_conflict: {
+          default: "escalate",
+          allowed: ["escalate", "silent_fix"],
+          locked: false,
+        },
         security_finding: { locked: true, value: "escalate", allowed: [] },
+        touches_protected_path: { locked: true, value: "escalate", allowed: [] },
+        scope_expanding_fix: { locked: true, value: "escalate", allowed: [] },
+        repeated_or_no_progress: { locked: true, value: "escalate", allowed: [] },
+        budget_exhausted: { locked: true, value: "escalate", allowed: [] },
+        approval_needed: { locked: true, value: "escalate", allowed: [] },
+        push_after_approval: { locked: true, value: "escalate", allowed: [] },
+        design_or_api_change: { locked: true, value: "escalate", allowed: [] },
+        unknown: { locked: true, value: "escalate", allowed: [] },
       },
     },
-    roles: { approver_keys: ["models.providers", "levels.*.graph_template", "github.*"] },
+    roles: {
+      approver_keys: [
+        "models.providers",
+        "levels.*.graph_template",
+        "sandbox.base_image",
+        "github.*",
+      ],
+    },
     egress: {
-      suggested_groups: {},
-      forbidden_hosts: ["169.254.169.254", "metadata.google.internal"],
+      suggested_groups: Object.fromEntries(
+        Object.entries(EGRESS_GROUPS).filter(([name]) => name !== "private_npm"),
+      ),
+      forbidden_hosts: [
+        "github.com",
+        "*.github.com",
+        "169.254.169.254",
+        "metadata.google.internal",
+      ],
     },
     notify: {
       channels: {
@@ -1072,6 +1617,167 @@ function buildCatalog(): SettingsCatalog {
       },
     },
   };
+}
+
+function usage(
+  input: number,
+  output: number,
+  cacheRead = 0,
+  cacheWrite = 0,
+  requests = 1,
+): Attempt["usage"] {
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    cache_read_tokens: cacheRead,
+    cache_write_tokens: cacheWrite,
+    requests,
+  };
+}
+
+function attempt(
+  id: string,
+  nodeId: string,
+  n: number,
+  status: Attempt["status"],
+  options: {
+    sandbox?: string | null;
+    started?: string;
+    ended?: string | null;
+    failure?: Attempt["failure_class"];
+    detail?: string | null;
+    used?: Attempt["usage"];
+  } = {},
+): Attempt {
+  return {
+    id,
+    node_id: nodeId,
+    n,
+    sandbox_id: options.sandbox ?? `sbx_${id.slice(4, 18)}`,
+    status,
+    started_at: options.started ?? "2026-10-24T12:30:00.000Z",
+    ended_at: options.ended ?? null,
+    result_ref:
+      status === "running" || status === "preparing"
+        ? "sha256:pending"
+        : `sha256:${"5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9"}`,
+    failure_class: options.failure ?? null,
+    failure_detail: options.detail ?? null,
+    usage: options.used ?? usage(0, 0, 0, 0, 0),
+  };
+}
+
+function buildAttempts(): Attempt[] {
+  return [
+    attempt("att_gantry_5_build_1", "nod_gantry_5_build", 1, "failed", {
+      started: "2026-10-24T12:20:00.000Z",
+      ended: "2026-10-24T12:24:00.000Z",
+      failure: "exec_failed",
+      detail: "sandbox.start: image pull timeout",
+      used: usage(18_400, 2_300, 5_000, 900, 4),
+    }),
+    attempt("att_gantry_5_build_2", "nod_gantry_5_build", 2, "running", {
+      started: "2026-10-24T12:30:10.000Z",
+      used: usage(41_200, 6_800, 30_500, 2_100, 9),
+    }),
+    attempt("att_gantry_7_sec_1", "nod_gantry_7_sec", 1, "succeeded", {
+      started: "2026-10-24T12:10:00.000Z",
+      ended: "2026-10-24T12:16:40.000Z",
+      used: usage(58_000, 7_600, 20_000, 1_800, 11),
+    }),
+    attempt("att_gantry_7_perf_1", "nod_gantry_7_perf_old", 1, "failed", {
+      started: "2026-10-24T12:12:00.000Z",
+      ended: "2026-10-24T12:15:20.000Z",
+      failure: "verdict_fail",
+      detail: "review context truncated; retrying with a fresh node",
+      used: usage(22_000, 3_100, 8_000, 500, 5),
+    }),
+    attempt("att_gantry_7_perf_2", "nod_gantry_7_perf", 1, "succeeded", {
+      started: "2026-10-24T12:16:00.000Z",
+      ended: "2026-10-24T12:23:30.000Z",
+      used: usage(44_800, 5_900, 17_200, 1_100, 8),
+    }),
+    attempt("att_gantry_7_arb_1", "nod_gantry_7_arb", 1, "running", {
+      started: "2026-10-24T12:25:00.000Z",
+      used: usage(12_400, 1_900, 4_200, 300, 3),
+    }),
+    attempt("att_gantry_6_single_1", "nod_gantry_6_single", 1, "failed", {
+      started: "2026-10-24T12:40:00.000Z",
+      ended: "2026-10-24T12:41:12.000Z",
+      failure: "timeout",
+      detail: "attempt wall time exceeded while rendering the settings shell",
+      used: usage(16_000, 2_200, 3_000, 500, 3),
+    }),
+    attempt("att_specgit_admission_1", "nod_specgit_31_admission", 1, "failed", {
+      started: "2026-10-24T11:20:00.000Z",
+      ended: "2026-10-24T11:22:04.000Z",
+      failure: "verdict_fail",
+      detail: "missing acceptance criteria",
+      used: usage(9_600, 1_100, 2_500, 300, 2),
+    }),
+  ];
+}
+
+const DELIVERY_FOR_NODE: Record<string, string> = {
+  nod_gantry_5: "dlv_gantry_5",
+  nod_gantry_6: "dlv_gantry_6",
+  nod_gantry_7: "dlv_gantry_7",
+  nod_specgit_31: "dlv_specgit_31",
+};
+
+function deliveryForNode(nodeId: string): string | null {
+  for (const [prefix, deliveryId] of Object.entries(DELIVERY_FOR_NODE)) {
+    if (nodeId.startsWith(prefix)) return deliveryId;
+  }
+  return null;
+}
+
+function buildBudgets(
+  deliveries: Delivery[],
+  attempts: Attempt[],
+): Record<string, BudgetLedger> {
+  const result: Record<string, BudgetLedger> = {};
+  for (const delivery of deliveries) {
+    const level = delivery.level_cap.toLowerCase();
+    const budget = SCENARIO_LEVEL_BUDGETS[level] ?? SCENARIO_LEVEL_BUDGETS.medium;
+    const ownAttempts = attempts.filter(
+      (entry) => deliveryForNode(entry.node_id) === delivery.id,
+    );
+    result[delivery.id] = {
+      id: `bdg_${delivery.id}`,
+      delivery_id: delivery.id,
+      subject: "delivery",
+      template: budget.template,
+      limits: {
+        tokens_by_tier: {
+          utility: budget.utility,
+          planner: budget.planner,
+          worker: budget.worker,
+        },
+        nodes: budget.nodes,
+        rounds: budget.rounds,
+        wall_time: budget.wall_time_s,
+        forge_writes: budget.forge_writes,
+        concurrency: budget.concurrency,
+      },
+      used: {
+        tokens_by_tier: {
+          utility: 18_400,
+          planner: 52_100,
+          worker: 611_000,
+        },
+        nodes: delivery.stage === "closed" ? 1 : 2,
+        attempts: ownAttempts.length,
+        rounds: delivery.stage === "review" ? 1 : 0,
+        wall_time: ownAttempts.reduce((sum, entry) => {
+          if (!entry.ended_at) return sum;
+          return sum + Math.max(0, (Date.parse(entry.ended_at) - Date.parse(entry.started_at)) / 1000);
+        }, 0),
+        forge_writes: delivery.pr ? 3 : 0,
+      },
+    };
+  }
+  return result;
 }
 
 export const DEFAULT_PREFS: Prefs = {

@@ -51,7 +51,7 @@ export function InboxActions({
         title={disabledTitle}
         onClick={() => onOpenApproval(approvalId)}
       >
-        审阅并签名…
+        审阅审批…
       </button>
     );
   }

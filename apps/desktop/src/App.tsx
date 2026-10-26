@@ -2,6 +2,7 @@ import {
   Component,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -14,9 +15,30 @@ import {
   PairingView,
   SettingsOverlay,
 } from "@/features/overlays/Overlays";
+import { ExecutionGraph } from "@/features/workspace/ExecutionGraph";
+import { ScenarioControls } from "@/features/workspace/ScenarioControls";
+import {
+  simulationFor,
+  useSimulationSnapshot,
+} from "@/features/workspace/SimulationActivity";
+import type { Prefs } from "@/api/shell";
 import { isScenarioAdapter } from "@/ipc";
 import type { DesktopController } from "@/store/controller";
 import "./app.css";
+
+/** 偏好读取失败时的布局；不是示例数据，不进入任何业务视图。 */
+const FALLBACK_PREFS: Prefs = {
+  theme: "dark",
+  density: "compact",
+  language: "zh-CN",
+  systemNotifications: true,
+  layout: {
+    leftWidth: 240,
+    inspectorWidth: 300,
+    leftCollapsed: false,
+    inspectorCollapsed: false,
+  },
+};
 
 export interface AppProps {
   controller: DesktopController;
@@ -25,7 +47,8 @@ export interface AppProps {
 type Overlay =
   | { kind: "settings"; page?: string }
   | { kind: "inbox" }
-  | { kind: "approval"; approvalId: string };
+  | { kind: "approval"; approvalId: string }
+  | { kind: "graph"; workflowId: string; deliveryId?: string };
 
 /**
  * 应用入口：唯一的状态订阅与浮层编排点。
@@ -39,16 +62,34 @@ export function App({ controller }: AppProps): ReactNode {
   const [overlay, setOverlay] = useState<Overlay | null>(null);
   const [overlayEpoch, setOverlayEpoch] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const [prefs, setPrefs] = useState<Prefs>(FALLBACK_PREFS);
   const overlayRef = useRef<Overlay | null>(null);
   overlayRef.current = overlay;
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const scenario = isScenarioAdapter(controller.ipc);
+  const simulation = useMemo(() => simulationFor(controller), [controller]);
+  const simulationSnapshot = useSimulationSnapshot(simulation);
 
   useEffect(() => {
     // 控制器内部已处理启动错误；这里只负责与组件生命周期配对。
     void controller.start().catch(() => undefined);
     return () => {
       void controller.stop();
+    };
+  }, [controller]);
+
+  useEffect(() => {
+    let alive = true;
+    void controller.ipc.prefsGet().then(
+      (value) => {
+        if (alive) setPrefs(value);
+      },
+      () => {
+        // 偏好不可用时保持默认布局；不回退到任何示例数据。
+      },
+    );
+    return () => {
+      alive = false;
     };
   }, [controller]);
 
@@ -91,6 +132,21 @@ export function App({ controller }: AppProps): ReactNode {
     return () => window.clearTimeout(timer);
   }, [overlay]);
 
+  const graphProgress = useMemo(() => {
+    if (!simulation || overlay?.kind !== "graph") return null;
+    const workflow = state.workflows[overlay.workflowId];
+    const deliveryId = overlay.deliveryId ?? workflow?.delivery_id ?? null;
+    if (!deliveryId) return null;
+    return {
+      tools: simulationSnapshot.activities.filter(
+        (activity) => activity.delivery_id === deliveryId,
+      ),
+      summaries: simulationSnapshot.summaries.filter(
+        (summary) => summary.delivery_id === deliveryId,
+      ),
+    };
+  }, [overlay, simulation, simulationSnapshot, state.workflows]);
+
   async function retry(): Promise<void> {
     setRetrying(true);
     try {
@@ -104,7 +160,7 @@ export function App({ controller }: AppProps): ReactNode {
     return (
       <div className="app-pairing-shell">
         <PairingView controller={controller} state={state} />
-        {scenario ? <ScenarioBadge /> : null}
+        <ScenarioControls controller={controller} />
       </div>
     );
   }
@@ -136,6 +192,7 @@ export function App({ controller }: AppProps): ReactNode {
             {retrying ? "正在重试…" : "重试连接"}
           </button>
           {scenario ? <ScenarioBadge /> : null}
+          <ScenarioControls controller={controller} />
         </section>
       </main>
     );
@@ -162,11 +219,15 @@ export function App({ controller }: AppProps): ReactNode {
         <Workspace
           controller={controller}
           state={state}
+          prefs={prefs}
           onSettings={(page) => openOverlay({ kind: "settings", page })}
           onApproval={(approvalId) =>
             openOverlay({ kind: "approval", approvalId })
           }
           onInbox={() => openOverlay({ kind: "inbox" })}
+          onOpenWorkflow={(workflowId, deliveryId) =>
+            openOverlay({ kind: "graph", workflowId, deliveryId })
+          }
         />
       </AppErrorBoundary>
 
@@ -182,6 +243,7 @@ export function App({ controller }: AppProps): ReactNode {
             controller={controller}
             state={state}
             initialPage={overlay.page}
+            onPrefsChanged={setPrefs}
             onClose={() =>
               closeOverlay((current) => current.kind === "settings")
             }
@@ -228,6 +290,25 @@ export function App({ controller }: AppProps): ReactNode {
           />
         </AppErrorBoundary>
       ) : null}
+
+      {overlay?.kind === "graph" ? (
+        <AppErrorBoundary
+          key={`graph:${overlay.workflowId}:${overlayEpoch}`}
+          label="执行图"
+          onDismiss={() => closeOverlay((current) => current.kind === "graph")}
+        >
+          <ExecutionGraph
+            controller={controller}
+            state={state}
+            workflowId={overlay.workflowId}
+            deliveryId={overlay.deliveryId}
+            progress={graphProgress}
+            onClose={() =>
+              closeOverlay((current) => current.kind === "graph")
+            }
+          />
+        </AppErrorBoundary>
+      ) : null}
     </div>
   );
 }
@@ -236,7 +317,7 @@ function ScenarioBadge(): ReactNode {
   return (
     <span
       className="app-scenario-badge"
-      title="开发场景：示例数据，未连接真实服务端；签名、配对与受保护保存不可用。"
+      title="开发场景：示例数据，未连接真实服务端；模拟审批、配对与保存只改内存，不生成真实签名或证书。"
     >
       示例数据
     </span>

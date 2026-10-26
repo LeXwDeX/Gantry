@@ -149,7 +149,7 @@ describe("ApprovalSheet", () => {
       );
       expect(sign).toBeDisabled();
       expect(screen.getByText(/此设备不能审批/)).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "拒绝" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "模拟拒绝" })).toBeDisabled();
       expect(screen.getByText(/只有审批设备可以拒绝/)).toBeInTheDocument();
     } finally {
       await controller.stop();
@@ -249,11 +249,29 @@ describe("ApprovalSheet", () => {
       ...base,
       can_sign: { ok: true },
     });
+    const granted = {
+      ...before.body,
+      status: "granted" as const,
+      signature: "test-signature",
+    };
     const sign = vi.spyOn(adapter, "approvalSign").mockResolvedValue({
       ok: true,
       status: 200,
       headers: {},
-      body: { ...before.body, status: "granted", signature: "test-signature" },
+      body: granted,
+    });
+    // 服务端在签名后不会再把这个审批列为 pending；模拟列表刷新必须一致。
+    const realApi = adapter.api.bind(adapter);
+    vi.spyOn(adapter, "api").mockImplementation(async (route, args) => {
+      if (route === "approvals.list") {
+        return {
+          ok: true,
+          status: 200,
+          headers: {},
+          body: { items: [], next_cursor: null },
+        };
+      }
+      return realApi(route, args);
     });
     try {
       render(
@@ -277,7 +295,7 @@ describe("ApprovalSheet", () => {
         }),
       );
       expect(
-        await screen.findByText(/签名请求已返回：已签名 · 排队 merge/),
+        await screen.findByText("签名请求已返回：已签名 · 等待合并。以服务端状态为准。"),
       ).toBeInTheDocument();
       expect(screen.queryByText(/审批已变化/)).toBeNull();
       expect(screen.getByRole("button", { name: /签名批准/ })).toBeDisabled();
@@ -313,6 +331,12 @@ describe("ApprovalSheet", () => {
         ),
       ).toBeDisabled();
       expect(screen.getAllByText(/代码已更新/).length).toBeGreaterThan(0);
+      expect(
+        screen.getByRole("button", { name: "模拟批准（不生成签名）" }),
+      ).toBeDisabled();
+      expect(
+        screen.getAllByText(/PR head 已变化，审批载荷不再对应当前代码/).length,
+      ).toBeGreaterThan(0);
     } finally {
       await stale.controller.stop();
     }
@@ -398,12 +422,165 @@ describe("ApprovalSheet", () => {
           )}
         </Live>,
       );
-      const deny = await screen.findByRole("button", { name: "拒绝" });
+      const deny = await screen.findByRole("button", { name: "模拟拒绝" });
       expect(deny).toBeEnabled();
 
       adapter.setConnection("reconnecting");
       await waitFor(() => expect(deny).toBeDisabled());
       expect(screen.getByText(/连接中断，暂不能拒绝/)).toBeInTheDocument();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("模拟批准只改内存、不调用生产签名且不生成 signature", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(TEST_NOW);
+    const { controller, adapter } = await startController();
+    const sign = vi.spyOn(adapter, "approvalSign");
+    try {
+      render(
+        <Live controller={controller}>
+          {(state) => (
+            <ApprovalSheet
+              controller={controller}
+              state={state}
+              approvalId="apr_gantry_9"
+              onClose={vi.fn()}
+            />
+          )}
+        </Live>,
+      );
+      expect(
+        await screen.findByText(/生产签名路径在示例模式始终拒绝/),
+      ).toBeInTheDocument();
+      const simulate = await screen.findByRole("button", {
+        name: "模拟批准（不生成签名）",
+      });
+      expect(simulate).toBeEnabled();
+      fireEvent.click(simulate);
+      expect(
+        await screen.findByText(/模拟批准已应用：未生成 signature/),
+      ).toBeInTheDocument();
+      expect(sign).not.toHaveBeenCalled();
+      const approval = controller.getSnapshot().approvals.apr_gantry_9;
+      expect(approval.status).toBe("granted");
+      expect(approval.signature).toBeNull();
+      expect(document.body.textContent).not.toContain("test-signature");
+      await waitFor(() =>
+        expect(
+          controller.getSnapshot().projectData.prj_gantry.deliveries.find(
+            (item) => item.id === "dlv_gantry_9",
+          )?.stage,
+        ).toBe("closed"),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("非审批设备与离线连接都不能模拟批准", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(TEST_NOW);
+    const viewer = await startController("viewer");
+    let first: ReturnType<typeof render> | null = null;
+    try {
+      first = render(
+        <Live controller={viewer.controller}>
+          {(state) => (
+            <ApprovalSheet
+              controller={viewer.controller}
+              state={state}
+              approvalId="apr_gantry_9"
+              onClose={vi.fn()}
+            />
+          )}
+        </Live>,
+      );
+      await screen.findByText(SCENARIO_PR9_SHA);
+      const simulate = screen.getByRole("button", {
+        name: "模拟批准（不生成签名）",
+      });
+      expect(simulate).toBeDisabled();
+      expect(screen.getAllByText(/只有审批设备可以模拟批准/).length).toBeGreaterThan(0);
+    } finally {
+      first?.unmount();
+      await viewer.controller.stop();
+    }
+
+    const offline = await startController();
+    try {
+      render(
+        <Live controller={offline.controller}>
+          {(state) => (
+            <ApprovalSheet
+              controller={offline.controller}
+              state={state}
+              approvalId="apr_gantry_9"
+              onClose={vi.fn()}
+            />
+          )}
+        </Live>,
+      );
+      await screen.findByText(SCENARIO_PR9_SHA);
+      offline.adapter.setConnection("reconnecting");
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "模拟批准（不生成签名）" }),
+        ).toBeDisabled(),
+      );
+      expect(
+        screen.getByText(/连接无效，不能模拟批准/),
+      ).toBeInTheDocument();
+    } finally {
+      await offline.controller.stop();
+    }
+  });
+
+  it("模拟拒绝关闭交付，跨视图状态一致且无真实签名", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(TEST_NOW);
+    const { controller, adapter } = await startController();
+    try {
+      render(
+        <Live controller={controller}>
+          {(state) => (
+            <ApprovalSheet
+              controller={controller}
+              state={state}
+              approvalId="apr_gantry_9"
+              onClose={vi.fn()}
+            />
+          )}
+        </Live>,
+      );
+      await screen.findByText(SCENARIO_PR9_SHA);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "模拟拒绝" }),
+      );
+      expect(
+        await screen.findByText(/模拟拒绝已应用：未生成 signature/),
+      ).toBeInTheDocument();
+      const state = controller.getSnapshot();
+      expect(state.approvals.apr_gantry_9.status).toBe("denied");
+      expect(state.approvals.apr_gantry_9.signature).toBeNull();
+      expect(
+        state.projectData.prj_gantry.deliveries.find(
+          (item) => item.id === "dlv_gantry_9",
+        )?.stage,
+      ).toBe("abandoned");
+      expect(
+        state.projectData.prj_gantry.messages.some((message) =>
+          message.text.includes("审批被拒绝"),
+        ),
+      ).toBe(true);
+      expect(
+        state.inbox.some(
+          (item) => item.id === "inb_apr9" && item.status === "open",
+        ),
+      ).toBe(false);
+      expect(document.body.textContent).not.toContain("test-signature");
+      const direct = await adapter.api("approvals.get", {
+        approvalId: "apr_gantry_9",
+      });
+      expect(direct.ok && direct.body?.signature).toBeFalsy();
     } finally {
       await controller.stop();
     }

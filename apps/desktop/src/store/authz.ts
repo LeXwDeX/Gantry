@@ -46,11 +46,9 @@ export function can(
   if (role === "operator") return !APPROVER_ACTIONS.has(action);
   return !OPERATOR_ACTIONS.has(action) && !APPROVER_ACTIONS.has(action);
 }
-
 export function canAct(
   state: Pick<DesktopState, "me">,
   action: Action,
 ): boolean {
   return can(state.me?.device.role, action);
 }
-

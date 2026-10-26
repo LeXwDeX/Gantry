@@ -229,7 +229,7 @@ export function InboxOverlay({
                 onClose();
               }}
             >
-              审阅并签名…
+              审阅审批…
             </button>
           </div>
         ) : null}

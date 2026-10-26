@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ScenarioIpcAdapter } from "@/ipc/scenario/adapter";
+import { DesktopController } from "@/store/controller";
 import {
   SCENARIO_PR9_SHA,
   buildScenarioData,
@@ -63,7 +64,7 @@ describe("开发场景数据", () => {
 });
 
 describe("ScenarioIpcAdapter", () => {
-  it("拒绝签名与受保护写入，不改变审批或 rev", async () => {
+  it("签名仍拒绝；受保护写入只在演示内存中保存并可回读", async () => {
     const adapter = new ScenarioIpcAdapter("default");
     const before = await adapter.api("approvals.get", {
       approvalId: "apr_gantry_9",
@@ -84,18 +85,27 @@ describe("ScenarioIpcAdapter", () => {
       value: {},
       ifMatch: '"18235"',
     });
-    expect(prepared.can_submit).toEqual({ ok: false, reason: "not_connected" });
-    await expect(
-      adapter.guardedWriteSubmit({ pendingId: prepared.pending_id }),
-    ).rejects.toMatchObject({ code: "shell.key_unavailable" });
+    expect(prepared.valid).toBe(true);
+    expect(prepared.can_submit).toEqual({ ok: true });
+    const submitted = await adapter.guardedWriteSubmit({ pendingId: prepared.pending_id });
+    expect(submitted.ok).toBe(true);
     const settings = await adapter.api("settings.get", { resource: "models" });
-    expect(settings.ok && settings.body?.rev).toBe(18235);
+    expect(settings.ok && settings.body?.rev).toBe(18236);
   });
 
-  it("配对永远不伪造成功", async () => {
+  it("模拟配对不生成密钥或证书，确认后进入已配对", async () => {
     const adapter = new ScenarioIpcAdapter("unpaired");
+    const begin = await adapter.pairingBegin({
+      pairingString: "gantry+pair://test-placeholder",
+      deviceName: "Mac",
+    });
+    expect(begin.confirmationCode).toMatch(/^\d{3} \d{3}$/);
+    expect(begin.device.cert_serial).toContain("test");
+    const identity = await adapter.pairingConfirm({ matches: true });
+    expect(identity.state).toBe("paired");
+    expect(identity.key_backend).toBe("test_software");
     await expect(
-      adapter.pairingBegin({ pairingString: "gantry+pair://...", deviceName: "Mac" }),
+      adapter.approvalSign({ preparedId: "prepared_never_issued" }),
     ).rejects.toMatchObject({ code: "shell.key_unavailable" });
   });
 
@@ -127,6 +137,99 @@ describe("ScenarioIpcAdapter", () => {
     expect(read?.view).toBe("map");
     expect(read?.draft).toBe("草稿");
     expect(await adapter.uiStateList()).toHaveProperty("prj_gantry");
+  });
+
+  it("identityReset 清除持久化 uiState 并保留偏好，旧队列保留且不自动发送", async () => {
+    const adapter = new ScenarioIpcAdapter("default");
+    const prefs = await adapter.prefsGet();
+    await adapter.prefsSet({
+      patch: { theme: "dark", layout: { ...prefs.layout, leftWidth: 321 } },
+    });
+    const controller = new DesktopController(adapter, {
+      refreshDelayMs: 0,
+      persistDelayMs: 0,
+      prefetchWorkflows: false,
+    });
+    let fresh: DesktopController | null = null;
+    try {
+      await controller.start();
+      controller.updateUi({
+        draft: "旧身份草稿",
+        view: "map",
+        ctx: { kind: "pr", repo: "acme/web", number: 1 },
+        chatScroll: {
+          atBottom: false,
+          anchor_message_id: "msg_old",
+          offset: 120,
+        },
+        outbox: [
+          {
+            local_id: "local_old_identity",
+            idempotency_key: "idem_old_identity",
+            text: "旧身份待发",
+            refs: [],
+            created_at: "2026-10-24T12:59:00.000Z",
+            state: "queued",
+          },
+        ],
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect((await adapter.uiStateList()).prj_gantry?.draft).toBe(
+        "旧身份草稿",
+      );
+
+      const post = vi.spyOn(adapter, "api");
+      await controller.resetIdentity();
+
+      expect(await adapter.uiStateList()).toEqual({});
+      const keptPrefs = await adapter.prefsGet();
+      expect(keptPrefs.theme).toBe("dark");
+      expect(keptPrefs.layout.leftWidth).toBe(321);
+
+      // 旧界面按默认值清理，只保留内存队列；不会自动发送。
+      expect(controller.getSnapshot().ui.prj_gantry.draft).toBe("");
+      expect(controller.getSnapshot().ui.prj_gantry.view).toBe("chat");
+      expect(controller.getSnapshot().ui.prj_gantry.ctx).toBeNull();
+      expect(controller.getSnapshot().ui.prj_gantry.chatScroll).toEqual({
+        atBottom: true,
+        anchor_message_id: null,
+        offset: 0,
+      });
+      expect(controller.getSnapshot().ui.prj_gantry.outbox).toHaveLength(1);
+      expect(controller.staleOutboxCount()).toBe(1);
+      await controller.flushOutbox("prj_gantry");
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect(
+        post.mock.calls.filter(([route]) => route === "messages.post"),
+      ).toHaveLength(0);
+      expect(controller.getSnapshot().ui.prj_gantry.outbox[0]).toMatchObject({
+        text: "旧身份待发",
+        state: "queued",
+      });
+
+      await controller.stop();
+      expect(await adapter.uiStateList()).toEqual({});
+      await adapter.pairingBegin({
+        pairingString: "gantry+pair://example",
+        deviceName: "新身份 Mac",
+      });
+      await adapter.pairingConfirm({ matches: true });
+      fresh = new DesktopController(adapter, {
+        refreshDelayMs: 0,
+        persistDelayMs: 0,
+        prefetchWorkflows: false,
+      });
+      await fresh.start();
+      expect(fresh.getSnapshot().status).toBe("ready");
+      expect(fresh.getSnapshot().ui.prj_gantry?.draft ?? "").not.toBe(
+        "旧身份草稿",
+      );
+      expect(fresh.getSnapshot().ui.prj_gantry?.draft ?? "").toBe("");
+      expect(fresh.getSnapshot().ui.prj_gantry?.outbox ?? []).toHaveLength(0);
+    } finally {
+      if (fresh) await fresh.stop();
+      await controller.stop();
+    }
   });
 
   it("openExternal 只记录 https；openGithub 校验 repo", async () => {
@@ -169,7 +272,7 @@ describe("ScenarioIpcAdapter", () => {
     }
   });
 
-  it("messages.post 返回本次消息接收，不做 agent 推测", async () => {
+  it("messages.post 先回执用户消息，演示脚本随后结算 agent 回复", async () => {
     const adapter = new ScenarioIpcAdapter("default");
     const response = await adapter.api("messages.post", {
       conversationId: "cnv_gantry",
@@ -182,6 +285,7 @@ describe("ScenarioIpcAdapter", () => {
       expect(response.body?.text).toBe("一条测试消息");
       expect(response.body?.cards).toEqual([]);
     }
+    adapter.simulation.advance(1_000);
     const list = await adapter.api("messages.list", {
       conversationId: "cnv_gantry",
       limit: 200,
@@ -189,6 +293,12 @@ describe("ScenarioIpcAdapter", () => {
     });
     expect(
       list.ok && list.body?.items.some((item) => item.text === "一条测试消息"),
+    ).toBe(true);
+    expect(
+      list.ok &&
+        list.body?.items.some(
+          (item) => item.role === "agent" && item.text.includes("模拟回答"),
+        ),
     ).toBe(true);
   });
 

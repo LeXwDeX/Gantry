@@ -12,7 +12,9 @@ export type ResourceKey =
   | `worktrees:${string}`
   | `settings:${string}`
   | `approval:${string}`
-  | `workflow:${string}`;
+  | `workflow:${string}`
+  | `attempts:${string}`
+  | `budget:${string}`;
 
 export interface EventLookup {
   currentProjectId: string | null;
@@ -102,7 +104,11 @@ export function resourcesForEvent(
   }
 
   if (type === "settings.updated") {
-    return current ? [`settings:${current}`] : [];
+    const target =
+      envelope.subject && envelope.subject !== "settings"
+        ? envelope.subject
+        : envelope.project_id ?? current;
+    return target ? [`settings:${target}`] : [];
   }
 
   if (type === "conversation.created") {
@@ -139,8 +145,25 @@ export function resourcesForEvent(
     const deliveryId =
       lookup.deliveryForCorrelation(envelope.correlation_id) ??
       lookup.deliveryForCorrelation(envelope.subject);
-    if (deliveryId) return [`workflow:${deliveryId}`];
-    return projectId ? [`deliveries:${projectId}`] : [];
+    const keys: ResourceKey[] = [];
+    if (deliveryId) {
+      keys.push(`workflow:${deliveryId}`, `budget:${deliveryId}`);
+    }
+    if (type.startsWith("node.") || type.startsWith("attempt.")) {
+      const data = envelope.data as { node_id?: unknown } | null;
+      const nodeId =
+        type.startsWith("attempt.")
+          ? typeof data?.node_id === "string"
+            ? data.node_id
+            : null
+          : envelope.subject;
+      if (nodeId) keys.push(`attempts:${nodeId}`);
+    }
+    if (projectId) keys.push(`deliveries:${projectId}`);
+    if (!deliveryId && type.startsWith("workflow.") && envelope.subject) {
+      keys.push(`workflow:${envelope.subject}`);
+    }
+    return keys;
   }
 
   if (type.startsWith("worktree.")) {
@@ -179,6 +202,16 @@ export function resourcesForEvent(
   }
 
   if (type.startsWith("budget.")) {
+    const data = envelope.data as { delivery_id?: unknown } | null;
+    const deliveryId =
+      lookup.deliveryForCorrelation(envelope.correlation_id) ??
+      (typeof data?.delivery_id === "string" ? data.delivery_id : null) ??
+      lookup.deliveryForCorrelation(envelope.subject);
+    if (deliveryId) {
+      const keys: ResourceKey[] = [`budget:${deliveryId}`];
+      if (projectId) keys.push(`deliveries:${projectId}`);
+      return keys;
+    }
     return projectId ? [`deliveries:${projectId}`] : [];
   }
 

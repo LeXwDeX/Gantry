@@ -179,9 +179,16 @@ describe("审批文案与闸门", () => {
     const data = buildScenarioData("default");
     const approval = data.approvals[0];
     expect(approvalStatusLabel(approval).label).toBe("待签名");
+    const granted = approvalStatusLabel({ ...approval, status: "granted" });
+    expect(granted.label).toContain("已批准");
+    expect(granted.label).not.toContain("已签名");
+    expect(granted.label).not.toContain("排队");
     expect(
-      approvalStatusLabel({ ...approval, status: "granted" }).label,
-    ).toContain("排队 merge");
+      approvalStatusLabel(
+        { ...approval, status: "granted", signature: "test-signature" },
+        { deliveryStage: "merge", prState: "open" },
+      ).label,
+    ).toBe("已签名 · 等待合并");
     expect(
       approvalStatusLabel(
         { ...approval, status: "consumed" },

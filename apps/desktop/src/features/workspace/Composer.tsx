@@ -179,14 +179,16 @@ export function Composer({
               <div className="ws-outbox__body">
                 <UntrustedText value={item.text} />
                 <span className="ws-outbox__state">
-                  {item.state === "queued"
-                    ? "待发送"
-                    : item.state === "sending"
-                      ? "发送中"
-                      : `发送失败：${errorMessage(item.error_code)}`}
+                  {controller.isOutboxStale(item)
+                    ? "旧身份待处理"
+                    : item.state === "queued"
+                      ? "待发送"
+                      : item.state === "sending"
+                        ? "发送中"
+                        : `发送失败：${errorMessage(item.error_code)}`}
                 </span>
               </div>
-              {item.state === "failed" ? (
+              {item.state === "failed" || controller.isOutboxStale(item) ? (
                 <div className="ws-outbox__actions">
                   <button
                     type="button"

@@ -173,16 +173,15 @@ describe("SettingsOverlay", () => {
     }
   });
 
-  it("保存只做 prepare、清空凭据并在外壳不连接时禁止提交", async () => {
+  it("保存先做 prepare、清空凭据，再模拟应用并从服务端回读", async () => {
     const { controller, adapter } = await openSettings();
     const prepare = vi.spyOn(adapter, "guardedWritePrepare");
     const submit = vi.spyOn(adapter, "guardedWriteSubmit");
-    const discard = vi.spyOn(adapter, "guardedWriteDiscard");
     try {
       const credential = screen.getByLabelText("anthropic API key");
       fireEvent.change(credential, { target: { value: "sk-test-secret-value" } });
-      const worker = await screen.findByLabelText("干活模型 模型");
-      fireEvent.change(worker, { target: { value: "anthropic/claude-opus-4-1" } });
+      const utility = await screen.findByLabelText("打杂模型 模型");
+      fireEvent.change(utility, { target: { value: "anthropic/claude-sonnet-4-5" } });
 
       fireEvent.click(screen.getByRole("button", { name: "保存" }));
       await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
@@ -196,23 +195,28 @@ describe("SettingsOverlay", () => {
       const sent = JSON.stringify(args);
       expect(sent).toContain("sk-test-secret-value");
       expect(sent).toContain("model.anthropic.main");
-      expect(sent).toContain("anthropic/claude-opus-4-1".split("/")[1]);
+      expect(sent).toContain("claude-sonnet-4-5");
 
       await waitFor(() => expect(credential).toHaveValue(""));
       expect(document.body.textContent).not.toContain("sk-test-secret-value");
-      expect(await screen.findByText(/示例模式不提交、不保存/)).toBeInTheDocument();
+      const submitButton = await screen.findByRole("button", {
+        name: "模拟应用设置",
+      });
+      await waitFor(() => expect(submitButton).toBeEnabled());
+      fireEvent.click(submitButton);
       expect(
-        screen.getByText(/无法提交：外壳未连接|无法提交：示例模式/),
+        await screen.findByText(/模拟设置已应用/),
       ).toBeInTheDocument();
-      const submitButton = screen.getByRole("button", { name: "确认提交" });
-      expect(submitButton).toBeDisabled();
-      expect(submit).not.toHaveBeenCalled();
+      expect(submit).toHaveBeenCalledTimes(1);
+      expect(document.body.textContent).not.toContain("sk-test-secret-value");
       expect(document.body.textContent).not.toMatch(/已保存（rev/);
 
-      fireEvent.change(worker, { target: { value: "anthropic/claude-sonnet-5" } });
-      await waitFor(() =>
-        expect(discard).toHaveBeenCalledWith({ pendingId: "pending_scenario" }),
-      );
+      const read = await adapter.api("settings.get", { resource: "models" });
+      expect(read.ok).toBe(true);
+      if (!read.ok || !read.body) throw new Error("no models doc");
+      expect(
+        (read.body.value as { utility: { model: string } }).utility.model,
+      ).toBe("claude-sonnet-4-5");
     } finally {
       await controller.stop();
     }
@@ -272,8 +276,8 @@ describe("SettingsOverlay", () => {
         target: { value: "anthropic/claude-sonnet-4-5" },
       });
       fireEvent.click(screen.getByRole("button", { name: "保存" }));
-      const confirm = await screen.findByRole("button", { name: "确认提交" });
-      await waitFor(() => expect(confirm).toBeEnabled());
+      const confirm = await screen.findByRole("button", { name: "模拟应用设置" }, { timeout: 5000 });
+      await waitFor(() => expect(confirm).toBeEnabled(), { timeout: 5000 });
       fireEvent.click(confirm);
 
       expect(
@@ -282,7 +286,9 @@ describe("SettingsOverlay", () => {
       expect(screen.getByRole("button", { name: "载入最新值（丢弃我的改动）" })).toBeInTheDocument();
       expect(document.body.textContent).not.toMatch(/已保存（rev/);
       await waitFor(() =>
-        expect(discard).toHaveBeenCalledWith({ pendingId: "pending_scenario" }),
+        expect(discard).toHaveBeenCalledWith({
+          pendingId: expect.stringMatching(/^pending_scenario/),
+        }),
       );
     } finally {
       await controller.stop();
@@ -306,13 +312,19 @@ describe("SettingsOverlay", () => {
       can_submit: { ok: true },
     });
     const discard = vi.spyOn(adapter, "guardedWriteDiscard");
+    vi.spyOn(adapter, "guardedWriteSubmit").mockRejectedValue(
+      new IpcError(
+        "shell.key_unavailable",
+        "审批签名密钥不可用，请检查设备密钥或重新配对。",
+      ),
+    );
     try {
       fireEvent.change(await screen.findByLabelText("打杂模型 模型"), {
         target: { value: "anthropic/claude-sonnet-4-5" },
       });
       fireEvent.click(screen.getByRole("button", { name: "保存" }));
-      const confirm = await screen.findByRole("button", { name: "确认提交" });
-      await waitFor(() => expect(confirm).toBeEnabled());
+      const confirm = await screen.findByRole("button", { name: "模拟应用设置" }, { timeout: 5000 });
+      await waitFor(() => expect(confirm).toBeEnabled(), { timeout: 5000 });
       fireEvent.click(confirm);
 
       expect(
@@ -321,69 +333,106 @@ describe("SettingsOverlay", () => {
         ),
       ).toBeInTheDocument();
       await waitFor(() =>
-        expect(discard).toHaveBeenCalledWith({ pendingId: "pending_scenario" }),
+        expect(discard).toHaveBeenCalledWith({
+          pendingId: expect.stringMatching(/^pending_scenario/),
+        }),
       );
     } finally {
       await controller.stop();
     }
   });
 
-  it("项目页显示继承与生效值，不提供预算/路径伪配置", async () => {
+  it("项目页按六类资源显示继承值，并可切换到档位与沙盒", async () => {
     const { controller } = await openSettings();
     try {
       const nav = screen.getByRole("navigation", { name: "设置分类" });
       fireEvent.click(within(nav).getByRole("button", { name: "specgit" }));
-      const levelText = await screen.findByText("默认档位上限");
+      await screen.findByRole("heading", {
+        name: /项目 · specgit/,
+      });
+      const resources = screen.getByRole("navigation", {
+        name: "项目覆盖资源",
+      });
+      for (const name of [
+        "模型",
+        "档位与预算",
+        "危险动作策略",
+        "后台守护",
+        "沙盒",
+        "出网档案",
+      ]) {
+        expect(
+          within(resources).getByRole("button", { name: `${name}覆盖` }),
+        ).toBeInTheDocument();
+      }
       expect(
-        screen.getByRole("heading", { name: /项目 · specgit/ }),
+        screen.getByRole("note", { name: "干活 模型 全局值" }),
+      ).toHaveTextContent("claude-sonnet-5");
+
+      fireEvent.click(
+        within(resources).getByRole("button", { name: "档位与预算覆盖" }),
+      );
+      expect(
+        await screen.findByLabelText("默认档位上限 项目覆盖"),
+      ).toHaveValue("High");
+
+      fireEvent.click(
+        within(resources).getByRole("button", { name: "沙盒覆盖" }),
+      );
+      expect(
+        await screen.findByLabelText("限制 mem_mb 项目覆盖"),
       ).toBeInTheDocument();
-      expect(
-        screen.getByRole("region", { name: "项目档位与模型覆盖" }),
-      ).toHaveAttribute("tabindex", "0");
-      const levelRow = levelText.closest("tr");
-      expect(levelRow).not.toBeNull();
-      expect(levelRow?.textContent).toContain("Medium");
-      const modelRow = screen.getByText("干活模型").closest("tr");
-      expect(modelRow?.textContent).toContain("claude-sonnet-5");
-      expect(screen.queryByText("预算模板")).toBeNull();
-      expect(screen.queryByText("额外需审批的路径")).toBeNull();
     } finally {
       await controller.stop();
     }
   });
 
-  it("项目保存使用项目作用域与已加载 ETag，示例模式不提交", async () => {
+  it("项目保存使用项目作用域与已加载 ETag，模拟应用后可回读", { timeout: 15000 }, async () => {
     const { controller, adapter } = await openSettings();
     const prepare = vi.spyOn(adapter, "guardedWritePrepare");
     const submit = vi.spyOn(adapter, "guardedWriteSubmit");
     try {
       const nav = screen.getByRole("navigation", { name: "设置分类" });
-      fireEvent.click(within(nav).getByRole("button", { name: "specgit" }));
-      await screen.findByText("默认档位上限");
-      fireEvent.change(screen.getByLabelText("默认档位上限 项目覆盖"), {
-        target: { value: "High" },
+      fireEvent.click(within(nav).getByRole("button", { name: "gantry" }));
+      await screen.findByRole("heading", { name: /项目 · gantry/ });
+      fireEvent.change(screen.getByLabelText("干活 模型 项目覆盖"), {
+        target: { value: "claude-opus-4-1" },
       });
-      fireEvent.click(screen.getByRole("button", { name: "保存档位" }));
+      fireEvent.click(screen.getByRole("button", { name: "保存模型覆盖" }));
       await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
-      expect(prepare).toHaveBeenCalledWith({
-        kind: "settings_put",
-        scope: "project",
-        projectId: "prj_specgit",
-        resource: "levels",
-        value: { default_level: "High" },
-        ifMatch: '"0"',
+      expect(prepare).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "settings_put",
+          scope: "project",
+          projectId: "prj_gantry",
+          resource: "models",
+          value: expect.objectContaining({
+            worker: expect.objectContaining({ model: "claude-opus-4-1" }),
+          }),
+        }),
+      );
+      const confirm = await screen.findByRole("button", { name: "模拟应用设置" }, { timeout: 5000 });
+      await waitFor(() => expect(confirm).toBeEnabled(), { timeout: 5000 });
+      fireEvent.click(confirm);
+      expect(
+        await screen.findByText(/模拟设置已应用/),
+      ).toBeInTheDocument();
+      expect(submit).toHaveBeenCalledTimes(1);
+      const read = await adapter.api("project_settings.get", {
+        projectId: "prj_gantry",
+        resource: "models",
       });
-      const confirm = await screen.findByRole("button", { name: "确认提交档位" });
-      expect(confirm).toBeDisabled();
-      expect(await screen.findByText(/示例模式不提交、不保存/)).toBeInTheDocument();
-      expect(submit).not.toHaveBeenCalled();
-      expect(document.body.textContent).not.toMatch(/已保存（rev/);
+      expect(read.ok).toBe(true);
+      if (!read.ok || !read.body) throw new Error("no project models");
+      expect(
+        (read.body.value as { worker: { model: string } }).worker.model,
+      ).toBe("claude-opus-4-1");
     } finally {
       await controller.stop();
     }
   });
 
-  it("设备角色变更走受保护预检，示例模式不伪成功", async () => {
+  it("设备角色变更走保护预检，模拟应用后不改真实签名", async () => {
     const { controller, adapter } = await openSettings();
     const prepare = vi.spyOn(adapter, "guardedWritePrepare");
     const submit = vi.spyOn(adapter, "guardedWriteSubmit");
@@ -395,20 +444,38 @@ describe("SettingsOverlay", () => {
       fireEvent.change(within(device).getByLabelText("书房 Mac 角色"), {
         target: { value: "approver" },
       });
-      fireEvent.click(within(device).getByRole("button", { name: "应用角色" }));
+      fireEvent.click(
+        within(device).getByRole("button", { name: "模拟角色变更" }),
+      );
       expect(
         await screen.findByText(/确认将 书房 Mac 的角色改为 审批设备/),
       ).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "确认并预检" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "确认并模拟预检" }),
+      );
       await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
       expect(prepare).toHaveBeenCalledWith({
         kind: "device_role",
         deviceId: "dev_scenario_second",
         role: "approver",
       });
-      expect(await screen.findByRole("button", { name: "提交" })).toBeDisabled();
-      expect(submit).not.toHaveBeenCalled();
-      expect(document.body.textContent).not.toContain("设备角色已更新。");
+      const confirm = await screen.findByRole("button", {
+        name: "模拟应用设备操作",
+      });
+      await waitFor(() => expect(confirm).toBeEnabled());
+      fireEvent.click(confirm);
+      expect(
+        await screen.findByText(/模拟设备角色已更新/),
+      ).toBeInTheDocument();
+      expect(submit).toHaveBeenCalledTimes(1);
+      const list = await adapter.api("devices.list", { limit: 100 });
+      expect(list.ok).toBe(true);
+      if (!list.ok || !list.body) throw new Error("no devices");
+      expect(
+        list.body.items.find((item) => item.id === "dev_scenario_second")
+          ?.role,
+      ).toBe("approver");
+      expect(document.body.textContent).not.toContain("BEGIN CERTIFICATE");
     } finally {
       await controller.stop();
     }
@@ -430,13 +497,17 @@ describe("SettingsOverlay", () => {
     }
   });
 
-  it("未排期页面诚实占位", async () => {
+  it("外观页提供已定义主题、语言与布局偏好", async () => {
     const { controller } = await openSettings();
     try {
       const nav = screen.getByRole("navigation", { name: "设置分类" });
       fireEvent.click(within(nav).getByRole("button", { name: "外观" }));
-      expect(await screen.findByText(/尚未提供/)).toBeInTheDocument();
-      expect(screen.getByText(/13\.2/)).toBeInTheDocument();
+      await screen.findByRole("heading", { name: "外观" });
+      expect(screen.getByLabelText("密度")).toBeInTheDocument();
+      expect(screen.getByLabelText("左栏宽度")).toBeInTheDocument();
+      expect(screen.getByLabelText("检视器宽度")).toBeInTheDocument();
+      expect(screen.getAllByText(/13\.2/).length).toBeGreaterThan(0);
+      expect(screen.queryByText(/尚未提供/)).toBeNull();
     } finally {
       await controller.stop();
     }

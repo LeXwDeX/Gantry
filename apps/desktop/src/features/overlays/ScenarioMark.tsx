@@ -8,7 +8,7 @@ export function ScenarioMark({ ipc }: { ipc: IpcAdapter }): ReactNode {
   return (
     <span
       className="ov-scenario-mark"
-      title="开发场景：示例数据，未连接真实服务端；签名、配对与受保护保存不可用。"
+      title="开发场景：示例数据，未连接真实服务端；模拟审批、配对与保存只改内存，不生成真实签名或证书。"
     >
       示例数据
     </span>

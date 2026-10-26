@@ -3,7 +3,9 @@ import type { Device } from "@/api/types";
 import type { ConnectionState, IdentityStatus } from "@/api/shell";
 import type { DesktopController } from "@/store/controller";
 import type { DesktopState } from "@/store/state";
+import { simulationFor } from "@/features/workspace/SimulationActivity";
 import { phaseLabel } from "@/i18n";
+import { ScenarioMark } from "./ScenarioMark";
 import { ipcErrorText } from "./settingsData";
 
 export interface PairingViewProps {
@@ -18,6 +20,8 @@ export function PairingView({
   state,
 }: PairingViewProps): ReactNode {
   const identity = state.identity;
+  const simulation = simulationFor(controller);
+  const [pairingNotice, setPairingNotice] = useState<string | null>(null);
   const [pairingString, setPairingString] = useState("");
   const [deviceName, setDeviceName] = useState(identity?.device?.name ?? "");
   const [stage, setStage] = useState<Stage>("form");
@@ -27,6 +31,7 @@ export function PairingView({
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [resetConfirm, setResetConfirm] = useState(false);
+  const [leftover, setLeftover] = useState<number | null>(null);
 
   const begin = async (): Promise<void> => {
     const trimmedPairing = pairingString.trim();
@@ -46,6 +51,9 @@ export function PairingView({
     setBusy(true);
     setError(null);
     setDone(null);
+    setPairingNotice(null);
+    // 配对串不留在组件状态中；失败后也必须重新粘贴。
+    setPairingString("");
     try {
       const result = await controller.ipc.pairingBegin({
         pairingString: trimmedPairing,
@@ -53,7 +61,6 @@ export function PairingView({
       });
       setConfirmationCode(result.confirmationCode);
       setPendingDevice(result.device);
-      setPairingString("");
       setStage("confirm");
     } catch (failure) {
       setError(ipcErrorText(failure));
@@ -66,6 +73,7 @@ export function PairingView({
   const confirm = async (matches: boolean): Promise<void> => {
     setBusy(true);
     setError(null);
+    setPairingNotice(null);
     try {
       const result = await controller.ipc.pairingConfirm({ matches });
       if (!matches || result.state !== "paired") {
@@ -82,6 +90,13 @@ export function PairingView({
         return;
       }
       setStage("done");
+      const stale = controller.staleOutboxCount();
+      if (stale > 0) {
+        // 旧身份的待发消息保留在队列里，必须先由用户明确处理。
+        setLeftover(stale);
+        setDone("配对已确认；旧身份还有未发送消息，请先处理。");
+        return;
+      }
       setDone("配对已确认，正在载入工作区…");
       try {
         await controller.refresh();
@@ -95,17 +110,33 @@ export function PairingView({
     }
   };
 
+  const finishLeftover = async (discard: boolean): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (discard) controller.discardStaleOutbox();
+      setLeftover(null);
+      setDone("配对已确认，正在载入工作区…");
+      await controller.refresh();
+    } catch (failure) {
+      setError(`配对已确认，但工作区载入失败：${ipcErrorText(failure)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const resetIdentity = async (): Promise<void> => {
     setBusy(true);
     setError(null);
     setDone(null);
     try {
-      await controller.ipc.identityReset();
+      await controller.resetIdentity();
       setStage("form");
       setConfirmationCode(null);
       setPendingDevice(null);
       setPairingString("");
       setResetConfirm(false);
+      setLeftover(null);
       setDone("外壳已接受重置请求；请重新配对。");
     } catch (failure) {
       setError(ipcErrorText(failure));
@@ -126,11 +157,17 @@ export function PairingView({
       <div className="ov-pairing__card">
         <header className="ov-pairing__head">
           <h1 className="ov-settings__h1">配对设备</h1>
+          <ScenarioMark ipc={controller.ipc} />
           <span className="ov-pairing__phase">
             {phaseLabel(state.connection?.phase)}
           </span>
         </header>
         <p className="ov-settings__muted">{stateText}</p>
+        {simulation ? (
+          <p className="ov-notice ov-notice--info" role="status">
+            模拟配对：只在本会话内存中核对设备名与确认码；不生成密钥、证书，不调用系统认证或真实服务端。确认码是固定测试值。
+          </p>
+        ) : null}
 
         {identity ? (
           <dl className="ov-kv ov-kv--compact">
@@ -150,10 +187,47 @@ export function PairingView({
             {error}
           </div>
         ) : null}
+        {pairingNotice ? (
+          <div role="status" className="ov-notice ov-notice--info">
+            {pairingNotice}
+          </div>
+        ) : null}
         {done ? (
           <div role="status" className="ov-notice ov-notice--ok">
             {done}
           </div>
+        ) : null}
+        {leftover !== null ? (
+          <section
+            className="ov-confirm"
+            role="group"
+            aria-label="处理旧身份的待发消息"
+          >
+            <p>
+              旧身份还有 {leftover} 条消息未发送；它们不会使用新身份自动发送。
+            </p>
+            <p className="ov-settings__meta">
+              保留的旧消息仅留在当前会话，不写入新身份的本机存储；关闭窗口前请编辑、重试或删除。
+            </p>
+            <div className="ov-save__actions">
+              <button
+                type="button"
+                className="ov-btn ov-btn--danger"
+                disabled={busy}
+                onClick={() => void finishLeftover(true)}
+              >
+                丢弃旧消息并继续
+              </button>
+              <button
+                type="button"
+                className="ov-btn"
+                disabled={busy}
+                onClick={() => void finishLeftover(false)}
+              >
+                保留并继续
+              </button>
+            </div>
+          </section>
         ) : null}
         {busy ? (
           <p role="status" className="ov-settings__muted">
@@ -185,7 +259,9 @@ export function PairingView({
               />
             </label>
             <p className="ov-settings__meta">
-              配对串只在本输入框内存在，配对开始后立即清空；不写入界面状态存储或日志。配对码由桌面外壳在完成密钥与证书流程后提供，本界面不会自行生成。
+              {simulation
+                ? "配对串只在本输入框内存在，模拟配对开始后立即清空；不写入界面状态存储或日志。确认码是开发场景固定测试值，不来自真实外壳。"
+                : "配对串只在本输入框内存在，配对开始后立即清空；不写入界面状态存储或日志。配对码由桌面外壳在完成密钥与证书流程后提供，本界面不会自行生成。"}
             </p>
             <div className="ov-save__actions">
               <button
@@ -196,6 +272,19 @@ export function PairingView({
               >
                 开始配对
               </button>
+              {simulation ? (
+                <button
+                  type="button"
+                  className="ov-btn"
+                  disabled={busy}
+                  onClick={() => {
+                    const result = simulation.failNextPairing();
+                    setPairingNotice(result.message ?? "已安排一次模拟失败。");
+                  }}
+                >
+                  模拟下次配对失败
+                </button>
+              ) : null}
               {terminal ? (
                 <button
                   type="button"
@@ -236,7 +325,9 @@ export function PairingView({
           <section className="ov-pairing__confirm" aria-label="核对待确认配对">
             <h2 className="ov-settings__h2">核对确认码</h2>
             <p className="ov-settings__muted">
-              对照服务端控制台显示的 6 位确认码。确认码来自 IPC 响应，本界面不生成、不猜测。
+              {simulation
+                ? "开发场景核对固定测试确认码；选择一致只把测试设备写入内存，不生成证书或系统认证。"
+                : "对照服务端控制台显示的 6 位确认码。确认码来自 IPC 响应，本界面不生成、不猜测。"}
             </p>
             <span className="ov-pairing__code" aria-label="6 位确认码">
               {confirmationCode ?? "未提供"}
@@ -250,7 +341,9 @@ export function PairingView({
               </dl>
             ) : null}
             <p className="ov-settings__meta">
-              只有服务端与外壳都确认一致后才会写入身份；本界面不伪造配对成功。
+              {simulation
+                ? "模拟配对一致只改开发场景内存；生产配对仍需服务端与外壳确认，且本界面不生成密钥。"
+                : "只有服务端与外壳都确认一致后才会写入身份；本界面不伪造配对成功。"}
             </p>
             <div className="ov-save__actions">
               <button

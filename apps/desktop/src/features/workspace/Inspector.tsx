@@ -62,8 +62,9 @@ export interface InspectorProps {
   onReplyDelivery: (deliveryId: string) => void;
   onSelect: (selection: Selection) => void;
   onOpenApproval: (approvalId: string) => void;
+  /** 打开只读执行图；缺省时不显示入口。 */
+  onOpenWorkflow?: (workflowId: string, deliveryId?: string) => void;
 }
-
 export function Inspector({
   controller,
   state,
@@ -77,6 +78,7 @@ export function Inspector({
   onReplyDelivery,
   onSelect,
   onOpenApproval,
+  onOpenWorkflow,
 }: InspectorProps): ReactNode {
   const selection = ui.sel;
   if (!selection) {
@@ -160,6 +162,7 @@ export function Inspector({
       onReplyDelivery={onReplyDelivery}
       onSelect={onSelect}
       onOpenApproval={onOpenApproval}
+      onOpenWorkflow={onOpenWorkflow}
     />
   );
 }
@@ -187,6 +190,7 @@ function InspectorBody({
   onReplyDelivery,
   onSelect,
   onOpenApproval,
+  onOpenWorkflow,
 }: {
   controller: DesktopController;
   delivery: Delivery;
@@ -210,6 +214,7 @@ function InspectorBody({
   onReplyDelivery: (deliveryId: string) => void;
   onSelect: (selection: Selection) => void;
   onOpenApproval: (approvalId: string) => void;
+  onOpenWorkflow?: (workflowId: string, deliveryId?: string) => void;
 }): ReactNode {
   const [moreOpen, setMoreOpen] = useState(false);
   const [confirmAbandon, setConfirmAbandon] = useState(false);
@@ -449,7 +454,7 @@ function InspectorBody({
                 title={isViewer ? "此设备为只读" : undefined}
                 onClick={() => onOpenApproval(approvalId)}
               >
-                审阅并签名…
+                审阅审批…
               </button>
             ) : null}
           </div>
@@ -477,6 +482,15 @@ function InspectorBody({
               )}`}
         </p>
       </section>
+
+      {!terminal && onOpenWorkflow ? (
+        <WorkflowEntry
+          controller={controller}
+          delivery={delivery}
+          workflow={workflow}
+          onOpenWorkflow={onOpenWorkflow}
+        />
+      ) : null}
 
       {delivery.stage === "merge" ? (
         <section className="ws-inspector__section" aria-label="合并闸门">
@@ -787,6 +801,43 @@ function inspectorTitle(
   return cleanText(delivery.title);
 }
 
+function WorkflowEntry({
+  controller,
+  delivery,
+  workflow,
+  onOpenWorkflow,
+}: {
+  controller: DesktopController;
+  delivery: Delivery;
+  workflow: Workflow | null;
+  onOpenWorkflow: (workflowId: string, deliveryId?: string) => void;
+}): ReactNode {
+  useEffect(() => {
+    if (workflow) return;
+    void controller
+      .ensureWorkflowForDelivery(delivery.id)
+      .catch(() => {
+        // 入口保持禁用与说明；加载失败不阻塞其他操作。
+      });
+  }, [controller, delivery.id, workflow]);
+
+  return (
+    <div className="ws-inspector__actions">
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={!workflow}
+        title={workflow ? undefined : "正在读取当前阶段的图…"}
+        onClick={() => {
+          if (workflow) onOpenWorkflow(workflow.id, delivery.id);
+        }}
+      >
+        {workflow ? "查看执行图" : "正在读取执行图…"}
+      </button>
+    </div>
+  );
+}
+
 function dataLabel(delivery: Delivery): string {
   return delivery.worktree_id ? "工作树" : "交付";
 }
@@ -807,4 +858,3 @@ function abandonDescription(delivery: Delivery, data: ProjectData): string {
     clauses.length > 0 ? clauses.join("；") : "不会关闭任何 PR";
   return `放弃这个交付：${detail}。此操作只经 controller 调服务端，不在本地伪造结果。`;
 }
-

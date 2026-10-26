@@ -40,4 +40,3 @@ export function httpBody(
       return explicitBody;
   }
 }
-

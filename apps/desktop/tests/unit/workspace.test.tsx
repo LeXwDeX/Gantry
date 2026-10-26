@@ -1,10 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { useSyncExternalStore } from "react";
+import type { Prefs } from "@/api/shell";
 import type { DesktopController } from "@/store/controller";
 import type { DesktopState } from "@/store/state";
 import { Workspace } from "@/features/workspace";
 import { startController } from "./helpers";
+
+const PREFS: Prefs = {
+  theme: "dark",
+  density: "compact",
+  language: "zh-CN",
+  systemNotifications: true,
+  layout: {
+    leftWidth: 240,
+    inspectorWidth: 300,
+    leftCollapsed: false,
+    inspectorCollapsed: false,
+  },
+};
 
 const controllers: DesktopController[] = [];
 
@@ -16,6 +30,7 @@ function renderWorkspace(controller: DesktopController) {
   const onSettings = vi.fn();
   const onApproval = vi.fn();
   const onInbox = vi.fn();
+  const onOpenWorkflow = vi.fn();
 
   function Harness() {
     const state: DesktopState = useSyncExternalStore(
@@ -26,15 +41,17 @@ function renderWorkspace(controller: DesktopController) {
       <Workspace
         controller={controller}
         state={state}
+        prefs={PREFS}
         onSettings={onSettings}
         onApproval={onApproval}
         onInbox={onInbox}
+        onOpenWorkflow={onOpenWorkflow}
       />
     );
   }
 
   render(<Harness />);
-  return { onSettings, onApproval, onInbox };
+  return { onSettings, onApproval, onInbox, onOpenWorkflow };
 }
 
 async function mount(scenario: "default" | "viewer" = "default") {
@@ -89,6 +106,32 @@ describe("工作区 顶栏与左栏", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "需要你 · 4" }));
     expect(onInbox).toHaveBeenCalledTimes(1);
+  });
+
+  it("左栏分组可折叠，最近完成同样保留计数与折叠状态", async () => {
+    await mount();
+    const issues = screen.getByRole("region", { name: "进行中 Issue" });
+    const issueToggle = within(issues).getByRole("button", {
+      name: /^进行中 Issue/,
+    });
+    expect(issueToggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(issues).getByRole("button", { name: /#5 沙盒驱动/ }),
+    ).toBeInTheDocument();
+    fireEvent.click(issueToggle);
+    expect(issueToggle).toHaveAttribute("aria-expanded", "false");
+    expect(
+      within(issues).queryByRole("button", { name: /#5 沙盒驱动/ }),
+    ).toBeNull();
+    fireEvent.click(issueToggle);
+
+    const done = screen.getByRole("region", { name: "最近完成" });
+    const doneToggle = within(done).getByRole("button", {
+      name: /^最近完成/,
+    });
+    expect(doneToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(doneToggle);
+    expect(doneToggle).toHaveAttribute("aria-expanded", "false");
   });
 
   it("选择左栏 Issue 只改变 sel，不改变发送上下文；引用 chip 同样只改 sel", async () => {
@@ -241,7 +284,7 @@ describe("工作区 视图与检视器", () => {
   it("审批入口只调用 onApproval，不在工作区直接签名", async () => {
     const { onApproval } = await mount();
     const buttons = within(mainPane()).getAllByRole("button", {
-      name: "审阅并签名…",
+      name: "审阅审批…",
     });
     expect(buttons.length).toBeGreaterThan(0);
     fireEvent.click(buttons[0]);
@@ -259,11 +302,11 @@ describe("工作区 viewer", () => {
       within(leftPane()).getByRole("button", { name: /PR #9/ }),
     );
     const approvalButtons = within(mainPane()).getAllByRole("button", {
-      name: "审阅并签名…",
+      name: "审阅审批…",
     });
     for (const button of approvalButtons) expect(button).toBeDisabled();
     expect(
-      within(inspector()).getAllByRole("button", { name: "审阅并签名…" })[0],
+      within(inspector()).getAllByRole("button", { name: "审阅审批…" })[0],
     ).toBeDisabled();
   });
 });

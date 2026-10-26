@@ -1,7 +1,14 @@
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { Message, Project, Ref } from "@/api/types";
 import type {
+  Prefs,
   ProjectUiState,
   ProjectView,
   Selection,
@@ -35,9 +42,11 @@ import "./workspace.css";
 export interface WorkspaceProps {
   controller: DesktopController;
   state: DesktopState;
+  prefs: Prefs;
   onSettings: (page?: string) => void;
   onApproval: (id: string) => void;
   onInbox: () => void;
+  onOpenWorkflow: (workflowId: string, deliveryId?: string) => void;
 }
 
 const VIEWS: Array<{ id: ProjectView; label: string }> = [
@@ -55,9 +64,11 @@ const VIEWS: Array<{ id: ProjectView; label: string }> = [
 export function Workspace({
   controller,
   state,
+  prefs,
   onSettings,
   onApproval,
   onInbox,
+  onOpenWorkflow,
 }: WorkspaceProps): ReactNode {
   const project =
     state.projects.find((item) => item.id === state.currentProjectId) ?? null;
@@ -74,9 +85,23 @@ export function Workspace({
   const isScenario =
     (controller.ipc as { isScenario?: boolean }).isScenario === true;
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [focusRequest, setFocusRequest] = useState(0);
   const [scrollTarget, setScrollTarget] = useState<string | null>(null);
+
+  // lint 禁止 JSX 内联样式；布局宽度只在根节点上更新 CSS 变量。
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    root.style.setProperty("--left-w", `${prefs.layout.leftWidth}px`);
+    root.style.setProperty("--inspector-w", `${prefs.layout.inspectorWidth}px`);
+    root.classList.toggle("ws-root--left-collapsed", prefs.layout.leftCollapsed);
+    root.classList.toggle(
+      "ws-root--inspector-collapsed",
+      prefs.layout.inspectorCollapsed,
+    );
+  }, [prefs]);
 
   const requestFocus = useCallback(() => {
     setFocusRequest((value) => value + 1);
@@ -196,7 +221,16 @@ export function Workspace({
   }
 
   return (
-    <div className="ws-root">
+    <div
+      className="ws-root"
+      ref={rootRef}
+      data-left-width={prefs.layout.leftWidth}
+      data-inspector-width={prefs.layout.inspectorWidth}
+      data-left-collapsed={prefs.layout.leftCollapsed ? "true" : "false"}
+      data-inspector-collapsed={
+        prefs.layout.inspectorCollapsed ? "true" : "false"
+      }
+    >
       <a className="skip-link" href="#composer">
         跳到输入框
       </a>
@@ -250,7 +284,7 @@ export function Workspace({
           {isScenario ? (
             <span
               className="ws-demo-badge"
-              title="开发场景：示例数据，未连接真实服务端；签名、配对与受保护保存不可用。"
+              title="开发场景：示例数据，未连接真实服务端；模拟审批、配对与保存只改内存，不生成真实签名或证书。"
             >
               示例数据
             </span>
@@ -475,6 +509,7 @@ export function Workspace({
                 onOpenApproval={onApproval}
                 onOpenExternal={openExternal}
                 onScrolled={clearScrollTarget}
+                onOpenWorkflow={onOpenWorkflow}
               />
             ) : (
               <p className="ws-empty">尚未载入项目。</p>
@@ -540,6 +575,7 @@ export function Workspace({
             onReplyDelivery={reply}
             onSelect={select}
             onOpenApproval={onApproval}
+            onOpenWorkflow={onOpenWorkflow}
           />
         </aside>
       </div>
@@ -632,13 +668,20 @@ function WorkSection({
   mainRow?: ReactNode;
   footer?: ReactNode;
 }): ReactNode {
+  const [collapsed, setCollapsed] = useState(false);
   const visible = showAll ? rows : rows.slice(0, 5);
   return (
     <section className="ws-work-section" aria-label={title}>
-      <div className="ws-section-head">
+      <button
+        type="button"
+        className="ws-section-head ws-section-head--button"
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed((value) => !value)}
+      >
         <span>{title}</span>
         <span className="mono">{rows.length}</span>
-      </div>
+      </button>
+      <div hidden={collapsed}>
       {mainRow}
       {visible.map((row) => {
         const selected = sameSelection(selection, row.selection);
@@ -688,6 +731,7 @@ function WorkSection({
       ) : null}
       {rows.length === 0 ? <span className="ws-empty ws-empty--inline">暂无</span> : null}
       {footer}
+      </div>
     </section>
   );
 }
@@ -701,12 +745,20 @@ function DoneSection({
   selection: Selection | null;
   onSelect: (selection: Selection) => void;
 }): ReactNode {
+  const [collapsed, setCollapsed] = useState(false);
   if (rows.length === 0) return null;
   return (
     <section className="ws-work-section" aria-label="最近完成">
-      <div className="ws-section-head">
+      <button
+        type="button"
+        className="ws-section-head ws-section-head--button"
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed((value) => !value)}
+      >
         <span>最近完成</span>
-      </div>
+        <span className="mono">{rows.length}</span>
+      </button>
+      <div hidden={collapsed}>
       {rows.map((row) => {
         const selected = sameSelection(selection, row.selection);
         return (
@@ -724,6 +776,7 @@ function DoneSection({
           </button>
         );
       })}
+      </div>
     </section>
   );
 }

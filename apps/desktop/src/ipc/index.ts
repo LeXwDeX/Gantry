@@ -81,6 +81,13 @@ export function isScenarioAdapter(
 }
 
 export type { ScenarioIpcAdapter, ScenarioName };
+export type {
+  Simulation,
+  SimulationAction,
+  SimulationScript,
+  SimulationScriptId,
+  SimulationSnapshot,
+} from "@/demo/types";
 export { UnavailableIpcAdapter } from "./unavailable";
 export { TauriIpcAdapter } from "./tauri";
 export { fromUnknownError } from "./errors";
