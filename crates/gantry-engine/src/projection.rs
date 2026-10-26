@@ -41,6 +41,7 @@ pub struct DeliveryProjection {
     pub origin: DeliveryOrigin,
     pub stage: Stage,
     pub stage_status: StageStatus,
+    pub status_before_pause: Option<StageStatus>,
     pub budget: DeliveryBudget,
     pub issues: Vec<IssueRef>,
     pub config_rev: u64,
@@ -129,6 +130,7 @@ impl Projection {
                     origin: data.origin,
                     stage: Stage::Spec,
                     stage_status: StageStatus::Running,
+                    status_before_pause: None,
                     budget: data.budget,
                     issues: data.issues,
                     config_rev: data.config_rev.as_u64(),
@@ -155,11 +157,12 @@ impl Projection {
                 }
             }
             EventType::DeliveryPaused => {
-                let _: DeliveryPausedData = decode(event, ty)?;
+                let data: DeliveryPausedData = decode(event, ty)?;
                 let delivery = self
                     .delivery
                     .as_mut()
                     .ok_or(ProjectionError::MissingParent { ty })?;
+                delivery.status_before_pause = Some(data.status_before);
                 delivery.stage_status = StageStatus::Paused;
             }
             EventType::DeliveryResumed => {
@@ -169,6 +172,7 @@ impl Projection {
                     .as_mut()
                     .ok_or(ProjectionError::MissingParent { ty })?;
                 delivery.stage_status = data.status_after;
+                delivery.status_before_pause = None;
             }
             EventType::DeliveryAbandoned => {
                 let _: DeliveryAbandonedData = decode(event, ty)?;
