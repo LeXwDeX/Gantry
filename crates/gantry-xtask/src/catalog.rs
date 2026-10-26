@@ -10,8 +10,8 @@ use gantry_core::egress::{
     StageSecretResponse, StagedSecretList, StatusResponse, UsagePage,
 };
 use gantry_core::entities::{
-    Approval, Attempt, BudgetLedger, Conversation, Delivery, Device, InboxItem, Message, Node,
-    OutboxAction, Project, Sandbox, SettingsResource, Workflow, Worktree,
+    Approval, Attempt, BudgetLedger, Conversation, Delivery, Device, ForgeEventKind, InboxItem,
+    Message, Node, OutboxAction, Project, Sandbox, SettingsResource, Workflow, Worktree,
 };
 use gantry_core::events::{
     ApprovalConsumedData, ApprovalGrantedData, ApprovalRequestedData, AttemptFinishedData,
@@ -196,7 +196,7 @@ fn event_data_schema(ty: EventType) -> Option<Value> {
             schema::annotate(
                 &mut value,
                 "x-gantry-validated-by",
-                Value::String("events::validate_event_data (SecretRef 位置禁止 value)".to_owned()),
+                Value::String("events::validate_event_data（value 必填、scope 约束、SecretRef 位置禁止 value）".to_owned()),
             );
             value
         }
@@ -237,12 +237,7 @@ fn event_data_schema(ty: EventType) -> Option<Value> {
         E::DeviceUpdated => schema::for_type::<DeviceUpdatedData>(),
         E::DeviceRevoked => schema::for_type::<DeviceRevokedData>(),
         E::Forge(kind) => {
-            let mut value = schema::for_type::<ForgeEventEnvelope>();
-            if let Some(properties) = value.get_mut("properties").and_then(Value::as_object_mut) {
-                if let Some(kind_schema) = properties.get_mut("kind") {
-                    *kind_schema = serde_json::json!({ "const": kind.as_str() });
-                }
-            }
+            let mut value = forge_event_schema(kind);
             schema::annotate(
                 &mut value,
                 "x-gantry-projection",
@@ -269,6 +264,41 @@ fn event_data_schema(ty: EventType) -> Option<Value> {
         | E::BudgetCharged
         | E::PolicyDenied => return None,
     })
+}
+
+/// 从完整信封中选出指定 kind 的分支，并把该分支的 `kind`/`data` 约束提到根。
+/// 根上的 `origin=self → caused_by_action` 条件继续保留。
+fn forge_event_schema(kind: ForgeEventKind) -> Value {
+    let mut value = schema::for_type::<ForgeEventEnvelope>();
+    let branch = value
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .and_then(|branches| {
+            branches.iter().find(|branch| {
+                branch
+                    .pointer("/properties/kind/const")
+                    .and_then(Value::as_str)
+                    == Some(kind.as_str())
+            })
+        })
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "ForgeEventEnvelope has no branch for kind `{}`",
+                kind.as_str()
+            )
+        });
+    if let Some(root_properties) = value.get_mut("properties").and_then(Value::as_object_mut) {
+        if let Some(branch_properties) = branch.get("properties").and_then(Value::as_object) {
+            for (name, schema) in branch_properties {
+                root_properties.insert(name.clone(), schema.clone());
+            }
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.remove("oneOf");
+    }
+    value
 }
 
 fn forge() -> Vec<Artifact> {
@@ -488,11 +518,12 @@ fn egress() -> Vec<Artifact> {
     ];
     let mut all = all;
     let mut config_view = schema::for_type::<ConfigView>();
-    schema::reject_property(
+    schema::annotate(
         &mut config_view,
-        "injection",
-        "egress-control §4.6 只给出 `injection: {}` 示例，字段表未定义形状（M2）；M0 拒绝",
-        "docs/interfaces/egress-control.md#46-下发配置视图",
+        "x-gantry-injection",
+        Value::String(
+            "egress-control §4.6 只给出 `injection: {}` 示例；M0 只接受空对象".to_owned(),
+        ),
     );
     all.push(Artifact {
         path: "schemas/egress/config-view.json".to_owned(),

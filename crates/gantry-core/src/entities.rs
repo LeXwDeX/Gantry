@@ -975,14 +975,16 @@ impl Serialize for Card {
 impl<'de> Deserialize<'de> for Card {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
-        let kind = value
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let kind = match value.get("kind") {
+            Some(Value::String(kind)) => kind.as_str(),
+            Some(_) => return Err(serde::de::Error::custom("card `kind` must be a string")),
+            None => return Err(serde::de::Error::missing_field("kind")),
+        };
         if matches!(
             kind,
             "plan" | "approval" | "escalation" | "choice" | "summary"
         ) {
+            reject_unknown_card_fields(kind, &value).map_err(serde::de::Error::custom)?;
             let known: KnownCard =
                 serde_json::from_value(value).map_err(serde::de::Error::custom)?;
             Ok(Self::from_known(known))
@@ -992,13 +994,55 @@ impl<'de> Deserialize<'de> for Card {
     }
 }
 
+fn reject_unknown_card_fields(kind: &str, value: &Value) -> Result<(), String> {
+    let allowed: &[&str] = match kind {
+        "plan" => &["kind", "delivery_id", "workflow_id", "summary"],
+        "approval" => &["kind", "approval_id"],
+        "escalation" => &["kind", "inbox_id"],
+        "choice" => &["kind", "inbox_id", "options"],
+        "summary" => &["kind", "delivery_id", "items"],
+        _ => return Ok(()),
+    };
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("unknown field `{key}` for card kind `{kind}`"));
+        }
+    }
+    Ok(())
+}
+
 impl JsonSchema for Card {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Card".into()
     }
 
+    /// 已知 kind 必须是严格形状；未知 kind 保留任意字段供客户端降级显示。
+    /// 未知分支显式排除已定义 kind，因此已知 kind 的坏形状不会落进降级分支。
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
-        generator.subschema_for::<KnownCard>()
+        let known = generator.subschema_for::<KnownCard>().to_value();
+        if let Some(definition) = generator.definitions_mut().get_mut("KnownCard") {
+            if let Some(branches) = definition.get_mut("oneOf").and_then(Value::as_array_mut) {
+                for branch in branches {
+                    branch["additionalProperties"] = Value::Bool(false);
+                }
+            }
+        }
+        let unknown = serde_json::json!({
+            "type": "object",
+            "required": ["kind"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "not": { "enum": ["plan", "approval", "escalation", "choice", "summary"] }
+                }
+            }
+        });
+        let mut schema = serde_json::Map::new();
+        schema.insert("oneOf".to_owned(), serde_json::json!([known, unknown]));
+        Schema::from(schema)
     }
 }
 
@@ -1570,6 +1614,21 @@ pub enum ApprovalTargetKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(extend("allOf" = [
+    {
+        "if": { "properties": { "kind": { "const": "settings" } }, "required": ["kind"] },
+        "then": { "oneOf": [
+            {
+                "properties": { "scope": { "const": "global" }, "project_id": { "type": "null" } },
+                "required": ["scope"]
+            },
+            {
+                "properties": { "scope": { "const": "project" }, "project_id": { "not": { "type": "null" } } },
+                "required": ["scope", "project_id"]
+            }
+        ] }
+    }
+]))]
 pub enum ApprovalTarget {
     Pr {
         repo: RepoSlug,
@@ -1605,6 +1664,21 @@ pub enum ApprovalTarget {
 }
 
 impl ApprovalTarget {
+    /// 运行时形状：settings target 的 `project_id` 必须与 `scope` 一致。
+    /// global 省略 `project_id`；project 必须带非空 `project_id`。
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        if let Self::Settings {
+            scope, project_id, ..
+        } = self
+        {
+            match (scope, project_id) {
+                (SettingsScope::Global, None) | (SettingsScope::Project, Some(_)) => {}
+                _ => return Err(ApprovalError::SettingsScopeMismatch),
+            }
+        }
+        Ok(())
+    }
+
     pub fn kind(&self) -> ApprovalTargetKind {
         match self {
             Self::Pr { .. } => ApprovalTargetKind::Pr,
@@ -1613,6 +1687,19 @@ impl ApprovalTarget {
             Self::Patch { .. } => ApprovalTargetKind::Patch,
             Self::Settings { .. } => ApprovalTargetKind::Settings,
             Self::Device { .. } => ApprovalTargetKind::Device,
+        }
+    }
+}
+
+impl ApprovalTargetKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pr => "pr",
+            Self::Branch => "branch",
+            Self::ReviewThread => "review_thread",
+            Self::Patch => "patch",
+            Self::Settings => "settings",
+            Self::Device => "device",
         }
     }
 }
@@ -1679,7 +1766,66 @@ pub enum ApprovalStatus {
     Denied,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// 只用于生成 JSON Schema 的字段镜像；语义与 [`Approval`] 相同。
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct ApprovalFields {
+    id: ApprovalId,
+    #[serde(default)]
+    delivery_id: Option<DeliveryId>,
+    action: ApprovalAction,
+    target: ApprovalTarget,
+    subject_digest: SubjectDigest,
+    #[serde(default)]
+    device_id: Option<DeviceId>,
+    #[serde(default)]
+    signature: Option<String>,
+    status: ApprovalStatus,
+    expires_at: Timestamp,
+    #[serde(default)]
+    consumed_by: Option<String>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+}
+
+/// 把一个只用于生成 schema 的字段镜像内联进当前根 schema；定义随后从 `$defs` 移除。
+pub(crate) fn inline_fields<T: JsonSchema>(
+    generator: &mut schemars::SchemaGenerator,
+) -> serde_json::Map<String, Value> {
+    let name = T::schema_name().to_string();
+    generator.subschema_for::<T>();
+    generator
+        .definitions_mut()
+        .remove(&name)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// `APPROVAL_SHAPES` 的 schema 投影：每个合法动作一支，联动 target.kind 与 subject 摘要格式。
+pub(crate) fn approval_shape_branches() -> Vec<Value> {
+    APPROVAL_SHAPES
+        .iter()
+        .map(|shape| {
+            let subject_pattern = match shape.subject_kind {
+                SubjectKind::GitOid => "^[0-9a-f]{40}$",
+                SubjectKind::Sha256 => "^sha256:[0-9a-f]{64}$",
+            };
+            serde_json::json!({
+                "properties": {
+                    "action": { "const": shape.action.as_str() },
+                    "target": {
+                        "properties": { "kind": { "const": shape.target_kind.as_str() } },
+                        "required": ["kind"]
+                    },
+                    "subject_digest": { "type": "string", "pattern": subject_pattern }
+                },
+                "required": ["action", "target", "subject_digest"]
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
     pub id: ApprovalId,
     #[serde(default)]
@@ -1699,6 +1845,22 @@ pub struct Approval {
     pub updated_at: Timestamp,
 }
 
+impl JsonSchema for Approval {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Approval".into()
+    }
+
+    /// 字段形状来自镜像类型；`oneOf` 只接受 `APPROVAL_SHAPES` 定义的动作，
+    /// 并联动 target.kind 与 subject_digest。未定义形状的动作 fail-closed。
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let mut fields = inline_fields::<ApprovalFields>(generator);
+        fields.remove("description");
+        fields.insert("title".to_owned(), Value::String("Approval".to_owned()));
+        fields.insert("oneOf".to_owned(), Value::Array(approval_shape_branches()));
+        Schema::from(fields)
+    }
+}
+
 impl Approval {
     /// 动作必须有定义形状，target 与 subject 必须匹配；否则 fail-closed。
     pub fn validate(&self) -> Result<(), ApprovalError> {
@@ -1706,6 +1868,7 @@ impl Approval {
         if shape.target_kind != self.target.kind() {
             return Err(ApprovalError::TargetMismatch);
         }
+        self.target.validate()?;
         if shape.subject_kind != self.subject_digest.kind() {
             return Err(ApprovalError::SubjectMismatch);
         }
@@ -1721,6 +1884,8 @@ pub enum ApprovalError {
     TargetMismatch,
     #[error("approval subject digest does not match the action shape")]
     SubjectMismatch,
+    #[error("settings approval target project_id does not match its scope")]
+    SettingsScopeMismatch,
 }
 
 // ---------------------------------------------------------------------------
@@ -2194,14 +2359,35 @@ impl Default for TokenWeights {
 
 impl TokenWeights {
     pub fn weighted(&self, usage: &TokenUsage) -> u64 {
-        let total = usage.input_tokens as f64 * self.input
-            + usage.output_tokens as f64 * self.output
-            + usage.cache_read_tokens as f64 * self.cache_read
-            + usage.cache_write_tokens as f64 * self.cache_write;
-        if !total.is_finite() || total <= 0.0 {
-            return 0;
+        let terms = [
+            (usage.input_tokens, self.input),
+            (usage.output_tokens, self.output),
+            (usage.cache_read_tokens, self.cache_read),
+            (usage.cache_write_tokens, self.cache_write),
+        ];
+        // 正常范围内仍按总和四舍五入；只有总和溢出时才逐项饱和，避免 inf 归零。
+        let total: f64 = terms
+            .iter()
+            .map(|(tokens, weight)| *tokens as f64 * *weight)
+            .sum();
+        if total.is_finite() && total <= u64::MAX as f64 {
+            return if total <= 0.0 {
+                0
+            } else {
+                total.round() as u64
+            };
         }
-        total.round().min(u64::MAX as f64) as u64
+        terms.iter().fold(0u64, |acc, (tokens, weight)| {
+            let term = *tokens as f64 * *weight;
+            let term = if term.is_nan() || term <= 0.0 {
+                0
+            } else if term >= u64::MAX as f64 {
+                u64::MAX
+            } else {
+                term.round() as u64
+            };
+            acc.saturating_add(term)
+        })
     }
 }
 
@@ -2456,6 +2642,7 @@ impl BudgetLedger {
                 if self.delivery_id.is_none()
                     || self.conversation_id.is_some()
                     || self.day.is_some()
+                    || self.limits.tokens.is_some()
                 {
                     return Err(EntityError::BudgetSubject);
                 }
@@ -2516,9 +2703,18 @@ impl BudgetLedger {
         for dimension in self.relevant_dimensions(delta.tier) {
             let exceeds = match dimension {
                 BudgetDimension::TokensByTier(tier) => {
-                    let used = self.used.tokens_by_tier.get(&tier).copied().unwrap_or(0);
-                    let limit = self.token_limit(tier);
-                    used.saturating_add(weighted) > limit
+                    let used = if self.subject == BudgetSubject::Conversation {
+                        self.used.total_tokens()
+                    } else {
+                        self.used.tokens_by_tier.get(&tier).copied().unwrap_or(0)
+                    };
+                    let planned =
+                        if self.subject == BudgetSubject::Conversation || tier == delta.tier {
+                            used.saturating_add(weighted)
+                        } else {
+                            used
+                        };
+                    planned > self.token_limit(tier)
                 }
                 BudgetDimension::Nodes => {
                     self.used.nodes.saturating_add(delta.nodes as u64) > self.limits.nodes
@@ -2547,7 +2743,11 @@ impl BudgetLedger {
     pub fn is_exhausted(&self, dimension: BudgetDimension, _weights: &TokenWeights) -> bool {
         match dimension {
             BudgetDimension::TokensByTier(tier) => {
-                let used = self.used.tokens_by_tier.get(&tier).copied().unwrap_or(0);
+                let used = if self.subject == BudgetSubject::Conversation {
+                    self.used.total_tokens()
+                } else {
+                    self.used.tokens_by_tier.get(&tier).copied().unwrap_or(0)
+                };
                 used >= self.token_limit(tier)
             }
             BudgetDimension::Nodes => {
@@ -2576,14 +2776,14 @@ impl BudgetLedger {
         }
     }
 
-    fn relevant_dimensions(&self, _tier: Tier) -> Vec<BudgetDimension> {
+    fn relevant_dimensions(&self, tier: Tier) -> Vec<BudgetDimension> {
         let tokens = [
             BudgetDimension::TokensByTier(Tier::Utility),
             BudgetDimension::TokensByTier(Tier::Planner),
             BudgetDimension::TokensByTier(Tier::Worker),
         ];
         if self.subject == BudgetSubject::Conversation {
-            tokens.to_vec()
+            vec![BudgetDimension::TokensByTier(tier)]
         } else {
             let mut dimensions = tokens.to_vec();
             dimensions.extend([

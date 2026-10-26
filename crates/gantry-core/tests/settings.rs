@@ -94,6 +94,19 @@ fn has(report: &ValidationReport, code: &str, pointer: &str) -> bool {
         .any(|issue| issue.code == code && issue.pointer == pointer)
 }
 
+fn assert_no_secret_echo(report: &ValidationReport, secret: &str) {
+    for issue in report.errors.iter().chain(report.warnings.iter()) {
+        assert!(
+            !issue.pointer.contains(secret),
+            "pointer echoed secret: {issue:?}"
+        );
+        assert!(
+            !issue.message.contains(secret),
+            "message echoed secret: {issue:?}"
+        );
+    }
+}
+
 fn fixture(name: &str) -> Value {
     let text = match name {
         "global" => include_str!("../fixtures/settings/global_example.json"),
@@ -1000,6 +1013,80 @@ fn v02_detects_inline_keys_and_secret_like_values() {
 }
 
 #[test]
+fn v02_detects_secret_like_strings_in_arrays() {
+    const SECRET: &str = "sk-audit-placeholder-not-a-real-credential";
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"allow_globs": [SECRET]}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "inline_secret_detected", "/allow_globs/0"));
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|issue| issue.message.contains(SECRET) || issue.pointer.contains(SECRET)),
+        "{:?}",
+        report.errors
+    );
+
+    for prefix in ["sk-", "ghp_", "github_pat_", "-----BEGIN", "xoxb-"] {
+        let secret = format!("{prefix}audit-placeholder-not-a-real-credential");
+        let report = check(
+            SettingsResource::Policies,
+            &json!({"allow_globs": [secret]}),
+            &TestCtx::default(),
+        );
+        assert!(
+            has(&report, "inline_secret_detected", "/allow_globs/0"),
+            "{prefix}: {:?}",
+            report.errors
+        );
+    }
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"allow_globs": [["src/**", SECRET]]}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "inline_secret_detected", "/allow_globs/0/1"));
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"allow_globs": ["src/**", "deploy/*.yml"]}),
+        &TestCtx::default(),
+    );
+    assert!(report.is_ok(), "{:?}", report.errors);
+
+    let report = check(
+        SettingsResource::Models,
+        &json!({"providers": {"x": {"credential": {
+            "type": "api_key", "secret_ref": "model.x", "value": SECRET
+        }}}}),
+        &TestCtx::default(),
+    );
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|issue| issue.code == "inline_secret_detected"),
+        "{:?}",
+        report.errors
+    );
+
+    let Err(report) = validate_and_parse(
+        SettingsResource::Policies,
+        &SettingsScope::Global,
+        &json!({"allow_globs": [SECRET]}),
+        &TestCtx::default(),
+    ) else {
+        panic!("parse entry must reject inline secrets");
+    };
+    assert!(has(&report, "inline_secret_detected", "/allow_globs/0"));
+}
+
+#[test]
 fn v02_does_not_flag_secret_ref_or_safe_values() {
     let report = check(
         SettingsResource::Github,
@@ -1020,6 +1107,221 @@ fn v02_does_not_flag_secret_ref_or_safe_values() {
         .errors
         .iter()
         .any(|issue| issue.code == "inline_secret_detected"));
+}
+
+#[test]
+fn v02_redacts_secret_like_dynamic_keys_from_reports() {
+    const SECRET_KEY: &str = "sk-audit-placeholder-not-a-real-credential";
+    let doc = json!({"paths": {SECRET_KEY: {
+        "globs": [SECRET_KEY],
+        "disposition": "approve"
+    }}});
+
+    let report = check(SettingsResource::Policies, &doc, &TestCtx::default());
+    assert!(
+        has(&report, "inline_secret_detected", "/paths"),
+        "{report:?}"
+    );
+    assert_no_secret_echo(&report, SECRET_KEY);
+
+    let Err(report) = validate_and_parse(
+        SettingsResource::Policies,
+        &SettingsScope::Global,
+        &doc,
+        &TestCtx::default(),
+    ) else {
+        panic!("parse entry must reject the secret-like path rule");
+    };
+    assert!(
+        has(&report, "inline_secret_detected", "/paths"),
+        "{report:?}"
+    );
+    assert_no_secret_echo(&report, SECRET_KEY);
+
+    const ENCODED_KEY: &str = "sk-audit~placeholder/branch-not-real";
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"paths": {"team~deploy/**": {ENCODED_KEY: true}}}),
+        &TestCtx::default(),
+    );
+    assert!(
+        has(&report, "unknown_field", "/paths/team~0deploy~1**"),
+        "{report:?}"
+    );
+    assert_no_secret_echo(&report, ENCODED_KEY);
+    let encoded = "sk-audit~0placeholder~1branch-not-real";
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|issue| issue.pointer.contains(encoded) || issue.message.contains(encoded)),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn v02_redacts_dynamic_keys_but_keeps_structural_errors() {
+    const SECRET_KEY: &str = "sk-audit-placeholder-not-a-real-credential";
+    let doc = json!({"paths": {SECRET_KEY: {
+        "globs": 5,
+        "disposition": "maybe",
+        "extra": null
+    }}});
+    let report = check(SettingsResource::Policies, &doc, &TestCtx::default());
+    assert!(has(&report, "type", "/paths"), "{report:?}");
+    assert!(has(&report, "enum", "/paths"), "{report:?}");
+    assert!(has(&report, "unknown_field", "/paths"), "{report:?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|issue| issue.code == "unknown_field" && issue.message == "unknown field `extra`"),
+        "{report:?}"
+    );
+    assert_no_secret_echo(&report, SECRET_KEY);
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"paths": {SECRET_KEY: {"globs": ["src/**"]}}}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "required", "/paths"), "{report:?}");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|issue| issue.code == "required" && issue.message == "`disposition` is required"),
+        "{report:?}"
+    );
+    assert_no_secret_echo(&report, SECRET_KEY);
+
+    let high_entropy = "Ab3~K9/xY7_Lm2Pq8Rt4Vw6Zc1Nd5Hf0Jk9Qw2E4";
+    let mut doc = json!({"paths": {"deploy/**": {}}});
+    doc["paths"]["deploy/**"]
+        .as_object_mut()
+        .unwrap()
+        .insert(high_entropy.into(), Value::Bool(true));
+    let report = check(SettingsResource::Policies, &doc, &TestCtx::default());
+    assert!(
+        has(&report, "unknown_field", "/paths/deploy~1**"),
+        "{report:?}"
+    );
+    assert_no_secret_echo(&report, high_entropy);
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"paths": {SECRET_KEY: null}}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "type", "/paths"), "{report:?}");
+    assert_no_secret_echo(&report, SECRET_KEY);
+}
+
+#[test]
+fn v02_redacts_secret_like_dynamic_keys_from_enum_messages() {
+    const SECRET_KEY: &str = "sk-audit-placeholder-not-a-real-credential";
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"actions": {SECRET_KEY: "deny"}}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "enum", "/actions"), "{report:?}");
+    assert_no_secret_echo(&report, SECRET_KEY);
+
+    let report = check(
+        SettingsResource::Guardian,
+        &json!({"triage": {SECRET_KEY: "continue"}}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "enum", "/triage"), "{report:?}");
+    assert_no_secret_echo(&report, SECRET_KEY);
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"paths": {"safe": {SECRET_KEY: true}}}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "unknown_field", "/paths/safe"), "{report:?}");
+    assert_no_secret_echo(&report, SECRET_KEY);
+
+    let mut report = ValidationReport::default();
+    report.warning(
+        format!("/paths/{SECRET_KEY}/globs"),
+        "audit",
+        format!("inline secret near globs for {SECRET_KEY}"),
+    );
+    assert_eq!(report.warnings[0].pointer, "/paths");
+    assert!(report.warnings[0].message.contains("globs"), "{report:?}");
+    assert_no_secret_echo(&report, SECRET_KEY);
+}
+
+#[test]
+fn v02_preserves_safe_dynamic_paths_and_pointer_escapes() {
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"paths": {"team~deploy/**": {
+            "globs": ["src/**"],
+            "disposition": "sometimes"
+        }}}),
+        &TestCtx::default(),
+    );
+    assert!(
+        has(&report, "enum", "/paths/team~0deploy~1**/disposition"),
+        "{report:?}"
+    );
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"escalation": {"rules": {"team~deploy/**": {
+            "when": {"paths": ["src/**"]},
+            "raise_to": "Sometimes"
+        }}}}),
+        &TestCtx::default(),
+    );
+    assert!(
+        has(
+            &report,
+            "enum",
+            "/escalation/rules/team~0deploy~1**/raise_to"
+        ),
+        "{report:?}"
+    );
+
+    let report = check(
+        SettingsResource::Policies,
+        &json!({"allow_globs": [42]}),
+        &TestCtx::default(),
+    );
+    assert!(has(&report, "type", "/allow_globs/0"), "{report:?}");
+
+    let report = check(
+        SettingsResource::Github,
+        &json!({"app": {"private_key": {"secret_ref": "github.app.key"}}}),
+        &TestCtx::with_forge(&["github.app.key"]),
+    );
+    assert!(report.is_ok(), "{report:?}");
+
+    let normal = json!({"paths": {"team~deploy/**": {
+        "globs": ["deploy/**"],
+        "disposition": "approve"
+    }}});
+    assert!(validate_and_parse(
+        SettingsResource::Policies,
+        &SettingsScope::Global,
+        &normal,
+        &TestCtx::default(),
+    )
+    .is_ok());
+
+    let parsed = validate_and_parse(
+        SettingsResource::Models,
+        &SettingsScope::Global,
+        &json!({"providers": {"x": {"credential": {
+            "type": "api_key", "secret_ref": "model.x", "value": "sk-ant-secret"
+        }}}}),
+        &TestCtx::default(),
+    );
+    assert!(parsed.is_ok(), "{parsed:?}");
 }
 
 // ---------------------------------------------------------------------------

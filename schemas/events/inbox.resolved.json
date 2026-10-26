@@ -61,7 +61,7 @@
   "$defs": {
     "Id_inb": {
       "type": "string",
-      "pattern": "^inb_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^inb_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "InboxResolution": {
       "type": "string",
@@ -78,11 +78,11 @@
     },
     "Id_msg": {
       "type": "string",
-      "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_apr": {
       "type": "string",
-      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

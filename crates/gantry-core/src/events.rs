@@ -68,11 +68,11 @@ pub struct NewEvent {
 }
 
 impl NewEvent {
-    /// 形状校验 + settings 的 subject / project_id 一致性。
+    /// 形状校验 + settings 的 subject / project_id / scope 一致性。
     pub fn validate(&self) -> Result<(), SchemaError> {
         validate_event_data(&self.ty, &self.data)?;
         if self.ty == EventType::SettingsUpdated {
-            validate_settings_subject(self.subject.as_str(), self.project_id.as_ref())?;
+            validate_settings_subject(self.subject.as_str(), self.project_id.as_ref(), &self.data)?;
         }
         Ok(())
     }
@@ -81,7 +81,9 @@ impl NewEvent {
 fn validate_settings_subject(
     subject: &str,
     project_id: Option<&ProjectId>,
+    data: &Value,
 ) -> Result<(), SchemaError> {
+    let scope = data.get("scope").and_then(Value::as_str);
     if subject == "settings" {
         if project_id.is_some() {
             return Err(SchemaError::consistency(
@@ -89,21 +91,33 @@ fn validate_settings_subject(
                 "global settings.updated must have project_id = null",
             ));
         }
-        return Ok(());
-    }
-    if subject.starts_with("prj_") {
-        if project_id.is_none() {
+        if scope != Some("global") {
             return Err(SchemaError::consistency(
-                "/project_id",
-                "project settings.updated must carry project_id",
+                "/scope",
+                "global settings.updated must have scope = global",
             ));
         }
         return Ok(());
     }
-    Err(SchemaError::consistency(
-        "/subject",
-        "settings.updated subject must be \"settings\" or a project id",
-    ))
+    let Some(project_id) = project_id else {
+        return Err(SchemaError::consistency(
+            "/project_id",
+            "project settings.updated must carry project_id",
+        ));
+    };
+    if subject != project_id.to_string() {
+        return Err(SchemaError::consistency(
+            "/project_id",
+            "settings.updated subject must equal project_id",
+        ));
+    }
+    if scope != Some("project") {
+        return Err(SchemaError::consistency(
+            "/scope",
+            "project settings.updated must have scope = project",
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +201,7 @@ impl JsonSchema for Subject {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": "^(settings|(prj|dlv|wfl|nod|att|wtr|sbx|cnv|msg|inb|apr|act|dev|evt|bdg)_[0-9A-HJKMNP-TV-Z]{26})$",
+            "pattern": "^(settings|(prj|dlv|wfl|nod|att|wtr|sbx|cnv|msg|inb|apr|act|dev|evt|bdg)_[0-7][0-9A-HJKMNP-TV-Z]{25})$",
         })
     }
 }
@@ -912,35 +926,258 @@ impl EventData for ConversationEventData {
 }
 
 /// `settings.updated`（config.md §2.3）。`value` 是已剥离 secret 的稀疏文档；
-/// 项目 `DELETE` 时为 `null`。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+/// 项目 `DELETE` 时为 `null`，全局写入不允许 `null`。字段必须存在：反序列化
+/// 区分“缺失”（拒绝）与显式 `null`（仅项目 DELETE 允许）。
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SettingsUpdatedData {
     pub scope: SettingsScope,
     pub resource: SettingsResource,
     pub schema_version: u32,
     pub base_rev: Seq,
-    #[serde(default)]
     pub value: Option<Value>,
     pub relaxes: Vec<KeyPath>,
     pub secret_changes: Vec<SecretChange>,
 }
 
+/// 字段出现时返回 `Some(value)`（显式 `null` 为 `Some(None)`）；缺失时由
+/// `#[serde(default)]` 得到 `None`。普通 `Option<Option<T>>` 会把两者都折叠成
+/// `None`，无法拒绝缺失的 `value`。
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Option<Value>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Some(Option::<Value>::deserialize(deserializer)?))
+}
+
+impl<'de> Deserialize<'de> for SettingsUpdatedData {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            scope: SettingsScope,
+            resource: SettingsResource,
+            schema_version: u32,
+            base_rev: Seq,
+            #[serde(default, deserialize_with = "deserialize_present_value")]
+            value: Option<Option<Value>>,
+            relaxes: Vec<KeyPath>,
+            secret_changes: Vec<SecretChange>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let value = wire
+            .value
+            .ok_or_else(|| serde::de::Error::missing_field("value"))?;
+        Ok(Self {
+            scope: wire.scope,
+            resource: wire.resource,
+            schema_version: wire.schema_version,
+            base_rev: wire.base_rev,
+            value,
+            relaxes: wire.relaxes,
+            secret_changes: wire.secret_changes,
+        })
+    }
+}
+
+/// 只用于生成 JSON Schema 的字段镜像；语义与 [`SettingsUpdatedData`] 相同。
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct SettingsUpdatedFields {
+    scope: SettingsScope,
+    resource: SettingsResource,
+    schema_version: u32,
+    base_rev: Seq,
+    value: Option<Value>,
+    relaxes: Vec<KeyPath>,
+    secret_changes: Vec<SecretChange>,
+}
+
+const SETTINGS_RESOURCES: [SettingsResource; 8] = [
+    SettingsResource::Models,
+    SettingsResource::Levels,
+    SettingsResource::Policies,
+    SettingsResource::Guardian,
+    SettingsResource::Sandbox,
+    SettingsResource::Egress,
+    SettingsResource::Notify,
+    SettingsResource::Github,
+];
+
+impl JsonSchema for SettingsUpdatedData {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SettingsUpdatedData".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let mut fields = crate::entities::inline_fields::<SettingsUpdatedFields>(generator);
+        fields.remove("description");
+        fields.insert(
+            "description".to_owned(),
+            Value::String(
+                "`settings.updated`（config.md §2.3）。`value` 是已剥离 secret 的稀疏文档且必须存在；全局写入不得为 `null`，项目 `DELETE` 时为 `null`。"
+                    .to_owned(),
+            ),
+        );
+        fields.insert(
+            "title".to_owned(),
+            Value::String("SettingsUpdatedData".to_owned()),
+        );
+        // `value` 不能是可选属性：缺失必须拒绝，global 必须是文档，只有
+        // project DELETE 的显式 `null` 合法。顶层只声明字段存在，具体形状由
+        // scope × resource 的 16 个分支约束。
+        if let Some(properties) = fields.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.insert("value".to_owned(), Value::Object(Default::default()));
+        }
+        let required = fields
+            .entry("required".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(required) = required.as_array_mut() {
+            if !required.iter().any(|field| field == "value") {
+                required.push(Value::String("value".to_owned()));
+            }
+        }
+        let mut branches = Vec::new();
+        for resource in SETTINGS_RESOURCES {
+            let mut value_schema = crate::settings::resource_schema(resource).to_value();
+            merge_resource_definitions(generator, &value_schema);
+            if let Some(object) = value_schema.as_object_mut() {
+                object.remove("$defs");
+            }
+            let key = resource_key(resource);
+            branches.push(serde_json::json!({
+                "properties": {
+                    "scope": { "const": "global" },
+                    "resource": { "const": key },
+                    "value": value_schema
+                },
+                "required": ["scope", "resource", "value"]
+            }));
+            let project_value = serde_json::json!({
+                "anyOf": [value_schema, { "type": "null" }]
+            });
+            branches.push(serde_json::json!({
+                "properties": {
+                    "scope": { "const": "project" },
+                    "resource": { "const": key },
+                    "value": project_value
+                },
+                "required": ["scope", "resource", "value"]
+            }));
+        }
+        for definition in generator.definitions_mut().values_mut() {
+            if definition.get("x-gantry-secret") == Some(&Value::Bool(true)) {
+                if let Some(properties) = definition
+                    .get_mut("properties")
+                    .and_then(Value::as_object_mut)
+                {
+                    // SecretRef 的读形状只有 secret_ref / present；事件日志不允许任何 value，
+                    // 包括 null。写入侧 SecretRefWrite 的 schema 由同一批资源类型派生。
+                    properties.insert("value".to_owned(), Value::Bool(false));
+                }
+            }
+        }
+        fields.insert("oneOf".to_owned(), Value::Array(branches));
+        Schema::from(fields)
+    }
+}
+
+fn merge_resource_definitions(generator: &mut schemars::SchemaGenerator, schema: &Value) {
+    let Some(definitions) = schema.get("$defs").and_then(Value::as_object) else {
+        return;
+    };
+    let target = generator.definitions_mut();
+    for (name, definition) in definitions {
+        match target.get(name) {
+            None => {
+                target.insert(name.clone(), definition.clone());
+            }
+            Some(existing) => assert_eq!(
+                existing, definition,
+                "settings resource schema definition `{name}` conflicts across resources"
+            ),
+        }
+    }
+}
+
 impl SettingsUpdatedData {
+    /// `value` 是 resource 内部文档；非 `null` 时按该 resource 的写形状解析，
+    /// 拒绝未知字段、错误类型与嵌套 `null`。根 `null` 只在项目 DELETE 合法；
+    /// 全局写入的 `null` 拒绝。
+    fn check_value(&self) -> Result<(), SchemaError> {
+        if self.value.as_ref().is_none_or(Value::is_null) {
+            return match self.scope {
+                SettingsScope::Global => Err(SchemaError::shape(
+                    "/value",
+                    "global settings.updated requires a non-null value",
+                )),
+                SettingsScope::Project => Ok(()),
+            };
+        }
+        let value = self
+            .value
+            .as_ref()
+            .expect("check_value handled null and absent values");
+        if let Err(pointer) = crate::settings::reject_null_storage(value) {
+            return Err(SchemaError::shape(
+                pointer,
+                "null is not allowed in a stored settings document; remove the key to clear it",
+            ));
+        }
+        crate::settings::parse_patch(self.resource, value)
+            .map_err(|error| from_serde(error, value))?;
+        Ok(())
+    }
+
     fn check_secret_values(&self) -> Result<(), SchemaError> {
         let Some(value) = &self.value else {
             return Ok(());
         };
-        for pointer in secret_positions(value) {
-            let target = pointer_value(value, &pointer);
-            if let Some(map) = target.and_then(Value::as_object) {
-                if map.contains_key("value") {
-                    return Err(SchemaError::new(
-                        SchemaErrorCode::SecretValueForbidden,
-                        pointer.join("/"),
-                        "SecretRef positions must not carry \"value\"; secret values never enter the event log",
-                    ));
+        for pointer in secret_positions(self.resource, value) {
+            let pointer_text = pointer_string(&pointer);
+            let Some(object) = pointer_value(value, &pointer).and_then(Value::as_object) else {
+                return Err(SchemaError::shape(
+                    pointer_text,
+                    "SecretRef must be an object",
+                ));
+            };
+            if object.contains_key("value") {
+                return Err(SchemaError::new(
+                    SchemaErrorCode::SecretValueForbidden,
+                    format!("{pointer_text}/value"),
+                    "SecretRef positions must not carry \"value\"; secret values never enter the event log",
+                ));
+            }
+            match object.get("secret_ref") {
+                Some(Value::String(name)) if name.parse::<crate::secret::SecretName>().is_ok() => {}
+                Some(Value::String(_)) => {
+                    return Err(SchemaError::shape(
+                        format!("{pointer_text}/secret_ref"),
+                        "secret_ref must match ^[a-z0-9][a-z0-9._-]{0,63}$",
+                    ))
                 }
+                Some(_) => {
+                    return Err(SchemaError::shape(
+                        format!("{pointer_text}/secret_ref"),
+                        "secret_ref must be a string",
+                    ))
+                }
+                None => {
+                    return Err(SchemaError::shape(
+                        format!("{pointer_text}/secret_ref"),
+                        "secret_ref is required",
+                    ))
+                }
+            }
+            if object
+                .get("present")
+                .is_some_and(|present| !present.is_boolean())
+            {
+                return Err(SchemaError::shape(
+                    format!("{pointer_text}/present"),
+                    "present must be a boolean",
+                ));
             }
         }
         Ok(())
@@ -951,7 +1188,8 @@ impl EventData for SettingsUpdatedData {
     const TYPES: &'static [EventType] = &[EventType::SettingsUpdated];
 
     fn validate(&self) -> Result<(), SchemaError> {
-        self.check_secret_values()
+        self.check_secret_values()?;
+        self.check_value()
     }
 }
 
@@ -974,45 +1212,80 @@ pub enum SecretChangeOp {
 }
 
 /// 配置文档里的 SecretRef 位置（config.md §2.4）。
-fn secret_positions(value: &Value) -> Vec<Vec<String>> {
+///
+/// `value` 是 resource 内部文档（如 `models` 的 `providers.*.credential`），
+/// 因此按 `resource` 的真实形状定位，而不是在 `value` 里再找 resource 前缀。
+/// 同时兼容历史 / 夹具里仍带 resource 前缀的形状：只有顶层键恰好等于该
+/// resource 名时才检查，避免按任意键名扫描业务文本。
+fn secret_positions(resource: SettingsResource, value: &Value) -> Vec<Vec<String>> {
     let mut found = Vec::new();
-    let Some(root) = value.as_object() else {
-        return found;
-    };
-    if let Some(models) = root.get("models").and_then(Value::as_object) {
-        if let Some(providers) = models.get("providers").and_then(Value::as_object) {
-            for id in providers.keys() {
-                found.push(vec![
-                    "models".into(),
-                    "providers".into(),
-                    id.clone(),
-                    "credential".into(),
-                ]);
-            }
-        }
-    }
-    if let Some(egress) = root.get("egress").and_then(Value::as_object) {
-        if let Some(injection) = egress.get("injection").and_then(Value::as_object) {
-            for id in injection.keys() {
-                found.push(vec![
-                    "egress".into(),
-                    "injection".into(),
-                    id.clone(),
-                    "credential".into(),
-                ]);
-            }
-        }
-    }
-    if let Some(github) = root.get("github").and_then(Value::as_object) {
-        if let Some(app) = github.get("app").and_then(Value::as_object) {
-            for key in ["private_key", "webhook_secret", "webhook_secret_previous"] {
-                if app.contains_key(key) {
-                    found.push(vec!["github".into(), "app".into(), key.into()]);
-                }
-            }
+    collect_secret_positions(resource, value, &mut found);
+    let prefix = resource_key(resource);
+    if let Some(nested) = value.as_object().and_then(|root| root.get(prefix)) {
+        let mut nested_found = Vec::new();
+        collect_secret_positions(resource, nested, &mut nested_found);
+        for mut pointer in nested_found {
+            pointer.insert(0, prefix.to_owned());
+            found.push(pointer);
         }
     }
     found
+}
+
+fn collect_secret_positions(
+    resource: SettingsResource,
+    value: &Value,
+    found: &mut Vec<Vec<String>>,
+) {
+    let Some(root) = value.as_object() else {
+        return;
+    };
+    match resource {
+        SettingsResource::Models => {
+            if let Some(providers) = root.get("providers").and_then(Value::as_object) {
+                for id in providers.keys() {
+                    found.push(vec!["providers".into(), id.clone(), "credential".into()]);
+                }
+            }
+        }
+        SettingsResource::Egress => {
+            if let Some(injections) = root.get("injection").and_then(Value::as_object) {
+                for id in injections.keys() {
+                    found.push(vec!["injection".into(), id.clone(), "credential".into()]);
+                }
+            }
+        }
+        SettingsResource::Github => {
+            if let Some(app) = root.get("app").and_then(Value::as_object) {
+                for key in ["private_key", "webhook_secret", "webhook_secret_previous"] {
+                    if app.contains_key(key) {
+                        found.push(vec!["app".into(), key.into()]);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resource_key(resource: SettingsResource) -> &'static str {
+    match resource {
+        SettingsResource::Models => "models",
+        SettingsResource::Levels => "levels",
+        SettingsResource::Policies => "policies",
+        SettingsResource::Guardian => "guardian",
+        SettingsResource::Sandbox => "sandbox",
+        SettingsResource::Egress => "egress",
+        SettingsResource::Notify => "notify",
+        SettingsResource::Github => "github",
+    }
+}
+
+fn pointer_string(pointer: &[String]) -> String {
+    pointer
+        .iter()
+        .map(|part| format!("/{}", escape_pointer(part)))
+        .collect()
 }
 
 fn pointer_value<'a>(value: &'a Value, pointer: &[String]) -> Option<&'a Value> {
@@ -1686,7 +1959,7 @@ impl EventData for InboxDismissedData {
 // ---------------------------------------------------------------------------
 
 /// `approval.requested`（policy.md §7.3）。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalRequestedData {
     pub action: ApprovalAction,
@@ -1695,6 +1968,45 @@ pub struct ApprovalRequestedData {
     pub expires_at: Timestamp,
     pub config_rev: Seq,
     pub requested_by: Actor,
+}
+
+/// 只用于生成 JSON Schema 的字段镜像；语义与 [`ApprovalRequestedData`] 相同。
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ApprovalRequestedFields {
+    action: ApprovalAction,
+    target: ApprovalTarget,
+    subject_digest: SubjectDigest,
+    expires_at: Timestamp,
+    config_rev: Seq,
+    requested_by: Actor,
+}
+
+impl JsonSchema for ApprovalRequestedData {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ApprovalRequestedData".into()
+    }
+
+    /// 与 [`crate::entities::Approval`] 共用 `APPROVAL_SHAPES` 投影；事件 schema 不再
+    /// 只校验三个字段各自的枚举/格式，而是要求 action、target.kind、subject_digest 同时符合。
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let mut fields = crate::entities::inline_fields::<ApprovalRequestedFields>(generator);
+        fields.remove("description");
+        fields.insert(
+            "description".to_owned(),
+            Value::String("`approval.requested`（policy.md §7.3）。".to_owned()),
+        );
+        fields.insert(
+            "title".to_owned(),
+            Value::String("ApprovalRequestedData".to_owned()),
+        );
+        fields.insert(
+            "oneOf".to_owned(),
+            Value::Array(crate::entities::approval_shape_branches()),
+        );
+        Schema::from(fields)
+    }
 }
 
 impl EventData for ApprovalRequestedData {
@@ -1711,6 +2023,9 @@ impl EventData for ApprovalRequestedData {
                 "target does not match the approval action shape",
             ));
         }
+        self.target
+            .validate()
+            .map_err(|error| SchemaError::consistency("/target", error.to_string()))?;
         if shape.subject_kind != self.subject_digest.kind() {
             return Err(SchemaError::consistency(
                 "/subject_digest",
@@ -2077,7 +2392,11 @@ fn check_inbox_raised_keys(data: &Value) -> Result<(), SchemaError> {
 
 impl Event<Value> {
     pub fn validate_data(&self) -> Result<(), SchemaError> {
-        validate_event_data(&self.ty, &self.data)
+        validate_event_data(&self.ty, &self.data)?;
+        if self.ty == EventType::SettingsUpdated {
+            validate_settings_subject(self.subject.as_str(), self.project_id.as_ref(), &self.data)?;
+        }
+        Ok(())
     }
 }
 

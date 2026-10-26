@@ -50,7 +50,7 @@
   "$defs": {
     "Id_prj": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "RepoSlug": {
       "type": "string",

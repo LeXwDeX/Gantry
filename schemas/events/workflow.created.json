@@ -109,11 +109,11 @@
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_cnv": {
       "type": "string",
-      "pattern": "^cnv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^cnv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

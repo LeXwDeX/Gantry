@@ -64,7 +64,7 @@
   "$defs": {
     "Id_evt": {
       "type": "string",
-      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^evt_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Seq": {
       "type": "integer",
@@ -160,11 +160,11 @@
     },
     "Subject": {
       "type": "string",
-      "pattern": "^(settings|(prj|dlv|wfl|nod|att|wtr|sbx|cnv|msg|inb|apr|act|dev|evt|bdg)_[0-9A-HJKMNP-TV-Z]{26})$"
+      "pattern": "^(settings|(prj|dlv|wfl|nod|att|wtr|sbx|cnv|msg|inb|apr|act|dev|evt|bdg)_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
     },
     "Id_prj": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Actor": {
       "type": "object",

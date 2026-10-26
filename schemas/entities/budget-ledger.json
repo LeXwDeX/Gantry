@@ -89,7 +89,7 @@
   "$defs": {
     "Id_bdg": {
       "type": "string",
-      "pattern": "^bdg_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^bdg_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "BudgetSubject": {
       "type": "string",
@@ -100,15 +100,15 @@
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_cnv": {
       "type": "string",
-      "pattern": "^cnv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^cnv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_prj": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Date": {
       "type": "string",

@@ -121,6 +121,7 @@ pub fn extract(root: &Path) -> Result<Extracted, String> {
                         let status = match annotation.mode.as_deref() {
                             Some("skip") => "skipped",
                             Some("partial") => "partial",
+                            None | Some("verify") if annotation.rust == "none" => "schema-only",
                             None | Some("verify") => "verified",
                             Some(_) => "annotated",
                         };
@@ -207,8 +208,10 @@ pub fn negative_cases(root: &Path) -> Result<Vec<NegativeCase>, String> {
 pub struct FixtureCheck {
     pub failures: Vec<String>,
     pub warnings: Vec<String>,
-    /// 完整验证：schema + Rust round-trip。
+    /// 完整验证：schema + Rust round-trip（或 validate）。
     pub verified: usize,
+    /// 只验证 schema：注解为 `rust=none`，没有 Rust 证据。
+    pub schema_only: usize,
     /// 部分验证：只校验 schema，示例省略了必填字段，不做 Rust round-trip。
     pub partial: usize,
     /// `unverified.json` 显式登记的块（skip / 未注解示意）。
@@ -218,12 +221,14 @@ pub struct FixtureCheck {
     pub unverified: BTreeSet<String>,
 }
 
-/// 校验已注解块：`verified` 必须通过 schema 与 Rust round-trip；`partial` 只校验
-/// schema 且要求 `rust=none`；`skipped` / 未注解块必须在 `unverified.json` 登记。
+/// 校验已注解块：`verified` 必须通过 schema 与 Rust round-trip；`schema-only` 只校验
+/// schema 且要求 `rust=none`；`partial` 只校验 schema 且要求 `rust=none`；`skipped` /
+/// 未注解块必须在 `unverified.json` 登记。
 pub fn check(root: &Path, manifest: &Manifest<'_>) -> Result<FixtureCheck, String> {
     let mut failures = Vec::new();
     let warnings = Vec::new();
     let mut verified = 0;
+    let mut schema_only = 0;
     let mut partial = 0;
     let mut allowlisted = 0;
     let mut skipped = 0;
@@ -285,7 +290,10 @@ pub fn check(root: &Path, manifest: &Manifest<'_>) -> Result<FixtureCheck, Strin
             ));
             continue;
         }
-        if !matches!(entry.status.as_str(), "verified" | "partial") {
+        if !matches!(
+            entry.status.as_str(),
+            "verified" | "partial" | "schema-only"
+        ) {
             match allowance.get(&entry.sha256) {
                 Some(block) if block.source == entry.source && block.line == entry.line => {
                     unverified.insert(format!(
@@ -403,6 +411,17 @@ pub fn check(root: &Path, manifest: &Manifest<'_>) -> Result<FixtureCheck, Strin
             }
             continue;
         }
+        if entry.status == "schema-only" {
+            if annotation.rust != "none" {
+                failures.push(format!(
+                    "{}:{} schema-only 要求 rust=none，实际为 {}",
+                    entry.source, entry.line, annotation.rust
+                ));
+            } else {
+                schema_only += 1;
+            }
+            continue;
+        }
         match crate::rust::check_annotation(&annotation.rust, &data) {
             Ok(()) => verified += 1,
             Err(error) => failures.push(format!(
@@ -435,6 +454,7 @@ pub fn check(root: &Path, manifest: &Manifest<'_>) -> Result<FixtureCheck, Strin
         failures,
         warnings,
         verified,
+        schema_only,
         partial,
         allowlisted,
         skipped,
@@ -678,5 +698,53 @@ mod tests {
             validator.validate(&mismatch).is_err(),
             "kind/payload mismatch must be rejected by the schema"
         );
+    }
+
+    /// `settings.updated` 的 16 个 scope × resource 分支都必须可解析，且空文档可以验证。
+    #[test]
+    fn settings_updated_schema_covers_every_resource_branch() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = fs::read_to_string(root.join("schemas/events/settings.updated.json"))
+            .expect("schemas/events/settings.updated.json must be generated");
+        let schema: Value = serde_json::from_str(&text).expect("schema must be JSON");
+        let validator = jsonschema::validator_for(&schema).expect("schema must compile");
+        for resource in [
+            "models", "levels", "policies", "guardian", "sandbox", "egress", "notify", "github",
+        ] {
+            let valid = serde_json::json!({
+                "scope": "global",
+                "resource": resource,
+                "schema_version": 1,
+                "base_rev": 1,
+                "value": {},
+                "relaxes": [],
+                "secret_changes": []
+            });
+            assert!(
+                validator.validate(&valid).is_ok(),
+                "empty {resource} document must pass"
+            );
+
+            let mut deleted = valid.clone();
+            deleted["scope"] = serde_json::json!("project");
+            deleted["value"] = Value::Null;
+            assert!(
+                validator.validate(&deleted).is_ok(),
+                "project DELETE must allow null for {resource}"
+            );
+
+            deleted["scope"] = serde_json::json!("global");
+            assert!(
+                validator.validate(&deleted).is_err(),
+                "global settings.updated must reject null for {resource}"
+            );
+
+            let mut missing = valid;
+            missing.as_object_mut().unwrap().remove("value");
+            assert!(
+                validator.validate(&missing).is_err(),
+                "settings.updated must require value for {resource}"
+            );
+        }
     }
 }

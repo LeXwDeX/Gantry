@@ -6,6 +6,8 @@ use serde_json::{Map, Number, Value};
 
 /// 2^53 − 1（api.md §1.5）。
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+/// 2^64：超出此边界的有限浮点不再可能落入 u64/i64 整数字段，按 RFC 8785 浮点处理。
+const INTEGER_FIELD_LIMIT: f64 = 18_446_744_073_709_551_616.0;
 /// worker-protocol §8.2 的默认深度上限。
 pub const DEFAULT_MAX_DEPTH: usize = 32;
 
@@ -281,6 +283,20 @@ impl<'a> Parser<'a> {
                 return Err(JsonError::new(
                     "nan_or_infinity",
                     "non-finite numbers are not allowed",
+                    start,
+                ));
+            }
+            // 小数 / 指数形式同样可能表示超出 2^53−1 的整数；落在 u64/i64 字段范围内的
+            // 整数值必须拒绝，否则会被 f64 静默舍入成相邻整数。
+            let magnitude = value.abs();
+            if self.limits.reject_unsafe_integers
+                && value.fract() == 0.0
+                && magnitude > MAX_SAFE_INTEGER as f64
+                && magnitude < INTEGER_FIELD_LIMIT
+            {
+                return Err(JsonError::new(
+                    "unsafe_integer",
+                    "integer magnitude exceeds 2^53-1",
                     start,
                 ));
             }

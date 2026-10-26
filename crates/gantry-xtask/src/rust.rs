@@ -4,7 +4,7 @@
 //! `event:<type>` 走 `events::validate_event_data`（含 SecretRef 与 kind 一致性检查）。
 
 use gantry_core::egress::{
-    ActivateSecretResponse, ConfigApplyResponse, EndpointsResponse, FinalUsage,
+    ActivateSecretResponse, ConfigApplyResponse, ConfigView, EndpointsResponse, FinalUsage,
     IssueJobTokenRequest, IssueJobTokenResponse, IssueSvcTokenRequest, IssueSvcTokenResponse,
     PresentRequest, PresentResponse, ProblemDetails, RevokeSvcTokenResponse, StageSecretResponse,
     StagedSecretList, StatusResponse, UsagePage,
@@ -62,7 +62,9 @@ pub fn check_annotation(kind: &str, data: &Value) -> Result<(), String> {
         "forge::RequestReviewersPayload" => roundtrip::<RequestReviewersPayload>(data),
         "forge::MergePrPayload" => roundtrip::<MergePrPayload>(data),
         "forge::RerunFailedJobsPayload" => roundtrip::<RerunFailedJobsPayload>(data),
-        "forge::ForgeEventEnvelope" => roundtrip::<ForgeEventEnvelope>(data),
+        "forge::ForgeEventEnvelope" => checked_roundtrip::<ForgeEventEnvelope>(data, |event| {
+            event.validate().map_err(|error| error.to_string())
+        }),
         "forge::OutboxEnqueueEnvelope" => roundtrip::<OutboxEnqueueEnvelope>(data),
         "config::AggregateDocument" => deserialize_only::<AggregateDocument>(data),
         "config::ProjectOverride" => deserialize_only::<ProjectOverride>(data),
@@ -79,6 +81,7 @@ pub fn check_annotation(kind: &str, data: &Value) -> Result<(), String> {
         "egress::PresentResponse" => roundtrip::<PresentResponse>(data),
         "egress::UsagePage" => roundtrip::<UsagePage>(data),
         "egress::ConfigApplyResponse" => roundtrip::<ConfigApplyResponse>(data),
+        "egress::ConfigView" => roundtrip::<ConfigView>(data),
         "egress::StatusResponse" => roundtrip::<StatusResponse>(data),
         "egress::EndpointsResponse" => roundtrip::<EndpointsResponse>(data),
         "egress::ProblemDetails" => roundtrip::<ProblemDetails>(data),
@@ -92,7 +95,9 @@ pub fn check_annotation(kind: &str, data: &Value) -> Result<(), String> {
         "entities::Conversation" => roundtrip::<Conversation>(data),
         "entities::Device" => roundtrip::<Device>(data),
         "entities::InboxItem" => roundtrip::<InboxItem>(data),
-        "entities::Approval" => roundtrip::<Approval>(data),
+        "entities::Approval" => checked_roundtrip::<Approval>(data, |approval| {
+            approval.validate().map_err(|error| error.to_string())
+        }),
         "entities::BudgetLedger" => roundtrip::<BudgetLedger>(data),
         "entities::OutboxAction" => roundtrip::<OutboxAction>(data),
         other => Err(format!("unknown rust annotation `{other}`")),
@@ -103,8 +108,19 @@ fn roundtrip<T>(data: &Value) -> Result<(), String>
 where
     T: DeserializeOwned + Serialize,
 {
+    checked_roundtrip::<T>(data, |_| Ok(()))
+}
+
+fn checked_roundtrip<T>(
+    data: &Value,
+    check: impl FnOnce(&T) -> Result<(), String>,
+) -> Result<(), String>
+where
+    T: DeserializeOwned + Serialize,
+{
     let typed: T =
         serde_json::from_value(data.clone()).map_err(|error| format!("反序列化失败: {error}"))?;
+    check(&typed)?;
     let back = serde_json::to_value(&typed).map_err(|error| format!("重新序列化失败: {error}"))?;
     if &back != data {
         return Err(format!(

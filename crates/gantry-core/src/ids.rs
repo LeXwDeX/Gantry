@@ -163,7 +163,7 @@ impl<K: IdKind> JsonSchema for Id<K> {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": format!("^{}_[0-9A-HJKMNP-TV-Z]{{26}}$", K::PREFIX),
+            "pattern": format!("^{}_[0-7][0-9A-HJKMNP-TV-Z]{{25}}$", K::PREFIX),
         })
     }
 }
@@ -226,7 +226,7 @@ impl JsonSchema for Ulid {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$",
         })
     }
 }
@@ -344,6 +344,9 @@ impl IdGen {
             return Err(IdError::NegativeTimestamp);
         }
         let now = now as u64;
+        if now > MAX_MS {
+            return Err(IdError::Overflow);
+        }
         let mut state = self
             .state
             .lock()

@@ -79,6 +79,10 @@ export function createValidator(spec) {
     discriminator: false,
   });
   addFormats(ajv);
+  ajv.addFormat("uint64", {
+    type: "integer",
+    validate: (value) => Number.isSafeInteger(value) && value >= 0,
+  });
   const defs = rewriteRefs(spec.components.schemas);
   const cache = new Map();
 

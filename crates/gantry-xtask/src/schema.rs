@@ -2,7 +2,7 @@
 
 use schemars::generate::SchemaGenerator;
 use schemars::JsonSchema;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 pub const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
@@ -62,26 +62,6 @@ pub fn narrow_tagged_variant(value: &Value, tag: &str, wanted: &str) -> Option<V
         }
     }
     None
-}
-
-/// 仅用于记录契约缺口：把已由文档明确声明“形状未定义”的字段替换为拒绝型子 schema。
-///
-/// 这不是补形状；它把“不猜测”落成机器可校验的拒绝。
-pub fn reject_property(schema: &mut Value, property: &str, reason: &str, source: &str) {
-    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
-        return;
-    };
-    let mut rejection = Map::new();
-    rejection.insert("not".to_owned(), Value::Object(Map::new()));
-    rejection.insert(
-        "x-gantry-unresolved".to_owned(),
-        serde_json::json!({
-            "reason": reason,
-            "source": source,
-            "rejects_all_values": true,
-        }),
-    );
-    properties.insert(property.to_owned(), Value::Object(rejection));
 }
 
 pub fn render(value: &Value) -> Vec<u8> {

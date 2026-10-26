@@ -223,6 +223,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "gantry-core",
+ "gantry-store",
  "serde",
  "serde_json",
  "tokio",

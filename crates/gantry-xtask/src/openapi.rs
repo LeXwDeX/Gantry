@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::catalog::Artifact;
 use crate::docs;
@@ -33,6 +33,8 @@ pub fn check(root: &Path, artifacts: &[Artifact], report: &mut Report) {
     check_examples(&document, report);
     check_entities(artifacts, &document, report);
     check_gantry_events(artifacts, &document, report);
+    check_approval_shapes(artifacts, &document, report);
+    check_settings_updated_shape(artifacts, &document, report);
     check_settings_refs(&document, report);
 }
 
@@ -709,6 +711,333 @@ fn signature_of(value: &Value) -> String {
     "any".to_owned()
 }
 
+/// `Approval` 必须覆盖生产 `APPROVAL_SHAPES` 的全部 8 个形状；
+/// `ApprovalCreateRequest` 只服务内部动作，允许集合固定为 3 个。
+/// 未定义 action（例如 `push_branch`）必须 fail-closed。
+fn check_approval_shapes(artifacts: &[Artifact], document: &Value, report: &mut Report) {
+    const CREATE_ACTIONS: [&str; 3] = ["settings_update", "device_role_change", "device_revoke"];
+
+    let Some(core) = artifacts
+        .iter()
+        .find(|artifact| artifact.path == "schemas/entities/approval.json")
+    else {
+        report.fail("缺少 schemas/entities/approval.json 生成物");
+        return;
+    };
+    let Some(core_shapes) = approval_shape_set(&core.value) else {
+        report.fail("Approval schema 缺少 action/target.kind/subject_digest oneOf");
+        return;
+    };
+    let create_shapes: BTreeSet<(String, String, String)> = core_shapes
+        .iter()
+        .filter(|(action, _, _)| CREATE_ACTIONS.contains(&action.as_str()))
+        .cloned()
+        .collect();
+    if create_shapes.len() != CREATE_ACTIONS.len() {
+        report.fail(format!(
+            "APPROVAL_SHAPES 缺少内部动作形状：期望 {CREATE_ACTIONS:?}"
+        ));
+    }
+    let Some(components) = document
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(Value::as_object)
+    else {
+        report.fail("openapi 缺少 components.schemas");
+        return;
+    };
+
+    if let Some(actions) = components
+        .get("ApprovalAction")
+        .and_then(|schema| schema.get("enum"))
+        .and_then(Value::as_array)
+    {
+        let mut seen = BTreeSet::new();
+        for action in actions {
+            let Some(action) = action.as_str() else {
+                continue;
+            };
+            if !seen.insert(action) {
+                report.fail(format!("ApprovalAction.enum 重复动作 `{action}`"));
+            }
+        }
+    } else {
+        report.fail("openapi 缺少 ApprovalAction.enum");
+    }
+
+    for (name, expected) in [
+        ("Approval", &core_shapes),
+        ("ApprovalCreateRequest", &create_shapes),
+    ] {
+        let Some(schema) = components.get(name) else {
+            report.fail(format!("openapi 缺少 {name}"));
+            continue;
+        };
+        let Some(api_shapes) = approval_shape_set(schema) else {
+            report.fail(format!(
+                "{name} 缺少 action/target.kind/subject_digest oneOf；未定义动作会绕过形状检查"
+            ));
+            continue;
+        };
+        if &api_shapes != expected {
+            let missing: Vec<_> = expected.difference(&api_shapes).collect();
+            let extra: Vec<_> = api_shapes.difference(expected).collect();
+            report.fail(format!(
+                "{name} 审批形状与允许集合不一致；缺少 {missing:?}，多出 {extra:?}"
+            ));
+            continue;
+        }
+        if name == "ApprovalCreateRequest" {
+            let actions = schema
+                .pointer("/properties/action/enum")
+                .and_then(Value::as_array);
+            let actions: BTreeSet<&str> = actions
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let expected_actions: BTreeSet<&str> = CREATE_ACTIONS.into_iter().collect();
+            if actions != expected_actions {
+                report.fail(format!(
+                    "ApprovalCreateRequest.action 必须内联内部动作 allowlist {CREATE_ACTIONS:?}，实际 {actions:?}"
+                ));
+            }
+        }
+        let Ok(validator) = compile(
+            document,
+            &json!({ "$ref": format!("#/components/schemas/{name}") }),
+        ) else {
+            report.fail(format!("{name} 无法编译"));
+            continue;
+        };
+        for (action, target_kind, digest_pattern) in expected {
+            let sample = approval_sample(name, action, target_kind, digest_pattern);
+            if let Err(error) = validator.validate(&sample) {
+                report.fail(format!(
+                    "{name} 拒绝允许的审批形状 {action}/{target_kind}: {error}"
+                ));
+            }
+        }
+        let undefined = approval_sample(name, "push_branch", "branch", "^[0-9a-f]{40}$");
+        if validator.validate(&undefined).is_ok() {
+            report.fail(format!(
+                "{name} 接受未定义审批动作 push_branch；必须 fail-closed"
+            ));
+        }
+        let mismatch = approval_sample(
+            name,
+            expected
+                .iter()
+                .next()
+                .map(|(action, _, _)| action.as_str())
+                .unwrap_or("merge_pr"),
+            "branch",
+            "^[0-9a-f]{40}$",
+        );
+        if validator.validate(&mismatch).is_ok() {
+            report.fail(format!("{name} 接受 action/target.kind 不匹配的审批形状"));
+        }
+        if name == "ApprovalCreateRequest" {
+            for (action, target_kind, digest_pattern) in core_shapes.difference(&create_shapes) {
+                let sample = approval_sample(name, action, target_kind, digest_pattern);
+                if validator.validate(&sample).is_ok() {
+                    report.fail(format!(
+                        "ApprovalCreateRequest 接受内部动作之外的审批动作 {action}"
+                    ));
+                }
+            }
+        }
+    }
+
+    check_approval_target(document, report);
+    report.note(format!(
+        "openapi 审批形状：Approval 覆盖 {} 个 APPROVAL_SHAPES；ApprovalCreateRequest 允许集合固定为 {} 个内部动作",
+        core_shapes.len(),
+        create_shapes.len()
+    ));
+}
+
+fn approval_shape_set(schema: &Value) -> Option<BTreeSet<(String, String, String)>> {
+    let branches = schema.get("oneOf")?.as_array()?;
+    if branches.is_empty() {
+        return None;
+    }
+    let mut shapes = BTreeSet::new();
+    for branch in branches {
+        let action = branch
+            .pointer("/properties/action/const")?
+            .as_str()?
+            .to_owned();
+        let kind = branch
+            .pointer("/properties/target/properties/kind/const")?
+            .as_str()?
+            .to_owned();
+        let pattern = branch
+            .pointer("/properties/subject_digest/pattern")?
+            .as_str()?
+            .to_owned();
+        shapes.insert((action, kind, pattern));
+    }
+    Some(shapes)
+}
+
+fn digest_sample(pattern: &str) -> String {
+    match pattern {
+        "^sha256:[0-9a-f]{64}$" => format!("sha256:{}", "a".repeat(64)),
+        _ => "a".repeat(40),
+    }
+}
+
+fn approval_target_sample(kind: &str) -> Value {
+    match kind {
+        "pr" => json!({ "kind": "pr", "repo": "acme/web", "number": 12 }),
+        "branch" => json!({ "kind": "branch", "repo": "acme/web", "branch": "gantry/42-fix" }),
+        "review_thread" => json!({
+            "kind": "review_thread",
+            "repo": "acme/web",
+            "number": 12,
+            "thread_node_id": "PRRT_kwDOAbc123"
+        }),
+        "patch" => json!({
+            "kind": "patch",
+            "repo": "acme/web",
+            "attempt_id": "att_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+            "rules": [],
+            "paths": []
+        }),
+        "settings" => json!({
+            "kind": "settings",
+            "scope": "global",
+            "resource": "levels",
+            "base_rev": 1
+        }),
+        "device" => json!({ "kind": "device", "id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM" }),
+        _ => json!({ "kind": kind }),
+    }
+}
+
+fn approval_sample(name: &str, action: &str, target_kind: &str, digest_pattern: &str) -> Value {
+    let mut sample = json!({
+        "id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+        "delivery_id": null,
+        "action": action,
+        "target": approval_target_sample(target_kind),
+        "subject_digest": digest_sample(digest_pattern),
+        "device_id": null,
+        "signature": null,
+        "status": "pending",
+        "expires_at": "2026-10-24T14:41:00.000Z",
+        "consumed_by": null,
+        "created_at": "2026-10-24T12:41:00.000Z",
+        "updated_at": "2026-10-24T12:41:00.000Z"
+    });
+    if name == "ApprovalCreateRequest" {
+        sample
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| matches!(key.as_str(), "action" | "target" | "subject_digest"));
+    }
+    sample
+}
+
+fn check_approval_target(document: &Value, report: &mut Report) {
+    let Ok(target) = compile(
+        document,
+        &json!({ "$ref": "#/components/schemas/ApprovalTarget" }),
+    ) else {
+        report.fail("ApprovalTarget 无法编译");
+        return;
+    };
+    let branch_without_oid = json!({
+        "kind": "branch",
+        "repo": "acme/web",
+        "branch": "gantry/42-fix"
+    });
+    let branch_null_oid = json!({
+        "kind": "branch",
+        "repo": "acme/web",
+        "branch": "gantry/42-fix",
+        "expected_remote_oid": null
+    });
+    let branch_with_oid = json!({
+        "kind": "branch",
+        "repo": "acme/web",
+        "branch": "gantry/42-fix",
+        "expected_remote_oid": "d7d018f867d6c5b78e82906386420d45a4d84486"
+    });
+    for sample in [&branch_without_oid, &branch_null_oid, &branch_with_oid] {
+        if let Err(error) = target.validate(sample) {
+            report.fail(format!(
+                "ApprovalTarget branch expected_remote_oid 与 Rust Option/null 不一致: {error}"
+            ));
+        }
+    }
+    let invalid_oid = json!({
+        "kind": "branch",
+        "repo": "acme/web",
+        "branch": "gantry/42-fix",
+        "expected_remote_oid": "not-an-oid"
+    });
+    if target.validate(&invalid_oid).is_ok() {
+        report.fail("ApprovalTarget 接受了非法 expected_remote_oid");
+    }
+
+    let global = json!({
+        "kind": "settings",
+        "scope": "global",
+        "resource": "levels",
+        "base_rev": 1
+    });
+    let global_null = json!({
+        "kind": "settings",
+        "scope": "global",
+        "project_id": null,
+        "resource": "levels",
+        "base_rev": 1
+    });
+    let global_with_project = json!({
+        "kind": "settings",
+        "scope": "global",
+        "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+        "resource": "levels",
+        "base_rev": 1
+    });
+    let project = json!({
+        "kind": "settings",
+        "scope": "project",
+        "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+        "resource": "levels",
+        "base_rev": 1
+    });
+    let project_null = json!({
+        "kind": "settings",
+        "scope": "project",
+        "project_id": null,
+        "resource": "levels",
+        "base_rev": 1
+    });
+    let project_without_id = json!({
+        "kind": "settings",
+        "scope": "project",
+        "resource": "levels",
+        "base_rev": 1
+    });
+    for sample in [&global, &global_null, &project] {
+        if let Err(error) = target.validate(sample) {
+            report.fail(format!(
+                "ApprovalTarget settings 拒绝合法 scope/project_id 组合: {error}"
+            ));
+        }
+    }
+    for sample in [&global_with_project, &project_null, &project_without_id] {
+        if target.validate(sample).is_ok() {
+            report.fail(format!(
+                "ApprovalTarget settings 接受 scope 与 project_id 不一致: {sample}"
+            ));
+        }
+    }
+}
+
 fn check_gantry_events(artifacts: &[Artifact], document: &Value, report: &mut Report) {
     let Some(branches) = document
         .get("components")
@@ -789,6 +1118,180 @@ fn check_gantry_events(artifacts: &[Artifact], document: &Value, report: &mut Re
             }
         }
     }
+}
+
+/// `SettingsUpdatedData` 的 `oneOf` 必须按 scope × resource 绑定 `value`，并与
+/// core 生成的事件 schema 逐分支一致；`resource=levels` 不能接受 models 形状。
+fn check_settings_updated_shape(artifacts: &[Artifact], document: &Value, report: &mut Report) {
+    let failures_before = report.failures.len();
+    let Ok(validator) = compile(
+        document,
+        &json!({ "$ref": "#/components/schemas/SettingsUpdatedData" }),
+    ) else {
+        report.fail("SettingsUpdatedData 无法编译");
+        return;
+    };
+    let base = json!({
+        "scope": "global",
+        "resource": "levels",
+        "schema_version": 1,
+        "base_rev": 1,
+        "value": {},
+        "relaxes": [],
+        "secret_changes": []
+    });
+    let features = [
+        ("models", json!({ "providers": {} })),
+        ("levels", json!({ "default_level": "High" })),
+        ("policies", json!({ "approval": { "ttl_s": 3600 } })),
+        ("guardian", json!({ "patrol_interval_s": 60 })),
+        ("sandbox", json!({ "driver": "podman" })),
+        ("egress", json!({ "groups": {} })),
+        ("notify", json!({ "channels": {} })),
+        ("github", json!({ "app": {} })),
+    ];
+    for (resource, feature) in &features {
+        for scope in ["global", "project"] {
+            let mut event = base.clone();
+            event["scope"] = json!(scope);
+            event["resource"] = json!(resource);
+            event["value"] = feature.clone();
+            if let Err(error) = validator.validate(&event) {
+                report.fail(format!(
+                    "SettingsUpdatedData 拒绝合法的 {scope}/{resource} 文档: {error}"
+                ));
+            }
+        }
+    }
+    // 16 个 scope×resource 组合只能携带本 resource 的值形状。
+    for (resource, _) in &features {
+        for (wrong_resource, wrong_feature) in &features {
+            if wrong_resource == resource {
+                continue;
+            }
+            for scope in ["global", "project"] {
+                let mut event = base.clone();
+                event["scope"] = json!(scope);
+                event["resource"] = json!(resource);
+                event["value"] = wrong_feature.clone();
+                if validator.validate(&event).is_ok() {
+                    report.fail(format!(
+                        "SettingsUpdatedData 接受 {scope}/{resource} 携带 {wrong_resource} 形状"
+                    ));
+                }
+            }
+        }
+    }
+    let mut global_null = base.clone();
+    global_null["value"] = Value::Null;
+    if validator.validate(&global_null).is_ok() {
+        report.fail("SettingsUpdatedData 接受 global value = null");
+    }
+    let mut project_null = base.clone();
+    project_null["scope"] = json!("project");
+    project_null["value"] = Value::Null;
+    if let Err(error) = validator.validate(&project_null) {
+        report.fail(format!(
+            "SettingsUpdatedData 拒绝 project DELETE（value = null）: {error}"
+        ));
+    }
+    let mut missing = base;
+    missing.as_object_mut().unwrap().remove("value");
+    if validator.validate(&missing).is_ok() {
+        report.fail("SettingsUpdatedData 接受缺失 value");
+    }
+
+    let Some(core) = artifacts
+        .iter()
+        .find(|artifact| artifact.path == "schemas/events/settings.updated.json")
+    else {
+        report.fail("缺少 schemas/events/settings.updated.json 生成物");
+        return;
+    };
+    let Some(api_schema) = document
+        .get("components")
+        .and_then(|components| components.get("schemas"))
+        .and_then(|schemas| schemas.get("SettingsUpdatedData"))
+    else {
+        report.fail("openapi 缺少 SettingsUpdatedData");
+        return;
+    };
+    let mut core_defs = Defs::new();
+    if let Some(defs) = core.value.get("$defs").and_then(Value::as_object) {
+        for (name, schema) in defs {
+            core_defs.insert(name.clone(), schema);
+        }
+    }
+    let mut api_defs = Defs::new();
+    if let Some(defs) = api_schema.get("$defs").and_then(Value::as_object) {
+        for (name, schema) in defs {
+            api_defs.insert(name.clone(), schema);
+        }
+    }
+    let Some(core_branches) = settings_branch_map(&core.value) else {
+        report.fail("settings.updated.json 缺少 scope × resource oneOf");
+        return;
+    };
+    let Some(api_branches) = settings_branch_map(api_schema) else {
+        report.fail("SettingsUpdatedData 缺少 scope × resource oneOf");
+        return;
+    };
+    if core_branches.len() != 16 {
+        report.fail(format!(
+            "settings.updated.json 有 {} 个 scope × resource 分支，期望 16",
+            core_branches.len()
+        ));
+    }
+    if api_branches.len() != 16 {
+        report.fail(format!(
+            "SettingsUpdatedData 有 {} 个 scope × resource 分支，期望 16",
+            api_branches.len()
+        ));
+    }
+    for (key, core_value) in &core_branches {
+        let Some(api_value) = api_branches.get(key) else {
+            report.fail(format!("SettingsUpdatedData 缺少 {}/{} 分支", key.0, key.1));
+            continue;
+        };
+        if canonical(core_value, &core_defs, 0) != canonical(api_value, &api_defs, 0) {
+            report.fail(format!(
+                "SettingsUpdatedData 的 {}/{} value 与 core 生成 schema 不一致",
+                key.0, key.1
+            ));
+        }
+    }
+    for key in api_branches.keys() {
+        if !core_branches.contains_key(key) {
+            report.fail(format!(
+                "SettingsUpdatedData 有 core 不存在的 {}/{} 分支",
+                key.0, key.1
+            ));
+        }
+    }
+    if report.failures.len() == failures_before {
+        report.note(format!(
+            "openapi SettingsUpdatedData：{} 个 scope×resource 分支与 core 生成 schema 一致",
+            api_branches.len()
+        ));
+    }
+}
+
+fn settings_branch_map(schema: &Value) -> Option<BTreeMap<(String, String), Value>> {
+    let branches = schema.get("oneOf")?.as_array()?;
+    let mut map = BTreeMap::new();
+    for branch in branches {
+        let scope = branch
+            .pointer("/properties/scope/const")?
+            .as_str()?
+            .to_owned();
+        let resource = branch
+            .pointer("/properties/resource/const")?
+            .as_str()?
+            .to_owned();
+        let value = branch.pointer("/properties/value")?.clone();
+        map.insert((scope, resource), value);
+    }
+    Some(map)
 }
 
 fn check_settings_refs(document: &Value, report: &mut Report) {

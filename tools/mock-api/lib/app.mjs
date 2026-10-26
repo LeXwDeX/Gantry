@@ -17,6 +17,24 @@ import { createValidator } from "./validator.mjs";
 
 const IDEMPOTENCY_RE = /^[A-Za-z0-9_-]{16,64}$/;
 const SEVERITY_RANK = { info: 0, warn: 1, blocker: 2 };
+const CHALLENGE_TTL_SECONDS = 120;
+// 与 core APPROVAL_SHAPES 保持一致：未列出的 action fail-closed（含 push_branch）。
+const APPROVAL_SHAPES = new Map([
+  ["merge_pr", { target: "pr", digest: /^[0-9a-f]{40}$/ }],
+  ["force_push", { target: "branch", digest: /^[0-9a-f]{40}$/ }],
+  ["push_outside_prefix", { target: "branch", digest: /^[0-9a-f]{40}$/ }],
+  ["resolve_review_thread_human", { target: "review_thread", digest: /^sha256:[0-9a-f]{64}$/ }],
+  ["patch_apply_protected", { target: "patch", digest: /^sha256:[0-9a-f]{64}$/ }],
+  ["settings_update", { target: "settings", digest: /^sha256:[0-9a-f]{64}$/ }],
+  ["device_role_change", { target: "device", digest: /^sha256:[0-9a-f]{64}$/ }],
+  ["device_revoke", { target: "device", digest: /^sha256:[0-9a-f]{64}$/ }],
+]);
+// POST /v1/approvals 只服务内部动作（api.md §6.6）；Forge 动作只能由 policy 创建。
+const CREATE_APPROVAL_ACTIONS = new Set([
+  "settings_update",
+  "device_role_change",
+  "device_revoke",
+]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -309,12 +327,26 @@ function schemaRefName(schema) {
   return null;
 }
 
+function pathParameterSchema(api, schema) {
+  const resolved = schema?.$ref
+    ? api.spec.components.schemas[schemaRefName(schema)]
+    : schema;
+  if (!resolved) {
+    return null;
+  }
+  // Keep enum/const out of path checks so an unknown settings resource still yields 404.
+  const { enum: _enum, const: _const, ...rest } = resolved;
+  return rest;
+}
+
 export async function createMockApplication({ specPath, heartbeatMs = 15000 } = {}) {
   const api = await loadOpenApi(specPath);
   const fixtures = await loadFixtureState();
   const state = createApplicationState(fixtures);
   const validator = createValidator(api.spec);
   const idempotency = new Map();
+  const challenges = new Map();
+  const pausedStages = new Map();
   const sseConnections = new Set();
   const requestLog = [];
 
@@ -398,12 +430,14 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     if (!key) {
       return null;
     }
+    // (device_id, key) scope; fingerprint uses the concrete path, not the route template.
+    const scopedKey = `${state.me.device.id}\u0000${key}`;
     const fingerprint = sha256(
-      `${context.route.method} ${context.route.path} ${context.rawBody}`,
+      `${context.route.method} ${context.instance} ${context.rawBody}`,
     );
-    const existing = idempotency.get(key);
+    const existing = idempotency.get(scopedKey);
     if (!existing) {
-      return { key, fingerprint };
+      return { key: scopedKey, fingerprint };
     }
     if (existing.fingerprint !== fingerprint) {
       throw new HttpProblem(422, "idempotency_key_reuse", "Idempotency-Key was used for different content");
@@ -558,6 +592,18 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       });
     }
     if (delivery.stage_status !== "paused") {
+      const existing = pausedStages.get(delivery.id);
+      const snapshot = existing?.status === delivery.stage_status ? existing : null;
+      pausedStages.set(delivery.id, {
+        status: delivery.stage_status,
+        openInbox:
+          snapshot?.openInbox ??
+          new Set(
+            state.inbox.items
+              .filter((item) => item.delivery_id === delivery.id && item.status === "open")
+              .map((item) => item.id),
+          ),
+      });
       delivery.stage_status = "paused";
       delivery.updated_at = nowTimestamp(state);
     }
@@ -574,9 +620,19 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
         extensions: { reason: "invalid_state" },
       });
     }
-    if (delivery.stage_status === "paused") {
-      delivery.stage_status = "running";
-      delivery.updated_at = nowTimestamp(state);
+    if (delivery.stage_status === "paused" || pausedStages.has(delivery.id)) {
+      const before = pausedStages.get(delivery.id);
+      if (before) {
+        // Dismissed or removed blockers never clear the pause; every recorded item must resolve.
+        const resolved =
+          before.openInbox.size > 0 &&
+          [...before.openInbox].every((id) => findById(state.inbox, id)?.status === "resolved");
+        delivery.stage_status = resolved ? "running" : before.status;
+        if (resolved || before.openInbox.size === 0) {
+          pausedStages.delete(delivery.id);
+        }
+        delivery.updated_at = nowTimestamp(state);
+      }
     }
     return { status: 200, body: delivery };
   }
@@ -754,8 +810,19 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
         extensions: { reason: "invalid_state" },
       });
     }
-    found.node.status = "queued";
-    found.node.updated_at = nowTimestamp(state);
+    const delivery = found.workflow.delivery_id
+      ? findById(state.deliveries, found.workflow.delivery_id)
+      : null;
+    if (
+      found.node.superseded_by !== null ||
+      delivery?.stage_status === "paused" ||
+      (delivery !== null && isTerminal(delivery))
+    ) {
+      throw new HttpProblem(409, "conflict", "node cannot be retried in its current state", {
+        extensions: { reason: "invalid_state" },
+      });
+    }
+    // The engine creates the new attempt asynchronously; the node keeps its current status.
     return { status: 202, body: found.node };
   }
 
@@ -855,7 +922,72 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     return { status: 200, body: approval };
   }
 
+  function approvalShapeErrors(body) {
+    const errors = [];
+    const shape = APPROVAL_SHAPES.get(body.action);
+    if (!shape) {
+      errors.push({
+        pointer: "/action",
+        code: "enum",
+        message: "action has no defined approval shape",
+      });
+      return errors;
+    }
+    const kind = body.target?.kind;
+    if (kind !== shape.target) {
+      errors.push({
+        pointer: "/target/kind",
+        code: "enum",
+        message: `target.kind must be ${shape.target} for ${body.action}`,
+      });
+    }
+    if (typeof body.subject_digest !== "string" || !shape.digest.test(body.subject_digest)) {
+      errors.push({
+        pointer: "/subject_digest",
+        code: "pattern",
+        message: `subject_digest does not match the ${body.action} shape`,
+      });
+    }
+    if (kind === "settings") {
+      const projectId = body.target?.project_id;
+      if (body.target?.scope === "global" && projectId != null) {
+        errors.push({
+          pointer: "/target/project_id",
+          code: "type",
+          message: "global settings target must omit project_id",
+        });
+      }
+      if (body.target?.scope === "project" && typeof projectId !== "string") {
+        errors.push({
+          pointer: "/target/project_id",
+          code: "required",
+          message: "project settings target requires project_id",
+        });
+      }
+    }
+    return errors;
+  }
+
+  function createApprovalShapeErrors(body) {
+    if (!CREATE_APPROVAL_ACTIONS.has(body.action)) {
+      return [
+        {
+          pointer: "/action",
+          code: "enum",
+          message: "action is not available for approval creation",
+        },
+      ];
+    }
+    return approvalShapeErrors(body);
+  }
+
   function handleCreateApproval(context) {
+    const errors = createApprovalShapeErrors(context.body);
+    if (errors.length > 0) {
+      throw new HttpProblem(422, "validation_failed", "approval shape validation failed", {
+        extensions: { errors },
+      });
+    }
     const timestamp = nowTimestamp(state);
     const approval = {
       id: entityId("apr", Date.parse(timestamp)),
@@ -895,16 +1027,39 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     if (!approval) {
       throw new HttpProblem(404, "not_found", "approval not found");
     }
+    const challenge = challenges.get(
+      `${approval.id}\u0000${state.me.device.id}`,
+    );
+    // 同设备换 key 重发已用 nonce 是状态检查的特例（api.md §6.4）。
+    if (challenge?.used && challenge.body.payload.nonce === context.body.nonce) {
+      throw challengeInvalid("used");
+    }
     if (approval.status !== "pending") {
       throw new HttpProblem(409, "approval_not_pending", "approval is no longer pending", {
         extensions: { approval_status: approval.status },
       });
     }
+    if (!challenge) {
+      throw challengeInvalid("none");
+    }
+    if (Date.parse(challenge.body.payload.expires_at) <= Date.parse(nowTimestamp(state))) {
+      throw challengeInvalid("expired");
+    }
+    if (challenge.body.payload.nonce !== context.body.nonce) {
+      throw challengeInvalid("mismatch");
+    }
+    challenge.used = true;
     approval.status = "granted";
     approval.device_id = state.me.device.id;
     approval.signature = context.body.signature;
     approval.updated_at = nowTimestamp(state);
     return { status: 200, body: approval };
+  }
+
+  function challengeInvalid(reason) {
+    return new HttpProblem(409, "challenge_invalid", "approval challenge is not usable", {
+      extensions: { reason },
+    });
   }
 
   function handleGetApprovalChallenge(context) {
@@ -917,7 +1072,17 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
         extensions: { approval_status: approval.status },
       });
     }
+    const key = `${approval.id}\u0000${state.me.device.id}`;
     const timestamp = nowTimestamp(state);
+    const current = challenges.get(key);
+    if (
+      current &&
+      !current.used &&
+      Date.parse(current.body.payload.expires_at) > Date.parse(timestamp)
+    ) {
+      return { status: 200, body: deepClone(current.body) };
+    }
+    const expiry = addSeconds(timestamp, CHALLENGE_TTL_SECONDS);
     const challenge = deepClone(context.fixture);
     challenge.approval_id = approval.id;
     challenge.payload.action = approval.action;
@@ -927,11 +1092,13 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       delete challenge.payload.delivery_id;
     }
     challenge.payload.device_id = state.me.device.id;
-    challenge.payload.expires_at = addSeconds(timestamp, 120);
+    challenge.payload.expires_at =
+      Date.parse(expiry) > Date.parse(approval.expires_at) ? approval.expires_at : expiry;
     challenge.payload.nonce = randomBytes(32).toString("base64url");
     challenge.payload.subject_digest = approval.subject_digest;
     challenge.payload.target = approval.target;
-    return { status: 200, body: challenge };
+    challenges.set(key, { used: false, body: challenge });
+    return { status: 200, body: deepClone(challenge) };
   }
 
   function handleGetSettings(context) {
@@ -1304,10 +1471,33 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       requestLog.shift();
     }
 
-    const parameters = api
-      .getParameters(route.operation, route.path)
-      .filter((parameter) => parameter.in === "query");
-    context.query = validateQuery(url.searchParams, parameters);
+    // Header precedence: an existing Last-Event-ID wins over the after query parameter.
+    if (route.operation.operationId === "streamEvents" && req.headers["last-event-id"] !== undefined) {
+      url.searchParams.delete("after");
+    }
+    const parameters = api.getParameters(route.operation, route.path);
+    for (const parameter of parameters) {
+      if (parameter.in !== "path") {
+        continue;
+      }
+      const value = matched.params[parameter.name];
+      if (value === undefined) {
+        continue;
+      }
+      const schema = pathParameterSchema(api, parameter.schema);
+      if (!schema) {
+        continue;
+      }
+      const check = validator.validate(schema, value);
+      if (!check.ok) {
+        throw new HttpProblem(400, "invalid_request", `path parameter ${parameter.name} is invalid`);
+      }
+    }
+    context.query = validateQuery(
+      url.searchParams,
+      parameters.filter((parameter) => parameter.in === "query"),
+      validator,
+    );
 
     if (route.operation.operationId === "streamEvents") {
       await handleSse(req, res, context);
@@ -1335,7 +1525,7 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       throw new HttpProblem(500, "internal", `mock handler missing for ${route.operation.operationId}`);
     }
     const plan = await handler(context);
-    storeIdempotency(context, idempotencyKey, idempotencyState?.fingerprint, plan);
+    storeIdempotency(context, idempotencyState?.key, idempotencyState?.fingerprint, plan);
     sendPlan(context, res, plan);
   }
 

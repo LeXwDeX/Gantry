@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::entities::{ApprovalAction, ApprovalTarget, ForgeActionKind};
 use crate::ids::{ApprovalId, DeliveryId, DeviceId, ProjectId};
+use crate::json_strict::MAX_SAFE_INTEGER;
 use crate::time::Timestamp;
 
 /// 审批签名字节的前缀与版本。
@@ -437,7 +438,8 @@ impl ApprovalPayload {
     /// `"gantry/approval/v1\n"` ‖ JCS(payload)。
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CanonError> {
         self.validate()?;
-        let canonical = serde_jcs::to_vec(self).map_err(|e| CanonError::Jcs(e.to_string()))?;
+        let value = serde_json::to_value(self).map_err(|e| CanonError::Jcs(e.to_string()))?;
+        let canonical = jcs(&value)?;
         let mut bytes = Vec::with_capacity(APPROVAL_SIGNING_PREFIX.len() + canonical.len());
         bytes.extend_from_slice(APPROVAL_SIGNING_PREFIX);
         bytes.extend_from_slice(&canonical);
@@ -546,8 +548,32 @@ pub fn sha256(bytes: &[u8]) -> Sha256Digest {
 }
 
 /// RFC 8785 JSON 规范化。
+///
+/// 先拒绝以 `i64` / `u64` 存储且超出 `±(2^53−1)` 的整数；`serde_jcs` 会把它们转成
+/// `f64`，相邻大整数会被舍入成同一规范字节。`f64` 值仍按 RFC 8785 的 ES6 数字规则输出。
 pub fn jcs(value: &Value) -> Result<Vec<u8>, CanonError> {
+    reject_unsafe_integers(value)?;
     serde_jcs::to_vec(value).map_err(|e| CanonError::Jcs(e.to_string()))
+}
+
+fn reject_unsafe_integers(value: &Value) -> Result<(), CanonError> {
+    match value {
+        Value::Number(number) => {
+            let unsafe_integer = number
+                .as_i64()
+                .map(|v| v.unsigned_abs() > MAX_SAFE_INTEGER)
+                .or_else(|| number.as_u64().map(|v| v > MAX_SAFE_INTEGER))
+                .unwrap_or(false);
+            if unsafe_integer {
+                Err(CanonError::UnsafeInteger)
+            } else {
+                Ok(())
+            }
+        }
+        Value::Array(values) => values.iter().try_for_each(reject_unsafe_integers),
+        Value::Object(map) => map.values().try_for_each(reject_unsafe_integers),
+        _ => Ok(()),
+    }
 }
 
 pub fn jcs_digest(value: &Value) -> Result<Sha256Digest, CanonError> {
@@ -558,6 +584,8 @@ pub fn jcs_digest(value: &Value) -> Result<Sha256Digest, CanonError> {
 pub enum CanonError {
     #[error("JSON canonicalization failed: {0}")]
     Jcs(String),
+    #[error("integer exceeds the safe range 2^53-1")]
+    UnsafeInteger,
     #[error("approval payload version {0} is not supported")]
     UnsupportedVersion(u32),
     #[error("approval action has no defined target/subject shape (fail-closed)")]

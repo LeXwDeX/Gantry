@@ -432,9 +432,9 @@
     {
       "sha256": "a11faf33dc15bdc8a157dd8807d1ca35b236b94d3c1fc2af8a82f532ff7bb9f8",
       "schema": "schemas/egress/config-view.json",
-      "rust": "none",
-      "mode": "skip",
-      "note": "ConfigView 示例含 injection:{}；egress-control §4.6 未定义 injection 形状，schema 显式拒绝该字段"
+      "rust": "egress::ConfigView",
+      "mode": "verify",
+      "note": "ConfigView；injection 为空对象，符合 egress-control §4.6 示例"
     },
     {
       "sha256": "43ddddd6bc736eea160b44d7fbd2832deedce2dec7162a78e01f7edfcd2b7f14",

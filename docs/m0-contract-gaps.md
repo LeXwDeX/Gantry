@@ -103,6 +103,53 @@
     按 8 个（全局）或 6 个（项目覆盖）resource 分别调用
     `settings::resource_schema`，再用对应 `*Patch` 类型反序列化。原始 JSON 不改写，
     逐资源验证，避免为凑一个“完整类型”强加原文没有的字段。
+13. **`Approval` / `approval.requested` 的 schema 未联动动作形状**：生成器现在按
+    `APPROVAL_SHAPES` 输出 8 个分支，同时约束 `action`、`target.kind` 与
+    `subject_digest`；未定义 shape 的动作不出现在任何分支。xtask 的 Approval 检查
+    调用生产 `validate()`。
+14. **`ForgeEventEnvelope` 的 schema 未绑定 `kind` 与 `data`**：23 个 kind 各一支，
+    每支引用该 kind 的强类型 data；`origin = self` 时 `caused_by_action` 必填且非
+    null。单 kind 事件 schema 从同一信封投影。
+15. **`Card` schema 拒绝未知 `kind`**：新增降级分支，并显式排除已知 kind；已知 kind
+    的坏形状仍失败。OpenAPI `Card` 同步。
+16. **ID schema 允许首字符 8 以上**：`Id`、`Ulid`、`Subject` 与 OpenAPI path/query
+    的 ID pattern 统一为 `[0-7]` + 25 位 Crockford；`IdGen` 对超过 48 位的时钟值
+    返回 `Overflow`。
+17. **`settings.updated.value` 可携带 SecretRef.value**：schema 按 resource 绑定生产
+    `*Patch` 形状，并把所有 `x-gantry-secret` 定义的 `value` 置为拒绝型；Rust 同规则
+    拒绝字符串与 `null`。负例改用真实 `value.providers` 形状。
+    schema 无法表达 `subject`、`project_id` 与 `value.resource` 的跨字段一致性；该
+    一致性仍由 `NewEvent::validate` 在运行时检查。
+18. **`ConfigView.injection` 接受任意值且 `Debug` 泄漏**：Rust 反序列化/序列化、
+    schema 与 `Debug` 现在只允许空对象；非空注入形状仍未定义。
+19. **fixture 统计把 `rust=none` 计作完整验证**：manifest 与检查输出分为
+    `verified`（schema + Rust）、`schema-only`、`partial`、`skipped`。
+20. **`settings.updated.value` 可用缺失绕过校验**：反序列化现在区分缺失与显式
+    `null`；缺失一律拒绝。`global` 必须是资源文档，`null` 被拒绝；只有
+    `project` 的 `DELETE` 允许 `value = null`。生成的 schema 由原来的 8 个资源分支
+    改为 16 个 `scope × resource` 分支，并在顶层 `required` 中保留 `value`。
+    `NewEvent::validate` / `Event::validate_data` 同时要求 `data.scope` 与
+    `subject` / `project_id` 一致，不再能用缺失的 `project_id` 绕过。OpenAPI 的
+    `SettingsUpdatedData` 也补了 `scope = global ⇒ value ≠ null` 条件，并由
+    `xtask` 的 OpenAPI 检查覆盖。
+21. **OpenAPI 的 `Approval` / `ApprovalCreateRequest` 没有联动形状**：两者现在各含
+    8 个分支，约束 `action`、`target.kind` 与 `subject_digest`；`merge_pr` 的重复
+    枚举项已删除。`ApprovalTarget.branch.expected_remote_oid` 与 Rust 的
+    `Option` 对齐：不是 required，允许 `null` 或 40 位 hex。`ApprovalTarget.settings`
+    在 schema 中要求 global 省略 / `null` `project_id`，project 必须带非空
+    `project_id`；Rust `ApprovalTarget::validate` 与 `approval.requested` 共用同一规则。
+    `xtask` 新增 OpenAPI 形状检查，覆盖合法 8 形状、`push_branch` fail-closed、
+    kind 错配、无效 `expected_remote_oid` 与 settings scope/project_id 组合。
+22. **Mock `createApproval` 接受任意 action/target**：`handleCreateApproval` 现在使用与
+    `APPROVAL_SHAPES` 对齐的 allowlist，并校验 target kind、摘要格式与 settings
+    scope/project_id；非法请求返回 `422 validation_failed`（RFC 9457 problem）。
+    新增 HTTP 回归覆盖合法 settings 创建、`push_branch`、kind 错配与 project_id 错配。
+23. **`KnownCard` 的已知分支允许未知字段**：生成的 `KnownCard` 分支现在与 OpenAPI
+    一样设置 `additionalProperties: false`；`Card` 反序列化也对五个已知 kind 拒绝
+    未知字段，未知 kind 仍保留降级分支。
+24. **`ApprovalTarget.Settings` 的 scope/project_id 只有类型没有一致性约束**：运行时
+    `validate()` 拒绝 global 带 `project_id` 与 project 缺 / `null` `project_id`；
+    `Approval` 与 `approval.requested` 都调用它。schema 用 `if/then` 表达同一规则。
 
 ## 5. `store` M0 范围与缺口
 
@@ -120,6 +167,18 @@
 - Outbox 表：`enqueue` 幂等键去重、`claim`（依赖 / `not_before` / 租约重放 /
   `exclude_deliveries`）、`record_effects`、`complete`、`fail`（Retry / Terminal）、
   `cancel`；`outbox.succeeded` / `outbox.failed` 与行状态同事务。
+- `renew_lease`：仅 `executing` 可续租；`until` 不早于事务时间（实现允许等于）。
+- `requeue`：仅 `executing` 置回 `queued`，写 `not_before` 并清空租约；
+  `refund_attempt = true` 退回本次认领的 `attempts`（饱和减法），`false` 保持。
+- `cancel_blocked`：按依赖链迭代到不动点，把依赖已 `failed` / `cancelled` 的
+  `queued` 行置 `cancelled` 并返回本次取消的 ID；缺失依赖继续阻塞。与 `cancel`
+  一样只改表，不追加未定义的 `outbox.cancelled` 事件。
+- `count_succeeded_since`：按 `delivery_id` 过滤，统计 `updated_at >= since` 的
+  `succeeded` 行；`since` 为闭区间，其他状态不计入。
+- `fail(Retry)` 边界：同样要求 `executing`，置回 `queued`、写 `not_before` 与
+  `last_error`，不改变 `attempts`，也不追加 `outbox.failed`；退还尝试次数只能用
+  `requeue(refund_attempt = true)`。`fail(Terminal)` 才进入 `failed` 并写恰好一条
+  `outbox.failed`；任何路径都不存在 `failed → queued`（P-53）。
 - `EventLog`：`head` / `check_cursor` / `scan`（`scanned_to` 语义、include/exclude、
   project 过滤、全局事件始终命中）/ `get` / `get_by_seq` / `by_dedup_key` / `by_subject`。
 - `Cursors`：`load` / `advance`（只增）。
@@ -146,22 +205,69 @@
 
 ## 6. 验证边界
 
-- 集成验收（2026-10-25）：`cargo test --workspace --all-features --locked`
-  266 个测试通过，0 失败（core 215、fakes 30、store 20、xtask 1）；
+- 历史记录：集成验收曾记录 workspace 329 项（core 249、fakes 48、store 30、
+  xtask 2）；core 曾单独跑到 252 项。这些数字是旧快照，**已被本轮全量重跑取代**，
+  不得再作为当前结果引用。
+- 终审 P1/P2 修复（第五轮历史快照）：
+  `cargo test --workspace --all-features --locked`
+  **345 项通过，0 失败**（core 254、fakes 55、store 34、xtask 2）；
   `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
   通过；`cargo fmt --all -- --check` 通过。
 - `cargo xtask schemas --check`：0 failure、0 warning；151 个生成 schema 无漂移。
-  文档块统计：76 块 = 49 完整验证（schema + Rust）、20 部分验证（仅 schema；
-  示例省略字段）、7 显式 skip。7 个 skip 均在 `fixtures/contracts/unverified.json`
-  登记：3 个 `contract-undefined`（G-03、G-04、ResultBundle），4 个原文示意错误或
+  文档块统计：76 块 = 36 完整验证（schema + Rust）、14 schema-only（`rust=none`，
+  不提供 Rust 证据）、20 部分验证（仅 schema；示例省略字段）、6 显式 skip。
+  6 个 skip 均在 `fixtures/contracts/unverified.json`
+  登记：2 个 `contract-undefined`（G-04、ResultBundle），4 个原文示意错误或
   非协议片段（G-13、G-15、github_ref 组合、App manifest）。实现漏项没有登记类别；
   新增未验证块会直接失败，不能用 warning 隐藏。
-- `npm test --prefix tools/mock-api`：19 个测试通过。
+- 负例夹具：21 个；每个都分别运行声明的 schema 与 Rust 校验，未只注册不执行。
+- `npm test --prefix tools/mock-api`：27 个测试通过（第五轮历史快照）。
 - 真实 HTTP 回环回归：本次 workspace 运行中 `http_framing`（10 项）与
   `runtime_fakes`（11 项）通过；此前集成验收记录为各连续 50 次通过，包含 150ms
   延迟发送、分片 body、冲突/非法 Content-Length 和不完整 body 用例。
-- 本节点未修改 `apps/**`、`prototype/**`、`docs/reviews/**`、`docs/interfaces/`、
-  `decisions.md`、`data-model.md`、`Cargo.lock`。
-- 完整事件契约仍未冻结；14 个事件的 `data` 形状见 §2，`ConfigView.injection` 与
-  drift 其余 8 种形状见 G-03/G-04。config 聚合示例已逐资源验证（G-07 已关闭），
-  但 `Notify` / `Github` 的覆盖策略仍由权威文档决定，M0 不新增生产类型。
+- 第五轮（终审 P1/P2）未修改 `apps/**`、`prototype/**`、`docs/reviews/**`、
+  `docs/interfaces/`、`decisions.md`、`data-model.md`、store/fakes 源码与
+  `Cargo.lock`；该段为历史记录。本轮 B1–B9 的 store/fakes 改动见下方第 7 节。
+- 完整事件契约仍未冻结；14 个事件的 `data` 形状见 §2，`ConfigView.injection` 的
+  非空形状与 drift 其余 8 种形状见 G-03/G-04。config 聚合示例已逐资源验证（G-07
+  已关闭），但 `Notify` / `Github` 的覆盖策略仍由权威文档决定，M0 不新增生产类型。
+  跨替身的事务 / 审批 / Outbox 集成已由 `crates/gantry-fakes/tests/tx_interop.rs`
+  覆盖（提交/回滚、同事务去重、跨 Store 拒绝、Outbox 终态与审批消费）；SQLite
+  持久化等 M1 能力仍不在本轮范围。
+
+## 7. B1–B9 修复后的验证边界（第六轮，2026-10-25）
+
+- Rust workspace：`cargo test --workspace --all-features --locked` 通过 363 项、失败 0、
+  ignored 2（core 260、fakes 64、store 37、xtask 2；ignored 是父测试驱动的两类看门狗子进程）。
+  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` 与
+  `cargo fmt --all -- --check` 通过。
+- schema：`cargo --locked xtask schemas --check` 为 0 failure、0 warning，151 个生成
+  文件无漂移；21 个负例与 76 个文档块仍按 36/14/20/6 分类。
+- Mock：`npm test --prefix tools/mock-api` 29 项通过。B8 覆盖无操作、dismissed、缺失、
+  多 blocker 部分解除和全部解除；B9 覆盖正常 failed、非 failed、superseded、暂停/终态
+  交付和无 delivery workflow。
+- Store/fakes：B5 的 Store 与 fakes async contention 都使用外部子进程看门狗；B1/B2/B6
+  的跨模块事务测试覆盖提交、回滚、真实序号、事件信封、Pending 去重和规范化幂等键；
+  B7 覆盖四种拒绝状态、Executing 预写和成功窗口不变。
+- 工作树本轮没有修改 `docs/interfaces/**`、`docs/decisions.md`、`docs/data-model.md`、
+  `schemas/**`、`apps/**`、`prototype/**` 或 `docs/reviews/**`。起点已有的其他未提交修改
+  保留，不能用相对 HEAD 的整体 diff 判断本轮契约变化。
+- 环境：macOS Darwin arm64，rustc/cargo 1.97.0、Node 26.12.0、npm 11.20.0。Rust 1.85、
+  Linux/Windows CI、真实 SQLite/GitHub/Sandbox/PKI、生产授权和 M1 未验证。
+- 独立复审先发现 fakes async 入口使用阻塞 `begin_write_sync` 的 P1，已修复并增加看门狗
+  回归；修复后未发现 B1–B9 新阻塞项。暂停期间新增 blocker 的完整 engine 调度语义、
+  14 个未定事件 data、`ConfigView.injection` 非空形状和 drift 其余 8 种形状仍是已披露
+范围外缺口。
+
+## 8. 第七轮复审补修边界（2026-10-25）
+
+- Mock B8 已补齐连续操作：部分 blocker 解除后第一次 resume 仍保持
+  `waiting_human`，保留暂停记录；重复暂停也不丢失 dismissed blocker；剩余 blocker 解除后
+  再次 resume 才恢复 `running`。
+  `npm test --prefix tools/mock-api` 实测 29 项通过。
+- B1 的 supersede 事件仍按既有契约由 `inbox.raised.data.supersedes` 承载；是否同时为
+  每个旧项追加 `inbox.resolved`，以及旧项 `last_seq` 的客户端语义，属于待冻结的契约
+  解释，不在本轮猜测或修改。
+- B9 的可选字段候选与 retryNode 的 OpenAPI 响应要求不一致，未增加额外兼容路径。
+- 第七轮未修改 `docs/interfaces/**`、`schemas/**` 或端口签名；完整 M0 的既有契约缺口
+  不变。

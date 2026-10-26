@@ -674,7 +674,7 @@
     },
     "Id_nod": {
       "type": "string",
-      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "ArbiterRuling": {
       "type": "string",
@@ -968,7 +968,7 @@
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "IntentOutput": {
       "type": "object",

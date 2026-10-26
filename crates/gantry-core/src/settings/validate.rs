@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
-use super::rules::{rule_for, RelaxCmp};
+use super::rules::{rule_for, triage_allowed_actions, triage_class_locked, RelaxCmp};
 use crate::entities::{PolicyActionId, SettingsResource, SettingsScope};
 use crate::secret::{Consumer, SecretName, SecretString};
 
@@ -47,10 +47,11 @@ impl ValidationReport {
         code: &'static str,
         message: impl Into<String>,
     ) {
+        let (pointer, message) = sanitize_issue(pointer.into(), message.into());
         self.errors.push(ValidationIssue {
-            pointer: pointer.into(),
+            pointer,
             code,
-            message: message.into(),
+            message,
             severity: Severity::Error,
         });
     }
@@ -61,10 +62,11 @@ impl ValidationReport {
         code: &'static str,
         message: impl Into<String>,
     ) {
+        let (pointer, message) = sanitize_issue(pointer.into(), message.into());
         self.warnings.push(ValidationIssue {
-            pointer: pointer.into(),
+            pointer,
             code,
-            message: message.into(),
+            message,
             severity: Severity::Warning,
         });
     }
@@ -163,6 +165,38 @@ fn child(pointer: &str, segment: &str) -> String {
     format!("{pointer}/{}", escape(segment))
 }
 
+fn unescape(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
+}
+
+/// 报告边界：动态键可能形似凭据，截断到最近的安全父路径，并抹掉消息里的原值。
+/// 只作用于诊断文本；`secret_slots` 等真实寻址路径不受影响。
+fn sanitize_issue(pointer: String, mut message: String) -> (String, String) {
+    let segments: Vec<&str> = pointer.split('/').skip(1).collect();
+    let Some(first_secret) = segments
+        .iter()
+        .position(|segment| looks_like_secret_value(&unescape(segment)))
+    else {
+        return (pointer, message);
+    };
+    let safe_pointer: String = segments[..first_secret]
+        .iter()
+        .map(|segment| format!("/{segment}"))
+        .collect();
+    for segment in &segments[first_secret..] {
+        let decoded = unescape(segment);
+        if !looks_like_secret_value(&decoded) {
+            continue;
+        }
+        for value in [*segment, decoded.as_str()] {
+            if !value.is_empty() {
+                message = message.replace(value, "<redacted>");
+            }
+        }
+    }
+    (safe_pointer, message)
+}
+
 /// `null` 不是"没有值"：存储文档用删除键表示清除。SecretRef 的 `value: null`
 /// 有独立错误码（V03），由 secret 检查报告，这里跳过整个 SecretRef 子树。
 fn check_nulls(value: &Value, pointer: &str, report: &mut ValidationReport) {
@@ -198,22 +232,13 @@ fn check_inline_secrets(value: &Value, pointer: &str, report: &mut ValidationRep
             }
             for (key, child_value) in map {
                 let child_pointer = child(pointer, key);
-                if let Value::String(text) = child_value {
-                    if key_looks_secret(key) {
-                        report.error(
-                            &child_pointer,
-                            "inline_secret_detected",
-                            "inline credentials are not allowed; use a SecretRef",
-                        );
-                        continue;
-                    }
-                    if looks_like_secret_value(text) {
-                        report.error(
-                            &child_pointer,
-                            "inline_secret_detected",
-                            "value looks like a credential; use a SecretRef",
-                        );
-                    }
+                if key_looks_secret(key) && child_value.is_string() {
+                    report.error(
+                        &child_pointer,
+                        "inline_secret_detected",
+                        "inline credentials are not allowed; use a SecretRef",
+                    );
+                    continue;
                 }
                 check_inline_secrets(child_value, &child_pointer, report);
             }
@@ -222,6 +247,13 @@ fn check_inline_secrets(value: &Value, pointer: &str, report: &mut ValidationRep
             for (index, child_value) in items.iter().enumerate() {
                 check_inline_secrets(child_value, &format!("{pointer}/{index}"), report);
             }
+        }
+        Value::String(text) if looks_like_secret_value(text) => {
+            report.error(
+                pointer,
+                "inline_secret_detected",
+                "value looks like a credential; use a SecretRef",
+            );
         }
         _ => {}
     }
@@ -1001,12 +1033,27 @@ fn validate_guardian(map: &Map<String, Value>, report: &mut ValidationReport) {
                     report.error(pointer, "enum", format!("unknown guardian class `{class}`"));
                     continue;
                 }
-                enum_string(
-                    action,
-                    &pointer,
-                    &["silent_fix", "silent_reply", "batch", "escalate"],
-                    report,
-                );
+                if triage_class_locked(class) {
+                    report.error(
+                        pointer,
+                        "locked_key",
+                        format!("guardian class `{class}` is locked and cannot be configured"),
+                    );
+                    continue;
+                }
+                let allowed = triage_allowed_actions(class).unwrap_or(&[]);
+                match action.as_str() {
+                    Some(value) if allowed.contains(&value) => {}
+                    Some(_) => report.error(
+                        pointer,
+                        "triage_value_invalid",
+                        format!(
+                            "guardian class `{class}` only accepts {}",
+                            allowed.join(", ")
+                        ),
+                    ),
+                    None => report.error(pointer, "type", "expected a string"),
+                }
             }
         }
     }

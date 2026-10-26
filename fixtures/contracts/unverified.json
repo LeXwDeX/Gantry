@@ -10,13 +10,6 @@
       "note": "示例 request_id 为 25 位，core Ulid 要求 26 位；原文示例与类型不一致，不能作为实现通过证据（G-13）。"
     },
     {
-      "sha256": "a11faf33dc15bdc8a157dd8807d1ca35b236b94d3c1fc2af8a82f532ff7bb9f8",
-      "source": "docs/interfaces/egress-control.md",
-      "line": 325,
-      "kind": "contract-undefined",
-      "note": "egress-control §4.6 只给出 injection:{} 示例，未定义字段形状；生成器显式拒绝（G-03）。"
-    },
-    {
       "sha256": "42ace6ad6507554f7ea08ef420db84e0575669b17c668f2fdb556a43417b596b",
       "source": "docs/interfaces/api.md",
       "line": 554,

@@ -8,7 +8,7 @@ description = "Gantry 事件存储：M0 内存实现（testing feature）"
 
 [features]
 default = []
-testing = []
+testing = ["gantry-core/testing"]
 
 [dependencies]
 gantry-core = { path = "../gantry-core" }

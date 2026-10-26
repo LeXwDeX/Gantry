@@ -23,24 +23,15 @@ function convertScalar(raw, schema) {
   return raw;
 }
 
-function checkValue(value, schema) {
-  if (schema.type === "integer") {
-    if (!Number.isInteger(value)) {
-      fail("query parameter must be an integer");
-    }
-    if (schema.minimum !== undefined && value < schema.minimum) {
-      fail("query parameter is below the minimum");
-    }
-    if (schema.maximum !== undefined && value > schema.maximum) {
-      fail("query parameter is above the maximum");
-    }
-  }
-  if (schema.enum && !schema.enum.includes(value)) {
-    fail("query parameter is not an allowed value");
+function checkValue(value, schema, validator) {
+  const check = validator.validate(schema, value);
+  if (!check.ok) {
+    const detail = check.errors.map((error) => error.message).join("; ");
+    fail(`query parameter is invalid: ${detail}`);
   }
 }
 
-export function validateQuery(searchParams, parameters) {
+export function validateQuery(searchParams, parameters, validator) {
   const byName = new Map(parameters.map((parameter) => [parameter.name, parameter]));
   const values = {};
   for (const [name, parameter] of byName) {
@@ -59,15 +50,15 @@ export function validateQuery(searchParams, parameters) {
     if (schema.type === "array") {
       const items = raw.flatMap((entry) => entry.split(",")).filter((entry) => entry !== "");
       for (const entry of items) {
-        checkValue(entry, schema.items || {});
+        checkValue(entry, schema.items || {}, validator);
       }
       values[name] = items;
     } else if (repeatable && raw.length > 1) {
       values[name] = raw.map((entry) => convertScalar(entry, schema));
-      values[name].forEach((entry) => checkValue(entry, schema));
+      values[name].forEach((entry) => checkValue(entry, schema, validator));
     } else {
       const converted = convertScalar(raw[0], schema);
-      checkValue(converted, schema);
+      checkValue(converted, schema, validator);
       values[name] = converted;
     }
   }

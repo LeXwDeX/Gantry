@@ -1,16 +1,23 @@
 //! `FakeInbox`：内存版 `InboxPort`。
 //!
+//! 条目保存在 `gantry_store::Store` 的 typed 模块快照里。每次实际状态变化都在
+//! 同一 `WriteTx` 内追加对应事件；`raise` / `resolve` 可以并入调用方的事务，
+//! 回滚时事件与状态一起撤销。`dismiss` / `choose` 自开事务；`register_push_token`
+//! 只写私有映射，不产生事件。`new(now)` 自建 Store；`new_in(store)` 与其它替身共享。
+//!
 //! 去重只针对 `open` 项；`resolved` / `dismissed` 后同一 `dedup_key` 可再次
-//! 创建。`raise` / `resolve` 支持并入 [`FakeInboxTx`]，回滚时不留痕。
-//! `register_push_token` 只写私有映射，不产生事件，也不出现在任何读响应里。
+//! 创建。`register_push_token` 只写私有映射，不产生事件，也不出现在任何读响应里。
 
-use std::any::Any;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use gantry_core::entities::{
     InboxItem, InboxKind, InboxOption, InboxPayload, InboxStatus, Seq, Severity,
+};
+use gantry_core::events::{
+    EventType, InboxDismissedData, InboxRaisedData, InboxResolution, InboxResolvedData, NewEvent,
+    Subject,
 };
 use gantry_core::ids::{ApprovalId, DeliveryId, DeviceId, InboxId, ProjectId};
 use gantry_core::ports::{
@@ -19,18 +26,22 @@ use gantry_core::ports::{
     PushToken, RaiseError, RaiseOutcome, RaiseRequest, Resolution, ResolveError, ResolveTarget,
     StoreError, TxHandle, Written,
 };
+use gantry_core::testing::FakeClock;
 use gantry_core::time::Timestamp;
+use gantry_store::{Appended, WriteTx};
+
+use crate::{port_store_error, read_state};
+
+const STATE_KEY: &str = "fakes.inbox";
 
 // ---------------------------------------------------------------------------
 // 状态
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct InboxSnapshot {
+struct InboxState {
     now: Timestamp,
-    generation: u64,
     counter: u128,
-    last_seq: u64,
     items: BTreeMap<InboxId, InboxItem>,
     seqs: BTreeMap<InboxId, Seq>,
     resolutions: BTreeMap<InboxId, Resolution>,
@@ -38,13 +49,11 @@ struct InboxSnapshot {
     push_tokens: BTreeMap<DeviceId, (PushToken, ApnsEnvironment)>,
 }
 
-impl InboxSnapshot {
+impl InboxState {
     fn new(now: Timestamp) -> Self {
         Self {
             now,
-            generation: 0,
             counter: 0,
-            last_seq: 0,
             items: BTreeMap::new(),
             seqs: BTreeMap::new(),
             resolutions: BTreeMap::new(),
@@ -60,13 +69,15 @@ impl InboxSnapshot {
             .expect("fake inbox counter must fit in 80 bits")
     }
 
-    fn bump(&mut self) -> Seq {
-        self.last_seq += 1;
-        Seq::new(self.last_seq).expect("fake inbox seq must be at least 1")
-    }
-
     fn seq_of(&self, id: &InboxId) -> Seq {
         self.seqs.get(id).copied().unwrap_or(Seq::ZERO)
+    }
+
+    fn open_count(&self) -> usize {
+        self.items
+            .values()
+            .filter(|item| item.status == InboxStatus::Open)
+            .count()
     }
 }
 
@@ -80,12 +91,13 @@ fn open_matches(item: &InboxItem, key: &str) -> bool {
 
 #[derive(Clone)]
 pub struct FakeInbox {
-    state: Arc<Mutex<InboxSnapshot>>,
+    store: gantry_store::Store,
+    clock: Option<Arc<FakeClock>>,
 }
 
 impl std::fmt::Debug for FakeInbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.lock();
+        let state = self.state();
         f.debug_struct("FakeInbox")
             .field("items", &state.items.len())
             .field("open", &state.open_count())
@@ -96,118 +108,79 @@ impl std::fmt::Debug for FakeInbox {
 
 impl FakeInbox {
     pub fn new(now: Timestamp) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(InboxSnapshot::new(now))),
-        }
+        let (store, clock) = crate::open_store(now);
+        Self::from_parts(store, Some(clock), now)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, InboxSnapshot> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// 共享调用方的 Store；raise/resolve 可以并入同一个写事务。
+    pub fn new_in(store: gantry_store::Store) -> Self {
+        let now = store.clock_now();
+        Self::from_parts(store, None, now)
+    }
+
+    fn from_parts(
+        store: gantry_store::Store,
+        clock: Option<Arc<FakeClock>>,
+        now: Timestamp,
+    ) -> Self {
+        store
+            .register_module_state(STATE_KEY, InboxState::new(now))
+            .expect("inbox module state must register");
+        Self { store, clock }
+    }
+
+    fn state(&self) -> InboxState {
+        read_state(&self.store, STATE_KEY).expect("inbox module state must exist")
     }
 
     pub fn set_now(&self, now: Timestamp) {
-        self.lock().now = now;
+        if let Some(clock) = &self.clock {
+            clock.set(now);
+        }
+        self.write_state(|state| state.now = now);
     }
 
     pub fn advance_ms(&self, ms: i64) {
-        let mut state = self.lock();
-        state.now = Timestamp::from_millis(state.now.as_millis().saturating_add(ms));
+        if let Some(clock) = &self.clock {
+            clock.advance_ms(ms);
+        }
+        self.write_state(|state| {
+            state.now = Timestamp::from_millis(state.now.as_millis().saturating_add(ms));
+        });
     }
 
-    pub fn begin_write(&self) -> FakeInboxTx {
-        let snapshot = self.lock().clone();
-        FakeInboxTx {
-            inbox: self.clone(),
-            snapshot,
-        }
+    fn write_state<R>(&self, f: impl FnOnce(&mut InboxState) -> R) -> R {
+        crate::update_state(&self.store, STATE_KEY, f).expect("inbox module state must exist")
+    }
+
+    /// 同步入口只给同步测试用；async 端口必须 `self.store.begin_write().await`，
+    /// 否则单线程运行时里竞争写令牌会阻塞 runtime 线程而死锁。
+    pub fn begin_write(&self) -> WriteTx {
+        self.store
+            .begin_write_sync()
+            .expect("in-memory store write must start")
     }
 
     pub fn resolution(&self, id: &InboxId) -> Option<Resolution> {
-        self.lock().resolutions.get(id).cloned()
+        self.state().resolutions.get(id).cloned()
     }
 
     pub fn chosen_option(&self, id: &InboxId) -> Option<(String, Option<String>)> {
-        self.lock().choices.get(id).cloned()
+        self.state().choices.get(id).cloned()
     }
 
     /// 仅用于测试断言：令牌本身不进入任何读端口响应。
     pub fn push_token_record(&self, device: &DeviceId) -> Option<(PushToken, ApnsEnvironment)> {
-        self.lock().push_tokens.get(device).cloned()
+        self.state().push_tokens.get(device).cloned()
     }
 
-    fn apply_raise(
-        state: &mut InboxSnapshot,
-        req: RaiseRequest,
-    ) -> Result<RaiseOutcome, RaiseError> {
-        if !validate_raise_kind(&req.payload, req.kind.clone()) {
-            return Err(RaiseError::InvalidPayload {
-                pointer: "/payload".into(),
-                message: "payload kind does not match the inbox kind".into(),
-            });
-        }
-        if let Some(existing) = state
-            .items
-            .values()
-            .find(|item| open_matches(item, req.dedup_key.as_str()))
-            .cloned()
-        {
-            let last_seq = state.seq_of(&existing.id);
-            return Ok(RaiseOutcome::Deduped(Written {
-                item: existing,
-                last_seq,
-            }));
-        }
-
-        let id = state.next_id();
-        let now = state.now;
-        for key in req.supersedes {
-            let superseded: Vec<InboxId> = state
-                .items
-                .iter()
-                .filter(|(_, item)| open_matches(item, key.as_str()))
-                .map(|(id, _)| *id)
-                .collect();
-            for target in superseded {
-                if let Some(item) = state.items.get_mut(&target) {
-                    item.status = InboxStatus::Resolved;
-                    item.updated_at = now;
-                }
-                state
-                    .resolutions
-                    .insert(target, Resolution::Superseded { by: id });
-                let seq = state.bump();
-                state.seqs.insert(target, seq);
-            }
-        }
-
-        let item = InboxItem {
-            id,
-            project_id: req.project_id,
-            delivery_id: req.delivery_id,
-            kind: req.kind,
-            severity: req.severity,
-            summary: req.summary.as_str().to_owned(),
-            payload: req.payload,
-            status: InboxStatus::Open,
-            dedup_key: req.dedup_key.as_str().to_owned(),
-            created_at: now,
-            updated_at: now,
-        };
-        let seq = state.bump();
-        state.items.insert(id, item.clone());
-        state.seqs.insert(id, seq);
-        Ok(RaiseOutcome::Created(Written {
-            item,
-            last_seq: seq,
-        }))
-    }
-
-    fn apply_resolve(
-        state: &mut InboxSnapshot,
+    async fn apply_resolve(
+        tx: &mut WriteTx,
+        state: &mut InboxState,
         target: ResolveTarget,
         how: Resolution,
+        ctx: &ActorCtx,
+        now: Timestamp,
     ) -> Result<Vec<Written<InboxItem>>, ResolveError> {
         let ids: Vec<InboxId> = match target {
             ResolveTarget::Id(id) => state
@@ -246,19 +219,20 @@ impl FakeInbox {
                 .map(|(inbox_id, _)| *inbox_id)
                 .collect(),
         };
-        let now = state.now;
         let mut written = Vec::new();
         for id in ids {
-            let Some(item) = state.items.get_mut(&id) else {
+            let Some(item) = state.items.get(&id) else {
                 continue;
             };
             if item.status != InboxStatus::Open {
                 continue;
             }
+            let data = resolved_data(id, &how);
+            let seq = append_inbox_event(tx, EventType::InboxResolved, item, &data, ctx).await?;
+            let item = state.items.get_mut(&id).expect("item checked above");
             item.status = InboxStatus::Resolved;
             item.updated_at = now;
             let item = item.clone();
-            let seq = state.bump();
             state.seqs.insert(id, seq);
             state.resolutions.insert(id, how.clone());
             written.push(Written {
@@ -268,53 +242,302 @@ impl FakeInbox {
         }
         Ok(written)
     }
-}
 
-impl InboxSnapshot {
-    fn open_count(&self) -> usize {
-        self.items
-            .values()
-            .filter(|item| item.status == InboxStatus::Open)
-            .count()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 事务句柄
-// ---------------------------------------------------------------------------
-
-pub struct FakeInboxTx {
-    inbox: FakeInbox,
-    snapshot: InboxSnapshot,
-}
-
-impl FakeInboxTx {
-    pub async fn commit(mut self) -> Result<(), StoreError> {
-        let mut shared = self.inbox.lock();
-        if shared.generation != self.snapshot.generation {
-            return Err(StoreError::Conflict {
-                code: "fake_inbox_tx_conflict",
+    async fn raise_on(tx: &mut WriteTx, req: RaiseRequest) -> Result<RaiseOutcome, RaiseError> {
+        let now = tx.now();
+        let mut state = tx
+            .module_state::<InboxState>(STATE_KEY)
+            .map_err(|error| RaiseError::Store(port_store_error(error)))?
+            .ok_or(RaiseError::Store(StoreError::NotFound))?;
+        state.now = now;
+        if !validate_raise_kind(&req.payload, req.kind.clone()) {
+            return Err(RaiseError::InvalidPayload {
+                pointer: "/payload".into(),
+                message: "payload kind does not match the inbox kind".into(),
             });
         }
-        self.snapshot.generation += 1;
-        *shared = self.snapshot;
-        Ok(())
+        if let Some(existing) = state
+            .items
+            .values()
+            .find(|item| open_matches(item, req.dedup_key.as_str()))
+            .cloned()
+        {
+            let last_seq = state.seq_of(&existing.id);
+            return Ok(RaiseOutcome::Deduped(Written {
+                item: existing,
+                last_seq,
+            }));
+        }
+
+        let id = state.next_id();
+        let mut supersedes = BTreeSet::new();
+        for key in &req.supersedes {
+            supersedes.extend(
+                state
+                    .items
+                    .iter()
+                    .filter(|(_, item)| open_matches(item, key.as_str()))
+                    .map(|(id, _)| *id),
+            );
+        }
+        let item = InboxItem {
+            id,
+            project_id: req.project_id,
+            delivery_id: req.delivery_id,
+            kind: req.kind,
+            severity: req.severity,
+            summary: req.summary.as_str().to_owned(),
+            payload: req.payload,
+            status: InboxStatus::Open,
+            dedup_key: req.dedup_key.as_str().to_owned(),
+            created_at: now,
+            updated_at: now,
+        };
+        let data = InboxRaisedData {
+            item: item.clone(),
+            supersedes: supersedes.iter().copied().collect(),
+        };
+        let event = NewEvent {
+            ty: EventType::InboxRaised,
+            subject: Subject::parse(&id.to_string()).map_err(|_| {
+                RaiseError::Store(StoreError::Rejected {
+                    message: "inbox id is not a valid subject".into(),
+                })
+            })?,
+            project_id: item.project_id,
+            actor: req.actor,
+            causation_id: req.causation_id,
+            correlation_id: item.delivery_id.map(|id| id.to_string()),
+            data: serde_json::to_value(&data).map_err(|_| {
+                RaiseError::Store(StoreError::Rejected {
+                    message: "inbox.raised data must serialize".into(),
+                })
+            })?,
+            dedup_key: None,
+        };
+        let Appended::New(event) = tx
+            .append(event)
+            .await
+            .map_err(|error| RaiseError::Store(port_store_error(error)))?
+        else {
+            return Err(RaiseError::Store(StoreError::Rejected {
+                message: "inbox.raised must not be deduplicated".into(),
+            }));
+        };
+        let seq = event.seq;
+
+        for target in supersedes {
+            if let Some(item) = state.items.get_mut(&target) {
+                item.status = InboxStatus::Resolved;
+                item.updated_at = now;
+            }
+            state
+                .resolutions
+                .insert(target, Resolution::Superseded { by: id });
+            state.seqs.insert(target, seq);
+        }
+        state.items.insert(id, item.clone());
+        state.seqs.insert(id, seq);
+        tx.update_module_state(STATE_KEY, |current: &mut InboxState| *current = state)
+            .map_err(|error| RaiseError::Store(port_store_error(error)))?;
+        Ok(RaiseOutcome::Created(Written {
+            item,
+            last_seq: seq,
+        }))
     }
 
-    pub async fn rollback(self) -> Result<(), StoreError> {
-        Ok(())
+    async fn resolve_on(
+        tx: &mut WriteTx,
+        target: ResolveTarget,
+        how: Resolution,
+        ctx: &ActorCtx,
+    ) -> Result<Vec<Written<InboxItem>>, ResolveError> {
+        let now = tx.now();
+        let mut state = tx
+            .module_state::<InboxState>(STATE_KEY)
+            .map_err(|error| ResolveError::Store(port_store_error(error)))?
+            .ok_or(ResolveError::Store(StoreError::NotFound))?;
+        state.now = now;
+        let written = Self::apply_resolve(tx, &mut state, target, how, ctx, now).await?;
+        tx.update_module_state(STATE_KEY, |current: &mut InboxState| *current = state)
+            .map_err(|error| ResolveError::Store(port_store_error(error)))?;
+        Ok(written)
+    }
+
+    async fn dismiss_on(
+        tx: &mut WriteTx,
+        id: &InboxId,
+        ctx: &ActorCtx,
+        note: Option<Note>,
+    ) -> Result<Written<InboxItem>, InboxError> {
+        let now = tx.now();
+        let mut state = tx
+            .module_state::<InboxState>(STATE_KEY)
+            .map_err(|error| InboxError::Store(port_store_error(error)))?
+            .ok_or(InboxError::Store(StoreError::NotFound))?;
+        let item = state.items.get(id).cloned().ok_or(InboxError::NotFound)?;
+        match item.status {
+            InboxStatus::Open => {
+                let data = InboxDismissedData {
+                    inbox_id: *id,
+                    note: note.map(|note| note.as_str().to_owned()),
+                };
+                let seq =
+                    append_inbox_event(tx, EventType::InboxDismissed, &item, &data, ctx).await?;
+                state.now = now;
+                let item = state.items.get_mut(id).expect("item checked before append");
+                item.status = InboxStatus::Dismissed;
+                item.updated_at = now;
+                let item = item.clone();
+                state.seqs.insert(*id, seq);
+                tx.update_module_state(STATE_KEY, |current: &mut InboxState| *current = state)
+                    .map_err(|error| InboxError::Store(port_store_error(error)))?;
+                Ok(Written {
+                    item,
+                    last_seq: seq,
+                })
+            }
+            InboxStatus::Dismissed => Ok(Written {
+                item,
+                last_seq: state.seq_of(id),
+            }),
+            InboxStatus::Resolved => Err(InboxError::InvalidRequest {
+                message: "inbox item is resolved".into(),
+            }),
+        }
+    }
+
+    async fn choose_on(
+        tx: &mut WriteTx,
+        id: &InboxId,
+        option: &OptionId,
+        note: Option<Note>,
+        ctx: &ActorCtx,
+    ) -> Result<Written<InboxItem>, ChooseError> {
+        let now = tx.now();
+        let mut state = tx
+            .module_state::<InboxState>(STATE_KEY)
+            .map_err(|error| ChooseError::Inbox(InboxError::Store(port_store_error(error))))?
+            .ok_or(ChooseError::Inbox(InboxError::Store(StoreError::NotFound)))?;
+        let Some(item) = state.items.get(id).cloned() else {
+            return Err(ChooseError::Inbox(InboxError::NotFound));
+        };
+        if matches!(&item.kind, InboxKind::ApprovalNeeded) {
+            return Err(ChooseError::UseApprovalRoute);
+        }
+        if ctx.client_profile == Some(ClientProfile::Mobile) {
+            if matches!(&item.kind, InboxKind::Escalation) {
+                return Err(ChooseError::ProfileForbidden);
+            }
+            if matches!(&item.kind, InboxKind::BudgetExhausted) && option.as_str() == "raise_cap" {
+                return Err(ChooseError::ProfileForbidden);
+            }
+        }
+        if item.status != InboxStatus::Open {
+            return Err(ChooseError::NotOpen);
+        }
+        let known = options(&item.payload)
+            .map(|options| {
+                options
+                    .iter()
+                    .any(|candidate| candidate.id.as_str() == option.as_str())
+            })
+            .unwrap_or(false);
+        if !known {
+            return Err(ChooseError::OptionUnknown);
+        }
+        let note = note.map(|note| note.as_str().to_owned());
+        let data = InboxResolvedData {
+            inbox_id: *id,
+            resolution: InboxResolution::Chosen,
+            option_id: Some(option.as_str().to_owned()),
+            note: note.clone(),
+            message_id: None,
+            approval_id: None,
+            reason: None,
+        };
+        let seq = append_inbox_event(tx, EventType::InboxResolved, &item, &data, ctx)
+            .await
+            .map_err(|error| ChooseError::Inbox(InboxError::Store(error)))?;
+        state.now = now;
+        let item = state.items.get_mut(id).expect("item checked before append");
+        item.status = InboxStatus::Resolved;
+        item.updated_at = now;
+        let item = item.clone();
+        state.seqs.insert(*id, seq);
+        state
+            .choices
+            .insert(*id, (option.as_str().to_owned(), note));
+        tx.update_module_state(STATE_KEY, |current: &mut InboxState| *current = state)
+            .map_err(|error| ChooseError::Inbox(InboxError::Store(port_store_error(error))))?;
+        Ok(Written {
+            item,
+            last_seq: seq,
+        })
     }
 }
 
-impl TxHandle for FakeInboxTx {
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
+fn resolved_data(id: InboxId, how: &Resolution) -> InboxResolvedData {
+    let (resolution, message_id, approval_id, reason) = match how {
+        Resolution::Answered { message_id } => {
+            (InboxResolution::Answered, Some(*message_id), None, None)
+        }
+        Resolution::ApprovalSettled { approval_id, .. } => (
+            InboxResolution::ApprovalSettled,
+            None,
+            Some(*approval_id),
+            None,
+        ),
+        Resolution::DeliveryClosed => (InboxResolution::DeliveryClosed, None, None, None),
+        Resolution::DeliveryAbandoned => (InboxResolution::DeliveryAbandoned, None, None, None),
+        Resolution::Superseded { .. } => (InboxResolution::Superseded, None, None, None),
+        Resolution::External { reason } => {
+            (InboxResolution::External, None, None, Some(reason.clone()))
+        }
+        Resolution::System { reason } => {
+            (InboxResolution::System, None, None, Some(reason.clone()))
+        }
+    };
+    InboxResolvedData {
+        inbox_id: id,
+        resolution,
+        option_id: None,
+        note: None,
+        message_id,
+        approval_id,
+        reason,
     }
 }
 
-fn inbox_tx_required() -> StoreError {
-    StoreError::Rejected {
-        message: "FakeInbox requires a FakeInboxTx when a transaction is supplied".into(),
+async fn append_inbox_event<T: serde::Serialize>(
+    tx: &mut WriteTx,
+    ty: EventType,
+    item: &InboxItem,
+    data: &T,
+    ctx: &ActorCtx,
+) -> Result<Seq, StoreError> {
+    let subject = Subject::parse(&item.id.to_string()).map_err(|_| StoreError::Rejected {
+        message: "inbox id is not a valid subject".into(),
+    })?;
+    let data = serde_json::to_value(data).map_err(|_| StoreError::Rejected {
+        message: "inbox event data must serialize".into(),
+    })?;
+    let event = NewEvent {
+        ty,
+        subject,
+        project_id: item.project_id,
+        actor: ctx.actor.clone(),
+        causation_id: ctx.causation_id,
+        correlation_id: item.delivery_id.map(|id| id.to_string()),
+        data,
+        dedup_key: None,
+    };
+    match tx.append(event).await {
+        Ok(Appended::New(event)) => Ok(event.seq),
+        Ok(Appended::Duplicate { .. }) => Err(StoreError::Rejected {
+            message: "inbox event must not be deduplicated".into(),
+        }),
+        Err(error) => Err(port_store_error(error)),
     }
 }
 
@@ -334,18 +557,26 @@ impl InboxPort for FakeInbox {
             Some(tx) => {
                 let tx = tx
                     .as_any_mut()
-                    .downcast_mut::<FakeInboxTx>()
+                    .downcast_mut::<WriteTx>()
                     .ok_or_else(|| RaiseError::Store(inbox_tx_required()))?;
-                if !Arc::ptr_eq(&tx.inbox.state, &self.state) {
+                if !tx.same_store(&self.store) {
                     return Err(RaiseError::Store(StoreError::Rejected {
-                        message: "FakeInboxTx belongs to another FakeInbox".into(),
+                        message: "WriteTx belongs to another Store".into(),
                     }));
                 }
-                FakeInbox::apply_raise(&mut tx.snapshot, req)
+                Self::raise_on(tx, req).await
             }
             None => {
-                let mut state = self.lock();
-                FakeInbox::apply_raise(&mut state, req)
+                let mut tx = self
+                    .store
+                    .begin_write()
+                    .await
+                    .map_err(|error| RaiseError::Store(port_store_error(error)))?;
+                let outcome = Self::raise_on(&mut tx, req).await?;
+                tx.commit()
+                    .await
+                    .map_err(|error| RaiseError::Store(port_store_error(error)))?;
+                Ok(outcome)
             }
         }
     }
@@ -355,24 +586,32 @@ impl InboxPort for FakeInbox {
         tx: Option<&mut dyn TxHandle>,
         target: ResolveTarget,
         how: Resolution,
-        _ctx: &ActorCtx,
+        ctx: &ActorCtx,
     ) -> Result<Vec<Written<InboxItem>>, ResolveError> {
         match tx {
             Some(tx) => {
                 let tx = tx
                     .as_any_mut()
-                    .downcast_mut::<FakeInboxTx>()
+                    .downcast_mut::<WriteTx>()
                     .ok_or_else(|| ResolveError::Store(inbox_tx_required()))?;
-                if !Arc::ptr_eq(&tx.inbox.state, &self.state) {
+                if !tx.same_store(&self.store) {
                     return Err(ResolveError::Store(StoreError::Rejected {
-                        message: "FakeInboxTx belongs to another FakeInbox".into(),
+                        message: "WriteTx belongs to another Store".into(),
                     }));
                 }
-                FakeInbox::apply_resolve(&mut tx.snapshot, target, how)
+                Self::resolve_on(tx, target, how, ctx).await
             }
             None => {
-                let mut state = self.lock();
-                FakeInbox::apply_resolve(&mut state, target, how)
+                let mut tx = self
+                    .store
+                    .begin_write()
+                    .await
+                    .map_err(|error| ResolveError::Store(port_store_error(error)))?;
+                let written = Self::resolve_on(&mut tx, target, how, ctx).await?;
+                tx.commit()
+                    .await
+                    .map_err(|error| ResolveError::Store(port_store_error(error)))?;
+                Ok(written)
             }
         }
     }
@@ -380,32 +619,19 @@ impl InboxPort for FakeInbox {
     async fn dismiss(
         &self,
         id: &InboxId,
-        _ctx: &ActorCtx,
-        _note: Option<Note>,
+        ctx: &ActorCtx,
+        note: Option<Note>,
     ) -> Result<Written<InboxItem>, InboxError> {
-        let mut state = self.lock();
-        let now = state.now;
-        let item = state.items.get_mut(id).ok_or(InboxError::NotFound)?;
-        match item.status {
-            InboxStatus::Open => {
-                item.status = InboxStatus::Dismissed;
-                item.updated_at = now;
-                let item = item.clone();
-                let seq = state.bump();
-                state.seqs.insert(*id, seq);
-                Ok(Written {
-                    item,
-                    last_seq: seq,
-                })
-            }
-            InboxStatus::Dismissed => Ok(Written {
-                item: item.clone(),
-                last_seq: state.seq_of(id),
-            }),
-            InboxStatus::Resolved => Err(InboxError::InvalidRequest {
-                message: "inbox item is resolved".into(),
-            }),
-        }
+        let mut tx = self
+            .store
+            .begin_write()
+            .await
+            .map_err(|error| InboxError::Store(port_store_error(error)))?;
+        let written = Self::dismiss_on(&mut tx, id, ctx, note).await?;
+        tx.commit()
+            .await
+            .map_err(|error| InboxError::Store(port_store_error(error)))?;
+        Ok(written)
     }
 
     async fn choose(
@@ -415,61 +641,20 @@ impl InboxPort for FakeInbox {
         note: Option<Note>,
         ctx: &ActorCtx,
     ) -> Result<Written<InboxItem>, ChooseError> {
-        let mut state = self.lock();
-        let Some(item) = state.items.get(id) else {
-            return Err(ChooseError::Inbox(InboxError::NotFound));
-        };
-        if matches!(item.kind, InboxKind::ApprovalNeeded) {
-            return Err(ChooseError::UseApprovalRoute);
-        }
-        if ctx.client_profile == Some(ClientProfile::Mobile) {
-            if matches!(item.kind, InboxKind::Escalation) {
-                return Err(ChooseError::ProfileForbidden);
-            }
-            if matches!(item.kind, InboxKind::BudgetExhausted) && option.as_str() == "raise_cap" {
-                return Err(ChooseError::ProfileForbidden);
-            }
-        }
-        if item.status != InboxStatus::Open {
-            return Err(ChooseError::NotOpen);
-        }
-        let known = options(&item.payload)
-            .map(|options| {
-                options
-                    .iter()
-                    .any(|candidate| candidate.id.as_str() == option.as_str())
-            })
-            .unwrap_or(false);
-        if !known {
-            return Err(ChooseError::OptionUnknown);
-        }
-        let now = state.now;
-        let snapshot = {
-            let item = state
-                .items
-                .get_mut(id)
-                .ok_or(ChooseError::Inbox(InboxError::NotFound))?;
-            item.status = InboxStatus::Resolved;
-            item.updated_at = now;
-            item.clone()
-        };
-        let seq = state.bump();
-        state.seqs.insert(*id, seq);
-        state.choices.insert(
-            *id,
-            (
-                option.as_str().to_owned(),
-                note.map(|n| n.as_str().to_owned()),
-            ),
-        );
-        Ok(Written {
-            item: snapshot,
-            last_seq: seq,
-        })
+        let mut tx = self
+            .store
+            .begin_write()
+            .await
+            .map_err(|error| ChooseError::Inbox(InboxError::Store(port_store_error(error))))?;
+        let written = Self::choose_on(&mut tx, id, option, note, ctx).await?;
+        tx.commit()
+            .await
+            .map_err(|error| ChooseError::Inbox(InboxError::Store(port_store_error(error))))?;
+        Ok(written)
     }
 
     async fn get(&self, id: &InboxId) -> Result<Written<InboxItem>, InboxError> {
-        let state = self.lock();
+        let state = self.state();
         let item = state.items.get(id).ok_or(InboxError::NotFound)?;
         Ok(Written {
             item: item.clone(),
@@ -478,7 +663,7 @@ impl InboxPort for FakeInbox {
     }
 
     async fn list(&self, q: InboxQuery) -> Result<Page<InboxItem>, InboxError> {
-        let state = self.lock();
+        let state = self.state();
         let status = q.status.unwrap_or(InboxStatus::Open);
         let cursor = match q.page.cursor.as_ref() {
             Some(cursor) => {
@@ -527,7 +712,7 @@ impl InboxPort for FakeInbox {
     }
 
     async fn summary(&self) -> Result<InboxSummary, InboxError> {
-        let state = self.lock();
+        let state = self.state();
         let mut by_project: BTreeMap<Option<ProjectId>, (u32, Severity)> = BTreeMap::new();
         let mut total_open = 0;
         for item in state
@@ -566,8 +751,16 @@ impl InboxPort for FakeInbox {
         let device = ctx.device.ok_or_else(|| InboxError::InvalidRequest {
             message: "push token registration requires a device".into(),
         })?;
-        self.lock().push_tokens.insert(device, (token, env));
+        self.write_state(|state| {
+            state.push_tokens.insert(device, (token, env));
+        });
         Ok(())
+    }
+}
+
+fn inbox_tx_required() -> StoreError {
+    StoreError::Rejected {
+        message: "FakeInbox requires a Store WriteTx when a transaction is supplied".into(),
     }
 }
 

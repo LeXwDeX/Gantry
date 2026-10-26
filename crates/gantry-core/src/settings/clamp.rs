@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use super::merge::merge_patch;
 use super::rules::{
     compare_loosens, disposition_rank, key_rule, level_rank, number, object, project_override,
-    strings, KeyRule, ProjectOverride,
+    strings, triage_class_locked, triage_default_action, KeyRule, ProjectOverride,
 };
 use crate::entities::SettingsResource;
 
@@ -451,16 +451,26 @@ fn clamp_triage(global: &Value, proposed: &Value) -> Value {
         return global.clone();
     };
     let mut result = proposed.clone();
-    for (class, global_action) in global {
-        if global_action.as_str() != Some("escalate") {
-            continue;
-        }
-        let keep = proposed
+    // 基线不只看全局显式键：锁定类与 `mechanical_conflict` 的权威默认是
+    // escalate，项目新增这些类后改成静默值也必须收紧。
+    for (class, proposed_action) in proposed {
+        let baseline = global
             .get(class)
             .and_then(Value::as_str)
-            .map(|action| action == "escalate")
-            .unwrap_or(false);
+            .or_else(|| triage_default_action(class));
+        let keep = match baseline {
+            Some("escalate") => proposed_action.as_str() == Some("escalate"),
+            Some(_) => true,
+            None => !triage_class_locked(class) || proposed_action.as_str() == Some("escalate"),
+        };
         if !keep {
+            result.insert(class.clone(), Value::String("escalate".to_owned()));
+        }
+    }
+    for (class, global_action) in global {
+        if global_action.as_str() == Some("escalate")
+            && result.get(class).and_then(Value::as_str) != Some("escalate")
+        {
             result.insert(class.clone(), global_action.clone());
         }
     }

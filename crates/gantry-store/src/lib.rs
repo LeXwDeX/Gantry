@@ -7,13 +7,20 @@
 //! `ProjectionRead` 留给 M1；未实现的入口在这里显式返回错误或记录到
 //! `unprojected`，不静默吞掉。缺口清单见 `docs/m0-contract-gaps.md`。
 //!
-//! M0 的 `WriteTx` 在 `Inner` 的克隆上工作：`commit` 原子替换，`rollback` 丢弃。
-//! 这对测试替身足够；真实存储必须用 SQLite 事务。
+//! M0 的 `WriteTx` 在 `Inner` 的克隆上工作：`commit` 校验 `revision` 后原子替换，
+//! `rollback` 丢弃。所有直接写（游标、`log_epoch`、testing 模块状态）在同一把
+//! `Inner` 写锁下 clone-modify-swap 并递增 `revision`，因此它们不会等待
+//! `WriteGate`，也不会与同线程持有的 `WriteTx` 死锁；提交时 `revision` 已变则
+//! 返回 `PreconditionFailed`，不覆盖直接写。`begin_write` 让出执行线程等待令牌，
+//! `begin_write_sync` 在 `Condvar` 上阻塞；两个入口共用同一 FIFO 队列。这对测试
+//! 替身足够；真实存储必须用 SQLite 事务。
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex, RwLock};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use gantry_core::canon::IdempotencyKey;
@@ -60,6 +67,20 @@ impl Store {
         deps: StoreDeps,
         modules: &[ModuleSpec],
     ) -> Result<Store, StoreError> {
+        Self::open_in_memory_sync_with(deps, modules)
+    }
+
+    /// 同步版本；fake 端口的构造函数是同步的。
+    #[cfg(feature = "testing")]
+    pub fn open_in_memory_sync(deps: StoreDeps) -> Result<Store, StoreError> {
+        Self::open_in_memory_sync_with(deps, &[])
+    }
+
+    #[cfg(feature = "testing")]
+    fn open_in_memory_sync_with(
+        deps: StoreDeps,
+        modules: &[ModuleSpec],
+    ) -> Result<Store, StoreError> {
         if !modules.is_empty() {
             return Err(StoreError::Unsupported(
                 "module projectors are M1 (store.md §7.10)",
@@ -79,15 +100,44 @@ impl Store {
     }
 
     pub async fn begin_write(&self) -> Result<WriteTx, StoreError> {
+        let lease = self.gate.acquire_async().await;
+        self.begin_write_parts(lease)
+    }
+
+    /// 与 `begin_write` 相同，但同步返回；fake 端口在同步辅助方法里使用。
+    #[cfg(feature = "testing")]
+    pub fn begin_write_sync(&self) -> Result<WriteTx, StoreError> {
         let lease = self.gate.acquire();
+        self.begin_write_parts(lease)
+    }
+
+    fn begin_write_parts(&self, lease: WriteLease) -> Result<WriteTx, StoreError> {
         let snapshot = self.inner.read().map_err(|_| StoreError::Poisoned)?.clone();
         let first_seq = snapshot.head;
+        let started_at = snapshot
+            .last_ts
+            .map(|last| last.max(self.deps.clock.now()))
+            .unwrap_or_else(|| self.deps.clock.now());
         Ok(WriteTx {
             store: self.clone(),
+            base_revision: snapshot.revision,
             snapshot,
             lease,
             first_seq,
+            started_at,
         })
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn snapshot_sync(&self) -> Result<ReadSnapshot, StoreError> {
+        Ok(ReadSnapshot {
+            inner: self.inner.read().map_err(|_| StoreError::Poisoned)?.clone(),
+        })
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn clock_now(&self) -> Timestamp {
+        self.deps.clock.now()
     }
 
     pub async fn snapshot(&self) -> Result<ReadSnapshot, StoreError> {
@@ -120,6 +170,8 @@ impl Store {
     }
 
     /// testing：模拟 `restore_from` 的 `log_epoch += 1`（P-67）。
+    ///
+    /// 这是直接写：不需要 `WriteGate`，并在同一把写锁下递增 `revision`。
     #[cfg(feature = "testing")]
     pub fn restore_epoch_bump(&self) -> LogIdentity {
         let mut inner = self
@@ -127,6 +179,7 @@ impl Store {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.log_epoch += 1;
+        inner.revision += 1;
         LogIdentity {
             log_id: inner.log_id.clone(),
             log_epoch: inner.log_epoch,
@@ -140,6 +193,121 @@ impl Store {
             .unprojected
             .clone()
     }
+
+    // -----------------------------------------------------------------------
+    // testing 模块状态：typed 快照，随 `Inner` 克隆/提交
+    // -----------------------------------------------------------------------
+
+    /// 注册模块状态；同一 key 已存在时保持原值（类型必须一致）。
+    #[cfg(feature = "testing")]
+    pub fn register_module_state<T>(&self, key: &'static str, state: T) -> Result<(), StoreError>
+    where
+        T: ModuleSnapshot,
+    {
+        let mut inner = self.inner.write().map_err(|_| StoreError::Poisoned)?;
+        match inner.module_states.get(key) {
+            // `as_ref` 先退到底层 `dyn ModuleSnapshot`，否则方法解析会把 `&Box<..>`
+            // 当成 `T`，要求借用满足 `'static`。`is` 只看擦除后的真实类型。
+            Some(existing) if ModuleSnapshot::as_any(existing.as_ref()).is::<T>() => Ok(()),
+            Some(_) => Err(StoreError::PreconditionFailed(format!(
+                "module state {key} has another type"
+            ))),
+            None => {
+                inner.module_states.insert(key, Box::new(state));
+                inner.revision += 1;
+                Ok(())
+            }
+        }
+    }
+
+    /// 读取模块状态的克隆；未注册返回 `None`。
+    #[cfg(feature = "testing")]
+    pub fn module_state<T>(&self, key: &str) -> Result<Option<T>, StoreError>
+    where
+        T: ModuleSnapshot + Clone,
+    {
+        let inner = self.inner.read().map_err(|_| StoreError::Poisoned)?;
+        module_state_from(&inner, key)
+    }
+
+    /// 直接更新模块状态：闭包成功才写回并递增 `revision`；失败不写回。
+    #[cfg(feature = "testing")]
+    pub fn try_update_module_state<T, R, E>(
+        &self,
+        key: &'static str,
+        f: impl FnOnce(&mut T) -> Result<R, E>,
+    ) -> Result<Result<R, E>, StoreError>
+    where
+        T: ModuleSnapshot + Clone,
+    {
+        let mut inner = self.inner.write().map_err(|_| StoreError::Poisoned)?;
+        let Some(current) = module_state_from::<T>(&inner, key)? else {
+            return Err(StoreError::PreconditionFailed(format!(
+                "module state {key} is not registered"
+            )));
+        };
+        let mut next = current;
+        match f(&mut next) {
+            Ok(value) => {
+                inner.module_states.insert(key, Box::new(next));
+                inner.revision += 1;
+                Ok(Ok(value))
+            }
+            Err(error) => Ok(Err(error)),
+        }
+    }
+
+    /// `try_update_module_state` 的不可失败封装。
+    #[cfg(feature = "testing")]
+    pub fn update_module_state<T, R>(
+        &self,
+        key: &'static str,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, StoreError>
+    where
+        T: ModuleSnapshot + Clone,
+    {
+        let result =
+            self.try_update_module_state(key, |state| Ok::<R, std::convert::Infallible>(f(state)))?;
+        Ok(result.unwrap_or_else(|error| match error {}))
+    }
+}
+
+/// testing 模块状态的类型擦除克隆。
+#[cfg(feature = "testing")]
+pub trait ModuleSnapshot: Any + Send + Sync {
+    fn clone_snapshot(&self) -> Box<dyn ModuleSnapshot>;
+    fn as_any(&self) -> &dyn Any;
+}
+
+#[cfg(feature = "testing")]
+impl<T> ModuleSnapshot for T
+where
+    T: Any + Send + Sync + Clone + 'static,
+{
+    fn clone_snapshot(&self) -> Box<dyn ModuleSnapshot> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[cfg(feature = "testing")]
+fn module_state_from<T: ModuleSnapshot + Clone>(
+    inner: &Inner,
+    key: &str,
+) -> Result<Option<T>, StoreError> {
+    let Some(state) = inner.module_states.get(key) else {
+        return Ok(None);
+    };
+    ModuleSnapshot::as_any(state.as_ref())
+        .downcast_ref::<T>()
+        .map(|state| Some(state.clone()))
+        .ok_or_else(|| {
+            StoreError::PreconditionFailed(format!("module state {key} has another type"))
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,13 +320,15 @@ pub struct LogIdentity {
 // 内部状态
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Inner {
     events: Vec<Event<Value>>,
     head: u64,
     last_ts: Option<Timestamp>,
     log_id: String,
     log_epoch: u64,
+    /// 每次直接写与每次提交都递增；`commit` 用它检测中间的直接写。
+    revision: u64,
     dedup: BTreeMap<String, Seq>,
     cursors: BTreeMap<String, Seq>,
     outbox: BTreeMap<ActionId, OutboxRow>,
@@ -167,6 +337,39 @@ struct Inner {
     next_enqueue_seq: u64,
     deliveries: BTreeMap<DeliveryId, DeliveryProjection>,
     unprojected: Vec<UnprojectedEvent>,
+    /// testing 的 typed 模块快照；克隆时逐项深拷贝，避免浅共享可变状态。
+    #[cfg(feature = "testing")]
+    module_states: BTreeMap<&'static str, Box<dyn ModuleSnapshot>>,
+}
+
+// 不用 `#[derive(Clone)]`：`dyn ModuleSnapshot` 不能浅克隆。
+impl Clone for Inner {
+    fn clone(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+            head: self.head,
+            last_ts: self.last_ts,
+            log_id: self.log_id.clone(),
+            log_epoch: self.log_epoch,
+            revision: self.revision,
+            dedup: self.dedup.clone(),
+            cursors: self.cursors.clone(),
+            outbox: self.outbox.clone(),
+            settings: self.settings.clone(),
+            secret_changes: self.secret_changes.clone(),
+            next_enqueue_seq: self.next_enqueue_seq,
+            deliveries: self.deliveries.clone(),
+            unprojected: self.unprojected.clone(),
+            #[cfg(feature = "testing")]
+            module_states: self
+                .module_states
+                .iter()
+                // 必须走底层 `dyn`：对 `Box`/引用调 `clone_snapshot` 会选中
+                // 包装类型的 blanket 实现并再次装箱，导致递归或浅共享。
+                .map(|(key, state)| (*key, state.as_ref().clone_snapshot()))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -210,65 +413,269 @@ pub struct UnprojectedEvent {
 // 写事务
 // ---------------------------------------------------------------------------
 
-/// 单写者令牌：`begin_write` 阻塞到前一个事务结束；`Drop` 归还。
+/// 单写者令牌：`begin_write` 等待前一个事务结束；`Drop` 归还。
+///
+/// 异步与同步入口共用同一 FIFO 队列：异步等待者登记 waker 并返回 `Pending`，
+/// 同步等待者在 `Condvar` 上阻塞。取消异步等待会移除自己的队列条目；若它已在
+/// 队首且令牌空闲，则唤醒下一位，因此取消不会吞掉令牌。
 struct WriteGate {
-    waiters: Mutex<mpsc::Receiver<()>>,
-    release: mpsc::Sender<()>,
+    state: Mutex<GateState>,
+    released: Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    busy: bool,
+    waiters: VecDeque<Waiter>,
+    next_waiter_id: u64,
+}
+
+struct Waiter {
+    id: u64,
+    /// `Some` = 异步等待者；`None` = 同步等待者（由 `Condvar` 唤醒）。
+    waker: Option<Waker>,
+}
+
+/// 唤醒动作在释放 `state` 锁之后执行，避免在持锁时调用任意外部代码。
+enum Wake {
+    Async(Waker),
+    Sync,
 }
 
 impl WriteGate {
+    // 只有 `open_in_memory` 造新 gate；其余构造入口不存在。
+    #[cfg(feature = "testing")]
     fn new() -> Self {
-        let (release, waiters) = mpsc::channel();
-        // 初始令牌：第一个写者不必等待。
-        let _ = release.send(());
         Self {
-            waiters: Mutex::new(waiters),
-            release,
+            state: Mutex::new(GateState::default()),
+            released: Condvar::new(),
         }
     }
 
+    /// 同步入口：在 `Condvar` 上阻塞，直到轮到自己且前一个事务已结束。
+    #[cfg(feature = "testing")]
     fn acquire(self: &Arc<Self>) -> WriteLease {
-        let token = self
-            .waiters
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .recv()
-            .ok();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let id = state.next_waiter_id;
+        state.next_waiter_id += 1;
+        state.waiters.push_back(Waiter { id, waker: None });
+        while state.busy || state.waiters.front().map(|waiter| waiter.id) != Some(id) {
+            state = self
+                .released
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        state.waiters.pop_front();
+        state.busy = true;
         WriteLease {
             gate: Arc::clone(self),
-            token,
         }
+    }
+
+    /// 异步入口：返回的 future 只登记 waker，不阻塞执行线程。
+    fn acquire_async(self: &Arc<Self>) -> AcquireFuture {
+        AcquireFuture {
+            gate: Arc::clone(self),
+            waiter_id: None,
+        }
+    }
+
+    fn release(&self) {
+        let wake = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.busy = false;
+            wake_front(&state)
+        };
+        wake_now(self, wake);
+    }
+}
+
+fn wake_front(state: &GateState) -> Option<Wake> {
+    match state.waiters.front() {
+        Some(Waiter {
+            waker: Some(waker), ..
+        }) => Some(Wake::Async(waker.clone())),
+        Some(Waiter { waker: None, .. }) => Some(Wake::Sync),
+        None => None,
+    }
+}
+
+fn wake_now(gate: &WriteGate, wake: Option<Wake>) {
+    match wake {
+        Some(Wake::Async(waker)) => waker.wake(),
+        Some(Wake::Sync) => gate.released.notify_all(),
+        None => {}
+    }
+}
+
+/// `begin_write` 的等待 future；首次 poll 入队，Drop 时若仍在排队则撤销。
+struct AcquireFuture {
+    gate: Arc<WriteGate>,
+    /// `None` = 尚未入队或已取得令牌。
+    waiter_id: Option<u64>,
+}
+
+impl Future for AcquireFuture {
+    type Output = WriteLease;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut state = this
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(id) = this.waiter_id {
+            let position = state
+                .waiters
+                .iter()
+                .position(|waiter| waiter.id == id)
+                .expect("write gate waiter lost");
+            if position == 0 && !state.busy {
+                state.waiters.pop_front();
+                state.busy = true;
+                this.waiter_id = None;
+                return Poll::Ready(WriteLease {
+                    gate: Arc::clone(&this.gate),
+                });
+            }
+            state.waiters[position].waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        let id = state.next_waiter_id;
+        state.next_waiter_id += 1;
+        state.waiters.push_back(Waiter {
+            id,
+            waker: Some(cx.waker().clone()),
+        });
+        this.waiter_id = Some(id);
+        if state.waiters.len() == 1 && !state.busy {
+            state.waiters.pop_front();
+            state.busy = true;
+            this.waiter_id = None;
+            Poll::Ready(WriteLease {
+                gate: Arc::clone(&this.gate),
+            })
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for AcquireFuture {
+    fn drop(&mut self) {
+        let Some(id) = self.waiter_id.take() else {
+            return;
+        };
+        let wake = {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(position) = state.waiters.iter().position(|waiter| waiter.id == id) else {
+                return;
+            };
+            state.waiters.remove(position);
+            if position == 0 && !state.busy {
+                wake_front(&state)
+            } else {
+                None
+            }
+        };
+        wake_now(&self.gate, wake);
     }
 }
 
 struct WriteLease {
     gate: Arc<WriteGate>,
-    token: Option<()>,
 }
 
 impl Drop for WriteLease {
     fn drop(&mut self) {
-        if self.token.take().is_some() {
-            let _ = self.gate.release.send(());
-        }
+        self.gate.release();
     }
 }
 
 pub struct WriteTx {
     store: Store,
+    /// `begin_write` 时的 `Inner.revision`；提交时不等则冲突。
+    base_revision: u64,
     snapshot: Inner,
     #[allow(dead_code)]
     lease: WriteLease,
     first_seq: u64,
+    /// 事务固定时钟：`begin_write` 时取 max(最后事件时间, 当前时钟)。
+    started_at: Timestamp,
 }
 
 impl WriteTx {
-    /// 事务开始时的时钟值；同一事务内复用，保证时间一致。
+    /// 事务开始时的时钟值；同一事务内固定，且不早于最后一条事件。
     pub fn now(&self) -> Timestamp {
-        self.snapshot
-            .last_ts
-            .map(|last| last.max(self.store.deps.clock.now()))
-            .unwrap_or_else(|| self.store.deps.clock.now())
+        self.started_at
+    }
+
+    /// 事务是否属于这个 `Store`；fake 端口用它拒绝跨 Store 的 TxHandle。
+    #[cfg(feature = "testing")]
+    pub fn same_store(&self, store: &Store) -> bool {
+        Arc::ptr_eq(&self.store.inner, &store.inner)
+    }
+
+    /// 从事务快照读取 testing 模块状态。
+    #[cfg(feature = "testing")]
+    pub fn module_state<T>(&self, key: &str) -> Result<Option<T>, StoreError>
+    where
+        T: ModuleSnapshot + Clone,
+    {
+        module_state_from(&self.snapshot, key)
+    }
+
+    /// 更新事务快照里的 testing 模块状态；失败不写回，提交时才生效。
+    #[cfg(feature = "testing")]
+    pub fn try_update_module_state<T, R, E>(
+        &mut self,
+        key: &'static str,
+        f: impl FnOnce(&mut T) -> Result<R, E>,
+    ) -> Result<Result<R, E>, StoreError>
+    where
+        T: ModuleSnapshot + Clone,
+    {
+        let Some(current) = module_state_from::<T>(&self.snapshot, key)? else {
+            return Err(StoreError::PreconditionFailed(format!(
+                "module state {key} is not registered"
+            )));
+        };
+        let mut next = current;
+        match f(&mut next) {
+            Ok(value) => {
+                self.snapshot.module_states.insert(key, Box::new(next));
+                Ok(Ok(value))
+            }
+            Err(error) => Ok(Err(error)),
+        }
+    }
+
+    /// `try_update_module_state` 的不可失败封装。
+    #[cfg(feature = "testing")]
+    pub fn update_module_state<T, R>(
+        &mut self,
+        key: &'static str,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, StoreError>
+    where
+        T: ModuleSnapshot + Clone,
+    {
+        let result =
+            self.try_update_module_state(key, |state| Ok::<R, std::convert::Infallible>(f(state)))?;
+        Ok(result.unwrap_or_else(|error| match error {}))
     }
 
     pub async fn append(&mut self, ev: NewEvent) -> Result<Appended, StoreError> {
@@ -306,11 +713,7 @@ impl WriteTx {
         let seq_value = self.snapshot.head + 1;
         let seq = Seq::new(seq_value).map_err(StoreError::Seq)?;
         let id = self.store.deps.ids.next::<Evt>().map_err(StoreError::Id)?;
-        let ts = self
-            .snapshot
-            .last_ts
-            .map(|last| last.max(self.store.deps.clock.now()))
-            .unwrap_or_else(|| self.store.deps.clock.now());
+        let ts = self.started_at;
 
         let event = Event {
             id,
@@ -372,18 +775,26 @@ impl WriteTx {
 
     pub async fn commit(self) -> Result<Committed, StoreError> {
         let mut inner = self.store.inner.write().map_err(|_| StoreError::Poisoned)?;
+        if inner.revision != self.base_revision {
+            return Err(StoreError::PreconditionFailed(
+                "store revision moved: a direct write landed after begin_write".to_owned(),
+            ));
+        }
         if inner.head != self.first_seq {
             return Err(StoreError::PreconditionFailed(
                 "another writer committed first".to_owned(),
             ));
         }
+        let base_revision = self.base_revision;
+        let first_new = if self.snapshot.head > self.first_seq {
+            self.first_seq + 1
+        } else {
+            0
+        };
         *inner = self.snapshot;
+        inner.revision = base_revision + 1;
         Ok(Committed {
-            first_seq: if inner.head > self.first_seq {
-                self.first_seq + 1
-            } else {
-                0
-            },
+            first_seq: first_new,
             last_seq: inner.head,
         })
     }
@@ -514,6 +925,13 @@ impl WriteTx {
                 let row = self.snapshot.outbox.get_mut(&id).ok_or_else(|| {
                     StoreError::PreconditionFailed(format!("outbox row {id} not found"))
                 })?;
+                // 事件投影也不允许从终态回退：只有执行中的动作可以成功。
+                if row.action.status != OutboxStatus::Executing {
+                    return Err(StoreError::PreconditionFailed(format!(
+                        "outbox.succeeded for {id} requires executing, found {:?}",
+                        row.action.status
+                    )));
+                }
                 row.action.status = OutboxStatus::Succeeded;
                 row.action.github_ref = Some(data.github_ref);
                 row.action.lease_until = None;
@@ -526,6 +944,12 @@ impl WriteTx {
                 let row = self.snapshot.outbox.get_mut(&id).ok_or_else(|| {
                     StoreError::PreconditionFailed(format!("outbox row {id} not found"))
                 })?;
+                if row.action.status != OutboxStatus::Executing {
+                    return Err(StoreError::PreconditionFailed(format!(
+                        "outbox.failed for {id} requires executing, found {:?}",
+                        row.action.status
+                    )));
+                }
                 row.action.status = OutboxStatus::Failed;
                 row.action.last_error = Some(OutboxError {
                     code: failure_code_str(data.code).to_owned(),
@@ -861,6 +1285,10 @@ impl ReadSnapshot {
         TxReader { inner: &self.inner }.outbox_action(id)
     }
 
+    pub fn outbox_list(&self) -> Vec<OutboxAction> {
+        TxReader { inner: &self.inner }.outbox_list()
+    }
+
     pub fn unprojected(&self) -> &[UnprojectedEvent] {
         &self.inner.unprojected
     }
@@ -1067,6 +1495,7 @@ impl Cursors {
         Ok(inner.cursors.get(consumer).copied().unwrap_or(Seq::ZERO))
     }
 
+    /// 直接写游标：不经过 `WriteGate`，递增 `revision`，使已打开的旧事务提交冲突。
     pub async fn advance(&self, consumer: &str, seq: Seq) -> Result<(), StoreError> {
         let mut inner = self.store.inner.write().map_err(|_| StoreError::Poisoned)?;
         let current = inner.cursors.get(consumer).copied().unwrap_or(Seq::ZERO);
@@ -1075,7 +1504,11 @@ impl Cursors {
                 "cursor must not move backwards".to_owned(),
             ));
         }
+        if seq == current {
+            return Ok(());
+        }
         inner.cursors.insert(consumer.to_owned(), seq);
+        inner.revision += 1;
         Ok(())
     }
 }
@@ -1217,6 +1650,7 @@ impl OutboxTx<'_> {
 
     pub async fn claim(&mut self, opts: ClaimOpts) -> Result<Option<Claimed>, StoreError> {
         let now = self.tx.now();
+        cancel_failed_dependents(&mut self.tx.snapshot, now);
         let mut candidates: Vec<(u8, Seq, ActionId)> = Vec::new();
         for (id, row) in &self.tx.snapshot.outbox {
             if opts.exclude_deliveries.contains(&row.action.delivery_id) {
@@ -1289,9 +1723,88 @@ impl OutboxTx<'_> {
             .outbox
             .get_mut(id)
             .ok_or(StoreError::NotFound)?;
+        if row.action.status != OutboxStatus::Executing {
+            return Err(StoreError::PreconditionFailed(
+                "outbox record_effects requires executing".to_owned(),
+            ));
+        }
         row.action.expected_effects = effects;
         row.action.updated_at = now;
         Ok(())
+    }
+
+    pub async fn renew_lease(&mut self, id: &ActionId, until: Timestamp) -> Result<(), StoreError> {
+        let now = self.tx.now();
+        let row = self
+            .tx
+            .snapshot
+            .outbox
+            .get_mut(id)
+            .ok_or(StoreError::NotFound)?;
+        if row.action.status != OutboxStatus::Executing {
+            return Err(StoreError::PreconditionFailed(
+                "outbox lease renewal requires executing".to_owned(),
+            ));
+        }
+        if until < now {
+            return Err(StoreError::PreconditionFailed(
+                "outbox lease must not end in the past".to_owned(),
+            ));
+        }
+        row.action.lease_until = Some(until);
+        row.action.updated_at = now;
+        Ok(())
+    }
+
+    pub async fn requeue(
+        &mut self,
+        id: &ActionId,
+        not_before: Timestamp,
+        refund_attempt: bool,
+    ) -> Result<(), StoreError> {
+        let now = self.tx.now();
+        let row = self
+            .tx
+            .snapshot
+            .outbox
+            .get_mut(id)
+            .ok_or(StoreError::NotFound)?;
+        if row.action.status != OutboxStatus::Executing {
+            return Err(StoreError::PreconditionFailed(
+                "outbox requeue requires executing".to_owned(),
+            ));
+        }
+        row.action.status = OutboxStatus::Queued;
+        row.action.not_before = Some(not_before);
+        row.action.lease_until = None;
+        if refund_attempt {
+            row.action.attempts = row.action.attempts.saturating_sub(1);
+        }
+        row.action.updated_at = now;
+        Ok(())
+    }
+
+    pub async fn cancel_blocked(&mut self) -> Result<Vec<ActionId>, StoreError> {
+        let now = self.tx.now();
+        Ok(cancel_failed_dependents(&mut self.tx.snapshot, now))
+    }
+
+    pub async fn count_succeeded_since(
+        &mut self,
+        delivery_id: &DeliveryId,
+        since: Timestamp,
+    ) -> Result<u64, StoreError> {
+        Ok(self
+            .tx
+            .snapshot
+            .outbox
+            .values()
+            .filter(|row| {
+                row.action.delivery_id == *delivery_id
+                    && row.action.status == OutboxStatus::Succeeded
+                    && row.action.updated_at >= since
+            })
+            .count() as u64)
     }
 
     pub async fn complete(
@@ -1357,6 +1870,13 @@ impl OutboxTx<'_> {
                 Ok(())
             }
             AfterFailure::Terminal => {
+                // 只有执行中的动作可以进入终态失败；queued / 已终态一律拒绝。
+                if row.action.status != OutboxStatus::Executing {
+                    return Err(StoreError::PreconditionFailed(format!(
+                        "outbox terminal fail for {id} requires executing, found {:?}",
+                        row.action.status
+                    )));
+                }
                 let code = parse_failure_code(&error.code).ok_or_else(|| {
                     StoreError::PreconditionFailed(format!(
                         "unknown outbox failure code {}",
@@ -1405,12 +1925,69 @@ impl OutboxTx<'_> {
         }
         row.action.status = OutboxStatus::Cancelled;
         row.action.last_error = Some(OutboxError {
-            code: format!("{reason:?}").to_lowercase(),
+            code: cancel_reason_code(reason).to_owned(),
             message: String::new(),
         });
         row.action.lease_until = None;
         row.action.updated_at = now;
         Ok(())
+    }
+}
+
+/// 显式 snake_case；不用 `Debug` 小写，避免改枚举名时静默改协议值。
+fn cancel_reason_code(reason: CancelReason) -> &'static str {
+    match reason {
+        CancelReason::Superseded => "superseded",
+        CancelReason::DependencyFailed => "dependency_failed",
+        CancelReason::ApprovalInvalid => "approval_invalid",
+        CancelReason::Manual => "manual",
+    }
+}
+
+/// 认领前把依赖已失败/已取消的 queued 动作级联取消（直到不动点）。
+///
+/// 迭代到不动点处理多层链与排序倒置；缺失的依赖继续阻塞（fail-closed）。
+/// 不追加 `outbox.cancelled` 事件：该事件未定义。
+fn cancel_failed_dependents(inner: &mut Inner, now: Timestamp) -> Vec<ActionId> {
+    let mut cancelled = Vec::new();
+    loop {
+        let failed: BTreeSet<ActionId> = inner
+            .outbox
+            .iter()
+            .filter(|(_, row)| {
+                matches!(
+                    row.action.status,
+                    OutboxStatus::Failed | OutboxStatus::Cancelled
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let mut changed = 0usize;
+        for row in inner.outbox.values_mut() {
+            if row.action.status != OutboxStatus::Queued {
+                continue;
+            }
+            if !row
+                .action
+                .depends_on
+                .iter()
+                .any(|dependency| failed.contains(dependency))
+            {
+                continue;
+            }
+            row.action.status = OutboxStatus::Cancelled;
+            row.action.last_error = Some(OutboxError {
+                code: "dependency_failed".to_owned(),
+                message: String::new(),
+            });
+            row.action.lease_until = None;
+            row.action.updated_at = now;
+            cancelled.push(row.action.id);
+            changed += 1;
+        }
+        if changed == 0 {
+            return cancelled;
+        }
     }
 }
 

@@ -54,7 +54,7 @@
   "$defs": {
     "Ulid": {
       "type": "string",
-      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "ProblemError": {
       "type": "object",

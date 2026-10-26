@@ -602,9 +602,10 @@ pub struct EgressProfile {
 
 /// 配置视图只含引用，不含 secret 值。
 ///
-/// `injection` 的形状在 egress-control §4.6 只给了示例 `{}`、字段表未定义（M2），
-/// M0 保留不透明对象并记录为契约缺口，不猜测其结构。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// `injection` 的权威依据只有 egress-control §4.6 的示例 `{}`；字段表未定义非空形状
+/// （M2）。因此 M0 只接受空对象：反序列化、序列化与 schema 都拒绝非空内容，
+/// `Debug` 不输出其中的值，不猜测未定义结构。
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigView {
     pub rev: u64,
@@ -612,9 +613,65 @@ pub struct ConfigView {
     pub groups: BTreeMap<String, EgressGroup>,
     pub profiles: BTreeMap<String, EgressProfile>,
     pub default_profile: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "empty_injection",
+        serialize_with = "empty_injection_ser"
+    )]
+    #[schemars(schema_with = "empty_injection_schema")]
     pub injection: BTreeMap<String, Value>,
     pub token_weights: TokenWeights,
+}
+
+impl fmt::Debug for ConfigView {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConfigView")
+            .field("rev", &self.rev)
+            .field("providers", &self.providers)
+            .field("groups", &self.groups)
+            .field("profiles", &self.profiles)
+            .field("default_profile", &self.default_profile)
+            .field("injection", &"<empty only; values redacted>")
+            .field("token_weights", &self.token_weights)
+            .finish()
+    }
+}
+
+fn empty_injection<'de, D>(deserializer: D) -> Result<BTreeMap<String, Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let map = BTreeMap::<String, Value>::deserialize(deserializer)?;
+    if map.is_empty() {
+        Ok(map)
+    } else {
+        Err(serde::de::Error::custom(
+            "injection must be an empty object; non-empty shape is undefined in M0",
+        ))
+    }
+}
+
+fn empty_injection_ser<S>(value: &BTreeMap<String, Value>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if !value.is_empty() {
+        return Err(serde::ser::Error::custom(
+            "injection must be an empty object; non-empty shape is undefined in M0",
+        ));
+    }
+    value.serialize(serializer)
+}
+
+fn empty_injection_schema(_: &mut schemars::SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "maxProperties": 0,
+        "x-gantry-unresolved": {
+            "reason": "egress-control §4.6 只给出 `injection: {}` 示例，非空字段表未定义（M2）；M0 只接受空对象",
+            "source": "docs/interfaces/egress-control.md#46-下发配置视图",
+        },
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

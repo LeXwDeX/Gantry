@@ -3,7 +3,7 @@
   "gaps": [
     {
       "id": "G-03",
-      "summary": "ConfigView.injection 形状未定义（egress-control §4.6 只有空对象示例）；生成器把该属性替换为拒绝型 schema",
+      "summary": "ConfigView.injection 的非空形状仍未定义（egress-control §4.6 只有空对象示例）；Rust/schema 只接受空对象，拒绝非空",
       "source": "docs/interfaces/egress-control.md#46",
       "affects": [
         "schemas/egress/config-view.json"
@@ -71,6 +71,30 @@
     {
       "id": "G-07",
       "summary": "config.md §12 聚合文档按 8/6 个 resource 的生产 schema 与 *Patch 类型逐资源验证；不生成新 wrapper，示例省略字段的 catalog 仍标 partial"
+    },
+    {
+      "id": "G-18",
+      "summary": "Approval 与 approval.requested 的 schema 由 APPROVAL_SHAPES 生成联动约束；未定义 shape 的动作 fail-closed"
+    },
+    {
+      "id": "G-19",
+      "summary": "ForgeEventEnvelope 按 kind 绑定强类型 data，并要求 origin=self 时 caused_by_action 非空"
+    },
+    {
+      "id": "G-20",
+      "summary": "Card schema 增加未知 kind 降级分支；已知 kind 的坏形状仍被拒绝"
+    },
+    {
+      "id": "G-21",
+      "summary": "Id/Ulid/Subject 与 OpenAPI path/query ID pattern 的首字符限制为 0-7；IdGen 对超出 48 位的时间戳返回 Overflow"
+    },
+    {
+      "id": "G-22",
+      "summary": "settings.updated 按 resource 校验真实内部文档，schema 与 Rust 都拒绝 SecretRef.value（含 null）；负例改用 value.providers 等真实形状"
+    },
+    {
+      "id": "G-23",
+      "summary": "ConfigView.injection 的 serde/schema/Debug 只支持空对象；非空注入仍未定，不猜测结构"
     }
   ]
 }

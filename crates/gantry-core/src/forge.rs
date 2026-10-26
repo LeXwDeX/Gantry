@@ -1005,7 +1005,7 @@ impl ForgeEventData {
 }
 
 /// `forge.<kind>` 事件的 `data`：forge-actions §6.2 信封。
-#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ForgeEventEnvelope {
     pub schema: ForgeEventSchema,
     pub kind: ForgeEventKind,
@@ -1024,6 +1024,110 @@ pub struct ForgeEventEnvelope {
     pub observed_at: Timestamp,
     pub stale: bool,
     pub data: ForgeEventData,
+}
+
+/// 只用于生成 JSON Schema 的字段镜像；`data` 由 kind 分支收窄。
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+struct ForgeEnvelopeFields {
+    schema: ForgeEventSchema,
+    kind: ForgeEventKind,
+    dedup_key: String,
+    source: ForgeEventSource,
+    delivery_ids: Vec<String>,
+    project_id: ProjectId,
+    repo: RepoSlug,
+    installation_id: u64,
+    delivery_id: Option<DeliveryId>,
+    target: ForgeEventTarget,
+    actor: ForgeActor,
+    origin: ForgeOrigin,
+    caused_by_action: Option<ActionId>,
+    occurred_at: Timestamp,
+    observed_at: Timestamp,
+    stale: bool,
+    data: Value,
+}
+
+fn forge_data_branch(kind: ForgeEventKind, data: Schema) -> Value {
+    serde_json::json!({
+        "properties": {
+            "kind": { "const": kind.as_str() },
+            "data": data.to_value()
+        },
+        "required": ["kind", "data"]
+    })
+}
+
+impl JsonSchema for ForgeEventEnvelope {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ForgeEventEnvelope".into()
+    }
+
+    /// 每个 `kind` 一支，绑定该 kind 的强类型 `data`；`origin=self` 时必须带
+    /// `caused_by_action`。未列出的 kind/data 组合不匹配任何分支。
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> Schema {
+        let mut branches = Vec::new();
+        macro_rules! branch {
+            ($kind:expr, $ty:ty) => {{
+                let data = generator.subschema_for::<$ty>();
+                branches.push(forge_data_branch($kind, data));
+            }};
+        }
+        branch!(ForgeEventKind::PrOpened, PrOpenedData);
+        branch!(ForgeEventKind::PrReopened, PrReopenedData);
+        branch!(ForgeEventKind::PrSynchronized, PrSynchronizedData);
+        branch!(ForgeEventKind::PrUpdated, PrUpdatedData);
+        branch!(ForgeEventKind::PrClosed, PrClosedData);
+        branch!(ForgeEventKind::PrMerged, PrMergedData);
+        branch!(ForgeEventKind::BaseAdvanced, BaseAdvancedData);
+        branch!(ForgeEventKind::PrEnqueued, PrEnqueuedData);
+        branch!(ForgeEventKind::PrDequeued, PrDequeuedData);
+        branch!(
+            ForgeEventKind::MergeGroupChecksRequested,
+            MergeGroupChecksRequestedData
+        );
+        branch!(ForgeEventKind::MergeGroupDestroyed, MergeGroupDestroyedData);
+        branch!(ForgeEventKind::CheckSuiteCompleted, CheckSuiteCompletedData);
+        branch!(ForgeEventKind::CheckRunCompleted, CheckRunCompletedData);
+        branch!(ForgeEventKind::ReviewSubmitted, ReviewSubmittedData);
+        branch!(ForgeEventKind::ReviewDismissed, ReviewDismissedData);
+        branch!(ForgeEventKind::ReviewComment, ReviewCommentData);
+        branch!(ForgeEventKind::ReviewThreadChanged, ReviewThreadChangedData);
+        branch!(ForgeEventKind::IssueComment, IssueCommentData);
+        branch!(ForgeEventKind::IssueClosed, IssueClosedData);
+        branch!(ForgeEventKind::IssueReopened, IssueReopenedData);
+        branch!(ForgeEventKind::IssueUpdated, IssueUpdatedData);
+        branch!(ForgeEventKind::InstallationChanged, InstallationChangedData);
+        branch!(ForgeEventKind::RepoChanged, RepoChangedData);
+        let mut fields = crate::entities::inline_fields::<ForgeEnvelopeFields>(generator);
+        fields.remove("description");
+        fields.insert(
+            "description".to_owned(),
+            Value::String("`forge.<kind>` 事件的 `data`：forge-actions §6.2 信封。".to_owned()),
+        );
+        fields.insert(
+            "title".to_owned(),
+            Value::String("ForgeEventEnvelope".to_owned()),
+        );
+        fields.insert("oneOf".to_owned(), Value::Array(branches));
+        fields.insert(
+            "allOf".to_owned(),
+            serde_json::json!([{
+                "if": {
+                    "properties": { "origin": { "const": "self" } },
+                    "required": ["origin"]
+                },
+                "then": {
+                    "required": ["caused_by_action"],
+                    "properties": {
+                        "caused_by_action": { "not": { "type": "null" } }
+                    }
+                }
+            }]),
+        );
+        Schema::from(fields)
+    }
 }
 
 impl ForgeEventEnvelope {

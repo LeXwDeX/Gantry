@@ -27,11 +27,11 @@
   "$defs": {
     "Id_apr": {
       "type": "string",
-      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_dev": {
       "type": "string",
-      "pattern": "^dev_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dev_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Sha256Digest": {
       "type": "string",

@@ -18,7 +18,7 @@
   "$defs": {
     "Id_wtr": {
       "type": "string",
-      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

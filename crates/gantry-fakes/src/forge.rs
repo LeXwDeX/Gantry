@@ -1,20 +1,18 @@
 //! `FakeForge`：内存版 `OutboxPort` + `ForgeReader` + `PrRefresher`。
 //!
-//! 只实现 M0 替身需要的可观察语义：入队幂等（同一 epoch）、epoch 递增产生新
-//! 动作、取消状态机、事务提交/回滚、快照读取与 webhook 注入。没有 GitHub
-//! 调用、没有 store 依赖，也不模拟真实限流与重试。
+//! Outbox 的唯一权威是 `gantry_store::Store`：`enqueue_in` 把动作写进调用方的
+//! `Store::WriteTx`，`cancel` 与所有读取都走同一个 Store。PR/项目等脚本状态
+//! 保存在 Store 的 typed 模块快照里，因此 `begin_write` 返回的就是调用方已经
+//! 持有的 `WriteTx`；提交/回滚与事件追加原子生效。
 //!
-//! 事务：`FakeForge::begin_write()` 返回 [`FakeForgeTx`]，它实现
-//! `core::ports::TxHandle`。`enqueue_in` 只接受这个类型；提交前的改动对读者
-//! 不可见，`commit` 原子替换，`rollback` 丢弃。其他 `TxHandle`（例如未来
-//! `store::WriteTx`）会明确返回 `StoreError::Rejected`，不静默退化成自开事务。
+//! 没有 GitHub 调用、没有真实限流与重试。`new(now)` 自建 Store；`new_in(store)`
+//! 让多个替身共享一个 Store。
 
-use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use gantry_core::canon::{GitOid, IdempotencyKey, RepoSlug};
+use gantry_core::canon::{GitOid, RepoSlug};
 use gantry_core::entities::{
     CheckSummary, IssueRef, OutboxAction, OutboxStatus, Project, PullRequestRef,
 };
@@ -26,8 +24,16 @@ use gantry_core::ports::{
     ForgeError, ForgeReader, MirrorWant, ModuleError, OutboxPort, PrRefresher, ProjectSnapshot,
     ReconcileReport, ReconcileTarget, ReviewThreadView, StoreError, ThreadNodeId, TxHandle,
 };
+use gantry_core::testing::FakeClock;
 use gantry_core::text::UntrustedText;
 use gantry_core::time::Timestamp;
+use gantry_store::{OutboxInsert, Store, WriteTx};
+
+use crate::{port_store_error, read_state, try_update_state, update_state};
+
+const STATE_KEY: &str = "fakes.forge";
+/// `forge.push.branch_prefix` 的 M0 默认值；fake 不新增配置。
+const DEFAULT_BRANCH_PREFIX: &str = "gantry/";
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -42,8 +48,6 @@ struct PrEntry {
 #[derive(Clone, Debug)]
 struct ForgeState {
     now: Timestamp,
-    generation: u64,
-    counter: u128,
     projects: BTreeMap<ProjectId, Project>,
     prs: BTreeMap<(ProjectId, u64), PrEntry>,
     issues: BTreeMap<(ProjectId, u64), IssueRef>,
@@ -56,16 +60,12 @@ struct ForgeState {
     webhooks: BTreeMap<String, FakeWebhook>,
     reconciles: Vec<ReconcileTarget>,
     mirrors: Vec<(ProjectId, MirrorWant)>,
-    outbox: BTreeMap<ActionId, OutboxAction>,
-    keys: BTreeMap<String, ActionId>,
 }
 
 impl ForgeState {
     fn new(now: Timestamp) -> Self {
         Self {
             now,
-            generation: 0,
-            counter: 0,
             projects: BTreeMap::new(),
             prs: BTreeMap::new(),
             issues: BTreeMap::new(),
@@ -78,16 +78,7 @@ impl ForgeState {
             webhooks: BTreeMap::new(),
             reconciles: Vec::new(),
             mirrors: Vec::new(),
-            outbox: BTreeMap::new(),
-            keys: BTreeMap::new(),
         }
-    }
-
-    fn next_id<K: gantry_core::ids::IdKind>(&mut self) -> gantry_core::ids::Id<K> {
-        self.counter += 1;
-        let ms = self.now.as_millis().max(0) as u64;
-        gantry_core::ids::Id::from_parts(ms, self.counter)
-            .expect("fake forge counter must fit in 80 bits")
     }
 }
 
@@ -97,16 +88,17 @@ impl ForgeState {
 
 #[derive(Clone)]
 pub struct FakeForge {
-    state: Arc<Mutex<ForgeState>>,
+    store: Store,
+    clock: Option<Arc<FakeClock>>,
 }
 
 impl std::fmt::Debug for FakeForge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.lock();
+        let state = self.state();
         f.debug_struct("FakeForge")
             .field("projects", &state.projects.len())
             .field("prs", &state.prs.len())
-            .field("outbox", &state.outbox.len())
+            .field("outbox", &self.outbox_len())
             .field("now", &state.now)
             .finish()
     }
@@ -114,69 +106,94 @@ impl std::fmt::Debug for FakeForge {
 
 impl FakeForge {
     pub fn new(now: Timestamp) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(ForgeState::new(now))),
-        }
+        let (store, clock) = crate::open_store(now);
+        Self::from_parts(store, Some(clock), now)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, ForgeState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// 共享调用方的 Store；脚本状态与 Outbox 都落在同一个 Store。
+    pub fn new_in(store: Store) -> Self {
+        let now = store.clock_now();
+        Self::from_parts(store, None, now)
+    }
+
+    fn from_parts(store: Store, clock: Option<Arc<FakeClock>>, now: Timestamp) -> Self {
+        store
+            .register_module_state(STATE_KEY, ForgeState::new(now))
+            .expect("forge module state must register");
+        Self { store, clock }
+    }
+
+    fn state(&self) -> ForgeState {
+        read_state(&self.store, STATE_KEY).expect("forge module state must exist")
     }
 
     pub fn set_now(&self, now: Timestamp) {
-        self.lock().now = now;
+        if let Some(clock) = &self.clock {
+            clock.set(now);
+        }
+        self.write_state(|state| state.now = now);
     }
 
     pub fn advance_ms(&self, ms: i64) {
-        let mut state = self.lock();
-        state.now = Timestamp::from_millis(state.now.as_millis().saturating_add(ms));
+        if let Some(clock) = &self.clock {
+            clock.advance_ms(ms);
+        }
+        self.write_state(|state| {
+            state.now = Timestamp::from_millis(state.now.as_millis().saturating_add(ms));
+        });
     }
 
     pub fn now(&self) -> Timestamp {
-        self.lock().now
+        self.state().now
+    }
+
+    fn write_state<R>(&self, f: impl FnOnce(&mut ForgeState) -> R) -> R {
+        update_state(&self.store, STATE_KEY, f).expect("forge module state must exist")
     }
 
     // ---- 快照注入 ----
 
     pub fn insert_project(&self, project: Project) {
-        self.lock().projects.insert(project.id, project);
+        self.write_state(|state| state.projects.insert(project.id, project));
     }
 
     pub fn remove_project(&self, project: &ProjectId) {
-        self.lock().projects.remove(project);
+        self.write_state(|state| state.projects.remove(project));
     }
 
     pub fn upsert_pr(&self, project: ProjectId, head_ref: impl Into<String>, pr: PullRequestRef) {
-        let mut state = self.lock();
-        let synced_at = state.now;
-        let mut pr = pr;
-        pr.synced_at = synced_at;
-        state.prs.insert(
-            (project, pr.number),
-            PrEntry {
-                head_ref: head_ref.into(),
-                snapshot: pr,
-            },
-        );
+        let head_ref = head_ref.into();
+        self.write_state(|state| {
+            let synced_at = state.now;
+            let mut pr = pr;
+            pr.synced_at = synced_at;
+            state.prs.insert(
+                (project, pr.number),
+                PrEntry {
+                    head_ref,
+                    snapshot: pr,
+                },
+            );
+        });
     }
 
     pub fn upsert_issue(&self, project: ProjectId, issue: IssueRef) {
-        let mut state = self.lock();
-        let synced_at = state.now;
-        let mut issue = issue;
-        issue.synced_at = synced_at;
-        state.issues.insert((project, issue.number), issue);
+        self.write_state(|state| {
+            let synced_at = state.now;
+            let mut issue = issue;
+            issue.synced_at = synced_at;
+            state.issues.insert((project, issue.number), issue);
+        });
     }
 
     pub fn set_checks(&self, project: ProjectId, number: u64, checks: CheckSummary) {
-        let mut state = self.lock();
-        let now = state.now;
-        if let Some(entry) = state.prs.get_mut(&(project, number)) {
-            entry.snapshot.checks = checks;
-            entry.snapshot.synced_at = now;
-        }
+        self.write_state(|state| {
+            let now = state.now;
+            if let Some(entry) = state.prs.get_mut(&(project, number)) {
+                entry.snapshot.checks = checks;
+                entry.snapshot.synced_at = now;
+            }
+        });
     }
 
     pub fn set_discussion(
@@ -185,13 +202,17 @@ impl FakeForge {
         target: DiscussionTarget,
         discussion: Discussion,
     ) {
-        self.lock()
-            .discussions
-            .insert(discussion_key(project, target), discussion);
+        self.write_state(|state| {
+            state
+                .discussions
+                .insert(discussion_key(project, target), discussion);
+        });
     }
 
     pub fn set_ci_log(&self, project: ProjectId, run_id: u64, log: CiLog) {
-        self.lock().ci_logs.insert((project, run_id), log);
+        self.write_state(|state| {
+            state.ci_logs.insert((project, run_id), log);
+        });
     }
 
     pub fn set_changed_files(
@@ -201,133 +222,159 @@ impl FakeForge {
         head_sha: GitOid,
         files: Vec<ChangedFile>,
     ) {
-        self.lock()
-            .changed_files
-            .insert((project, number, head_sha), files);
+        self.write_state(|state| {
+            state
+                .changed_files
+                .insert((project, number, head_sha), files);
+        });
     }
 
     pub fn set_review_thread(&self, project: ProjectId, view: ReviewThreadView) {
-        self.lock()
-            .review_threads
-            .insert((project, view.thread_node_id.clone()), view);
+        self.write_state(|state| {
+            state
+                .review_threads
+                .insert((project, view.thread_node_id.clone()), view);
+        });
     }
 
     pub fn set_annotations(&self, project: ProjectId, check_run_id: u64, items: Vec<Annotation>) {
-        self.lock()
-            .annotations
-            .insert((project, check_run_id), items);
+        self.write_state(|state| {
+            state.annotations.insert((project, check_run_id), items);
+        });
     }
 
     pub fn set_mirror_unreachable(&self, project: ProjectId, unreachable: bool) {
-        let mut state = self.lock();
-        if unreachable {
-            state.unreachable.insert(project);
-        } else {
-            state.unreachable.remove(&project);
-        }
+        self.write_state(|state| {
+            if unreachable {
+                state.unreachable.insert(project);
+            } else {
+                state.unreachable.remove(&project);
+            }
+        });
     }
 
     /// 注入一条 webhook。返回 `false` 表示同一 delivery 已处理过（去重）。
     pub fn inject_webhook(&self, delivery_id: impl Into<String>, hook: FakeWebhook) -> bool {
         let delivery_id = delivery_id.into();
-        let mut state = self.lock();
-        if state.webhooks.contains_key(&delivery_id) {
-            return false;
-        }
-        let now = state.now;
-        match &hook {
-            FakeWebhook::PrUpserted {
-                project,
-                head_ref,
-                pr,
-            } => {
-                let mut pr = pr.clone();
-                pr.synced_at = now;
-                state.prs.insert(
-                    (*project, pr.number),
-                    PrEntry {
-                        head_ref: head_ref.clone(),
-                        snapshot: pr,
-                    },
-                );
+        self.write_state(|state| {
+            if state.webhooks.contains_key(&delivery_id) {
+                return false;
             }
-            FakeWebhook::PrChecksUpdated {
-                project,
-                number,
-                checks,
-            } => {
-                if let Some(entry) = state.prs.get_mut(&(*project, *number)) {
-                    entry.snapshot.checks = checks.clone();
-                    entry.snapshot.synced_at = now;
+            let now = state.now;
+            match &hook {
+                FakeWebhook::PrUpserted {
+                    project,
+                    head_ref,
+                    pr,
+                } => {
+                    let mut pr = pr.clone();
+                    pr.synced_at = now;
+                    state.prs.insert(
+                        (*project, pr.number),
+                        PrEntry {
+                            head_ref: head_ref.clone(),
+                            snapshot: pr,
+                        },
+                    );
+                }
+                FakeWebhook::PrChecksUpdated {
+                    project,
+                    number,
+                    checks,
+                } => {
+                    if let Some(entry) = state.prs.get_mut(&(*project, *number)) {
+                        entry.snapshot.checks = checks.clone();
+                        entry.snapshot.synced_at = now;
+                    }
+                }
+                FakeWebhook::PrClosed { project, number } => {
+                    if let Some(entry) = state.prs.get_mut(&(*project, *number)) {
+                        entry.snapshot.state = gantry_core::entities::PullRequestState::Closed;
+                        entry.snapshot.synced_at = now;
+                    }
+                }
+                FakeWebhook::IssueUpserted { project, issue } => {
+                    let mut issue = issue.clone();
+                    issue.synced_at = now;
+                    state.issues.insert((*project, issue.number), issue);
+                }
+                FakeWebhook::InstallationUnreachable { project } => {
+                    state.unreachable.insert(*project);
                 }
             }
-            FakeWebhook::PrClosed { project, number } => {
-                if let Some(entry) = state.prs.get_mut(&(*project, *number)) {
-                    entry.snapshot.state = gantry_core::entities::PullRequestState::Closed;
-                    entry.snapshot.synced_at = now;
-                }
-            }
-            FakeWebhook::IssueUpserted { project, issue } => {
-                let mut issue = issue.clone();
-                issue.synced_at = now;
-                state.issues.insert((*project, issue.number), issue);
-            }
-            FakeWebhook::InstallationUnreachable { project } => {
-                state.unreachable.insert(*project);
-            }
-        }
-        state.webhooks.insert(delivery_id, hook);
-        true
+            state.webhooks.insert(delivery_id, hook);
+            true
+        })
     }
 
     pub fn webhook_count(&self) -> usize {
-        self.lock().webhooks.len()
+        self.state().webhooks.len()
     }
 
     pub fn reconcile_count(&self) -> usize {
-        self.lock().reconciles.len()
+        self.state().reconciles.len()
     }
 
     pub fn mirror_sync_count(&self) -> usize {
-        self.lock().mirrors.len()
+        self.state().mirrors.len()
     }
 
-    // ---- Outbox 观测 ----
+    // ---- Outbox 观测：唯一权威是 Store ----
 
     pub fn outbox_len(&self) -> usize {
-        self.lock().outbox.len()
+        self.snapshot().outbox_list().len()
     }
 
     pub fn outbox_action(&self, id: &ActionId) -> Option<OutboxAction> {
-        self.lock().outbox.get(id).cloned()
+        self.snapshot().outbox_action(id)
     }
 
     pub fn outbox_list(&self) -> Vec<OutboxAction> {
-        self.lock().outbox.values().cloned().collect()
+        self.snapshot().outbox_list()
+    }
+
+    fn snapshot(&self) -> gantry_store::ReadSnapshot {
+        self.store
+            .snapshot_sync()
+            .expect("in-memory store snapshot must succeed")
     }
 
     // ---- 事务 ----
 
-    pub fn begin_write(&self) -> FakeForgeTx {
-        let snapshot = self.lock().clone();
-        FakeForgeTx {
-            forge: self.clone(),
-            snapshot,
-        }
+    /// 同一 Store 的写事务；与调用方的 `append` / `inbox.raise` 共用一个事务。
+    ///
+    /// 同步入口只给同步测试用；async 端口必须 `self.store.begin_write().await`，
+    /// 否则单线程运行时里竞争写令牌会阻塞 runtime 线程而死锁。
+    pub fn begin_write(&self) -> WriteTx {
+        self.store
+            .begin_write_sync()
+            .expect("in-memory store write must start")
     }
 
-    fn enqueue_on(
-        state: &mut ForgeState,
+    async fn enqueue_on(
+        tx: &mut WriteTx,
         req: &EnqueueRequest,
         _ctx: &ActorCtx,
     ) -> Result<EnqueueOutcome, EnqueueError> {
+        let state = tx
+            .module_state::<ForgeState>(STATE_KEY)
+            .map_err(|error| EnqueueError::Store(port_store_error(error)))?
+            .ok_or(EnqueueError::Store(StoreError::NotFound))?;
         if !state.projects.contains_key(&req.project_id) {
             return Err(EnqueueError::ProjectUnknown);
         }
-        if matches!(req.payload, ActionPayload::MergePr(_)) && req.requires_approval.is_none() {
+        if matches!(&req.payload, ActionPayload::MergePr(_)) && req.requires_approval.is_none() {
             return Err(EnqueueError::ApprovalRequired {
                 reason: "merge_pr requires an approval id at enqueue time",
             });
+        }
+        if let ActionPayload::PushBranch(payload) = &req.payload {
+            let outside_prefix = !payload.branch.starts_with(DEFAULT_BRANCH_PREFIX);
+            if (payload.force || outside_prefix) && req.requires_approval.is_none() {
+                return Err(EnqueueError::ApprovalRequired {
+                    reason: "force push or push outside the branch prefix requires an approval id",
+                });
+            }
         }
         let payload_value =
             serde_json::to_value(&req.payload).map_err(|error| EnqueueError::InvalidPayload {
@@ -337,57 +384,39 @@ impl FakeForge {
         // shortcut: target/intent 推导在 core OQ-9 冻结前由 fake 给出最小确定性
         // 形式；真实 forge 可按同一输入实现，但不需要与本函数逐字一致。
         let target = payload_target(&req.payload);
-        let key = IdempotencyKey::derive(
-            &req.project_id,
-            &req.delivery_id,
-            req.payload.kind(),
-            &target,
-            &payload_value,
-            req.epoch,
-        )
-        .map_err(|error| EnqueueError::InvalidPayload {
-            pointer: "/payload".into(),
-            message: error.to_string(),
-        })?;
-        if let Some(existing) = state.keys.get(key.as_str()) {
-            let action = state
-                .outbox
-                .get(existing)
-                .cloned()
-                .ok_or(EnqueueError::ProjectUnknown)?;
-            return Ok(EnqueueOutcome {
-                action,
-                created: false,
-            });
+        let mut intent = payload_value.clone();
+        if let ActionPayload::AddLabels(payload) = &req.payload {
+            let mut labels = payload.labels.clone();
+            labels.sort();
+            labels.dedup();
+            intent = serde_json::json!({ "labels": labels });
         }
-        let now = state.now;
-        let id: ActionId = state.next_id();
-        let action = OutboxAction {
-            id,
+        let insert = OutboxInsert {
             project_id: req.project_id,
             delivery_id: req.delivery_id,
-            idempotency_key: key.clone(),
             kind: req.payload.kind(),
-            payload: req.payload.clone(),
+            target,
+            intent,
+            payload: payload_value,
             requires_approval: req.requires_approval,
             depends_on: req.depends_on.clone(),
             priority: req.priority,
             not_before: req.not_before,
             epoch: req.epoch,
-            status: OutboxStatus::Queued,
-            attempts: 0,
-            lease_until: None,
-            last_error: None,
-            expected_effects: Vec::new(),
-            github_ref: None,
-            created_at: now,
-            updated_at: now,
+            coalesce_key: None,
+            enqueued_by: gantry_store::EnqueuedBy {
+                module: req.enqueued_by.module.as_str().to_owned(),
+                causation_id: req.enqueued_by.causation_id,
+            },
         };
-        state.outbox.insert(id, action.clone());
-        state.keys.insert(key.as_str().to_owned(), id);
+        let enqueued = tx
+            .outbox()
+            .enqueue(insert)
+            .await
+            .map_err(|error| EnqueueError::Store(port_store_error(error)))?;
         Ok(EnqueueOutcome {
-            action,
-            created: true,
+            action: enqueued.action,
+            created: enqueued.created,
         })
     }
 }
@@ -418,49 +447,27 @@ fn payload_target(payload: &ActionPayload) -> String {
         CreateIssue(p) => format!("issue:{}:{}", p.repo, p.client_ref),
         UpdateIssue(p) => format!("issue:{}:{}", p.repo, p.number),
         CloseIssue(p) => format!("issue:{}:{}", p.repo, p.number),
-        AddLabels(p) => format!("issue:{}:{}", p.repo, p.number),
+        AddLabels(p) => format!("labels:{}", p.number),
         RequestReviewers(p) => format!("pr:{}:{}", p.repo, p.pull_number),
         MergePr(p) => format!("pr:{}:{}", p.repo, p.pull_number),
         RerunFailedJobs(p) => format!("run:{}:{}", p.repo, p.run_id),
     }
 }
 
-// ---------------------------------------------------------------------------
-// 事务句柄
-// ---------------------------------------------------------------------------
-
-pub struct FakeForgeTx {
-    forge: FakeForge,
-    snapshot: ForgeState,
-}
-
-impl FakeForgeTx {
-    pub async fn commit(mut self) -> Result<(), StoreError> {
-        let mut shared = self.forge.lock();
-        if shared.generation != self.snapshot.generation {
-            return Err(StoreError::Conflict {
-                code: "fake_forge_tx_conflict",
-            });
-        }
-        self.snapshot.generation += 1;
-        *shared = self.snapshot;
-        Ok(())
-    }
-
-    pub async fn rollback(self) -> Result<(), StoreError> {
-        Ok(())
-    }
-}
-
-impl TxHandle for FakeForgeTx {
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-fn tx_required() -> StoreError {
+fn tx_required(message: &'static str) -> StoreError {
     StoreError::Rejected {
-        message: "FakeForge::enqueue_in requires a FakeForgeTx".into(),
+        message: message.into(),
+    }
+}
+
+fn store_cancel_reason(reason: &CancelReason) -> gantry_store::CancelReason {
+    match reason {
+        CancelReason::Superseded => gantry_store::CancelReason::Superseded,
+        CancelReason::ApprovalInvalidated => gantry_store::CancelReason::ApprovalInvalid,
+        CancelReason::DeliveryAbandoned => gantry_store::CancelReason::Manual,
+        CancelReason::DeliveryClosed => gantry_store::CancelReason::Manual,
+        CancelReason::Shutdown => gantry_store::CancelReason::Manual,
+        CancelReason::Other(_) => gantry_store::CancelReason::Manual,
     }
 }
 
@@ -476,16 +483,17 @@ impl OutboxPort for FakeForge {
         req: EnqueueRequest,
         ctx: &ActorCtx,
     ) -> Result<EnqueueOutcome, EnqueueError> {
-        let tx = tx
-            .as_any_mut()
-            .downcast_mut::<FakeForgeTx>()
-            .ok_or_else(|| EnqueueError::Store(tx_required()))?;
-        if !Arc::ptr_eq(&tx.forge.state, &self.state) {
+        let tx = tx.as_any_mut().downcast_mut::<WriteTx>().ok_or_else(|| {
+            EnqueueError::Store(tx_required(
+                "FakeForge::enqueue_in requires a Store WriteTx",
+            ))
+        })?;
+        if !tx.same_store(&self.store) {
             return Err(EnqueueError::Store(StoreError::Rejected {
-                message: "FakeForgeTx belongs to another FakeForge".into(),
+                message: "WriteTx belongs to another Store".into(),
             }));
         }
-        FakeForge::enqueue_on(&mut tx.snapshot, &req, ctx)
+        FakeForge::enqueue_on(tx, &req, ctx).await
     }
 
     async fn enqueue(
@@ -493,9 +501,15 @@ impl OutboxPort for FakeForge {
         req: EnqueueRequest,
         ctx: &ActorCtx,
     ) -> Result<EnqueueOutcome, EnqueueError> {
-        let mut tx = self.begin_write();
-        let outcome = FakeForge::enqueue_on(&mut tx.snapshot, &req, ctx)?;
-        tx.commit().await?;
+        let mut tx = self
+            .store
+            .begin_write()
+            .await
+            .map_err(|error| EnqueueError::Store(port_store_error(error)))?;
+        let outcome = FakeForge::enqueue_on(&mut tx, &req, ctx).await?;
+        tx.commit()
+            .await
+            .map_err(|error| EnqueueError::Store(port_store_error(error)))?;
         Ok(outcome)
     }
 
@@ -505,38 +519,32 @@ impl OutboxPort for FakeForge {
         reason: CancelReason,
         _ctx: &ActorCtx,
     ) -> Result<CancelOutcome, ForgeError> {
-        let mut state = self.lock();
-        let now = state.now;
-        let action = state
-            .outbox
-            .get_mut(id)
+        let snapshot = self.snapshot();
+        let action = snapshot
+            .outbox_action(id)
             .ok_or_else(|| ForgeError::InvalidTarget {
                 message: format!("outbox action {id} not found"),
             })?;
         match action.status {
             OutboxStatus::Queued => {
-                action.status = OutboxStatus::Cancelled;
-                action.updated_at = now;
-                action.last_error = Some(gantry_core::entities::OutboxError {
-                    code: cancel_reason_code(&reason).to_owned(),
-                    message: String::new(),
-                });
+                let mut tx = self
+                    .store
+                    .begin_write()
+                    .await
+                    .map_err(|error| ForgeError::Store(port_store_error(error)))?;
+                tx.outbox()
+                    .cancel(id, store_cancel_reason(&reason))
+                    .await
+                    .map_err(|error| ForgeError::Store(port_store_error(error)))?;
+                tx.commit()
+                    .await
+                    .map_err(|error| ForgeError::Store(port_store_error(error)))?;
                 Ok(CancelOutcome::Cancelled)
             }
+            // 端口语义：执行中的动作不可取消；不改变 Store 低层的状态机。
             OutboxStatus::Executing => Ok(CancelOutcome::NotCancellable),
             other => Ok(CancelOutcome::AlreadyTerminal(other)),
         }
-    }
-}
-
-fn cancel_reason_code(reason: &CancelReason) -> &str {
-    match reason {
-        CancelReason::Superseded => "superseded",
-        CancelReason::DeliveryAbandoned => "delivery_abandoned",
-        CancelReason::ApprovalInvalidated => "approval_invalidated",
-        CancelReason::DeliveryClosed => "delivery_closed",
-        CancelReason::Shutdown => "shutdown",
-        CancelReason::Other(_) => "other",
     }
 }
 
@@ -552,7 +560,7 @@ impl ForgeReader for FakeForge {
         number: u64,
     ) -> Result<Option<PullRequestRef>, ForgeError> {
         Ok(self
-            .lock()
+            .state()
             .prs
             .get(&(*project, number))
             .map(|entry| entry.snapshot.clone()))
@@ -563,11 +571,11 @@ impl ForgeReader for FakeForge {
         project: &ProjectId,
         number: u64,
     ) -> Result<Option<IssueRef>, ForgeError> {
-        Ok(self.lock().issues.get(&(*project, number)).cloned())
+        Ok(self.state().issues.get(&(*project, number)).cloned())
     }
 
     async fn project_snapshot(&self, project: &ProjectId) -> Result<ProjectSnapshot, ForgeError> {
-        let state = self.lock();
+        let state = self.state();
         let project = state
             .projects
             .get(project)
@@ -585,7 +593,7 @@ impl ForgeReader for FakeForge {
         target: DiscussionTarget,
         query: DiscussionQuery,
     ) -> Result<Discussion, ForgeError> {
-        let state = self.lock();
+        let state = self.state();
         let source = state
             .discussions
             .get(&discussion_key(*project, target))
@@ -623,7 +631,7 @@ impl ForgeReader for FakeForge {
     }
 
     async fn ci_log(&self, project: &ProjectId, query: CiLogQuery) -> Result<CiLog, ForgeError> {
-        let state = self.lock();
+        let state = self.state();
         let source = state
             .ci_logs
             .get(&(*project, query.run_id))
@@ -645,7 +653,7 @@ impl ForgeReader for FakeForge {
         head_sha: &GitOid,
     ) -> Result<Vec<ChangedFile>, ForgeError> {
         Ok(self
-            .lock()
+            .state()
             .changed_files
             .get(&(*project, number, *head_sha))
             .cloned()
@@ -657,7 +665,7 @@ impl ForgeReader for FakeForge {
         project: &ProjectId,
         thread: &ThreadNodeId,
     ) -> Result<ReviewThreadView, ForgeError> {
-        self.lock()
+        self.state()
             .review_threads
             .get(&(*project, thread.clone()))
             .cloned()
@@ -670,7 +678,7 @@ impl ForgeReader for FakeForge {
         check_run_id: u64,
     ) -> Result<Vec<Annotation>, ForgeError> {
         Ok(self
-            .lock()
+            .state()
             .annotations
             .get(&(*project, check_run_id))
             .cloned()
@@ -682,14 +690,15 @@ impl ForgeReader for FakeForge {
         target: ReconcileTarget,
         _ctx: &ActorCtx,
     ) -> Result<ReconcileReport, ForgeError> {
-        let mut state = self.lock();
-        let now = state.now;
-        state.reconciles.push(target);
-        Ok(ReconcileReport {
-            emitted: Vec::new(),
-            drifts: Vec::<DriftKind>::new(),
-            synced_at: now,
-        })
+        let report = self.write_state(|state| {
+            state.reconciles.push(target);
+            ReconcileReport {
+                emitted: Vec::new(),
+                drifts: Vec::<DriftKind>::new(),
+                synced_at: state.now,
+            }
+        });
+        Ok(report)
     }
 
     async fn sync_mirror(
@@ -698,17 +707,18 @@ impl ForgeReader for FakeForge {
         want: MirrorWant,
         _ctx: &ActorCtx,
     ) -> Result<(), ForgeError> {
-        let mut state = self.lock();
-        if !state.projects.contains_key(project) {
-            return Err(ForgeError::NotFound);
-        }
-        if state.unreachable.contains(project) {
-            return Err(ForgeError::Unavailable {
-                message: "installation unreachable".into(),
-            });
-        }
-        state.mirrors.push((*project, want));
-        Ok(())
+        self.write_state(|state| {
+            if !state.projects.contains_key(project) {
+                return Err(ForgeError::NotFound);
+            }
+            if state.unreachable.contains(project) {
+                return Err(ForgeError::Unavailable {
+                    message: "installation unreachable".into(),
+                });
+            }
+            state.mirrors.push((*project, want));
+            Ok(())
+        })
     }
 }
 
@@ -735,24 +745,27 @@ impl PrRefresher for FakeForge {
         number: u64,
         _ctx: &ActorCtx,
     ) -> Result<PrHead, ModuleError> {
-        let mut state = self.lock();
-        let now = state.now;
-        let project = state
-            .projects
-            .values()
-            .find(|project| project.repo == *repo)
-            .map(|project| project.id)
-            .ok_or(ModuleError::NotFound)?;
-        let entry = state
-            .prs
-            .get_mut(&(project, number))
-            .ok_or(ModuleError::NotFound)?;
-        entry.snapshot.synced_at = now;
-        Ok(PrHead {
-            ref_name: entry.head_ref.clone(),
-            sha: entry.snapshot.head_sha,
-            repo: repo.clone(),
+        let result = try_update_state(&self.store, STATE_KEY, |state: &mut ForgeState| {
+            let now = state.now;
+            let project = state
+                .projects
+                .values()
+                .find(|project| project.repo == *repo)
+                .map(|project| project.id)
+                .ok_or(ModuleError::NotFound)?;
+            let entry = state
+                .prs
+                .get_mut(&(project, number))
+                .ok_or(ModuleError::NotFound)?;
+            entry.snapshot.synced_at = now;
+            Ok(PrHead {
+                ref_name: entry.head_ref.clone(),
+                sha: entry.snapshot.head_sha,
+                repo: repo.clone(),
+            })
         })
+        .map_err(ModuleError::Store)?;
+        result
     }
 }
 

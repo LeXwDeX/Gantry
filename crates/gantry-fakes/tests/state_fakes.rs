@@ -6,14 +6,14 @@
 use std::any::Any;
 use std::time::Duration;
 
-use gantry_core::canon::{sha256, GitOid, RepoSlug, Sha256Digest, SubjectDigest};
+use gantry_core::canon::{sha256, GitOid, IdempotencyKey, RepoSlug, Sha256Digest, SubjectDigest};
 use gantry_core::entities::{
     Actor, ActorKind, ApprovalAction, ApprovalStatus, ApprovalTarget, CheckSummary, DecisionKind,
     ForgeActionKind, InboxItem, InboxKind, InboxOption, InboxPayload, LockHolder, MergeMethod,
     PolicyActionId, Priority, Project, PullRequestRef, PullRequestState, ReasonCode, ReviewState,
     Seq, Severity,
 };
-use gantry_core::forge::AddLabelsPayload;
+use gantry_core::forge::{ActionPayload, AddLabelsPayload};
 use gantry_core::ids::{Act, Apr, Att, Dev, Dlv, Id, IdKind, Prj, Ulid};
 use gantry_core::ports::{
     ActionDecision, ActionFacts, ActionRequest, ActorCtx, ApnsEnvironment, ApprovalSpec,
@@ -208,6 +208,57 @@ async fn forge_outbox_is_idempotent_and_tx_is_atomic() {
 
     let actions = forge.outbox_list();
     assert!(actions.iter().all(|action| action.project_id == project_id));
+}
+
+#[tokio::test]
+async fn add_labels_idempotency_uses_canonical_target_and_label_set() {
+    let forge = FakeForge::new(ts());
+    forge.insert_project(project());
+    let ctx = ctx();
+
+    let mut request = add_labels_request(0);
+    if let ActionPayload::AddLabels(payload) = &mut request.payload {
+        payload.labels = vec!["ui".into(), "bug".into(), "bug".into()];
+    }
+    let expected_key = IdempotencyKey::derive(
+        &request.project_id,
+        &request.delivery_id,
+        ForgeActionKind::AddLabels,
+        "labels:7",
+        &serde_json::json!({"labels": ["bug", "ui"]}),
+        0,
+    )
+    .unwrap();
+    let first = forge.enqueue(request.clone(), &ctx).await.unwrap();
+    assert!(first.created);
+    assert_eq!(first.action.idempotency_key, expected_key);
+    assert_eq!(first.action.payload, request.payload);
+
+    let mut reordered = add_labels_request(0);
+    if let ActionPayload::AddLabels(payload) = &mut reordered.payload {
+        payload.labels = vec!["bug".into(), "ui".into()];
+    }
+    let second = forge.enqueue(reordered, &ctx).await.unwrap();
+    assert!(!second.created);
+    assert_eq!(second.action.id, first.action.id);
+    assert_eq!(forge.outbox_len(), 1);
+
+    let mut changed_set = add_labels_request(0);
+    if let ActionPayload::AddLabels(payload) = &mut changed_set.payload {
+        payload.labels = vec!["bug".into()];
+    }
+    let third = forge.enqueue(changed_set, &ctx).await.unwrap();
+    assert!(third.created);
+    assert_ne!(third.action.id, first.action.id);
+
+    let mut changed_epoch = add_labels_request(1);
+    if let ActionPayload::AddLabels(payload) = &mut changed_epoch.payload {
+        payload.labels = vec!["ui".into(), "bug".into()];
+    }
+    let fourth = forge.enqueue(changed_epoch, &ctx).await.unwrap();
+    assert!(fourth.created);
+    assert_ne!(fourth.action.id, first.action.id);
+    assert_eq!(forge.outbox_len(), 3);
 }
 
 #[tokio::test]

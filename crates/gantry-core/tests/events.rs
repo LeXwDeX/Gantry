@@ -257,7 +257,7 @@ fn settings_secret_value_is_fail_closed() {
         );
     }
 
-    // value 里的非 SecretRef 位置可以带同名键，不受影响。
+    // resource 文档里的任意未知键（包括名为 value 的业务键）都不符合 Patch 形状。
     let data = json!({
         "scope": "global",
         "resource": "levels",
@@ -267,7 +267,9 @@ fn settings_secret_value_is_fail_closed() {
         "relaxes": [],
         "secret_changes": []
     });
-    validate_event_data(&EventType::SettingsUpdated, &data).unwrap();
+    let error = validate_event_data(&EventType::SettingsUpdated, &data).unwrap_err();
+    assert_eq!(error.code, SchemaErrorCode::Shape);
+    assert!(error.message.contains("unknown field `value`"), "{error:?}");
 }
 
 #[test]
@@ -437,6 +439,7 @@ fn new_event_checks_settings_subject_consistency() {
     .validate()
     .unwrap_err();
 
+    // data.scope 不能与信封不一致：global data 配 project subject 必须拒绝。
     NewEvent {
         ty: EventType::SettingsUpdated,
         subject: Subject::parse("prj_01JB7K2M9Q4X8V3N5R6T1W0YZA").unwrap(),
@@ -444,7 +447,22 @@ fn new_event_checks_settings_subject_consistency() {
         actor: actor.clone(),
         causation_id: None,
         correlation_id: None,
-        data,
+        data: data.clone(),
+        dedup_key: None,
+    }
+    .validate()
+    .unwrap_err();
+
+    let mut project_data = data;
+    project_data["scope"] = json!("project");
+    NewEvent {
+        ty: EventType::SettingsUpdated,
+        subject: Subject::parse("prj_01JB7K2M9Q4X8V3N5R6T1W0YZA").unwrap(),
+        project_id: Some(project),
+        actor: actor.clone(),
+        causation_id: None,
+        correlation_id: None,
+        data: project_data,
         dedup_key: None,
     }
     .validate()

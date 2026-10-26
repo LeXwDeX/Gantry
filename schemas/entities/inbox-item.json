@@ -67,15 +67,15 @@
   "$defs": {
     "Id_inb": {
       "type": "string",
-      "pattern": "^inb_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^inb_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_prj": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "InboxKind": {
       "type": "string",
@@ -288,7 +288,7 @@
     },
     "Id_apr": {
       "type": "string",
-      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "DecisionKind": {
       "type": "string",
@@ -327,7 +327,7 @@
     },
     "Id_nod": {
       "type": "string",
-      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "PatchRef": {
       "type": "object",
@@ -381,7 +381,7 @@
     },
     "Id_att": {
       "type": "string",
-      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Level": {
       "type": "string",
@@ -503,7 +503,7 @@
     },
     "Id_wtr": {
       "type": "string",
-      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "EvidenceKind": {
       "type": "string",

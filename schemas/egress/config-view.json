@@ -29,12 +29,13 @@
       "type": "string"
     },
     "injection": {
-      "not": {},
+      "type": "object",
+      "maxProperties": 0,
       "x-gantry-unresolved": {
-        "reason": "egress-control §4.6 只给出 `injection: {}` 示例，字段表未定义形状（M2）；M0 拒绝",
-        "source": "docs/interfaces/egress-control.md#46-下发配置视图",
-        "rejects_all_values": true
-      }
+        "reason": "egress-control §4.6 只给出 `injection: {}` 示例，非空字段表未定义（M2）；M0 只接受空对象",
+        "source": "docs/interfaces/egress-control.md#46-下发配置视图"
+      },
+      "default": {}
     },
     "token_weights": {
       "$ref": "#/$defs/TokenWeights"
@@ -48,7 +49,7 @@
     "default_profile",
     "token_weights"
   ],
-  "description": "配置视图只含引用，不含 secret 值。\n\n`injection` 的形状在 egress-control §4.6 只给了示例 `{}`、字段表未定义（M2），\nM0 保留不透明对象并记录为契约缺口，不猜测其结构。",
+  "description": "配置视图只含引用，不含 secret 值。\n\n`injection` 的权威依据只有 egress-control §4.6 的示例 `{}`；字段表未定义非空形状\n（M2）。因此 M0 只接受空对象：反序列化、序列化与 schema 都拒绝非空内容，\n`Debug` 不输出其中的值，不猜测未定义结构。",
   "title": "ConfigView",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
@@ -134,5 +135,6 @@
       ]
     }
   },
-  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema"
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-injection": "egress-control §4.6 只给出 `injection: {}` 示例；M0 只接受空对象"
 }

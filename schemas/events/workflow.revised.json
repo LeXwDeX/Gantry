@@ -77,7 +77,7 @@
     },
     "Id_nod": {
       "type": "string",
-      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

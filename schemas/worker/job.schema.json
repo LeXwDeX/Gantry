@@ -95,7 +95,7 @@
     },
     "Id_att": {
       "type": "string",
-      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Timestamp": {
       "type": "string",
@@ -103,11 +103,11 @@
     },
     "Id_prj": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "JobWorkflow": {
       "type": "object",
@@ -128,7 +128,7 @@
     },
     "Id_wfl": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "JobNode": {
       "type": "object",
@@ -155,7 +155,7 @@
     },
     "Id_nod": {
       "type": "string",
-      "pattern": "^nod_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Role": {
       "type": "string",

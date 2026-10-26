@@ -73,7 +73,7 @@
     },
     "Id_msg": {
       "type": "string",
-      "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "IssueRef": {
       "type": "object",

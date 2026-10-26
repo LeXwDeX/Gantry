@@ -91,11 +91,11 @@
   "$defs": {
     "Id_msg": {
       "type": "string",
-      "pattern": "^msg_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_cnv": {
       "type": "string",
-      "pattern": "^cnv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^cnv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "MessageRole": {
       "type": "string",
@@ -220,14 +220,38 @@
     },
     "Id_wtr": {
       "type": "string",
-      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Card": {
-      "$ref": "#/$defs/KnownCard"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/KnownCard"
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "not": {
+                "enum": [
+                  "plan",
+                  "approval",
+                  "escalation",
+                  "choice",
+                  "summary"
+                ]
+              }
+            }
+          }
+        }
+      ]
     },
     "KnownCard": {
       "oneOf": [
@@ -253,7 +277,8 @@
             "delivery_id",
             "workflow_id",
             "summary"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -269,7 +294,8 @@
           "required": [
             "kind",
             "approval_id"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -285,7 +311,8 @@
           "required": [
             "kind",
             "inbox_id"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -308,7 +335,8 @@
             "kind",
             "inbox_id",
             "options"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "type": "object",
@@ -338,13 +366,14 @@
           "required": [
             "kind",
             "items"
-          ]
+          ],
+          "additionalProperties": false
         }
       ]
     },
     "Id_wfl": {
       "type": "string",
-      "pattern": "^wfl_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "UntrustedText": {
       "type": "object",
@@ -368,11 +397,11 @@
     },
     "Id_apr": {
       "type": "string",
-      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_inb": {
       "type": "string",
-      "pattern": "^inb_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^inb_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "InboxOption": {
       "type": "object",

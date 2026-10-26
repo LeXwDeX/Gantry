@@ -7,7 +7,8 @@ license.workspace = true
 description = "Gantry M0 端口替身（由后续节点填充；本节点只建立文件边界）"
 
 [dependencies]
-gantry-core = { path = "../gantry-core" }
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
 async-trait.workspace = true
 futures-core.workspace = true
 serde.workspace = true

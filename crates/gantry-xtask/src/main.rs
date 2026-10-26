@@ -395,8 +395,8 @@ fn check_fixtures(root: &Path, report: &mut Report) -> Result<(), String> {
     report.failures.extend(check.failures);
     report.warnings.extend(check.warnings);
     report.note(format!(
-        "夹具：{} 个完整验证（schema + Rust），{} 个部分验证（仅 schema；示例省略字段），{} 个块在 unverified.json 显式登记（其中 {} 个 skip）",
-        check.verified, check.partial, check.allowlisted, check.skipped
+        "夹具：{} 个完整验证（schema + Rust），{} 个 schema-only（rust=none，无 Rust 证据），{} 个部分验证（仅 schema；示例省略字段），{} 个块在 unverified.json 显式登记（其中 {} 个 skip）",
+        check.verified, check.schema_only, check.partial, check.allowlisted, check.skipped
     ));
     for entry in check.unverified.iter().take(40) {
         report.note(format!("未验证块 {entry}"));

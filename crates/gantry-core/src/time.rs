@@ -12,12 +12,22 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub struct Timestamp(i64);
 
 impl Timestamp {
+    /// `0000-01-01T00:00:00.000Z`；schema 只接受四位年份。
+    pub const MIN_MILLIS: i64 = days_from_civil(0, 1, 1) * 86_400_000;
+    /// `9999-12-31T23:59:59.999Z`。
+    pub const MAX_MILLIS: i64 = days_from_civil(9999, 12, 31) * 86_400_000 + 86_399_999;
+
     pub fn from_millis(ms: i64) -> Self {
         Self(ms)
     }
 
     pub fn as_millis(self) -> i64 {
         self.0
+    }
+
+    /// 能否用 schema 接受的四位年份规范形表示。
+    pub fn is_representable(self) -> bool {
+        (Self::MIN_MILLIS..=Self::MAX_MILLIS).contains(&self.0)
     }
 
     /// 宽松 RFC 3339：0–9 位小数、`Z` 或数值偏移；归一为 UTC 毫秒并截断多余精度。
@@ -37,11 +47,16 @@ impl Timestamp {
 
     pub fn checked_add_secs(self, secs: u64) -> Option<Self> {
         let delta = i64::try_from(secs).ok()?.checked_mul(1000)?;
-        self.0.checked_add(delta).map(Self)
+        self.0
+            .checked_add(delta)
+            .filter(|ms| (Self::MIN_MILLIS..=Self::MAX_MILLIS).contains(ms))
+            .map(Self)
     }
 
+    /// 越界值取最近的可表示边界；这类值本身不能序列化。
     pub fn to_date(self) -> Date {
-        let days = self.0.div_euclid(86_400_000);
+        let ms = self.0.clamp(Self::MIN_MILLIS, Self::MAX_MILLIS);
+        let days = ms.div_euclid(86_400_000);
         let (year, month, day) = civil_from_days(days);
         Date { year, month, day }
     }
@@ -69,6 +84,11 @@ impl FromStr for Timestamp {
 
 impl Serialize for Timestamp {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if !self.is_representable() {
+            return Err(serde::ser::Error::custom(
+                "timestamp is out of the supported range",
+            ));
+        }
         serializer.serialize_str(&self.to_canonical_string())
     }
 }
@@ -103,7 +123,12 @@ pub struct Date {
 
 impl Date {
     pub fn from_ymd(year: i32, month: u8, day: u8) -> Result<Self, TimeError> {
-        if month == 0 || month > 12 || day == 0 || day > days_in_month(year, month) {
+        if !(0..=9999).contains(&year)
+            || month == 0
+            || month > 12
+            || day == 0
+            || day > days_in_month(year, month)
+        {
             return Err(TimeError::InvalidDate);
         }
         Ok(Self { year, month, day })
@@ -308,6 +333,9 @@ fn parse_rfc3339(input: &str, canonical: bool) -> Result<Timestamp, TimeError> {
         .and_then(|v| v.checked_add(millis))
         .and_then(|v| v.checked_sub(offset_minutes.checked_mul(60_000)?))
         .ok_or(TimeError::OutOfRange)?;
+    if !(Timestamp::MIN_MILLIS..=Timestamp::MAX_MILLIS).contains(&utc_ms) {
+        return Err(TimeError::OutOfRange);
+    }
     Ok(Timestamp(utc_ms))
 }
 
@@ -345,7 +373,7 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 }
 
 // Howard Hinnant 的 civil 日历算法。
-fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
+const fn days_from_civil(year: i32, month: u8, day: u8) -> i64 {
     let y = if month <= 2 { year - 1 } else { year } as i64;
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;

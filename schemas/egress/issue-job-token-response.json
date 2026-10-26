@@ -44,7 +44,7 @@
   "$defs": {
     "Id_att": {
       "type": "string",
-      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "JobToken": {
       "type": "string",

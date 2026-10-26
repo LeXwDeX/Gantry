@@ -27,7 +27,7 @@
   "$defs": {
     "Id_wtr": {
       "type": "string",
-      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "LockHolder": {
       "type": "string",
@@ -39,7 +39,7 @@
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Timestamp": {
       "type": "string",

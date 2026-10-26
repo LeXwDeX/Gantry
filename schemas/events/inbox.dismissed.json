@@ -21,7 +21,7 @@
   "$defs": {
     "Id_inb": {
       "type": "string",
-      "pattern": "^inb_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^inb_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

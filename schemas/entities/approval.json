@@ -73,15 +73,229 @@
     "updated_at"
   ],
   "title": "Approval",
+  "oneOf": [
+    {
+      "properties": {
+        "action": {
+          "const": "merge_pr"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "pr"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "force_push"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "branch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "push_outside_prefix"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "branch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "resolve_review_thread_human"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "review_thread"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "patch_apply_protected"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "patch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "settings_update"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "settings"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "device_role_change"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "device"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "device_revoke"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "device"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    }
+  ],
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
     "Id_apr": {
       "type": "string",
-      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "ApprovalAction": {
       "type": "string",
@@ -273,6 +487,53 @@
             "id"
           ]
         }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "settings"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "scope": {
+                    "const": "global"
+                  },
+                  "project_id": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "scope"
+                ]
+              },
+              {
+                "properties": {
+                  "scope": {
+                    "const": "project"
+                  },
+                  "project_id": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "scope",
+                  "project_id"
+                ]
+              }
+            ]
+          }
+        }
       ]
     },
     "RepoSlug": {
@@ -285,7 +546,7 @@
     },
     "Id_att": {
       "type": "string",
-      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "SettingsScope": {
       "type": "string",
@@ -296,7 +557,7 @@
     },
     "Id_prj": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "SettingsResource": {
       "type": "string",
@@ -318,7 +579,7 @@
     },
     "Id_dev": {
       "type": "string",
-      "pattern": "^dev_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dev_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "SubjectDigest": {
       "type": "string",
@@ -334,10 +595,6 @@
         "expired",
         "denied"
       ]
-    },
-    "Timestamp": {
-      "type": "string",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

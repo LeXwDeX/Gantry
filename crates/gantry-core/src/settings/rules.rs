@@ -292,6 +292,48 @@ pub const RULES: &[KeyRule] = &[
     },
 ];
 
+/// config.md §6.1 锁定类：不可配置，出现在 `triage` 里即 V17 `locked_key`。
+pub const LOCKED_TRIAGE_CLASSES: &[&str] = &[
+    "security_finding",
+    "touches_protected_path",
+    "scope_expanding_fix",
+    "repeated_or_no_progress",
+    "budget_exhausted",
+    "approval_needed",
+    "push_after_approval",
+    "design_or_api_change",
+    "unknown",
+];
+
+pub fn triage_class_locked(class: &str) -> bool {
+    LOCKED_TRIAGE_CLASSES.contains(&class)
+}
+
+/// config.md §6.1 非锁定类的允许取值。锁定类与未知类返回 `None`。
+pub fn triage_allowed_actions(class: &str) -> Option<&'static [&'static str]> {
+    match class {
+        "ci_failure_in_scope" | "bot_finding_valid" | "mechanical_conflict" => {
+            Some(&["silent_fix", "escalate"])
+        }
+        "bot_finding_invalid" => Some(&["silent_reply", "escalate"]),
+        "nit" => Some(&["batch", "escalate"]),
+        _ => None,
+    }
+}
+
+/// config.md §6.1 的权威默认处置。锁定类按不可放宽的 `escalate` 处理；
+/// `touches_protected_path` 的实际处置由 `policies.paths` 决定，但仍属锁定类。
+pub fn triage_default_action(class: &str) -> Option<&'static str> {
+    match class {
+        "ci_failure_in_scope" | "bot_finding_valid" => Some("silent_fix"),
+        "bot_finding_invalid" => Some("silent_reply"),
+        "nit" => Some("batch"),
+        "mechanical_conflict" => Some("escalate"),
+        class if triage_class_locked(class) => Some("escalate"),
+        _ => None,
+    }
+}
+
 /// 查找最具体的匹配规则；`*` 只匹配一段。
 pub fn key_rule(path: &str) -> Option<&'static KeyRule> {
     let segments: Vec<&str> = path.split('.').collect();
@@ -630,16 +672,29 @@ fn when_loosens(old: &Value, new: &Value) -> bool {
 }
 
 fn triage_loosen(old: &Value, new: &Value) -> bool {
-    let (Some(old), Some(new)) = (object(old), object(new)) else {
+    let Some(new) = object(new) else {
         return false;
     };
-    old.iter().any(|(class, action)| {
-        action == "escalate"
-            && new
-                .get(class)
-                .and_then(Value::as_str)
-                .map(|value| value != "escalate")
-                .unwrap_or(true)
+    let old = object(old);
+    // 旧值显式 escalate，新值缺失或改成任何静默值 = 放宽。
+    if old.is_some_and(|old| {
+        old.iter().any(|(class, action)| {
+            action == "escalate" && new.get(class).and_then(Value::as_str) != Some("escalate")
+        })
+    }) {
+        return true;
+    }
+    // 新增类没有旧值时按权威默认判断；锁定类即使不在默认表里也按 escalate。
+    // 这只覆盖配置出现过的类，不遍历业务文本。
+    new.iter().any(|(class, action)| {
+        let baseline = old
+            .and_then(|old| old.get(class))
+            .and_then(Value::as_str)
+            .or_else(|| triage_default_action(class));
+        match baseline {
+            Some(baseline) => baseline == "escalate" && action.as_str() != Some("escalate"),
+            None => triage_class_locked(class) && action.as_str() != Some("escalate"),
+        }
     })
 }
 

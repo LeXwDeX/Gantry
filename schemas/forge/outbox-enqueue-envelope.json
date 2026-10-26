@@ -387,7 +387,7 @@
     },
     "Id_act": {
       "type": "string",
-      "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^act_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "IdempotencyKey": {
       "type": "string",
@@ -395,11 +395,11 @@
     },
     "Id_prj": {
       "type": "string",
-      "pattern": "^prj_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Id_dlv": {
       "type": "string",
-      "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "ForgeActionKind": {
       "type": "string",
@@ -422,7 +422,7 @@
     },
     "Id_apr": {
       "type": "string",
-      "pattern": "^apr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Priority": {
       "type": "string",
@@ -468,7 +468,7 @@
     },
     "Id_evt": {
       "type": "string",
-      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^evt_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "PushBranchPayload": {
       "type": "object",
@@ -531,7 +531,7 @@
     },
     "Id_wtr": {
       "type": "string",
-      "pattern": "^wtr_[0-9A-HJKMNP-TV-Z]{26}$"
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "GitOid": {
       "type": "string",
