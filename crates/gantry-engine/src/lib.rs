@@ -5,6 +5,7 @@
 
 pub mod budget;
 pub mod projection;
+pub mod stage;
 pub mod template;
 
 pub use budget::{charge, check, ledger_for_delivery, remaining};
@@ -12,4 +13,5 @@ pub use projection::{
     AttemptProjection, DeliveryProjection, NodeProjection, Projection, ProjectionError,
     WorkflowProjection,
 };
+pub use stage::{advance, StageTransition};
 pub use template::{stage_graph, NodeSpec, StageGraph, VerdictRule};
