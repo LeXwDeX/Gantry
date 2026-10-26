@@ -265,7 +265,8 @@ impl Engine {
             .await
     }
 
-    /// 调整上限：不改变创建时固化的预算模板；降幅低于 `level_effective` 时一并下调。
+    /// 调整上限：不改变创建时固化的预算模板；只写 `kind = cap`，低于 `level_effective`
+    /// 时由投影派生下调（engine.md §11，#48）。
     pub async fn set_level_cap(
         &self,
         id: DeliveryId,
@@ -281,12 +282,6 @@ impl Engine {
         ensure_active(&current)?;
         if cap == current.level_cap {
             return Ok(current);
-        }
-        // shortcut: effective 下降需要契约允许，见 issue #48；在此之前只接受不压到 effective 的上限。
-        if cap < current.level_effective {
-            return Err(EngineError::Unsupported(
-                "lowering level_effective needs a contract change",
-            ));
         }
         let event = level_changed_event(
             &current,
@@ -352,7 +347,7 @@ fn level_changed_event(
             from,
             to,
             kind,
-            reason: "user_cap_change".to_owned(),
+            reason: "user".to_owned(),
         },
     )
 }
