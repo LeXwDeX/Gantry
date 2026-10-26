@@ -147,13 +147,13 @@
       "source": "docs/interfaces/api.md",
       "line": 554,
       "context": "### 4.5 conversations / messages",
-      "sha256": "42ace6ad6507554f7ea08ef420db84e0575669b17c668f2fdb556a43417b596b",
-      "bytes": 373,
+      "sha256": "ce823811700fc940d9cc386226146a356dffde71aeb369a1501f45659e097463",
+      "bytes": 372,
       "file": "fixtures/contracts/blocks/api/L554.json",
-      "status": "skipped",
+      "status": "partial",
       "schema": "openapi:Message",
       "rust": "none",
-      "note": "示例 Message.id `msg_01JB7NB4K8R2X6V9M3Q5T1W7YZQ` 不是合法 26 位 ID；原文示意错误，保留待裁决，不能作为通过证据",
+      "note": "Message；示例省略 created_at/updated_at",
       "error": null
     },
     {
@@ -581,13 +581,13 @@
       "source": "docs/interfaces/egress-control.md",
       "line": 227,
       "context": "### 4.4 密钥：只写不读",
-      "sha256": "13555b702b445fc67c2aa15f76e8b8485ac303b05fa00b3505dd37de8750036f",
+      "sha256": "6505b037f84b0bf8217eabf6931b0838510536ece6355c00953d3493f653d067",
       "bytes": 131,
       "file": "fixtures/contracts/blocks/egress-control/L227.json",
-      "status": "skipped",
+      "status": "schema-only",
       "schema": "schemas/egress/stage-secret-request.json",
       "rust": "none",
-      "note": "示例 request_id 为 25 位，core Ulid 要求 26 位；文档示例与类型不一致，未改夹具",
+      "note": "示例 request_id 已改为合法 26 位 ULID；StageSecretRequest 只实现 Serialize，不做 Rust round-trip，按 schema-only 验证",
       "error": null
     },
     {
@@ -1068,9 +1068,9 @@
     }
   ],
   "summary": {
-    "partial": 20,
-    "schema-only": 14,
-    "skipped": 6,
+    "partial": 21,
+    "schema-only": 15,
+    "skipped": 4,
     "verified": 36
   }
 }

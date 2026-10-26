@@ -3,20 +3,6 @@
   "description": "显式登记无法按当前 schema 验证的文档块。kind 只允许 example（原文示意/省略）与 contract-undefined（权威契约未定义）；实现漏项没有登记类别，会直接使 --check 失败。未登记的未验证块同样失败。",
   "blocks": [
     {
-      "sha256": "13555b702b445fc67c2aa15f76e8b8485ac303b05fa00b3505dd37de8750036f",
-      "source": "docs/interfaces/egress-control.md",
-      "line": 227,
-      "kind": "example",
-      "note": "示例 request_id 为 25 位，core Ulid 要求 26 位；原文示例与类型不一致，不能作为实现通过证据（G-13）。"
-    },
-    {
-      "sha256": "42ace6ad6507554f7ea08ef420db84e0575669b17c668f2fdb556a43417b596b",
-      "source": "docs/interfaces/api.md",
-      "line": 554,
-      "kind": "example",
-      "note": "示例 Message.id `msg_01JB7NB4K8R2X6V9M3Q5T1W7YZQ` 不是合法 26 位 ID；原文示意错误，不能作为实现通过证据。"
-    },
-    {
       "sha256": "4a29a75c0a4e2e436c4cc0b0ca65308a3332db54e2d82f605fc5491647c8367c",
       "source": "docs/interfaces/forge-actions.md",
       "line": 520,

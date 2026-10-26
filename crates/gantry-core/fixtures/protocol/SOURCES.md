@@ -15,14 +15,13 @@
 | `worker/outputs.json` | worker-protocol §6.3（`plan`、`review:security`、`arbiter`） | 三个 `structured_output` 示例，按 role 键合并；内容原样。 |
 | `egress/job_token.json` | egress-control §4.1、§4.2 | 签发请求、签发响应、`FinalUsage` 三个示例原样。 |
 | `egress/svc_token.json` | egress-control §4.3 | 签发请求与响应原样。 |
-| `egress/secrets.json` | egress-control §4.4 | 暂存请求/响应、激活响应、`present` 请求/响应原样；`request_id` 用等价合法 ULID 替换（见下）。 |
+| `egress/secrets.json` | egress-control §4.4 | 暂存请求/响应、激活响应、`present` 请求/响应原样。 |
 | `egress/usage.json` | egress-control §4.5 | 用量分页示例原样。 |
 | `egress/config.json` | egress-control §4.6 | 配置视图示例原样。 |
 | `egress/status.json` | egress-control §4.7 | `status` 与 `endpoints` 示例原样。 |
 
 ## 已知偏差
 
-- `egress/secrets.json` 的 `request_id`：文档示例 `01JBX5C7E9G2J4L6N8Q0S3U5WY` 含 Crockford base32 之外的字母 `L`、`U`，无法被 data-model 的 `Ulid` 解析。夹具使用同长度、同形状的合法 ULID `01JBX5C7E9G2J4K6N8Q0S3T5WY`，只影响测试数据，不改变线上字段。
 - `SvcTokenId` / `StagedId` 的后缀：文档示例 `svt_01JBX5A2C4E6G8J1L3N5Q7S9UW` / `stg_01JBX5C8F0H3K5M7P9R1T4V6XZ` 同样含 Crockford 之外的字母。类型按 `^svt_[0-9A-Z]{26}$` / `^stg_[0-9A-Z]{26}$` 宽松校验，理由见 `src/egress.rs` 注释。
 
 ## 未定形状（不生成夹具、不猜测）
