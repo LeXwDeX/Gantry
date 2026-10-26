@@ -1,8 +1,13 @@
 //! 编排引擎（`docs/modules/engine.md`）。
 //!
-//! M1 只落地已定义的模板部分。`GraphTemplate` / `TemplateCx` / `ExitRule`
-//! 在规格中仍有未定义字段，本 crate 不伪造这些接口；后续契约确定后再补。
+//! M1 目前落地已定义的模板与事件投影；`GraphTemplate` / `TemplateCx` /
+//! `ExitRule` 及完整决策器仍未实现。
 
+pub mod projection;
 pub mod template;
 
+pub use projection::{
+    AttemptProjection, DeliveryProjection, NodeProjection, Projection, ProjectionError,
+    WorkflowProjection,
+};
 pub use template::{stage_graph, NodeSpec, StageGraph, VerdictRule};

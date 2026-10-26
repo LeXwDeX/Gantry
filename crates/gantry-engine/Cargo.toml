@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Gantry 编排引擎（M1 起；当前为已定义模板骨架）"
+description = "Gantry 编排引擎（M1 起；当前为已定义模板与事件投影）"
 
 [dependencies]
 gantry-core = { path = "../gantry-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
