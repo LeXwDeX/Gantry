@@ -122,13 +122,34 @@ async fn none_cap_is_rejected() {
 }
 
 #[tokio::test]
-async fn lowering_below_effective_is_blocked_until_contract_allows_it() {
+async fn lowering_below_effective_clamps_it_with_one_cap_event() {
     let (engine, id) = engine(Level::High, Level::High).await;
-    assert!(matches!(
-        engine.set_level_cap(id, Level::Low, operator()).await,
-        Err(EngineError::Unsupported(_))
-    ));
-    assert_eq!(event_count(&engine).await, 1);
+    let updated = engine
+        .set_level_cap(id, Level::Low, operator())
+        .await
+        .unwrap();
+    assert_eq!(updated.level_cap, Level::Low);
+    assert_eq!(updated.level_effective, Level::Low);
+    assert_eq!(event_count(&engine).await, 2);
+
+    // 再调高上限不会让 effective 自动回升（P-57）。
+    let raised = engine
+        .set_level_cap(id, Level::Max, operator())
+        .await
+        .unwrap();
+    assert_eq!(raised.level_cap, Level::Max);
+    assert_eq!(raised.level_effective, Level::Low);
+}
+
+#[tokio::test]
+async fn lowering_above_effective_keeps_it() {
+    let (engine, id) = engine(Level::Max, Level::Medium).await;
+    let updated = engine
+        .set_level_cap(id, Level::High, operator())
+        .await
+        .unwrap();
+    assert_eq!(updated.level_cap, Level::High);
+    assert_eq!(updated.level_effective, Level::Medium);
 }
 
 #[tokio::test]

@@ -152,7 +152,11 @@ impl Projection {
                     .as_mut()
                     .ok_or(ProjectionError::MissingParent { ty })?;
                 match data.kind {
-                    LevelChangeKind::Cap => delivery.level_cap = data.to,
+                    // 压低上限时 effective 随之派生为 min（engine.md §11，#48）。
+                    LevelChangeKind::Cap => {
+                        delivery.level_cap = data.to;
+                        delivery.level_effective = delivery.level_effective.min(data.to);
+                    }
                     LevelChangeKind::Effective => delivery.level_effective = data.to,
                 }
             }
