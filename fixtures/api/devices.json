@@ -1,0 +1,30 @@
+{
+  "items": [
+    {
+      "id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+      "name": "Susan 的 MacBook",
+      "platform": "macos",
+      "cert_serial": "5f3a9c01d27be4468a1c",
+      "pubkey_fpr": "sha256:9fe698148e3e8234105e25bf598c9689640aba943b8275348470152799f1dd42",
+      "approval_pubkey_fpr": "sha256:7a1c3e5f90b2d4f6a8c0e2a4b6d8f0a2c4e6a8b0d2f4a6c8e0b2d4f6a8c0e2a4",
+      "role": "approver",
+      "status": "active",
+      "last_seen": "2026-10-24T12:41:03.120Z",
+      "created_at": "2026-10-20T09:00:00.000Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    {
+      "id": "dev_01JB6Z4M8S3T6X9N2Q5V7W0YZN",
+      "name": "Susan 的 iPhone",
+      "platform": "ios",
+      "cert_serial": "7b4c1d22e38cf5579b2d",
+      "pubkey_fpr": "sha256:1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccddeeff001",
+      "approval_pubkey_fpr": null,
+      "role": "operator",
+      "status": "active",
+      "last_seen": "2026-10-24T12:30:00.000Z",
+      "created_at": "2026-10-21T10:00:00.000Z",
+      "updated_at": "2026-10-24T12:30:00.000Z"
+    }
+  ]
+}

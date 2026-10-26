@@ -1,0 +1,380 @@
+{
+  "oneOf": [
+    {
+      "$ref": "#/$defs/HelloEvent",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "hello"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "$ref": "#/$defs/StageEvent",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "stage"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "$ref": "#/$defs/ToolEvent",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "$ref": "#/$defs/UsageEvent",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "usage"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "$ref": "#/$defs/HeartbeatEvent",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "heartbeat"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "$ref": "#/$defs/WarnEvent",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "warn"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "$ref": "#/$defs/FinishEvent",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "finish"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    }
+  ],
+  "title": "ProgressEvent",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "AgentId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "HelloEvent": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "job_id": {
+          "$ref": "#/$defs/Id_att"
+        },
+        "agent": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "agent_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "job_id",
+        "agent",
+        "agent_version"
+      ]
+    },
+    "ProgressStage": {
+      "type": "string",
+      "enum": [
+        "init",
+        "explore",
+        "plan",
+        "edit",
+        "test",
+        "review",
+        "package",
+        "finalize"
+      ]
+    },
+    "StageEvent": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "stage": {
+          "$ref": "#/$defs/ProgressStage"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "stage",
+        "detail"
+      ]
+    },
+    "ToolPhase": {
+      "type": "string",
+      "enum": [
+        "start",
+        "end"
+      ]
+    },
+    "ToolEvent": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "phase": {
+          "$ref": "#/$defs/ToolPhase"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "ok": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "phase",
+        "call_id",
+        "tool"
+      ]
+    },
+    "UsageEvent": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "turns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "turns"
+      ]
+    },
+    "HeartbeatEvent": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "in_flight": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "in_flight"
+      ]
+    },
+    "WarnEvent": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "code": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "code",
+        "detail"
+      ]
+    },
+    "ResultStatus": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "FinishEvent": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/ResultStatus"
+        }
+      },
+      "required": [
+        "v",
+        "seq",
+        "status"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "worker::ProgressEvent"
+}

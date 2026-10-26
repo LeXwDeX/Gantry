@@ -1,0 +1,12 @@
+{
+  "id": "evt_01JB7P6Q9T3X2N5R8K1V4W7YZN",
+  "seq": 18234,
+  "ts": "2026-10-24T12:41:03.120Z",
+  "type": "delivery.stage_changed",
+  "subject": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+  "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+  "actor": {"kind": "engine", "id": "engine"},
+  "causation_id": "evt_01JB7P6M3K5R8T2X9N1Q4V7WZA",
+  "correlation_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+  "data": {"from": "implement", "to": "propose", "stage_status": "running"}
+}

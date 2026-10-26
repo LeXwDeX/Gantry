@@ -1,0 +1,72 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "node_id": {
+      "$ref": "#/$defs/Id_nod"
+    },
+    "status": {
+      "$ref": "#/$defs/NodeStatus"
+    },
+    "verdict": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Verdict"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "superseded_by": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_nod"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "node_id",
+    "status"
+  ],
+  "description": "`node.queued` / `started` / `finished` / `superseded`（engine.md §11）。",
+  "title": "NodeEventData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "NodeStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "cancelled",
+        "superseded"
+      ]
+    },
+    "Verdict": {
+      "type": "string",
+      "enum": [
+        "ACCEPT",
+        "REVISE",
+        "REJECT",
+        "BLOCKED"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "node.queued",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

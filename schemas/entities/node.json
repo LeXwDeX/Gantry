@@ -1,0 +1,132 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_nod"
+    },
+    "workflow_id": {
+      "$ref": "#/$defs/Id_wfl"
+    },
+    "role": {
+      "$ref": "#/$defs/Role"
+    },
+    "tier": {
+      "$ref": "#/$defs/Tier"
+    },
+    "exec": {
+      "$ref": "#/$defs/Exec"
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Id_nod"
+      }
+    },
+    "required": {
+      "type": "boolean"
+    },
+    "status": {
+      "$ref": "#/$defs/NodeStatus"
+    },
+    "verdict": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Verdict"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "superseded_by": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_nod"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "workflow_id",
+    "role",
+    "tier",
+    "exec",
+    "depends_on",
+    "required",
+    "status",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "Node",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_wfl": {
+      "type": "string",
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Role": {
+      "type": "string",
+      "pattern": "^(plan|build|verify|single|reasoner|arbiter|summarize|admission|heal|answer|intent|classify|review:[a-z][a-z0-9_-]*)$"
+    },
+    "Tier": {
+      "type": "string",
+      "enum": [
+        "utility",
+        "planner",
+        "worker"
+      ]
+    },
+    "Exec": {
+      "type": "string",
+      "enum": [
+        "sandbox",
+        "sandbox_ro",
+        "direct"
+      ]
+    },
+    "NodeStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "cancelled",
+        "superseded"
+      ]
+    },
+    "Verdict": {
+      "type": "string",
+      "enum": [
+        "ACCEPT",
+        "REVISE",
+        "REJECT",
+        "BLOCKED"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "entities::Node"
+}

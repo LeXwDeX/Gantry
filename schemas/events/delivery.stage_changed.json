@@ -1,0 +1,58 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "from": {
+      "$ref": "#/$defs/Stage"
+    },
+    "to": {
+      "$ref": "#/$defs/Stage"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "stage_status": {
+      "$ref": "#/$defs/StageStatus"
+    }
+  },
+  "required": [
+    "from",
+    "to",
+    "stage_status"
+  ],
+  "description": "`delivery.stage_changed`：`from` / `to` 来自 api.md §5.1；\n`reason` / `stage_status` 来自 engine.md §11。data-model §5.2 规定 data\n必须带新 `stage_status`；core §7.5 的 `trigger` 只是建议，不在 M0 数据形状中。",
+  "title": "DeliveryStageChangedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Stage": {
+      "type": "string",
+      "enum": [
+        "spec",
+        "plan",
+        "implement",
+        "propose",
+        "review",
+        "merge",
+        "closed",
+        "abandoned"
+      ]
+    },
+    "StageStatus": {
+      "type": "string",
+      "enum": [
+        "running",
+        "waiting_human",
+        "blocked",
+        "paused",
+        "done"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "delivery.stage_changed",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

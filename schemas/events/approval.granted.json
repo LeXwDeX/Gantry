@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "approval_id": {
+      "$ref": "#/$defs/Id_apr"
+    },
+    "device_id": {
+      "$ref": "#/$defs/Id_dev"
+    },
+    "approval_pubkey_fpr": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "payload_sha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    }
+  },
+  "required": [
+    "approval_id",
+    "device_id",
+    "approval_pubkey_fpr",
+    "payload_sha256"
+  ],
+  "description": "`approval.granted`（policy.md §7.5 第 6 步）。",
+  "title": "ApprovalGrantedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_apr": {
+      "type": "string",
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_dev": {
+      "type": "string",
+      "pattern": "^dev_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "approval.granted",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

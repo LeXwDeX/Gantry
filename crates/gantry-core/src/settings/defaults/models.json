@@ -1,0 +1,30 @@
+{
+  "providers": {},
+  "retry": { "max_attempts": 3, "backoff_ms": 1000 },
+  "utility": {
+    "reasoning_effort": "low",
+    "fallback": [],
+    "request_timeout_s": 60,
+    "total_timeout_s": 120
+  },
+  "planner": {
+    "reasoning_effort": "high",
+    "fallback": [],
+    "request_timeout_s": 300,
+    "total_timeout_s": 900
+  },
+  "worker": {
+    "adapter": "claude-code",
+    "reasoning_effort": "by_level",
+    "effort_by_level": {
+      "low": { "default": "low" },
+      "medium": { "default": "medium" },
+      "high": { "default": "medium", "critical": "high" },
+      "max": { "default": "high", "critical": "max" }
+    },
+    "fallback": [],
+    "request_timeout_s": 600,
+    "attempt_wall_s": 3600,
+    "max_turns": 60
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_wfl"
+    },
+    "delivery_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "conversation_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_cnv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "stage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Stage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "graph_rev": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "status": {
+      "$ref": "#/$defs/WorkflowStatus"
+    },
+    "template": {
+      "type": "string"
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "graph_rev",
+    "status",
+    "template",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "Workflow",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_wfl": {
+      "type": "string",
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_cnv": {
+      "type": "string",
+      "pattern": "^cnv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Stage": {
+      "type": "string",
+      "enum": [
+        "spec",
+        "plan",
+        "implement",
+        "propose",
+        "review",
+        "merge",
+        "closed",
+        "abandoned"
+      ]
+    },
+    "WorkflowStatus": {
+      "type": "string",
+      "enum": [
+        "running",
+        "paused",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "entities::Workflow"
+}

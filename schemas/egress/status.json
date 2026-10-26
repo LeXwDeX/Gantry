@@ -1,0 +1,79 @@
+{
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "$ref": "#/$defs/EgressControlProtocol"
+    },
+    "applied_rev": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0,
+      "default": null
+    },
+    "health": {
+      "$ref": "#/$defs/EgressHealth"
+    },
+    "detail": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "unresolved_secret_refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SecretName"
+      }
+    },
+    "active_jobs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "active_svc_tokens": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "usage_head": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "protocol",
+    "health",
+    "unresolved_secret_refs",
+    "active_jobs",
+    "active_svc_tokens"
+  ],
+  "title": "StatusResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "EgressControlProtocol": {
+      "type": "string",
+      "const": "gantry-egress-control/1"
+    },
+    "EgressHealth": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "degraded",
+        "unhealthy"
+      ]
+    },
+    "SecretName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::StatusResponse"
+}

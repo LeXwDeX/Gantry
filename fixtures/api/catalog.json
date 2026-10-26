@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "models": {
+    "capabilities": {
+      "anthropic/example-utility-model": {
+        "tools": false,
+        "reasoning_efforts": ["none", "low", "medium", "high", "max"]
+      },
+      "anthropic/example-planner-model": {
+        "tools": true,
+        "reasoning_efforts": ["none", "low", "medium", "high", "max"],
+        "context_window": 200000
+      },
+      "anthropic/example-worker-model": {
+        "tools": true,
+        "reasoning_efforts": ["none", "low", "medium", "high", "max"],
+        "context_window": 200000
+      }
+    },
+    "adapters": {
+      "claude-code": {
+        "provider_kinds": ["anthropic"],
+        "supports_fallback": false
+      }
+    }
+  },
+  "levels": {
+    "graph_templates": {
+      "low": ["low.single"],
+      "medium": ["medium.plan_build_verify"],
+      "high": ["high.multi_review"],
+      "max": ["max.adversarial"],
+      "ultimate": ["ultimate.milestone"]
+    }
+  },
+  "policies": {
+    "actions": {
+      "merge_pr": { "default": "approve", "allowed": ["approve", "deny"], "dangerous": true, "reserved": false },
+      "force_push": { "default": "approve", "allowed": ["approve", "deny"], "dangerous": true, "reserved": false },
+      "push_outside_prefix": { "default": "approve", "allowed": ["approve", "deny"], "dangerous": true, "reserved": false },
+      "resolve_review_thread_human": { "default": "deny", "allowed": ["approve", "deny"], "dangerous": true, "reserved": false },
+      "delete_branch": { "default": "deny", "allowed": ["approve", "deny"], "dangerous": true, "reserved": true },
+      "publish_release": { "default": "deny", "allowed": ["approve", "deny"], "dangerous": true, "reserved": true },
+      "change_repo_settings": { "default": "deny", "allowed": ["approve", "deny"], "dangerous": true, "reserved": true },
+      "push_branch": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "create_pr": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "update_pr": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "upsert_status_comment": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "create_comment": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "reply_review_thread": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "resolve_review_thread": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "create_issue": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "update_issue": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "close_issue": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "add_labels": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "request_reviewers": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false },
+      "rerun_failed_jobs": { "default": "auto", "allowed": ["auto", "approve", "deny"], "dangerous": false, "reserved": false }
+    }
+  },
+  "guardian": {
+    "triage": {
+      "ci_failure_in_scope": {
+        "default": "silent_fix",
+        "allowed": ["silent_fix", "escalate"],
+        "locked": false
+      },
+      "bot_finding_valid": {
+        "default": "silent_fix",
+        "allowed": ["silent_fix", "escalate"],
+        "locked": false
+      },
+      "bot_finding_invalid": {
+        "default": "silent_reply",
+        "allowed": ["silent_reply", "escalate"],
+        "locked": false
+      },
+      "nit": {
+        "default": "batch",
+        "allowed": ["batch", "escalate"],
+        "locked": false
+      },
+      "mechanical_conflict": {
+        "default": "escalate",
+        "allowed": ["escalate", "silent_fix"],
+        "locked": false
+      },
+      "security_finding": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "touches_protected_path": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "scope_expanding_fix": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "repeated_or_no_progress": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "budget_exhausted": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "approval_needed": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "push_after_approval": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "design_or_api_change": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      },
+      "unknown": {
+        "locked": true,
+        "value": "escalate",
+        "allowed": []
+      }
+    }
+  },
+  "egress": {
+    "suggested_groups": {
+      "model_api": { "hosts": ["api.anthropic.com"] },
+      "npm": { "hosts": ["registry.npmjs.org"] },
+      "pypi": { "hosts": ["pypi.org", "files.pythonhosted.org"] },
+      "crates": { "hosts": ["crates.io", "index.crates.io", "static.crates.io"] },
+      "go": { "hosts": ["proxy.golang.org", "sum.golang.org"] },
+      "maven": { "hosts": ["repo.maven.apache.org", "repo1.maven.org"] }
+    },
+    "forbidden_hosts": ["github.com", "*.github.com", "api.github.com"]
+  },
+  "roles": {
+    "approver_keys": [
+      "models.providers",
+      "levels.*.graph_template",
+      "policies.allow_globs",
+      "github.*",
+      "sandbox.driver",
+      "sandbox.runtime",
+      "sandbox.base_image",
+      "sandbox.max_concurrent_sandboxes",
+      "egress.groups",
+      "egress.injection",
+      "egress.default_profile"
+    ]
+  },
+  "notify": {
+    "channels": {
+      "desktop": { "available": true },
+      "mobile_push": { "available": false, "reason": "reserved" }
+    }
+  }
+}

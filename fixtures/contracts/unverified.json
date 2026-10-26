@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "description": "显式登记无法按当前 schema 验证的文档块。kind 只允许 example（原文示意/省略）与 contract-undefined（权威契约未定义）；实现漏项没有登记类别，会直接使 --check 失败。未登记的未验证块同样失败。",
+  "blocks": [
+    {
+      "sha256": "13555b702b445fc67c2aa15f76e8b8485ac303b05fa00b3505dd37de8750036f",
+      "source": "docs/interfaces/egress-control.md",
+      "line": 227,
+      "kind": "example",
+      "note": "示例 request_id 为 25 位，core Ulid 要求 26 位；原文示例与类型不一致，不能作为实现通过证据（G-13）。"
+    },
+    {
+      "sha256": "42ace6ad6507554f7ea08ef420db84e0575669b17c668f2fdb556a43417b596b",
+      "source": "docs/interfaces/api.md",
+      "line": 554,
+      "kind": "example",
+      "note": "示例 Message.id `msg_01JB7NB4K8R2X6V9M3Q5T1W7YZQ` 不是合法 26 位 ID；原文示意错误，不能作为实现通过证据。"
+    },
+    {
+      "sha256": "4a29a75c0a4e2e436c4cc0b0ca65308a3332db54e2d82f605fc5491647c8367c",
+      "source": "docs/interfaces/forge-actions.md",
+      "line": 520,
+      "kind": "example",
+      "note": "github_ref 与 expected_effects 的组合展示；没有单一 core 类型，不能据此声明完整 OutboxAction 通过。"
+    },
+    {
+      "sha256": "10f1313ecf27202b8dc74528f167e67c093b321dc4374188e4c9f025cdb6f73e",
+      "source": "docs/interfaces/forge-actions.md",
+      "line": 873,
+      "kind": "contract-undefined",
+      "note": "forge-actions §7.4 只给出 head_diverged 示例，其余 8 种 drift.kind 的 expected/actual 未定义（G-04）。"
+    },
+    {
+      "sha256": "9911a924ae311ede157cdec544883b47658407b10d3b0d341fb1e98f4ed5a927",
+      "source": "docs/interfaces/forge-actions.md",
+      "line": 990,
+      "kind": "example",
+      "note": "GitHub App manifest 片段供 deploy 使用，不属于 Gantry 协议类型。"
+    },
+    {
+      "sha256": "f3a4a967c6f5acecc4391d94e6e79e06b0bed68bbafce345bc29dff2a5bc9429",
+      "source": "docs/interfaces/worker-protocol.md",
+      "line": 499,
+      "kind": "contract-undefined",
+      "note": "ResultBundle 仍为 [提议]，core 无对应类型，不猜形状。"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "acme/shop-api",
+  "pull_number": 57,
+  "thread_node_id": "PRRT_kwDOabc123_example",
+  "in_reply_to_comment_id": 1893456721,
+  "body": "已在 f2c03d8 中修正：分页上界改为 ceil(total / size)。"
+}

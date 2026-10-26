@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "worktree_id": {
+      "$ref": "#/$defs/Id_wtr"
+    },
+    "holder": {
+      "$ref": "#/$defs/LockHolder"
+    },
+    "delivery_id": {
+      "$ref": "#/$defs/Id_dlv"
+    },
+    "lease_until": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "worktree_id",
+    "holder",
+    "delivery_id",
+    "lease_until"
+  ],
+  "description": "`worktree.locked`（repo.md §11）。",
+  "title": "WorktreeLockedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "LockHolder": {
+      "type": "string",
+      "enum": [
+        "engine",
+        "guardian",
+        "human"
+      ]
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "worktree.locked",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

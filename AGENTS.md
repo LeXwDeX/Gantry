@@ -4,7 +4,9 @@ Agent 进入本仓库的入口。先读本文，再按"领取模块"流程工作
 
 ## 项目一句话
 
-Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付的 AI 开发平台：服务端（Ubuntu）在沙盒中运行 agent，桌面端（Windows / macOS）只查看、控制和签名。当前处于**设计阶段**，尚无可运行代码。
+Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付的 AI 开发平台：服务端（Ubuntu）在沙盒中运行 agent，桌面端（Windows / macOS）只查看、控制和签名。当前处于 **M0 统一开发基线验收阶段**，已有领域核心、端口、测试替身、内存模拟接口（Mock API）和浏览器模拟场景（scenario）前端；前后端尚未接线，真实联调未验证，M0 契约未冻结，M1 未启动。实现范围与缺口见 [M0 实施记录](docs/m0-implementation.md)。
+
+当前迭代入口是 [NEXT-STEPS.md](NEXT-STEPS.md)。[M0 契约冻结提案](docs/m0-contract-proposal.md)尚未批准；须先确认待决项、经独立契约 PR 批准，再另获授权单独实施，不把草案候选当作既定契约。
 
 ## 文档地图
 

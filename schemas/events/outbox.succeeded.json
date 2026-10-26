@@ -1,0 +1,110 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "github_ref": {
+      "$ref": "#/$defs/GithubRef"
+    }
+  },
+  "required": [
+    "github_ref"
+  ],
+  "description": "`outbox.succeeded`（core §7.5）。`github_ref` 形状见 forge-actions §4.2。",
+  "title": "OutboxSucceededData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "GithubRef": {
+      "type": "object",
+      "properties": {
+        "bot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GithubBot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GithubPrRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "marker": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "recorded_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "GithubBot": {
+      "type": "object",
+      "properties": {
+        "github_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "login": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "github_id",
+        "login"
+      ]
+    },
+    "GithubPrRef": {
+      "type": "object",
+      "properties": {
+        "number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "head_sha": {
+          "$ref": "#/$defs/GitOid"
+        }
+      },
+      "required": [
+        "number",
+        "node_id",
+        "head_sha"
+      ]
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "outbox.succeeded",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "pull_number": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "thread_node_id": {
+      "type": "string"
+    },
+    "expected_comment_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string",
+      "description": "仅用于审计，不进幂等键。"
+    },
+    "fixed_in_oid": {
+      "$ref": "#/$defs/GitOid"
+    }
+  },
+  "required": [
+    "repo",
+    "pull_number",
+    "thread_node_id",
+    "expected_comment_count",
+    "reason",
+    "fixed_in_oid"
+  ],
+  "title": "ResolveReviewThreadPayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "ResolveReviewThreadPayload",
+  "x-gantry-action-kind": "resolve_review_thread"
+}

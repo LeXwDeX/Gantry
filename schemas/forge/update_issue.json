@@ -1,0 +1,66 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "number": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "spec_block_markdown": {
+      "type": "string"
+    },
+    "expected_block_hash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "`null` 表示正文里还没有 Gantry 规格块（首次写入）。",
+      "default": null
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "labels": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "default": null
+    }
+  },
+  "required": [
+    "repo",
+    "number",
+    "spec_block_markdown"
+  ],
+  "title": "UpdateIssuePayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "UpdateIssuePayload",
+  "x-gantry-action-kind": "update_issue"
+}

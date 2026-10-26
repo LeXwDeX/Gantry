@@ -1,0 +1,12 @@
+{
+  "id": "msg_01JB7N3R5T8X2V6M9Q4K1W7YZD",
+  "conversation_id": "cnv_01JB7K5Q1M3X8V2N6R9T4W0YZC",
+  "role": "user",
+  "agent_kind": null,
+  "tone": null,
+  "text": "把登录接口的超时改成 30 秒，参考 #5",
+  "level_cap": "High",
+  "refs": [{ "kind": "issue", "repo": "acme/web", "number": 5 }],
+  "cards": [],
+  "delivery_id": null
+}

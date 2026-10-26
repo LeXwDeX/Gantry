@@ -282,7 +282,8 @@ impl OutboxTx<'_> {
 }
 pub enum AfterFailure { Terminal, Retry { not_before: Timestamp } }
 // 读取：ProjectionRead 之外，另有
-//   outbox_action / outbox_by_key / outbox_list(OutboxQuery, Page) / count_succeeded_since(delivery_id, since)
+//   outbox_action / outbox_by_key / outbox_list(OutboxQuery, Page) /
+//   count_succeeded_since(delivery_id, since)
 ```
 
 ### 6.4 CAS

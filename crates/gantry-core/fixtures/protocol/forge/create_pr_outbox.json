@@ -1,0 +1,24 @@
+{
+  "id": "act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+  "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+  "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+  "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+  "kind": "create_pr",
+  "payload": {
+    "repo": "acme/shop-api",
+    "head": "gantry/42-fix-pagination",
+    "base": "main",
+    "title": "Fix pagination off-by-one in /orders",
+    "body": "Fixes the off-by-one when page size divides total count.",
+    "draft": false,
+    "closes": [42],
+    "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+    "maintainer_can_modify": false
+  },
+  "requires_approval": null,
+  "depends_on": ["act_01JBA1F2N8SW1M6A4C7G9K3QTB"],
+  "priority": "high",
+  "not_before": null,
+  "epoch": 0,
+  "enqueued_by": { "module": "engine", "causation_id": "evt_01JBA1G8S2WY4Z6B9D1F3H5KNP" }
+}

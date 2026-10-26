@@ -1,0 +1,13 @@
+{
+  "resource": "models",
+  "scope": "global",
+  "rev": 18240,
+  "value": {
+    "providers": {
+      "anthropic": {
+        "credential": { "type": "api_key", "secret_ref": "model.anthropic.main", "present": true }
+      }
+    }
+  },
+  "warnings": []
+}

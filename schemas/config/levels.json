@@ -1,0 +1,261 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "default_level": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Level"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "token_weights": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TokenWeights"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "none": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NoneLevelPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "low": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LevelEntryPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "medium": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LevelEntryPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "high": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LevelEntryPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "max": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LevelEntryPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ultimate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LevelEntryPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "title": "LevelsPatch",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Level": {
+      "type": "string",
+      "enum": [
+        "None",
+        "Low",
+        "Medium",
+        "High",
+        "Max",
+        "Ultimate"
+      ],
+      "description": "线上档位值：`\"None\"`…`\"Ultimate\"`。"
+    },
+    "TokenWeights": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "number",
+          "format": "double"
+        },
+        "output": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_read": {
+          "type": "number",
+          "format": "double"
+        },
+        "cache_write": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "input",
+        "output",
+        "cache_read",
+        "cache_write"
+      ]
+    },
+    "NoneLevelPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "daily_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "LevelEntryPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "graph_template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LevelBudgetPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "LevelBudgetPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens_by_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TierBudgetPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nodes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "rounds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wall_time_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "concurrency": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "forge_writes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "forge_writes_per_hour": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "TierBudgetPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "utility": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "planner": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "worker": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-resource": "levels"
+}

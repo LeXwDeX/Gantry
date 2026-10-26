@@ -1,0 +1,77 @@
+{
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "code": {
+      "type": "string"
+    },
+    "detail": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Ulid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProblemError"
+      },
+      "default": []
+    }
+  },
+  "required": [
+    "type",
+    "title",
+    "status",
+    "code"
+  ],
+  "description": "控制面错误体：`application/problem+json`（形状同 api.md §3.1）。",
+  "title": "ProblemDetails",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Ulid": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ProblemError": {
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pointer",
+        "message"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::ProblemDetails"
+}

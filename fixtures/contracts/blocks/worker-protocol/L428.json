@@ -1,0 +1,52 @@
+{
+  "protocol": "gantry-worker/1",
+  "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+  "job_sha256": "sha256:5e8c9902207afaeb7120430c585a445f21e92932081d64bc99f80e4925bcb002",
+  "status": "succeeded",
+  "summary": "Fixed the off-by-one in paginate(); added 2 regression tests; cargo test --workspace passes.",
+  "error": null,
+  "structured_output": {
+    "kind": "build",
+    "changes_summary": "paginate() computed the last page offset with page * per_page instead of (page - 1) * per_page.",
+    "steps_status": [
+      { "step_id": "s1", "status": "done", "note": "" },
+      { "step_id": "s2", "status": "done", "note": "two tests added" }
+    ],
+    "checks_run": [
+      { "command": "cargo test --workspace", "exit_code": 0, "outcome": "pass", "summary": "142 passed" }
+    ],
+    "known_issues": [],
+    "no_change_reason": null
+  },
+  "artifacts": {
+    "patch": {
+      "path": "changes.patch",
+      "sha256": "sha256:a4895eb44afc336fecbba6e520cd67e178dace0276655d102fceffa8e5f70570",
+      "bytes": 2210,
+      "base_sha": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+      "files_changed": 2
+    },
+    "report": {
+      "path": "report.md",
+      "sha256": "sha256:845e91831319e89c4d656bdb80c278ac09a7230d61e5dfd2e1b1fbb436ac8917",
+      "bytes": 1530
+    },
+    "proposals": {
+      "path": "proposals.json",
+      "sha256": "sha256:c0cbf0fbcaf64c0b201506063e2b6b12b9999482a61de6d6078321000fafdf76",
+      "bytes": 640
+    }
+  },
+  "flags": { "suspected_injection": [] },
+  "usage_reported": {
+    "input_tokens": 412000,
+    "output_tokens": 18300,
+    "cache_read_tokens": 350000,
+    "cache_write_tokens": 21000,
+    "turns": 24,
+    "tool_calls": 61
+  },
+  "agent": { "kind": "claude-code", "version": "x.y.z", "model": "claude-sonnet-5-5" },
+  "started_at": "2026-10-24T12:41:02.311Z",
+  "ended_at": "2026-10-24T12:58:47.902Z"
+}

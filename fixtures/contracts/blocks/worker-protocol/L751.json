@@ -1,0 +1,27 @@
+{
+  "kind": "plan",
+  "steps": [
+    {
+      "id": "s1",
+      "title": "Fix the offset computation in paginate()",
+      "detail": "Use (page - 1) * per_page when computing the offset.",
+      "files": ["src/api/items.rs"],
+      "depends_on": [],
+      "verification": "cargo test -p api items::pagination"
+    },
+    {
+      "id": "s2",
+      "title": "Add regression tests for the last page",
+      "detail": "Cover 21 rows with per_page=10, pages 1 to 3.",
+      "files": ["tests/items_pagination.rs"],
+      "depends_on": ["s1"],
+      "verification": "cargo test --workspace"
+    }
+  ],
+  "risks": [
+    { "severity": "low", "description": "Clients may rely on the old zero-based behaviour.", "mitigation": "Check API docs and existing callers." }
+  ],
+  "assumptions": ["page numbers are 1-based"],
+  "blocking_questions": [],
+  "touched_paths_estimate": ["src/api/**", "tests/**"]
+}

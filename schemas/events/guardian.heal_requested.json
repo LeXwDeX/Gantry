@@ -1,0 +1,13 @@
+{
+  "title": "guardian.heal_requested data (contract undefined)",
+  "not": {},
+  "x-gantry-unresolved": {
+    "reason": "core §7.5 / docs/m0-contract-gaps.md 未定义该事件的 data 形状；M0 显式拒绝，不猜测字段",
+    "source": "docs/m0-contract-gaps.md",
+    "rejects_all_data": true
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "guardian.heal_requested",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

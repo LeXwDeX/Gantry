@@ -1,0 +1,13 @@
+{
+  "id": "wtr_01JB7M8Q2X5V9N3R6T1K4W0YZE",
+  "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+  "branch": "gantry/dlv-12-login-timeout",
+  "base_ref": "main",
+  "path": "/var/lib/gantry/worktrees/acme-web/dlv-12",
+  "lock": {
+    "holder": "engine",
+    "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+    "acquired_at": "2026-10-24T12:38:00.000Z",
+    "lease_until": "2026-10-24T13:08:00.000Z"
+  }
+}

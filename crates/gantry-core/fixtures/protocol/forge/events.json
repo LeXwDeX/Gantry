@@ -1,0 +1,60 @@
+{
+  "pr_synchronized": {
+    "schema": "forge.event.v1",
+    "kind": "pr_synchronized",
+    "dedup_key": "pr_sync:acme/shop-api:57:2",
+    "source": "webhook",
+    "delivery_ids": ["72d3162e-cc78-11e3-81ab-4c9367dc0958"],
+    "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+    "repo": "acme/shop-api",
+    "installation_id": 4837261,
+    "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+    "target": { "type": "pr", "number": 57, "node_id": "PR_kwDOabc123_example" },
+    "actor": { "login": "gantry-acme[bot]", "github_id": 9988776, "type": "bot", "association": null },
+    "origin": "self",
+    "caused_by_action": "act_01JBA1H5T7XA3P9C2E6J8M1QWD",
+    "occurred_at": "2026-10-24T12:41:02.000Z",
+    "observed_at": "2026-10-24T12:41:03.412Z",
+    "stale": false,
+    "data": {
+      "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+      "previous_head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486",
+      "head_epoch": 2,
+      "forced": false,
+      "base_ref": "main",
+      "commits_added": 1
+    }
+  },
+  "check_suite_completed": {
+    "schema": "forge.event.v1",
+    "kind": "check_suite_completed",
+    "dedup_key": "check_suite:acme/shop-api:1122334455:2026-10-24T12:44:10Z",
+    "source": "webhook",
+    "delivery_ids": ["b1c0e4a2-72f5-4c1f-9d3a-0a4f5e6d7c8b"],
+    "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+    "repo": "acme/shop-api",
+    "installation_id": 4837261,
+    "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+    "target": { "type": "pr", "number": 57, "node_id": "PR_kwDOabc123_example" },
+    "actor": { "login": "github-actions[bot]", "github_id": 41898282, "type": "bot", "association": null },
+    "origin": "external",
+    "caused_by_action": null,
+    "occurred_at": "2026-10-24T12:44:10.000Z",
+    "observed_at": "2026-10-24T12:44:11.087Z",
+    "stale": false,
+    "data": {
+      "check_suite_id": 1122334455,
+      "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+      "conclusion": "failure",
+      "app": { "id": 15368, "slug": "github-actions" },
+      "pr_numbers": [57],
+      "is_current_head": true,
+      "workflow_runs": [
+        { "run_id": 9876543210, "run_attempt": 1, "name": "ci", "path": ".github/workflows/ci.yml", "conclusion": "failure" }
+      ],
+      "failed_check_runs": [
+        { "check_run_id": 5566778899, "name": "test (ubuntu)", "conclusion": "failure" }
+      ]
+    }
+  }
+}

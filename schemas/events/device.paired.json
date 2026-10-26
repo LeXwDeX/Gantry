@@ -1,0 +1,82 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "device_id": {
+      "$ref": "#/$defs/Id_dev"
+    },
+    "name": {
+      "type": "string"
+    },
+    "platform": {
+      "$ref": "#/$defs/DevicePlatform"
+    },
+    "role": {
+      "$ref": "#/$defs/DeviceRole"
+    },
+    "cert_serial": {
+      "type": "string"
+    },
+    "pubkey_fpr": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "approval_pubkey": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "approval_pubkey_fpr": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "device_id",
+    "name",
+    "platform",
+    "role",
+    "cert_serial",
+    "pubkey_fpr"
+  ],
+  "description": "`device.paired`（pki.md §7.4.3）。",
+  "title": "DevicePairedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_dev": {
+      "type": "string",
+      "pattern": "^dev_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "DevicePlatform": {
+      "type": "string",
+      "enum": [
+        "windows",
+        "macos",
+        "ios"
+      ]
+    },
+    "DeviceRole": {
+      "type": "string",
+      "enum": [
+        "viewer",
+        "operator",
+        "approver"
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "device.paired",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

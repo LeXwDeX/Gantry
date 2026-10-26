@@ -1,0 +1,532 @@
+[
+  {
+    "id": "delivery-stage-missing-to",
+    "schema": "schemas/events/delivery.stage_changed.json",
+    "rust": "event:delivery.stage_changed",
+    "event_type": "delivery.stage_changed",
+    "data": {
+      "from": "spec"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "delivery-stage-missing-status",
+    "schema": "schemas/events/delivery.stage_changed.json",
+    "rust": "event:delivery.stage_changed",
+    "event_type": "delivery.stage_changed",
+    "data": {
+      "from": "spec",
+      "to": "plan"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "inbox-raised-flat-shape",
+    "schema": "schemas/events/inbox.raised.json",
+    "rust": "event:inbox.raised",
+    "event_type": "inbox.raised",
+    "data": {
+      "id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "kind": "approval_needed",
+      "severity": "blocker",
+      "summary": "需要审批",
+      "payload": {
+        "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK"
+      },
+      "status": "open",
+      "dedup_key": "approval:apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "attempt-progress-contract-undefined",
+    "schema": "schemas/events/attempt.progress.json",
+    "rust": "event:attempt.progress",
+    "event_type": "attempt.progress",
+    "data": {},
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "settings-updated-secret-value",
+    "schema": "schemas/events/settings.updated.json",
+    "rust": "event:settings.updated",
+    "event_type": "settings.updated",
+    "data": {
+      "scope": "global",
+      "resource": "models",
+      "schema_version": 1,
+      "base_rev": 1,
+      "value": {
+        "providers": {
+          "anthropic": {
+            "credential": {
+              "secret_ref": "model.anthropic.main",
+              "value": null
+            }
+          }
+        }
+      },
+      "relaxes": [],
+      "secret_changes": []
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "egress-present-extra-key",
+    "schema": "schemas/egress/present-request.json",
+    "rust": "egress::PresentRequest",
+    "data": {
+      "refs": [],
+      "bogus": 1
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "outbox-action-kind-payload-mismatch",
+    "schema": "schemas/forge/outbox-action.json",
+    "rust": "entities::OutboxAction",
+    "data": {
+      "id": "act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+      "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+      "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+      "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+      "kind": "push_branch",
+      "payload": {
+        "repo": "acme/shop-api",
+        "head": "gantry/42-fix-pagination",
+        "base": "main",
+        "title": "Fix pagination off-by-one in /orders",
+        "body": "Fixes the off-by-one when page size divides total count.",
+        "draft": false,
+        "closes": [
+          42
+        ],
+        "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+        "maintainer_can_modify": false
+      },
+      "requires_approval": null,
+      "depends_on": [],
+      "priority": "normal",
+      "not_before": null,
+      "epoch": 0,
+      "status": "queued",
+      "attempts": 0,
+      "lease_until": null,
+      "last_error": null,
+      "expected_effects": [],
+      "github_ref": null,
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "outbox-enqueue-envelope-unknown-module",
+    "schema": "schemas/forge/outbox-enqueue-envelope.json",
+    "rust": "forge::OutboxEnqueueEnvelope",
+    "data": {
+      "id": "act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+      "idempotency_key": "gk1_anbfwcip7r36is6wsqcuxxfd34",
+      "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+      "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+      "kind": "create_pr",
+      "payload": {
+        "repo": "acme/shop-api",
+        "head": "gantry/42-fix-pagination",
+        "base": "main",
+        "title": "Fix pagination off-by-one in /orders",
+        "body": "Fixes the off-by-one when page size divides total count.",
+        "draft": false,
+        "closes": [
+          42
+        ],
+        "expected_head_oid": "d7d018f867d6c5b78e82906386420d45a4d84486",
+        "maintainer_can_modify": false
+      },
+      "requires_approval": null,
+      "depends_on": [
+        "act_01JBA1F2N8SW1M6A4C7G9K3QTB"
+      ],
+      "priority": "high",
+      "not_before": null,
+      "epoch": 0,
+      "enqueued_by": {
+        "module": "scheduler",
+        "causation_id": "evt_01JBA1G8S2WY4Z6B9D1F3H5KNP"
+      }
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "approval-undefined-action",
+    "schema": "schemas/entities/approval.json",
+    "rust": "entities::Approval",
+    "data": {
+      "id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "action": "push_branch",
+      "target": {
+        "kind": "pr",
+        "repo": "acme/web",
+        "number": 12
+      },
+      "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+      "device_id": null,
+      "signature": null,
+      "status": "pending",
+      "expires_at": "2026-10-24T14:41:00.000Z",
+      "consumed_by": null,
+      "created_at": "2026-10-24T12:41:00.000Z",
+      "updated_at": "2026-10-24T12:41:00.000Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "approval-target-mismatch",
+    "schema": "schemas/entities/approval.json",
+    "rust": "entities::Approval",
+    "data": {
+      "id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "action": "merge_pr",
+      "target": {
+        "kind": "device",
+        "id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"
+      },
+      "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+      "device_id": null,
+      "signature": null,
+      "status": "pending",
+      "expires_at": "2026-10-24T14:41:00.000Z",
+      "consumed_by": null,
+      "created_at": "2026-10-24T12:41:00.000Z",
+      "updated_at": "2026-10-24T12:41:00.000Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "approval-subject-mismatch",
+    "schema": "schemas/entities/approval.json",
+    "rust": "entities::Approval",
+    "data": {
+      "id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "action": "merge_pr",
+      "target": {
+        "kind": "pr",
+        "repo": "acme/web",
+        "number": 12
+      },
+      "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "device_id": null,
+      "signature": null,
+      "status": "pending",
+      "expires_at": "2026-10-24T14:41:00.000Z",
+      "consumed_by": null,
+      "created_at": "2026-10-24T12:41:00.000Z",
+      "updated_at": "2026-10-24T12:41:00.000Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "approval-requested-target-mismatch",
+    "schema": "schemas/events/approval.requested.json",
+    "rust": "event:approval.requested",
+    "event_type": "approval.requested",
+    "data": {
+      "action": "merge_pr",
+      "target": {
+        "kind": "device",
+        "id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"
+      },
+      "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+      "expires_at": "2026-10-24T12:45:00.000Z",
+      "config_rev": 10,
+      "requested_by": {
+        "kind": "engine",
+        "id": "engine"
+      }
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "forge-kind-data-mismatch",
+    "schema": "schemas/forge/forge.event.v1.json",
+    "rust": "forge::ForgeEventEnvelope",
+    "data": {
+      "schema": "forge.event.v1",
+      "kind": "pr_reopened",
+      "dedup_key": "pr_sync:acme/shop-api:57:2",
+      "source": "webhook",
+      "delivery_ids": [
+        "72d3162e-cc78-11e3-81ab-4c9367dc0958"
+      ],
+      "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+      "repo": "acme/shop-api",
+      "installation_id": 4837261,
+      "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+      "target": {
+        "type": "pr",
+        "number": 57
+      },
+      "actor": {
+        "login": "gantry-acme[bot]",
+        "github_id": 9988776,
+        "type": "bot"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:02.000Z",
+      "observed_at": "2026-10-24T12:41:03.412Z",
+      "stale": false,
+      "data": {
+        "number": 57
+      }
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "forge-self-missing-caused-by-action",
+    "schema": "schemas/forge/forge.event.v1.json",
+    "rust": "forge::ForgeEventEnvelope",
+    "data": {
+      "schema": "forge.event.v1",
+      "kind": "pr_reopened",
+      "dedup_key": "pr_sync:acme/shop-api:57:2",
+      "source": "webhook",
+      "delivery_ids": [
+        "72d3162e-cc78-11e3-81ab-4c9367dc0958"
+      ],
+      "project_id": "prj_01JBA1C4M8XQ0Z5R7T2V9E3HNK",
+      "repo": "acme/shop-api",
+      "installation_id": 4837261,
+      "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+      "target": {
+        "type": "pr",
+        "number": 57
+      },
+      "actor": {
+        "login": "gantry-acme[bot]",
+        "github_id": 9988776,
+        "type": "bot"
+      },
+      "origin": "self",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:02.000Z",
+      "observed_at": "2026-10-24T12:41:03.412Z",
+      "stale": false,
+      "data": {
+        "number": 57,
+        "head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486",
+        "base_ref": "main"
+      }
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "card-known-kind-bad-shape",
+    "schema": "schemas/entities/message.json",
+    "rust": "entities::Message",
+    "data": {
+      "id": "msg_01JBX2E3G5J7K9N1Q3S5T7W9YA",
+      "conversation_id": "cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ",
+      "role": "agent",
+      "agent_kind": null,
+      "tone": null,
+      "text": "hello",
+      "level_cap": null,
+      "refs": [],
+      "cards": [
+        {
+          "kind": "approval"
+        }
+      ],
+      "delivery_id": null,
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "project-id-first-char-overflow",
+    "schema": "schemas/entities/project.json",
+    "rust": "entities::Project",
+    "data": {
+      "id": "prj_81JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "bot_user_id": 2,
+      "default_branch": "main",
+      "allowed_merge_methods": [
+        "squash"
+      ],
+      "merge_queue_enabled": false,
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "request-id-first-char-overflow",
+    "schema": "schemas/egress/problem.json",
+    "rust": "egress::ProblemDetails",
+    "data": {
+      "type": "about:blank",
+      "title": "validation failed",
+      "status": 422,
+      "code": "validation_failed",
+      "request_id": "81JBX5C7E9G2J4K6N8Q0S3T5WY",
+      "errors": []
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "config-view-non-empty-injection",
+    "schema": "schemas/egress/config-view.json",
+    "rust": "egress::ConfigView",
+    "data": {
+      "rev": 18240,
+      "providers": {},
+      "groups": {},
+      "profiles": {},
+      "default_profile": "default",
+      "injection": {
+        "npm": {
+          "credential": {
+            "secret_ref": "registry.npm.corp"
+          }
+        }
+      },
+      "token_weights": {
+        "input": 1.0,
+        "output": 5.0,
+        "cache_read": 0.1,
+        "cache_write": 1.25
+      }
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "settings-updated-value-missing",
+    "schema": "schemas/events/settings.updated.json",
+    "rust": "event:settings.updated",
+    "event_type": "settings.updated",
+    "data": {
+      "scope": "global",
+      "resource": "levels",
+      "schema_version": 1,
+      "base_rev": 1,
+      "relaxes": [],
+      "secret_changes": []
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "settings-updated-global-null",
+    "schema": "schemas/events/settings.updated.json",
+    "rust": "event:settings.updated",
+    "event_type": "settings.updated",
+    "data": {
+      "scope": "global",
+      "resource": "levels",
+      "schema_version": 1,
+      "base_rev": 1,
+      "value": null,
+      "relaxes": [],
+      "secret_changes": []
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "approval-invalid-branch-expected-remote-oid",
+    "schema": "schemas/entities/approval.json",
+    "rust": "entities::Approval",
+    "data": {
+      "id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "action": "force_push",
+      "target": {
+        "kind": "branch",
+        "repo": "acme/web",
+        "branch": "gantry/42-fix",
+        "expected_remote_oid": "not-an-oid"
+      },
+      "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+      "device_id": null,
+      "signature": null,
+      "status": "pending",
+      "expires_at": "2026-10-24T14:41:00.000Z",
+      "consumed_by": null,
+      "created_at": "2026-10-24T12:41:00.000Z",
+      "updated_at": "2026-10-24T12:41:00.000Z"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  }
+]

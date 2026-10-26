@@ -1,0 +1,16 @@
+{
+  "device": {
+    "id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+    "name": "Susan 的 MacBook",
+    "platform": "macos",
+    "cert_serial": "5f3a9c01d27be4468a1c",
+    "pubkey_fpr": "sha256:9fe698148e3e8234105e25bf598c9689640aba943b8275348470152799f1dd42",
+    "approval_pubkey_fpr": "sha256:7a1c3e5f90b2d4f6a8c0e2a4b6d8f0a2c4e6a8b0d2f4a6c8e0b2d4f6a8c0e2a4",
+    "role": "approver",
+    "status": "active",
+    "last_seen": "2026-10-24T12:41:03.120Z"
+  },
+  "profile": "desktop",
+  "certificate": { "not_after": "2026-11-23T12:00:00.000Z", "renew_after": "2026-11-13T12:00:00.000Z" },
+  "server": { "api_version": "v1", "version": "0.1.0", "time": "2026-10-24T12:41:03.456Z", "log_epoch": 1 }
+}

@@ -1,0 +1,12 @@
+{
+  "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+  "job_token": "gjt1_q3Vb7nT1xK9wL2mP5sR8uY0aC4eG6iJ9kM1oQ3sU5wX",
+  "model_base_urls": {
+    "anthropic": "http://10.89.0.1:8081/j/gjt1_q3Vb7nT1xK9wL2mP5sR8uY0aC4eG6iJ9kM1oQ3sU5wX/anthropic"
+  },
+  "connect_proxy_url": "http://job:gjt1_q3Vb7nT1xK9wL2mP5sR8uY0aC4eG6iJ9kM1oQ3sU5wX@10.89.0.1:3128",
+  "effective_groups": ["model_api", "npm", "crates"],
+  "issued_at": "2026-10-24T12:40:58.120Z",
+  "expires_at": "2026-10-24T13:20:58.120Z",
+  "reissued": false
+}

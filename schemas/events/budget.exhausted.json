@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "dimension": {
+      "$ref": "#/$defs/BudgetDimension"
+    },
+    "limit": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "used": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "dimension",
+    "limit",
+    "used"
+  ],
+  "description": "`budget.exhausted`（core §7.5：`{dimension, limit, used}`）。",
+  "title": "BudgetExhaustedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "BudgetDimension": {
+      "type": "string",
+      "enum": [
+        "tokens_by_tier.utility",
+        "tokens_by_tier.planner",
+        "tokens_by_tier.worker",
+        "nodes",
+        "rounds",
+        "wall_time",
+        "concurrency",
+        "forge_writes"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "budget.exhausted",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

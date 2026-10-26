@@ -1,0 +1,98 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "channels": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NotifyChannelsPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "routes": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/NotifyRoute"
+      }
+    }
+  },
+  "title": "NotifyPatch",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "NotifyChannelsPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desktop": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DesktopChannelPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DesktopChannelPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "NotifyRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InboxKind"
+          }
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NotifyChannelKind"
+          }
+        }
+      },
+      "required": [
+        "kinds",
+        "channels"
+      ]
+    },
+    "InboxKind": {
+      "type": "string",
+      "enum": [
+        "approval_needed",
+        "decision_needed",
+        "spec_needed",
+        "budget_exhausted",
+        "escalation",
+        "security_finding"
+      ]
+    },
+    "NotifyChannelKind": {
+      "type": "string",
+      "enum": [
+        "desktop"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-resource": "notify"
+}

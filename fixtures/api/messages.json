@@ -1,0 +1,51 @@
+{
+  "items": [
+    {
+      "id": "msg_01JB7N3R5T8X2V6M9Q4K1W7YZD",
+      "conversation_id": "cnv_01JB7K5Q1M3X8V2N6R9T4W0YZC",
+      "role": "user",
+      "agent_kind": null,
+      "tone": null,
+      "text": "把登录接口的超时改成 30 秒，参考 #5",
+      "level_cap": "High",
+      "refs": [{ "kind": "issue", "repo": "acme/web", "number": 5 }],
+      "cards": [],
+      "delivery_id": null,
+      "created_at": "2026-10-24T12:10:00.000Z",
+      "updated_at": "2026-10-24T12:10:00.000Z"
+    },
+    {
+      "id": "msg_01JB7N8T2X6V9M3Q5R1K4W7YZP",
+      "conversation_id": "cnv_01JB7K5Q1M3X8V2N6R9T4W0YZC",
+      "role": "agent",
+      "agent_kind": "planner",
+      "tone": null,
+      "text": "PR #12 已就绪，合并前需要你的审批。",
+      "level_cap": null,
+      "refs": [{ "kind": "pr", "repo": "acme/web", "number": 12 }],
+      "cards": [
+        {
+          "kind": "approval",
+          "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK"
+        }
+      ],
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "created_at": "2026-10-24T12:20:00.000Z",
+      "updated_at": "2026-10-24T12:20:00.000Z"
+    },
+    {
+      "id": "msg_01JB7NB4K8R2X6V9M3Q5T1W7YZ",
+      "conversation_id": "cnv_01JB7K5Q1M3X8V2N6R9T4W0YZC",
+      "role": "event",
+      "agent_kind": null,
+      "tone": "ok",
+      "text": "后台已修复 PR #12 的 lint 失败（f2c03d8）",
+      "level_cap": null,
+      "refs": [{ "kind": "pr", "repo": "acme/web", "number": 12 }],
+      "cards": [],
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "created_at": "2026-10-24T12:30:00.000Z",
+      "updated_at": "2026-10-24T12:30:00.000Z"
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "worktree_id": {
+      "$ref": "#/$defs/Id_wtr"
+    },
+    "reason": {
+      "$ref": "#/$defs/WorktreeUnlockReason"
+    }
+  },
+  "required": [
+    "worktree_id",
+    "reason"
+  ],
+  "title": "WorktreeUnlockedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "WorktreeUnlockReason": {
+      "type": "string",
+      "enum": [
+        "released",
+        "expired"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "worktree.unlocked",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

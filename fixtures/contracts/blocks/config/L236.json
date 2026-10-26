@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "models": {
+    "capabilities": {
+      "anthropic/example-worker-model": { "tools": true, "reasoning_efforts": ["none", "low", "medium", "high", "max"] }
+    },
+    "adapters": { "claude-code": { "provider_kinds": ["anthropic"], "supports_fallback": false } }
+  },
+  "policies": {
+    "actions": {
+      "merge_pr": { "default": "approve", "allowed": ["approve", "deny"], "dangerous": true, "reserved": false }
+    }
+  },
+  "guardian": {
+    "triage": {
+      "nit": { "default": "batch", "allowed": ["batch", "escalate"], "locked": false },
+      "security_finding": { "locked": true, "value": "escalate", "allowed": [] }
+    }
+  },
+  "roles": { "approver_keys": ["models.providers", "levels.*.graph_template", "github.*"] }
+}

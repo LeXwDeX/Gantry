@@ -1,0 +1,457 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_msg"
+    },
+    "conversation_id": {
+      "$ref": "#/$defs/Id_cnv"
+    },
+    "role": {
+      "$ref": "#/$defs/MessageRole"
+    },
+    "agent_kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "text": {
+      "type": "string"
+    },
+    "tone": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MessageTone"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "level_cap": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Level"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "refs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Ref"
+      }
+    },
+    "cards": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Card"
+      }
+    },
+    "delivery_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "conversation_id",
+    "role",
+    "text",
+    "refs",
+    "cards",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "Message",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_msg": {
+      "type": "string",
+      "pattern": "^msg_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_cnv": {
+      "type": "string",
+      "pattern": "^cnv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "MessageRole": {
+      "type": "string",
+      "enum": [
+        "user",
+        "agent",
+        "event"
+      ]
+    },
+    "AgentKind": {
+      "type": "string",
+      "enum": [
+        "planner",
+        "worker",
+        "utility"
+      ]
+    },
+    "MessageTone": {
+      "type": "string",
+      "enum": [
+        "info",
+        "ok",
+        "run",
+        "warn"
+      ]
+    },
+    "Level": {
+      "type": "string",
+      "enum": [
+        "None",
+        "Low",
+        "Medium",
+        "High",
+        "Max",
+        "Ultimate"
+      ],
+      "description": "线上档位值：`\"None\"`…`\"Ultimate\"`。"
+    },
+    "Ref": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "issue"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pr"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "worktree"
+            },
+            "id": {
+              "$ref": "#/$defs/Id_wtr"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "delivery"
+            },
+            "id": {
+              "$ref": "#/$defs/Id_dlv"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ]
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Card": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/KnownCard"
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "not": {
+                "enum": [
+                  "plan",
+                  "approval",
+                  "escalation",
+                  "choice",
+                  "summary"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "KnownCard": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "plan"
+            },
+            "delivery_id": {
+              "$ref": "#/$defs/Id_dlv"
+            },
+            "workflow_id": {
+              "$ref": "#/$defs/Id_wfl"
+            },
+            "summary": {
+              "$ref": "#/$defs/UntrustedText"
+            }
+          },
+          "required": [
+            "kind",
+            "delivery_id",
+            "workflow_id",
+            "summary"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "approval"
+            },
+            "approval_id": {
+              "$ref": "#/$defs/Id_apr"
+            }
+          },
+          "required": [
+            "kind",
+            "approval_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "escalation"
+            },
+            "inbox_id": {
+              "$ref": "#/$defs/Id_inb"
+            }
+          },
+          "required": [
+            "kind",
+            "inbox_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "choice"
+            },
+            "inbox_id": {
+              "$ref": "#/$defs/Id_inb"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InboxOption"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "inbox_id",
+            "options"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "summary"
+            },
+            "delivery_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id_dlv"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SummaryItem"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "items"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Id_wfl": {
+      "type": "string",
+      "pattern": "^wfl_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "UntrustedText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "source",
+        "truncated"
+      ],
+      "description": "来自 GitHub、沙盒或其他外部来源的文本。\n\n刻意不实现 `Deref<Target = str>`、`Display`、`AsRef<str>`；取内容必须调用\n[`UntrustedText::as_untrusted_str`]，`Debug` 不输出正文。"
+    },
+    "Id_apr": {
+      "type": "string",
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_inb": {
+      "type": "string",
+      "pattern": "^inb_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "InboxOption": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "primary": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ]
+    },
+    "SummaryItem": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "$ref": "#/$defs/UntrustedText"
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ref"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "entities::Message"
+}

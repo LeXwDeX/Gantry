@@ -1,0 +1,13 @@
+{
+  "kind": "head_diverged",
+  "delivery_id": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM",
+  "target": { "type": "pr", "number": 57 },
+  "expected": { "head_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865", "basis_action": "act_01JBA1H5T7XA3P9C2E6J8M1QWD" },
+  "actual": {
+    "head_sha": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b",
+    "pushed_by": { "login": "alice", "github_id": 1234567, "type": "user" }
+  },
+  "resolution": "github_wins",
+  "synthesized_events": ["pr_synchronized"],
+  "detected_by": "patrol"
+}

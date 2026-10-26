@@ -1,0 +1,602 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/Id_apr"
+    },
+    "delivery_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "action": {
+      "$ref": "#/$defs/ApprovalAction"
+    },
+    "target": {
+      "$ref": "#/$defs/ApprovalTarget"
+    },
+    "subject_digest": {
+      "$ref": "#/$defs/SubjectDigest"
+    },
+    "device_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dev"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "signature": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "status": {
+      "$ref": "#/$defs/ApprovalStatus"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "consumed_by": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "created_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "updated_at": {
+      "$ref": "#/$defs/Timestamp"
+    }
+  },
+  "required": [
+    "id",
+    "action",
+    "target",
+    "subject_digest",
+    "status",
+    "expires_at",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "Approval",
+  "oneOf": [
+    {
+      "properties": {
+        "action": {
+          "const": "merge_pr"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "pr"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "force_push"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "branch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "push_outside_prefix"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "branch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "resolve_review_thread_human"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "review_thread"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "patch_apply_protected"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "patch"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "settings_update"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "settings"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "device_role_change"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "device"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    },
+    {
+      "properties": {
+        "action": {
+          "const": "device_revoke"
+        },
+        "target": {
+          "properties": {
+            "kind": {
+              "const": "device"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "subject_digest"
+      ]
+    }
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "Id_apr": {
+      "type": "string",
+      "pattern": "^apr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ApprovalAction": {
+      "type": "string",
+      "enum": [
+        "push_branch",
+        "create_pr",
+        "update_pr",
+        "upsert_status_comment",
+        "create_comment",
+        "reply_review_thread",
+        "resolve_review_thread",
+        "create_issue",
+        "update_issue",
+        "close_issue",
+        "add_labels",
+        "request_reviewers",
+        "merge_pr",
+        "rerun_failed_jobs",
+        "force_push",
+        "push_outside_prefix",
+        "resolve_review_thread_human",
+        "settings_update",
+        "device_role_change",
+        "device_revoke",
+        "patch_apply_protected"
+      ]
+    },
+    "ApprovalTarget": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pr"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "branch"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "expected_remote_oid": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GitOid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "branch"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "review_thread"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "thread_node_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "number",
+            "thread_node_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "patch"
+            },
+            "repo": {
+              "$ref": "#/$defs/RepoSlug"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/Id_att"
+            },
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "repo",
+            "attempt_id",
+            "rules",
+            "paths"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "settings"
+            },
+            "scope": {
+              "$ref": "#/$defs/SettingsScope"
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id_prj"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resource": {
+              "$ref": "#/$defs/SettingsResource"
+            },
+            "base_rev": {
+              "$ref": "#/$defs/Seq"
+            }
+          },
+          "required": [
+            "kind",
+            "scope",
+            "resource",
+            "base_rev"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "device"
+            },
+            "id": {
+              "$ref": "#/$defs/Id_dev"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "settings"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "scope": {
+                    "const": "global"
+                  },
+                  "project_id": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "scope"
+                ]
+              },
+              {
+                "properties": {
+                  "scope": {
+                    "const": "project"
+                  },
+                  "project_id": {
+                    "not": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "required": [
+                  "scope",
+                  "project_id"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "SettingsScope": {
+      "type": "string",
+      "enum": [
+        "global",
+        "project"
+      ]
+    },
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "SettingsResource": {
+      "type": "string",
+      "enum": [
+        "models",
+        "levels",
+        "policies",
+        "guardian",
+        "sandbox",
+        "egress",
+        "notify",
+        "github"
+      ]
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "Id_dev": {
+      "type": "string",
+      "pattern": "^dev_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "SubjectDigest": {
+      "type": "string",
+      "pattern": "^(sha256:[0-9a-f]{64}|[0-9a-f]{40})$"
+    },
+    "ApprovalStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "granted",
+        "consumed",
+        "invalidated",
+        "expired",
+        "denied"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "entities::Approval"
+}

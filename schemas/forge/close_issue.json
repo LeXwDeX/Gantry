@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "number": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "state_reason": {
+      "$ref": "#/$defs/IssueStateReason"
+    },
+    "require_merged_pr": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0,
+      "default": null
+    }
+  },
+  "required": [
+    "repo",
+    "number",
+    "state_reason"
+  ],
+  "title": "CloseIssuePayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "IssueStateReason": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "not_planned"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "CloseIssuePayload",
+  "x-gantry-action-kind": "close_issue"
+}

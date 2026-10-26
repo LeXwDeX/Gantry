@@ -1,0 +1,122 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "stage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Stage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "template": {
+      "type": "string"
+    },
+    "graph_rev": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NodeDescriptor"
+      }
+    },
+    "delivery_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "conversation_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_cnv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "template",
+    "graph_rev",
+    "nodes"
+  ],
+  "title": "WorkflowCreatedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Stage": {
+      "type": "string",
+      "enum": [
+        "spec",
+        "plan",
+        "implement",
+        "propose",
+        "review",
+        "merge",
+        "closed",
+        "abandoned"
+      ]
+    },
+    "NodeDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "critical": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "role",
+        "depends_on",
+        "required",
+        "critical"
+      ],
+      "description": "`workflow.created` / `revised` 里的节点描述（engine.md §11）。"
+    },
+    "Role": {
+      "type": "string",
+      "pattern": "^(plan|build|verify|single|reasoner|arbiter|summarize|admission|heal|answer|intent|classify|review:[a-z][a-z0-9_-]*)$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_cnv": {
+      "type": "string",
+      "pattern": "^cnv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "workflow.created",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

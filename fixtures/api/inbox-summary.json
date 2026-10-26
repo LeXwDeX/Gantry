@@ -1,0 +1,10 @@
+{
+  "total_open": 2,
+  "by_project": [
+    {
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "open": 2,
+      "max_severity": "blocker"
+    }
+  ]
+}

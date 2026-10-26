@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "$ref": "#/$defs/OutboxFailureCode"
+    },
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "code"
+  ],
+  "description": "`outbox.failed`（forge-actions §2.6）：只在终态发；`code` 取顶层失败码。",
+  "title": "OutboxFailedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "OutboxFailureCode": {
+      "type": "string",
+      "enum": [
+        "rate_limited",
+        "transient",
+        "token_expired",
+        "precondition_failed",
+        "not_mergeable",
+        "validation_failed",
+        "permission_denied",
+        "target_missing",
+        "approval_invalid",
+        "signature_required"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "outbox.failed",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

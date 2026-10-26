@@ -1,0 +1,14 @@
+{
+  "type": "urn:gantry:problem:validation_failed",
+  "title": "Settings validation failed",
+  "status": 422,
+  "code": "validation_failed",
+  "request_id": "01JB7PA2M5R8T3X6N1Q4V9WZYB",
+  "errors": [
+    {
+      "pointer": "/providers/anthropic/credential/secret_ref",
+      "code": "secret_ref_missing",
+      "message": "secret_ref \"model.anthropic.main\" does not exist and no value was supplied"
+    }
+  ]
+}

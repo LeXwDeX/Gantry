@@ -1,0 +1,74 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "pull_number": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "expected_head_sha": {
+      "$ref": "#/$defs/GitOid"
+    },
+    "merge_method": {
+      "$ref": "#/$defs/MergeMethod"
+    },
+    "mode": {
+      "$ref": "#/$defs/MergeMode"
+    },
+    "commit_title": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "commit_message": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "repo",
+    "pull_number",
+    "expected_head_sha",
+    "merge_method",
+    "mode"
+  ],
+  "title": "MergePrPayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "MergeMethod": {
+      "type": "string",
+      "enum": [
+        "merge",
+        "squash",
+        "rebase"
+      ]
+    },
+    "MergeMode": {
+      "type": "string",
+      "enum": [
+        "auto"
+      ],
+      "description": "`mode` 目前只定义 `auto`；其他合并队列模式见 forge-actions OQ-1，未冻结前拒绝。"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "MergePrPayload",
+  "x-gantry-action-kind": "merge_pr"
+}

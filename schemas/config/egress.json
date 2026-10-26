@@ -1,0 +1,145 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "groups": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/EgressGroupPatch"
+      }
+    },
+    "profiles": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/EgressProfilePatch"
+      }
+    },
+    "default_profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "injection": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/EgressInjectionPatch"
+      }
+    }
+  },
+  "title": "EgressPatch",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "EgressGroupPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "EgressProfilePatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "groups": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "EgressInjectionPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hosts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressInjectionKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "header": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecretRefWrite"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "EgressInjectionKind": {
+      "type": "string",
+      "enum": [
+        "bearer",
+        "header"
+      ]
+    },
+    "SecretRefWrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secret_ref"
+      ],
+      "properties": {
+        "secret_ref": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "present": {
+          "type": "boolean",
+          "readOnly": true
+        },
+        "value": {
+          "type": "string",
+          "writeOnly": true
+        }
+      },
+      "x-gantry-secret": true
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-resource": "egress"
+}

@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "id": "bdg_01JB7M4Q1T5X9V2N6R8K3W7YZC",
+      "subject": "delivery",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "conversation_id": null,
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "day": null,
+      "template": "high.multi_review",
+      "limits": {
+        "tokens_by_tier": { "utility": 400000, "planner": 300000, "worker": 8000000 },
+        "nodes": 40,
+        "rounds": 4,
+        "wall_time": 10800,
+        "forge_writes": 120,
+        "concurrency": 3
+      },
+      "used": {
+        "tokens_by_tier": { "utility": 18400, "planner": 52100, "worker": 611000 },
+        "nodes": 4,
+        "attempts": 5,
+        "rounds": 1,
+        "wall_time": 940,
+        "forge_writes": 3
+      },
+      "created_at": "2026-10-24T12:10:00.000Z",
+      "updated_at": "2026-10-24T12:40:58.000Z"
+    }
+  ]
+}

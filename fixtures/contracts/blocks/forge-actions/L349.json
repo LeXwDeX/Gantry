@@ -1,0 +1,6 @@
+{
+  "repo": "acme/shop-api",
+  "target": { "type": "issue", "number": 42 },
+  "client_ref": "p2",
+  "body": "A fix is ready and will be linked here once the PR is opened."
+}

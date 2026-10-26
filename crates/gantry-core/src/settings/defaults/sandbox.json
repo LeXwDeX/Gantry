@@ -1,0 +1,22 @@
+{
+  "driver": "podman",
+  "runtime": "runsc",
+  "base_image": "registry.example/gantry/gantry-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "limits": { "cpu_cores": 2, "mem_mb": 4096, "disk_mb": 10240, "pids": 512, "wall_time_s": 3600 },
+  "max_concurrent_sandboxes": 6,
+  "prewarm": { "enabled": false, "pool_size": 0 },
+  "devcontainer": { "mode": "safe_subset" },
+  "idle_timeout_s": 300,
+  "kill_grace_s": 10,
+  "io": {
+    "progress": { "max_line_bytes": 8192, "max_lines": 20000, "max_rate_per_s": 20 },
+    "artifacts": {
+      "result_max_bytes": 1048576,
+      "report_max_bytes": 262144,
+      "proposals_max_bytes": 262144,
+      "proposals_max_count": 20
+    },
+    "materials": { "max_item_bytes": 65536, "max_total_bytes": 524288 },
+    "logs_tail_bytes": 1048576
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "msg_01JB7NB4K8R2X6V9M3Q5T1W7YZQ",
+  "conversation_id": "cnv_01JB7K5Q1M3X8V2N6R9T4W0YZC",
+  "role": "event",
+  "agent_kind": null,
+  "tone": "ok",
+  "text": "后台已修复 PR #12 的 lint 失败（f2c03d8）",
+  "level_cap": null,
+  "refs": [{ "kind": "pr", "repo": "acme/web", "number": 12 }],
+  "cards": [],
+  "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB"
+}

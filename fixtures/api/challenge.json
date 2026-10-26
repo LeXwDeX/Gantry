@@ -1,0 +1,19 @@
+{
+  "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+  "payload": {
+    "action": "merge_pr",
+    "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+    "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+    "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+    "expires_at": "2026-10-24T12:52:00.000Z",
+    "nonce": "lIXSmI8Oxz4mQbtZkKkIguvXjQtExu3PzyWZHQSw7js",
+    "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+    "target": { "kind": "pr", "number": 12, "repo": "acme/web" },
+    "v": 1
+  },
+  "signing": {
+    "alg": "ES256",
+    "canonicalization": "JCS",
+    "prefix": "gantry/approval/v1\n"
+  }
+}

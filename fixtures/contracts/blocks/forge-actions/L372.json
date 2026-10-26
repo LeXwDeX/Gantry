@@ -1,0 +1,8 @@
+{
+  "repo": "acme/shop-api",
+  "pull_number": 57,
+  "thread_node_id": "PRRT_kwDOabc123_example",
+  "expected_comment_count": 2,
+  "reason": "fixed_in_commit",
+  "fixed_in_oid": "f2c03d84a858156b0121130fd1ec2f391aa90865"
+}
