@@ -1,12 +1,25 @@
 //! 预算检查与记账（engine.md §7.9）。
 
+use gantry_core::entities::BudgetLimits;
 use gantry_core::entities::{BudgetDimension, Tier};
 use gantry_core::events::DeliveryCreatedData;
 use gantry_core::ids::{BudgetId, DeliveryId, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::time::Timestamp;
-use gantry_engine::budget::{charge, check, ledger_for_delivery, low_limits, remaining};
+use gantry_engine::budget::{charge, check, ledger_for_delivery, remaining};
 use serde_json::json;
+
+/// 测试夹具的限额，不代表 `levels.low` 的默认值（默认值见 settings/defaults/levels.json）。
+fn low_limits() -> BudgetLimits {
+    let tokens = [
+        (Tier::Utility, 0),
+        (Tier::Planner, 0),
+        (Tier::Worker, 1_000_000),
+    ]
+    .into_iter()
+    .collect();
+    BudgetLimits::delivery(tokens, 8, 0, 3600, 1, 20)
+}
 
 fn created() -> DeliveryCreatedData {
     serde_json::from_value(json!({
@@ -51,9 +64,10 @@ fn ledger_is_fixed_at_creation() {
 #[test]
 fn budget_is_exhausted_when_used_reaches_limit() {
     let mut ledger = ledger();
-    for _ in 0..8 {
+    for n in 1..=8 {
         check(&ledger, BudgetDimension::Nodes).expect("below limit");
-        charge(&mut ledger, BudgetDimension::Nodes, 1).expect("charge within limit");
+        let exhausted = charge(&mut ledger, BudgetDimension::Nodes, 1);
+        assert_eq!(exhausted.is_some(), n == 8, "charge {n}");
     }
     let error = check(&ledger, BudgetDimension::Nodes).expect_err("8/8 must be exhausted");
     assert_eq!(error.limit, 8);
@@ -61,36 +75,38 @@ fn budget_is_exhausted_when_used_reaches_limit() {
     assert_eq!(remaining(&ledger, BudgetDimension::Nodes), 0);
 }
 
+/// 计量用量是事实：超额也记账，并报告耗尽（§7.9；direct 调用可超支一次）。
 #[test]
-fn charge_over_limit_does_not_mutate() {
+fn charge_records_overrun_and_reports_exhaustion() {
     let mut ledger = ledger();
-    let error =
-        charge(&mut ledger, BudgetDimension::ForgeWrites, 21).expect_err("over forge_writes");
-    assert_eq!(error.limit, 20);
-    assert_eq!(ledger.used.forge_writes, 0);
-    charge(&mut ledger, BudgetDimension::ForgeWrites, 20).expect("exact limit is allowed");
-    assert_eq!(ledger.used.forge_writes, 20);
+    assert!(charge(&mut ledger, BudgetDimension::ForgeWrites, 19).is_none());
+    let exhausted =
+        charge(&mut ledger, BudgetDimension::ForgeWrites, 5).expect("over forge_writes");
+    assert_eq!(exhausted.limit, 20);
+    assert_eq!(exhausted.used, 24);
+    assert_eq!(ledger.used.forge_writes, 24);
+    assert_eq!(remaining(&ledger, BudgetDimension::ForgeWrites), 0);
 }
 
 #[test]
 fn token_tiers_are_independent() {
     let mut ledger = ledger();
-    charge(
+    assert!(charge(
         &mut ledger,
         BudgetDimension::TokensByTier(Tier::Worker),
         999_999,
     )
-    .unwrap();
+    .is_none());
     assert!(check(&ledger, BudgetDimension::TokensByTier(Tier::Worker)).is_ok());
     assert!(check(&ledger, BudgetDimension::TokensByTier(Tier::Planner)).is_err());
-    charge(&mut ledger, BudgetDimension::TokensByTier(Tier::Worker), 1).unwrap();
+    assert!(charge(&mut ledger, BudgetDimension::TokensByTier(Tier::Worker), 1).is_some());
     assert!(check(&ledger, BudgetDimension::TokensByTier(Tier::Worker)).is_err());
 }
 
 #[test]
 fn wall_time_and_rounds_use_the_same_rule() {
     let mut ledger = ledger();
-    charge(&mut ledger, BudgetDimension::WallTime, 3600).unwrap();
+    assert!(charge(&mut ledger, BudgetDimension::WallTime, 3600).is_some());
     assert!(check(&ledger, BudgetDimension::WallTime).is_err());
     assert!(check(&ledger, BudgetDimension::Rounds).is_err());
 }
@@ -99,7 +115,7 @@ fn wall_time_and_rounds_use_the_same_rule() {
 fn concurrency_is_left_to_the_scheduler() {
     let mut ledger = ledger();
     assert!(check(&ledger, BudgetDimension::Concurrency).is_ok());
-    charge(&mut ledger, BudgetDimension::Concurrency, 99).unwrap();
+    assert!(charge(&mut ledger, BudgetDimension::Concurrency, 99).is_none());
     assert_eq!(ledger.used.nodes, 0);
 }
 

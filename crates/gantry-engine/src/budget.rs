@@ -5,7 +5,7 @@
 //! `concurrency` 没有已用计数，由调度器用在途数比较 `limits.concurrency`。
 
 use gantry_core::entities::{
-    BudgetDimension, BudgetLedger, BudgetLimits, BudgetSubject, BudgetUsed, Tier,
+    BudgetDimension, BudgetLedger, BudgetLimits, BudgetSubject, BudgetUsed,
 };
 use gantry_core::events::DeliveryCreatedData;
 use gantry_core::ids::{BudgetId, DeliveryId, ProjectId};
@@ -84,25 +84,19 @@ pub fn check(ledger: &BudgetLedger, dimension: BudgetDimension) -> Result<(), Bu
     }
 }
 
-/// 记账并检查上限；达到或超过上限的增量被拒绝。
+/// 记账：用量是已发生的事实（Egress 计量、已创建的节点），一律累加，不因超额拒绝；
+/// 记账后达到或超过上限时返回耗尽信息，由调用方写 `budget.exhausted`（§7.9）。
+/// 是否允许发起新的消耗由调用方事先用 `check` / `remaining` 判断。
 pub fn charge(
     ledger: &mut BudgetLedger,
     dimension: BudgetDimension,
     delta: u64,
-) -> Result<(), BudgetExceeded> {
+) -> Option<BudgetExceeded> {
     if dimension == BudgetDimension::Concurrency {
-        return Ok(());
+        return None;
     }
     let limit = limit_for(&ledger.limits, dimension);
-    let used = used_for(&ledger.used, dimension);
-    let next = used.saturating_add(delta);
-    if next > limit {
-        return Err(BudgetExceeded {
-            dimension,
-            limit,
-            used,
-        });
-    }
+    let next = used_for(&ledger.used, dimension).saturating_add(delta);
     match dimension {
         BudgetDimension::TokensByTier(tier) => {
             ledger.used.tokens_by_tier.insert(tier, next);
@@ -113,22 +107,14 @@ pub fn charge(
         BudgetDimension::Concurrency => {}
         BudgetDimension::ForgeWrites => ledger.used.forge_writes = next,
     }
-    Ok(())
+    (next >= limit).then_some(BudgetExceeded {
+        dimension,
+        limit,
+        used: next,
+    })
 }
 
 /// 剩余额度；已耗尽返回 0。
 pub fn remaining(ledger: &BudgetLedger, dimension: BudgetDimension) -> u64 {
     limit_for(&ledger.limits, dimension).saturating_sub(used_for(&ledger.used, dimension))
-}
-
-/// 供测试与调用方构造 Low 档台账。
-pub fn low_limits() -> BudgetLimits {
-    let tokens = [
-        (Tier::Utility, 0),
-        (Tier::Planner, 0),
-        (Tier::Worker, 1_000_000),
-    ]
-    .into_iter()
-    .collect();
-    BudgetLimits::delivery(tokens, 8, 0, 3600, 1, 20)
 }
