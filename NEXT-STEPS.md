@@ -4,7 +4,7 @@
 
 本文件是当前统一开发基线的迭代入口。前端已有浏览器模拟场景（scenario），后端已有领域核心、
 端口、内存存储、测试替身与可运行的内存模拟接口（Mock API）。两者尚未接线，真实前后端联调
-未验证；前端不是生产客户端或桌面安装包。**M0 契约未冻结，M1 未启动。**
+未验证；前端不是生产客户端或桌面安装包。**M0 实现基线已合入，M1 已启动。**
 
 运行与检查入口见[根目录说明](README.md#本地接入)和[前端说明](apps/desktop/README.md)。
 本轮已在同一合并候选工作树中完成本机检查，来源为 `main` 的 `0463880` 与后端的 `ea5969b`，
@@ -25,6 +25,36 @@ Node 工程均按现有锁文件以 `npm ci --offline` 安装，复用本机依�
 提示 `esbuild` / `fsevents` 安装脚本尚未获批准；本轮未批准脚本或改依赖，构建与测试均通过。
 未验证 Rust 1.85、Node 22、Linux/Windows 或远端 CI；这些结果不代表真实外部系统、原生外壳、
 生产鉴权或前后端联调通过。
+
+## M1 进展（2026-10-26）
+
+M1 已按 `docs/modules/engine.md` 实现事件写入与控制面；真实端到端仍缺外部环境。
+
+| 已实现（`crates/gantry-engine`） | PR |
+| --- | --- |
+| `low.single` 模板的 `low.implement` 单节点图 | #26 |
+| 事件投影：delivery / workflow / node / attempt / inbox | #33 |
+| 预算台账构造、检查、记账、余额 | #35 |
+| 阶段转移表驱动的 `advance` | #37 |
+| `budget_from_level` 与 `delivery.created` | #39 |
+| Outbox 意图构造与幂等键派生 | #41 |
+| `create_delivery` 单事务写入 | #43 |
+| `advance_stage` 写入 `delivery.stage_changed` | #45 |
+| 暂停 / 继续 / 放弃 | #47 |
+| 调整 `level_cap`（effective 下调待契约 #48） | #49 |
+| 失败节点重试 | #51 |
+| 模板目录、崩溃恢复重放 | #53 |
+| 上报项写入 inbox | #55 |
+
+本机验证：`cargo test -p gantry-engine` 51 项通过；`cargo clippy -p gantry-engine --all-targets --all-features -- -D warnings` 与 `cargo fmt` 通过。结果只覆盖内存存储与测试替身。
+
+未实现或未验证：
+
+- 决策器 `decide`、`DeliveryActor` / `EventRouter`、调度与并发闸。
+- Outbox 执行与审批消费；`PolicyPort` 尚未接入引擎。
+- 终结管线；`waiting_human` / `blocked` 尚无自动切换。
+- `attempt.*` 与 `budget.charged` 的事件写入；`open_inbox` 与轮次历史未完整投影。
+- 真实 GitHub App、模型、Podman、目标主机与代码签名；M1 端到端退出标准全部未验证。
 
 ## 当前后续顺序
 
