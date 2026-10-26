@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -821,6 +822,19 @@ async fn egress_stub_rejects_expired_service_tokens() {
     egress.shutdown();
 }
 
+fn openssl_supports_explicit_dates() -> bool {
+    let Ok(output) = Command::new("openssl").args(["x509", "-help"]).output() else {
+        return false;
+    };
+    // 3.x 的 -help 写 stderr；同时读两路，避免版本差异。
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    help.contains("-not_before") && help.contains("-not_after")
+}
+
 #[test]
 fn test_ca_issues_certificates_and_signs_with_a_separate_p256_key() {
     let ca = TestCA::new().expect("openssl must be available for TestCA");
@@ -857,11 +871,19 @@ fn test_ca_issues_certificates_and_signs_with_a_separate_p256_key() {
         .to_string()
         .starts_with("sha256:"));
 
-    let expired = ca.issue_expired_device().expect("expired");
-    let future = ca.issue_not_yet_valid_device().expect("not yet valid");
+    // shortcut: -not_before/-not_after 需要 OpenSSL 3.4+；Ubuntu 24.04 的 3.0
+    // 不支持任意起止日期，该分支在目标 CI 跳过并输出原因，不伪造通过。
+    if openssl_supports_explicit_dates() {
+        let expired = ca.issue_expired_device().expect("expired");
+        let future = ca.issue_not_yet_valid_device().expect("not yet valid");
+        assert_ne!(expired.cert_pem, future.cert_pem);
+    } else {
+        eprintln!(
+            "skip explicit-date device certs: openssl lacks -not_before/-not_after (needs 3.4+)"
+        );
+    }
     let foreign = ca.issue_foreign_ca_device().expect("foreign");
     let server_only = ca.issue_server_auth_only_device().expect("server auth");
-    assert_ne!(expired.cert_pem, future.cert_pem);
     assert_ne!(foreign.cert_pem, server_only.cert_pem);
     assert!(ca.root_dir().starts_with(std::env::temp_dir()));
     let root_dir = ca.root_dir().to_path_buf();
