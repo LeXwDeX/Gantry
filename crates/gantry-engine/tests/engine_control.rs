@@ -70,11 +70,11 @@ async fn engine() -> (Engine, DeliveryId) {
 #[tokio::test]
 async fn pause_is_idempotent_and_resume_restores() {
     let (engine, id) = engine().await;
-    let paused = engine.pause(id.clone(), operator()).await.unwrap();
+    let paused = engine.pause(id, operator()).await.unwrap();
     assert_eq!(paused.stage_status, StageStatus::Paused);
     assert_eq!(paused.status_before_pause, Some(StageStatus::Running));
 
-    let again = engine.pause(id.clone(), operator()).await.unwrap();
+    let again = engine.pause(id, operator()).await.unwrap();
     assert_eq!(again, paused);
     assert_eq!(
         engine
@@ -88,7 +88,7 @@ async fn pause_is_idempotent_and_resume_restores() {
         2
     );
 
-    let resumed = engine.resume(id.clone(), operator()).await.unwrap();
+    let resumed = engine.resume(id, operator()).await.unwrap();
     assert_eq!(resumed.stage_status, StageStatus::Running);
     assert_eq!(resumed.status_before_pause, None);
 
@@ -102,14 +102,14 @@ async fn pause_is_idempotent_and_resume_restores() {
 async fn abandon_is_terminal() {
     let (engine, id) = engine().await;
     let abandoned = engine
-        .abandon(id.clone(), Some("not needed".to_owned()), operator())
+        .abandon(id, Some("not needed".to_owned()), operator())
         .await
         .unwrap();
     assert_eq!(abandoned.stage, Stage::Abandoned);
     assert_eq!(abandoned.stage_status, StageStatus::Done);
 
     assert!(matches!(
-        engine.abandon(id.clone(), None, operator()).await,
+        engine.abandon(id, None, operator()).await,
         Err(EngineError::InvalidState(_))
     ));
     assert!(matches!(
