@@ -68,7 +68,10 @@ async fn replayed_events_keep_deliveries_isolated() {
     let store = Store::open_in_memory(StoreDeps { clock, ids }, &[])
         .await
         .unwrap();
-    let engine = Engine::new(store.clone());
+    let engine = Engine::new(
+        store.clone(),
+        Arc::new(gantry_fakes::inbox::FakeInbox::new_in(store.clone())),
+    );
 
     let first: DeliveryId = "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB".parse().unwrap();
     let second: DeliveryId = "dlv_01JB7N3R5T8X2V6M9Q4K1W7YZD".parse().unwrap();
@@ -88,7 +91,10 @@ async fn replayed_events_keep_deliveries_isolated() {
         .unwrap();
     engine.advance_stage(stage_request(first)).await.unwrap();
 
-    let recovered = Engine::new(store);
+    let recovered = Engine::new(
+        store.clone(),
+        Arc::new(gantry_fakes::inbox::FakeInbox::new_in(store)),
+    );
     assert_eq!(recovered.template_catalog().templates, ["low.single"]);
     assert_eq!(
         recovered
