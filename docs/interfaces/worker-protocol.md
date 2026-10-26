@@ -1189,3 +1189,7 @@ claude -p \
 | OQ-15 | 包仓库白名单本身是低带宽外泄通道（URL 路径 / 查询串 / 发布）；是否改为 `egress` 内置只读镜像 / 缓存代理。依赖指向 `github.com` 源默认拒绝，见 decisions.md Q-08；`CONNECT` 如何识别尝试已决（P-72，`Proxy-Authorization` 携带 `job_token`，审计按尝试归集） | I1 的实际强度 | 只读缓存代理 | 未处理 |
 | OQ-16 | 预热池（M2）下"先启动、后注入"用 `READY` 文件标记是否接受 | worker 启动逻辑；M2 | — | §3.2，**[提议]** |
 | OQ-17 | 仓库内的 `CLAUDE.md` / `AGENTS.md` 是否自动载入 agent 上下文：它们对 agent 有用，但按 I5 属于"仓库内容" | 适配层的 prompt 组装 | 作为 `file_excerpt` 材料包装后注入；或完全不载入 | 未处理，适配层按 I5 不赋予其权限 |
+
+## 13. 事件 data 送审契约
+
+13 个事件 data 的送审字段见 [event-data.md](event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本文其余语义不变。
