@@ -2,19 +2,20 @@
 //!
 //! 决策器、调度与副作用执行仍未实现。
 
-use gantry_core::entities::{Actor, Seq, Stage, StageStatus};
+use gantry_core::entities::{Actor, NodeStatus, Seq, Stage, StageStatus};
 use gantry_core::events::{
     DeliveryAbandonedData, DeliveryLevelChangedData, DeliveryPausedData, DeliveryResumedData,
-    DeliveryStageChangedData, EventType, LevelChangeKind, NewEvent, SchemaError, Subject,
+    DeliveryStageChangedData, EventType, LevelChangeKind, NewEvent, NodeRetryRequestedData,
+    SchemaError, Subject,
 };
-use gantry_core::ids::{DeliveryId, IdError, ProjectId};
+use gantry_core::ids::{DeliveryId, IdError, NodeId, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::machines::delivery::StageTrigger;
 use gantry_core::machines::TransitionError;
 use gantry_store::{EventFilter, Store, StoreError};
 
 use crate::create::{created_event, NewDelivery};
-use crate::projection::{DeliveryProjection, Projection, ProjectionError};
+use crate::projection::{DeliveryProjection, NodeProjection, Projection, ProjectionError};
 use crate::stage::{advance, StageTransition};
 
 #[derive(Debug, thiserror::Error)]
@@ -108,16 +109,59 @@ impl Engine {
         &self,
         id: &DeliveryId,
     ) -> Result<Option<DeliveryProjection>, EngineError> {
-        let target = id.to_string();
-        let filter = EventFilter {
-            project_ids: None,
-            include: Vec::new(),
-            exclude: Vec::new(),
+        Ok(self.load_projection(id).await?.delivery)
+    }
+
+    /// 人工重试：只接受 `failed` 节点；`failed → queued`。
+    pub async fn retry_node(
+        &self,
+        node_id: NodeId,
+        actor: Actor,
+    ) -> Result<NodeProjection, EngineError> {
+        let delivery_id = self.delivery_of_node(&node_id).await?;
+        let projection = self.load_projection(&delivery_id).await?;
+        let delivery = projection.delivery.as_ref().ok_or(EngineError::NotFound)?;
+        ensure_active(delivery)?;
+        let node = projection
+            .nodes
+            .get(&node_id)
+            .ok_or(EngineError::NotFound)?;
+        if node.status != NodeStatus::Failed {
+            return Err(EngineError::InvalidState("node is not failed"));
+        }
+        let subject = Subject::parse(&node_id.to_string())
+            .map_err(|error| SchemaError::shape("/subject", error.to_string()))?;
+        let event = NewEvent {
+            ty: EventType::NodeRetryRequested,
+            subject,
+            project_id: Some(delivery.project_id),
+            actor: actor.clone(),
+            causation_id: None,
+            correlation_id: Some(delivery_id.to_string()),
+            data: serde_json::to_value(NodeRetryRequestedData {
+                node_id,
+                by: actor.id,
+            })
+            .map_err(|error| SchemaError::shape("/data", error.to_string()))?,
+            dedup_key: None,
         };
+        event.validate()?;
+        let mut tx = self.store.begin_write().await?;
+        tx.append(event).await?;
+        tx.commit().await?;
+        self.load_projection(&delivery_id)
+            .await?
+            .nodes
+            .remove(&node_id)
+            .ok_or(EngineError::NotFound)
+    }
+
+    async fn load_projection(&self, id: &DeliveryId) -> Result<Projection, EngineError> {
+        let target = id.to_string();
         let mut projection = Projection::default();
         let mut cursor = Seq::ZERO;
         loop {
-            let page = self.store.events().scan(cursor, &filter, 200).await?;
+            let page = self.store.events().scan(cursor, &all_events(), 200).await?;
             for event in &page.events {
                 if event.correlation_id.as_deref() == Some(target.as_str()) {
                     projection.apply(event)?;
@@ -128,7 +172,29 @@ impl Engine {
             }
             cursor = page.scanned_to;
         }
-        Ok(projection.delivery)
+        Ok(projection)
+    }
+
+    async fn delivery_of_node(&self, node_id: &NodeId) -> Result<DeliveryId, EngineError> {
+        let target = node_id.to_string();
+        let mut cursor = Seq::ZERO;
+        loop {
+            let page = self.store.events().scan(cursor, &all_events(), 200).await?;
+            for event in &page.events {
+                if event.subject.as_str() == target {
+                    return event
+                        .correlation_id
+                        .as_deref()
+                        .and_then(|value| value.parse().ok())
+                        .ok_or(EngineError::NotFound);
+                }
+            }
+            if page.scanned_to >= page.head {
+                break;
+            }
+            cursor = page.scanned_to;
+        }
+        Err(EngineError::NotFound)
     }
 
     /// 暂停：停止派发新节点，记录暂停前的 `stage_status`。已暂停 → 幂等返回。
@@ -177,7 +243,9 @@ impl Engine {
         actor: Actor,
     ) -> Result<DeliveryProjection, EngineError> {
         if cap == Level::None {
-            return Err(EngineError::Validation("delivery level_cap must not be None"));
+            return Err(EngineError::Validation(
+                "delivery level_cap must not be None",
+            ));
         }
         let current = self.current(&id).await?;
         ensure_active(&current)?;
@@ -280,6 +348,14 @@ fn delivery_event<T: serde::Serialize>(
     };
     event.validate()?;
     Ok(event)
+}
+
+fn all_events() -> EventFilter {
+    EventFilter {
+        project_ids: None,
+        include: Vec::new(),
+        exclude: Vec::new(),
+    }
 }
 
 fn ensure_active(delivery: &DeliveryProjection) -> Result<(), EngineError> {
