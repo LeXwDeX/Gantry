@@ -661,7 +661,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - **运行时**：tokio。`EventRouter`（一个任务）用 `events().tail` 订阅 `store`，持久化游标 `engine`（按各执行体已处理 `seq` 的低水位推进，§7.14.1）；按 §7.14.2 的路由表分发到 `DeliveryActor` 邮箱（None 档临时图按 `conversation_id` 分发到会话执行体）；`AttemptRunner` 是每个尝试一个任务，驱动 `SandboxService` / `models` 并向执行体回报；`Scheduler` 单例持有派发队列与在途计数。
 - **持久化**：引擎没有自己的表。游标按低水位推进、落后于实际处理进度（§7.14.1）；"事件已处理"靠决策幂等而不是游标精确一次。
 - **启动恢复**：
-  1. 读所有非终结交付单元的投影，折叠游标之后的事件，重建 `DeliveryState`；
+  1. 读所有非终结交付单元，以及仍有未清理资源的 `abandoned` / `closed` 交付单元（排队中的 Outbox、未终结尝试、活跃审批、未移除的工作树）的投影，折叠游标之后的事件，重建 `DeliveryState`；
   2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`（worker-protocol §3.5）：仍在运行 → 继续监督；已退出 → 直接 `collect` 并走终结管线；已不存在 → 终结为 `infra_error`（`infra.lost`）并按 §7.8 重试；`direct` 尝试没有沙盒，按 `infra.lost` 重试；终结后 `release`；再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
   3. 终结管线内的补丁提交幂等：先查 `attempt.finished` 是否已存在 `result_tree`，再由 `repo` 按 `refs/gantry/attempt/<job_id>` 查已有提交，已存在则不重复提交；
   4. 对每个交付单元补一次 `decide(Tick)`：应有未建的 Workflow / 悬空的上报项（`dedup_key` 相同则 `Deduped`）都会被补齐（阶段事件与入队之间的崩溃窗口由 §7.14.1 的期望动作集合补齐；同一幂等键不会重复）；
@@ -726,7 +726,9 @@ pub enum ObservedData {
     OutboxCancelled { action_id: ActionId, reason: CancelReason },
     ApprovalRequested { approval_id: ApprovalId, action: ApprovalAction, subject_digest: SubjectDigest },
     Approval { approval_id: ApprovalId, status: ApprovalStatus },  // granted / consumed / invalidated / expired / denied
-    InboxResolved { inbox_id: InboxId, resolution: InboxResolution, option_id: Option<OptionId> },
+    /// item：路由器按 inbox_id 从投影联查的原上报项快照（含 kind、reason_code、target_level、node_id 等）。
+    /// 折叠 inbox.resolved 会把该项移出 open_inbox，执行选项所需的上下文只能随输入带入。
+    InboxResolved { inbox_id: InboxId, resolution: InboxResolution, option_id: Option<OptionId>, item: Option<OpenInbox> },
     InboxDismissed { inbox_id: InboxId },                          // 只记录，不解除阻塞（§7.11）
     PatchValidated(PatchValidatedData),
     PatchRejected(PatchRejectedData),
@@ -963,23 +965,24 @@ pub struct AttemptPlan {
 | --- | --- | --- |
 | `Append(delivery.stage_changed)` | 阶段非终态，或为 T15（阶段 `abandoned` 且 `abandon_cause = PrClosedUnmerged`）；§7.6 对应行的守卫成立；core 转移表有边 | `Tick(Settle)`、`Observed` |
 | T10 `review → merge` 另需 | 若本阶段因 `base_advanced` 进入（`stage_entered.reason`），快照 `pr.synced_at > stage_entered.ts`（对账已回）；否则只产出 `Effect(ReconcileNow)` | `Report::ReconcileDone`、`Observed(forge.synced)` |
-| `Append(delivery.level_changed, kind = cap)` | `cap ≠ None`、≠ 当前上限、阶段非终态；否则 `Reply(Err)`，同值 `Reply(Ok)` | `Command::SetLevelCap`、`inbox.resolved(upgrade)`（取 `OpenInbox.target_level`） |
+| `Append(delivery.level_changed, kind = cap)` | `cap ≠ None`、≠ 当前上限、阶段非终态；否则 `Reply(Err)`，同值 `Reply(Ok)` | `Command::SetLevelCap`、`inbox.resolved(upgrade)`（取输入里 `item.target_level`；`item` 缺失或无 `target_level` → 记错误、不动作） |
 | `Append(delivery.level_changed, kind = effective)` | 新值 > 当前且 ≤ `level_cap`（只升，P-57） | 加码求值（§7.10），M2 |
 | `Append(delivery.paused / resumed)` | 未暂停 / 已暂停；阶段非终态 | `Command::Pause` / `Resume` |
-| `Append(delivery.abandoned)` 及收尾 | 阶段非终态。同一决策另产出：`pending` / `queued` 节点的 `node.finished(cancelled)`、运行中 Workflow 的 `workflow.finished(cancelled)`、运行中尝试的 `CancelAttempt`、排队中 Outbox 的 `CancelOutbox`、活跃补丁审批的 `InvalidateApproval`；PR 仍 open 时 `update_pr(closed)` 进入期望动作集合；尝试全部终结后 `RemoveWorktree`（锁已释放时由执行器先取锁） | T13 / T14 |
+| `Append(delivery.abandoned)` | 阶段非终态 | T13 / T14 |
+| 放弃收尾（每项独立派生，可重放） | 阶段为 `abandoned`，且对应资源尚未清理：`pending` / `queued` 节点 → `node.finished(cancelled)`；`running` 的 Workflow → `workflow.finished(cancelled)`；未终结尝试 → `CancelAttempt`；`outbox` 中仍 `queued` 的动作 → `CancelOutbox`；`approvals` 中本交付单元 `pending` / `granted` 的审批 → `InvalidateApproval`；PR 仍 open → `update_pr(closed)` 进入期望动作集合；尝试全部终结且 `worktree` 非空 → `RemoveWorktree`（锁已释放时由执行器先取锁）。收尾不依赖"刚刚放弃"这一输入，所以在 `delivery.abandoned` 提交后崩溃，也能由 `Tick(Recover)` 重新派生。`forge` 的出站执行器不会因交付单元已放弃而跳过排队动作（forge.md §7.8），因此 `CancelOutbox` 是唯一防线 | 同一决策内的 `Tick(Settle)`、`Tick(Recover)` |
 | `Append(workflow.created)` + `budget.charged(nodes)` | 当前阶段有 agent 图；**自 `stage_entered` 以来尚未建过该阶段的 Workflow**（修正轮与 Low 的 `replan` 显式新建，见下）；追加后 `used.nodes ≤ limits.nodes`（否则走耗尽，§7.9）；ID 由 `mint` 生成 | 进入阶段后的 `Tick(Settle)` |
 | `Append(workflow.finished)` | 全部 `required` 节点 `succeeded` → `succeeded`；放弃或 `replan` 取代 → `cancelled`。**`required` 节点终态失败时不 finish**：下游保持 `pending`、Workflow 保持 `running`，等人工重试或放弃（core 中 Workflow `failed` 无出边，节点也没有 `pending → skipped`） | `Tick(Settle)` |
 | `Append(node.queued)` | 节点 `pending`；依赖已满足（§7.4 通则）；`may_dispatch` | `Tick(Settle)` |
 | `Effect(EnsureWorktree)` | 当前阶段需要写工作树（Low 起的 `implement`）且 `worktree` 为空 | `Tick(Settle)` |
-| `Effect(AcquireLock)` | 节点 `queued`、`exec = sandbox`；`worktree` 已建；`locks` 中无他人未过期租约；`lock_owner` 中该工作树未被本交付单元的其他节点占用（同持有者重入在 repo 是续租，交付单元内的互斥由引擎保证）；`may_dispatch` | `Tick(Settle)`、`LockBusy` 后的 `Timer(LeaseCheck)` |
-| `Append(node.started)` + `Append(attempt.started)` + `budget.charged(attempts)`；提交后 `Effect(RunAttempt)` | `may_dispatch`；节点 `queued`（每次从 `queued` 派发都写 `node.started`），或 `running` 且上一尝试已终结、`retry_not_before ≤ now`；`after_retry_request < MAX_ATTEMPTS_PER_NODE`；并发闸 1、2 通过；`exec = sandbox` 时 `lock_owner` 指向本节点；`reservation.reserve(...) > 0`；`models` 有表项 | `Tick(Settle)`、`Report::LockAcquired`、`Timer(RetryBackoff)` |
+| `Effect(AcquireLock)` | `exec = sandbox`，且节点处于可派发状态：`queued`，或 `running` 且上一尝试已终结、`retry_not_before ≤ now`、`after_retry_request < MAX_ATTEMPTS_PER_NODE`（自动重试）；本节点当前没有有效锁（见下）；`worktree` 已建；`locks` 中无他人未过期租约；`lock_owner` 中该工作树未被本交付单元的其他节点占用（同持有者重入在 repo 是续租，交付单元内的互斥由引擎保证）；`may_dispatch` | `Tick(Settle)`、`LockBusy` 后的 `Timer(LeaseCheck)`、`Timer(RetryBackoff)` |
+| `Append(node.started)` + `Append(attempt.started)` + `budget.charged(attempts)`；提交后 `Effect(RunAttempt)` | `may_dispatch`；节点 `queued`（每次从 `queued` 派发都写 `node.started`），或 `running` 且上一尝试已终结、`retry_not_before ≤ now`；`after_retry_request < MAX_ATTEMPTS_PER_NODE`；并发闸 1、2 通过；`exec = sandbox` 时本节点持有**有效锁**——`lock_owner` 指向本节点，且 `locks` 中该工作树的持有者为 `engine`、`fence` 与执行体内存中的令牌一致、`lease_until > now`；`reservation.reserve(...) > 0`；`models` 有表项 | `Tick(Settle)`、`Report::LockAcquired`、`Timer(RetryBackoff)` |
 | `Effect(RunAttempt { resume: true })` | 尝试有 `attempt.started` 无 `attempt.finished` | `Tick(Recover)` |
 | `Append(attempt.finished)` + `budget.charged`（tokens / wall_time）+ `node.finished`（节点因此进入终态时） | 该尝试无 `attempt.finished`；`Finalized.attempt_id` 匹配 | `Report::AttemptFinalized` |
-| `Effect(ReleaseSandbox)`、`Effect(ReleaseLock)` | 对应 `attempt.finished` 已提交；锁不再被其他未终结尝试使用 | 同上，及 `Tick(Recover)` |
+| `Effect(ReleaseSandbox)`、`Effect(ReleaseLock)` | 对应 `attempt.finished` 已提交；锁不再被其他未终结尝试使用。执行体在 `ReleaseLock` 发出时清除 `lock_owner` 中该项，所以自动重试必须重新 `AcquireLock` 拿新令牌，不会复用已释放的令牌 | 同上，及 `Tick(Recover)` |
 | `Append(node.retry_requested)` + `Resolve`（该节点的 `escalation(attempt_failed)`，`Resolution::System`） | 节点 `failed`、交付单元非终态；否则 `Reply(Err(InvalidState))`。同一决策关闭该上报，`stage_status` 回到 `running`，重试才能通过派发总闸 | `Command::RetryNode` |
 | `Resolve`（`escalation(models_not_configured)`） | 收到 `settings.updated` 后 `env.models` 已有所需表项 | `Observed(SettingsUpdated)` |
 | `Append(budget.charged(forge_writes))` | `outbox.succeeded` 的动作属于本交付单元且尚未记账 | `Observed(OutboxSucceeded)` |
-| `Append(budget.exhausted)` + `Raise(budget_exhausted)` | 某维度 `used ≥ limit` 且本阶段尚无同维度 `budget.exhausted` | 记账后的 `Tick(Settle)` |
+| `Append(budget.exhausted)` + `Raise(budget_exhausted)` | 某维度 `used ≥ limit`，**或**下一步必须的动作只因该维度不足而无法产出（例如进入阶段要建的图需要 `k` 个节点而 `used.nodes + k > limit.nodes`；追加一轮时 `rounds` / `nodes` 不够；预留结果为零）；且本阶段尚无同维度 `budget.exhausted`。`data` 仍为 `{dimension, limit, used}`，与"已用尽"共用同一形状；不出现"追加一半的图"（§7.5） | 记账后或前置条件因预算不满足时的 `Tick(Settle)` |
 | `Effect(JudgeAction)` | 意图 ∈ `expected_actions(state)`；`outbox` 无该 `ActionKey`；不在 `env.denied`；需审批的动作在 `approvals` 中无同主体 `pending` | `Tick(Settle)` |
 | `Enqueue` | `Report::ActionJudged` 为 `Allow`；意图仍 ∈ `expected_actions`；`outbox` 仍无该键；`depends_on` 指向的动作已在 `outbox` | `Report::ActionJudged` |
 | `Effect(RequestApproval)` | 判定为 `NeedsApproval` 且 `pending = None` | `Report::ActionJudged` |
@@ -1016,7 +1019,8 @@ pub struct TemplateCx {
 pub struct RevisionCx { pub round: u32, pub feedback_from: Vec<NodeKey> } // 修正 build 的上游：本轮判定节点
 
 pub enum ExitRule {
-    RequiredSucceeded,                        // plan：全部 required 节点 succeeded（T5；Max 的 reasoner 非 R 不阻塞）
+    RequiredSucceeded,                        // plan：全部 required 节点 succeeded，且全部非 required 节点已进入终态（T5）。
+                                              // "非 R"只表示失败不阻塞，不表示未跑完也可跳过：Max 的 reasoner 是 build 的上游，必须先终结
     PatchCommitted { node: NodeKey },         // Low implement：该节点 succeeded 且 PatchResult::Committed（T6）
     VerdictAccept { head: HeadBinding },      // 阶段结论 ACCEPT，且结论所基于的 head 满足绑定
 }
@@ -1030,7 +1034,7 @@ pub enum HeadBinding {
 | 档位 / 阶段图 | `ExitRule` | 满足后的触发器 |
 | --- | --- | --- |
 | `low.implement` | `PatchCommitted { node: "single" }` | `PatchValidated`（T6） |
-| `*.plan` | `RequiredSucceeded` | `PlanProduced`（T5） |
+| `*.plan` | `RequiredSucceeded`（含非 R 节点已终结） | `PlanProduced`（T5） |
 | `*.implement`（Medium 起） | `VerdictAccept { head: Candidate }` | `PatchValidated`（T6） |
 | `high.spec` / `max.spec` | `VerdictAccept { head: None }` | `AdmissionAccept`（T3） |
 | `*.review`（Medium 起） | `VerdictAccept { head: PrHead }` | 与 CI 条件合取后 `ReviewAcceptCiGreen`（T10） |
