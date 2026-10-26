@@ -32,8 +32,12 @@ fn level_entry() -> LevelEntry {
 
 fn new_delivery(cap: Level, effective: Level) -> NewDelivery {
     NewDelivery {
-        id: "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB".parse::<DeliveryId>().unwrap(),
-        project_id: "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA".parse::<ProjectId>().unwrap(),
+        id: "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB"
+            .parse::<DeliveryId>()
+            .unwrap(),
+        project_id: "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA"
+            .parse::<ProjectId>()
+            .unwrap(),
         title: "fix login timeout".to_owned(),
         level_cap: cap,
         level_effective: effective,
@@ -55,7 +59,9 @@ fn operator() -> Actor {
 async fn engine(cap: Level, effective: Level) -> (Engine, DeliveryId) {
     let clock = Arc::new(FakeClock::new(1_700_000_000_000));
     let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
-    let store = Store::open_in_memory(StoreDeps { clock, ids }, &[]).await.unwrap();
+    let store = Store::open_in_memory(StoreDeps { clock, ids }, &[])
+        .await
+        .unwrap();
     let engine = Engine::new(store);
     let id = engine
         .create_delivery(new_delivery(cap, effective))
