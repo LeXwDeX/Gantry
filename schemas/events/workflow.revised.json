@@ -43,6 +43,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "node_id": {
+          "$ref": "#/$defs/Id_nod"
+        },
         "key": {
           "type": "string"
         },
@@ -63,6 +66,7 @@
         }
       },
       "required": [
+        "node_id",
         "key",
         "role",
         "depends_on",
@@ -71,13 +75,13 @@
       ],
       "description": "`workflow.created` / `revised` 里的节点描述（engine.md §11）。"
     },
-    "Role": {
-      "type": "string",
-      "pattern": "^(plan|build|verify|single|reasoner|arbiter|summarize|admission|heal|answer|intent|classify|review:[a-z][a-z0-9_-]*)$"
-    },
     "Id_nod": {
       "type": "string",
       "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Role": {
+      "type": "string",
+      "pattern": "^(plan|build|verify|single|reasoner|arbiter|summarize|admission|heal|answer|intent|classify|review:[a-z][a-z0-9_-]*)$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

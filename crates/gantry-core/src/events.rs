@@ -1602,6 +1602,7 @@ impl EventData for DeliveryResumedData {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDescriptor {
+    pub node_id: NodeId,
     pub key: String,
     pub role: crate::entities::Role,
     pub depends_on: Vec<String>,

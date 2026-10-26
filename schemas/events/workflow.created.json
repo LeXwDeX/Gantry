@@ -75,6 +75,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "node_id": {
+          "$ref": "#/$defs/Id_nod"
+        },
         "key": {
           "type": "string"
         },
@@ -95,6 +98,7 @@
         }
       },
       "required": [
+        "node_id",
         "key",
         "role",
         "depends_on",
@@ -102,6 +106,10 @@
         "critical"
       ],
       "description": "`workflow.created` / `revised` 里的节点描述（engine.md §11）。"
+    },
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "Role": {
       "type": "string",
