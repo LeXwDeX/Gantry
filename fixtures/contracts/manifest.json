@@ -945,13 +945,13 @@
       "source": "docs/interfaces/forge-actions.md",
       "line": 873,
       "context": "### 7.4 drift 目录",
-      "sha256": "10f1313ecf27202b8dc74528f167e67c093b321dc4374188e4c9f025cdb6f73e",
-      "bytes": 506,
+      "sha256": "32a37a78e3033a458ac22cdc0c47c3d0820442bd2c7be1a6f66794b65d1338d4",
+      "bytes": 552,
       "file": "fixtures/contracts/blocks/forge-actions/L873.json",
-      "status": "skipped",
+      "status": "verified",
       "schema": "schemas/forge/drift.json",
-      "rust": "none",
-      "note": "drift 示例；core 只有无载荷 DriftKind，drift schema 显式拒绝",
+      "rust": "forge::DriftPayload",
+      "note": "forge-actions §7.4 head_diverged 示例；target.repo 已补齐，按 DriftPayload 完整验证",
       "error": null
     },
     {
@@ -1070,7 +1070,7 @@
   "summary": {
     "partial": 21,
     "schema-only": 15,
-    "skipped": 4,
-    "verified": 36
+    "skipped": 3,
+    "verified": 37
   }
 }
