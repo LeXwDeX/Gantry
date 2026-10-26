@@ -140,13 +140,13 @@ B 级全绿后，按 [§4 清单](docs/m1-acceptance.md#4-外部资源最小清�
 5. **上下文管理是策略端口**：材料截断、上游产物摘要、多轮压缩、记忆，统一收敛为可替换的策略（`sandbox.stage` 与 `engine` 的 `ReservationPolicy` 同形），可单测、可按角色配置，不写死在适配层。
 6. **可审计**：每次尝试记录实际生效的扩展清单与摘要（进入 `attempt.started` 或 JobSpec 摘要），便于事后核对"这次 agent 带了什么"。
 
-**参考实现调研**（重点看边界划分与功能取舍，记录"他们踩过的坑"，不照搬代码）：
+**参考实现调研**（重点看边界划分与功能取舍，记录前身项目踩过的坑，避免在 Gantry 重犯；不照搬代码）：
 
 | 方向 | 候选参考 | 要回答的问题 |
 | --- | --- | --- |
 | Agent 扩展模型 | Claude Code 自身的技能、MCP、hooks、插件、子代理机制（worker 第一实现即它） | 哪些扩展在 headless 模式下可控、可关、可审计；配置作用域如何分层 |
-| DAG 编排 | Argo Workflows、Temporal、Airflow / Dagster、LangGraph | 图定义与执行状态的分离、重试与人工介入的建模、图修订（我们的 `graph_rev`）怎样不破坏可重放性 |
-| 规格驱动开发 | 你提到的 "specgit"（**名称待确认**；若指 GitHub 的 spec-kit，则对照它的规格 → 计划 → 任务分层） | 规格、计划、任务的边界与产物格式，能否映射到我们的 `spec` / `plan` 阶段与 `admission` / `plan` 角色 |
+| DAG 编排（**首要**） | 前身项目 [GraphAgent](https://github.com/LeXwDeX/OpenCode-GraphAgent)（AGPL：只借鉴设计与教训，不复用代码，见 README）；对照参考 Argo Workflows、Temporal、LangGraph | GraphAgent 在图定义与执行状态的分离、重试与人工介入、图修订方面的边界哪里划错了、Gantry 现行设计（`graph_rev`、`decide` 纯决策、§7.14）是否已经避开 |
+| 规格驱动交付（**首要**） | 前身项目 [SpecGit](https://github.com/LeXwDeX/SpecGit)（"Issue → PR → 验证完成"交付语义的来源）；对照参考 GitHub spec-kit | SpecGit 的规格 / 计划 / 任务与 GitHub 证据之间的边界、哪些功能取舍后来证明是错的；能否映射到 `spec` / `plan` 阶段、`admission` / `plan` 角色与 Outbox |
 | 沙盒化编码 agent | OpenHands、SWE-agent 等 | 沙盒与宿主的接口面、工具调用的信任边界、上下文压缩策略 |
 
 **产出**：一份调研记录（docs/reviews/，只读）；一条 ADR（扩展通道的边界与分层）；随后才是契约 PR（`JobSpec.extensions`、`AdapterCaps`、设置资源、上下文策略端口），M1 只拒绝非空。
