@@ -658,7 +658,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 ### 7.13 并发模型、持久化与恢复
 
-- **运行时**：tokio。`EventRouter`（一个任务）用 `events().tail` 订阅 `store`，持久化游标 `engine`（按各执行体已处理 `seq` 的低水位推进，§7.14.1）；按 `delivery_id`（事件的 `subject` / `correlation_id`）分发到 `DeliveryActor` 邮箱（None 档临时图按 `conversation_id` 分发到会话执行体）；`AttemptRunner` 是每个尝试一个任务，驱动 `SandboxService` / `models` 并向执行体回报；`Scheduler` 单例持有派发队列与在途计数。
+- **运行时**：tokio。`EventRouter`（一个任务）用 `events().tail` 订阅 `store`，持久化游标 `engine`（按各执行体已处理 `seq` 的低水位推进，§7.14.1）；按 §7.14.2 的路由表分发到 `DeliveryActor` 邮箱（None 档临时图按 `conversation_id` 分发到会话执行体）；`AttemptRunner` 是每个尝试一个任务，驱动 `SandboxService` / `models` 并向执行体回报；`Scheduler` 单例持有派发队列与在途计数。
 - **持久化**：引擎没有自己的表。游标按低水位推进、落后于实际处理进度（§7.14.1）；"事件已处理"靠决策幂等而不是游标精确一次。
 - **启动恢复**：
   1. 读所有非终结交付单元的投影，折叠游标之后的事件，重建 `DeliveryState`；
@@ -681,16 +681,16 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 1. 打开 `WriteTx`，`tx.read()` 折叠得到 `DeliveryState`；调 `decide(state, input, env)`。
 2. 按序执行事务内决策；任何一步失败整笔回滚、不发副作用、不回 `Reply`。成功则提交。
-3. 提交后：把 `Reply` 交给调用方；对每个 `Effect` 先把它的 `EffectKey` 记入执行体内存里的**在途集合**（`env.inflight`），再发起。该副作用的 `Report`（含 `EffectFailed`）到达时从在途集合移除。
+3. 提交后：把 `Reply` 交给调用方；对每个 `Effect` 先把它的 `EffectKey` 记入执行体内存里的**在途集合**（`env.inflight`），再发起。该副作用的 `Report`（含 `Done` 与 `EffectFailed`）到达时从在途集合移除；`ScheduleTimer` 的键在对应 `Tick(Timer)` 到达时移除。
 4. **收敛**：只要上一步产出过事务内决策，就对新状态再调用 `decide(state', Tick(Settle), env')`；某一轮不再产出事务内决策即停（此轮产出的副作用照常发起）。上限 `MAX_SETTLE = 16` 轮，超过视为引擎缺陷：记错误日志、`status` 报 `degraded`、停止为该交付单元决策；不写事件、不上报（词表里没有此码，P-79）。
 
 保证收敛与幂等的三条规则：
 
 - **一切前置条件写在 `decide` 里**（7.14.5 表）。每个 `Effect` 的前置条件都包含"其 `EffectKey` 不在 `env.inflight`"；在途集合不持久化，崩溃后为空，于是 `Tick(Recover)` 恰好把未完成的副作用重新发一遍，而副作用本身幂等（`submit` 按 `job_id`、`release` / `cancel`、`create_worktree`、`acquire_lock` 同持有者重入均幂等，sandbox.md §6.1、repo.md §7.6）。
 - **期望动作集合**：Outbox 动作不靠"刚才发生了什么"决定，而由纯函数 `expected_actions(state) -> BTreeMap<ActionKey, ActionIntent>` 从状态推出（例如阶段为 `propose` 且有 `candidate_head` → 期望一条 `push_branch`）。`JudgeAction` 只为"期望中、`outbox` 里没有、未在途、未被本进程判过 `Deny`"的意图产出；`Enqueue` 回流时再核对该意图仍在期望集合中（用户中途放弃则不入队）。
-- **判定是两段式的**：`PolicyPort::decide_action` / `request_approval` 没有事务参数且自身写事件（`policy.denied`、`approval.requested`），不能在引擎的单写者事务里调用。所以 `decide` 先产出 `Effect::JudgeAction`，判定作为 `Report::ActionJudged` 回流后再产出 `Enqueue`、`Effect::RequestApproval` 或 `Raise`。因此"入队与决策同事务"（§1 第 9 条、§7.1、§7.12）在本节之后的含义是：**入队与"决定入队的那次决策"同事务**；阶段事件（如 T6 的 `stage_changed`）与入队之间存在一个崩溃窗口，由期望动作集合在 `Tick(Recover)` 时补齐，幂等键保证不重复（§7.13 第 4 步"不会悬空"指的是这一点）。`Deny` 的意图记入执行体内存的 `env.denied`，本进程内不再重判；重启后至多重判一次（`policy.denied` 由 `policy` 去重）。
+- **判定是两段式的**：`PolicyPort::decide_action` / `request_approval` 没有事务参数且自身写事件（`policy.denied`、`approval.requested`），不能在引擎的单写者事务里调用。所以 `decide` 先产出 `Effect::JudgeAction`，判定作为 `Report::ActionJudged` 回流后再产出 `Enqueue`、`Effect::RequestApproval` 或 `Raise`。因此"入队与决策同事务"（§1 第 9 条、§7.1、§7.12）在本节之后的含义是：**入队与"决定入队的那次决策"同事务**；阶段事件（如 T6 的 `stage_changed`）与入队之间存在一个崩溃窗口，由期望动作集合在 `Tick(Recover)` 时补齐，幂等键保证不重复（§7.13 第 4 步"不会悬空"指的是这一点）。`Deny` 的意图记入执行体内存的 `env.denied`，本进程内不再重判，收到 `settings.updated` 时清空（策略可能已改）；重启后至多重判一次（`policy.denied` 由 `policy` 去重）。
 
-**事件游标**：§7.1 第 4 步改为由 `EventRouter` 推进。各执行体按 `seq` 顺序处理各自的输入并在提交后向路由器回报已处理到的 `seq`；路由器以所有执行体中最小的已处理 `seq`（低水位）推进持久游标 `engine`。崩溃后从低水位重放，重复投递由前置条件消化。执行体自己的事务不再 `advance_cursor`。
+**事件游标**：§7.1 第 4 步改为由 `EventRouter` 推进。各执行体按 `seq` 顺序处理各自的输入并在提交后向路由器回报已处理到的 `seq`。低水位 = 仍有"已投递未处理完"事件的执行体中最小的未处理 `seq` − 1；没有积压时取路由器已读到的最大 `seq`（含不投给任何执行体的事件）。路由器以低水位推进持久游标 `engine`，空闲执行体不拖住游标。崩溃后从低水位重放，重复投递由前置条件消化。执行体自己的事务不再 `advance_cursor`。
 
 `create_delivery`（T1）不经 `decide`：此时还没有 `DeliveryState`，由 `Engine::create_delivery` 直接写 `delivery.created`；提交后执行体用 `Tick(Settle)` 推进 T2 / T2b。None 档 `run_answer` 的会话临时图使用同一组 `Input` / `Decision` 类型，状态为 `AnswerState { workflow: WorkflowState, ledger: BudgetLedger, conversation_id }`，决策函数 `decide_answer` 只覆盖调度、尝试与记账，不涉及阶段机（P-58）。
 
@@ -741,7 +741,7 @@ pub enum TickReason {
     Recover,                                  // §7.13 第 4 步
     Timer { at: Timestamp, kind: TimerKind },
 }
-pub enum TimerKind { RetryBackoff { node_id: NodeId }, LeaseCheck, LockRenew { worktree_id: WorktreeId }, RecoveryScan }
+pub enum TimerKind { RetryBackoff { node_id: NodeId }, LeaseCheck { worktree_id: WorktreeId }, LockRenew { worktree_id: WorktreeId }, RecoveryScan }
 ```
 
 `ObservedData` 是对 `schemas/events/*.json` 已校验 `data` 的解码，**不新增事件字段**；`Outbox*` 的 `kind` / `ActionKey` 由投影按 `action_id` 联查，`WorktreeLocked.fence` 取该事件自身的 `seq`（repo.md §7.6）。
@@ -756,7 +756,7 @@ pub enum TimerKind { RetryBackoff { node_id: NodeId }, LeaseCheck, LockRenew { w
 | `outbox.succeeded` / `failed` / `cancelled` | 投影按 `action_id` 联查 `delivery_id` | 是；`outbox.enqueued` / `executing` 只折叠 |
 | `approval.requested` / `granted` / `consumed` / `invalidated` / `expired` / `denied` | 审批的 `delivery_id` | 是（含 `policy` 以引擎 `ActorCtx` 写的 `requested`） |
 | `patch.validated` / `rejected` | 按 `job_id` → 尝试 → 交付单元 | 是 |
-| `worktree.created` / `locked` / `unlocked` / `removed` | `data.delivery_id` | 是（含 `repo` 以引擎 `ActorCtx` 写的） |
+| `worktree.created` / `locked` / `unlocked` / `removed` | `created` / `locked` 取 `data.delivery_id`；`unlocked` / `removed` 的 data 无此字段，按工作树投影以 `worktree_id` 联查 | 是（含 `repo` 以引擎 `ActorCtx` 写的） |
 | `forge.*` | `forge` 的绑定结果（forge.md §7 第 5 步：`forge_effect_index` → `Delivery.pr` / `issues` 投影） | 是；未绑定的不投 |
 | `settings.updated` | 无（`subject = settings`） | 是：广播给**所有**活跃执行体，用于 §9"配置修复后恢复派发" |
 | 其余 | — | 否 |
@@ -769,6 +769,7 @@ pub enum EffectReport {
     LockAcquired { node_id: NodeId, token: LockToken },                  // RepoService::acquire_lock
     LockBusy { node_id: NodeId, holder: LockHolder, until: Option<Timestamp> },
     ReconcileDone { target: ReconcileTarget },                           // ForgeReader::reconcile_now
+    Done { key: EffectKey },                                             // 没有专门结果的副作用成功完成（ReleaseLock、RenewLock、ReleaseSandbox、CancelAttempt、RemoveWorktree、InvalidateApproval、CancelOutbox）
     AttemptFinalized(Finalized),                                         // AttemptRunner 走完 §7.8 终结管线
     EffectFailed { key: EffectKey, error: EffectErrorClass },
 }
@@ -840,7 +841,7 @@ impl DecideEnv<'_> {
 /// 副作用的身份：用于在途去重、DecideSeed 与 EffectFailed 回报。
 pub enum EffectKey {
     Judge(ActionKey), Approval(ActionKey), Worktree(DeliveryId), RemoveWorktree(WorktreeId),
-    Lock(WorktreeId), Unlock(WorktreeId), Run(AttemptId), Cancel(AttemptId), Release(AttemptId),
+    Lock(WorktreeId), Renew(WorktreeId, Seq), Unlock(WorktreeId, Seq), Run(AttemptId), Cancel(AttemptId), Release(AttemptId),
     Invalidate(ApprovalId), CancelOutbox(ActionId), Reconcile(ReconcileTarget), Timer(TimerKind),
 }
 ```
@@ -899,12 +900,12 @@ pub struct FindingFingerprint(Sha256Digest);
 | `approvals` | `BTreeMap<ApprovalId, ApprovalLite>` | `approval.requested`（本交付单元）及后续状态事件；`ApprovalLite = { action, subject_digest, status }` |
 | `locks` | `BTreeMap<WorktreeId, LockLite>` | `worktree.locked` / `unlocked`；`LockLite = { holder, lease_until, fence }`。`LockToken` 可由 `{worktree_id, holder, delivery_id, fence, lease_until}` 重建（repo.md §7.6），重启后无需重新取锁即可续租或释放；租约已过期则重新 `AcquireLock` |
 | `lock_owner` | `BTreeMap<WorktreeId, NodeId>` | **内存**：执行体在 `Report::LockAcquired` 时记下锁是为哪个节点取的；重启后为空，由 `Tick(Recover)` 按"有未终结 sandbox 尝试的节点"重新认领 |
-| `worktree` | `Option<WorktreeInfo>` | `worktree.created`（含 `branch`、`base_sha`）；首个 `single` / `build` 的 `base_sha` 取它，不再单独 `resolve` |
+| `worktree` | `Option<WorktreeInfo>` | `worktree.created`（含 `branch`、`base_sha`）设置，`worktree.removed` 清空；首个 `single` / `build` 的 `base_sha` 取它，不再单独 `resolve` |
 | `last_seq` | `Seq` | 折叠到的最后一条事件 |
 
 `Evidence` 补 `candidate_tree: Option<GitOid>`（`push_branch.expected_tree_oid`）与 `stage_verdicts: BTreeMap<WorkflowId, Verdict>`（按 `VerdictRule` 折叠后的阶段结论）。
 
-**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1；同一（`kind`，`target`）的动作终态失败（`outbox.failed`）、其上报被用户以 `continue` / `done` 关闭后，期望动作的 `epoch` = 上一行 `epoch + 1`（P-53、P-54；需要审批的动作同时需要新审批）；其余情况沿用。
+**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，M1 内不自增：Outbox 终态失败后的上报 `escalation(outbox_failed:*)` 在 P-79 词表里没有选项，用户"决定重试"（§9）目前没有入口，见 7.14.6 E6；在此之前终态失败的动作只能以放弃收场。`create_pr` 的期望意图只用状态里已有的确定字段（交付单元标题、模板正文、绑定 Issue），`open_pr` 提议的标题 / 正文待 E5 落地后再并入，否则崩溃恢复时推出的意图与崩溃前不同，幂等键对不上。
 
 #### 7.14.5 `Decision`
 
@@ -923,9 +924,10 @@ pub enum Decision {
 
 pub enum Effect {
     EnsureWorktree { branch: BranchName, base_ref: String, base_sha: GitOid }, // T2 / T5（§7.12 分支名）
-    RemoveWorktree { worktree_id: WorktreeId },               // T12 / T13 释放工作树
+    RemoveWorktree { worktree_id: WorktreeId, lock: Option<LockToken> }, // T12 / T13 释放工作树；lock 为空时执行器先以 engine 身份取锁再删（remove_worktree 需要 LockToken）
     AcquireLock { worktree_id: WorktreeId, node_id: NodeId, holder: LockHolder, lease_s: u64 },
     ReleaseLock { token: LockToken },
+    RenewLock { token: LockToken, lease_s: u64 },             // Timer(LockRenew) 到期时；每半个租约一次（§7.7）
     RunAttempt(AttemptPlan),                                  // attempt.started 已提交后；Recover 时对未终结尝试重发
     CancelAttempt { attempt_id: AttemptId, why: CancelWhy },
     ReleaseSandbox { attempt_id: AttemptId },                 // attempt.finished 已提交后
@@ -964,23 +966,24 @@ pub struct AttemptPlan {
 | `Append(delivery.level_changed, kind = cap)` | `cap ≠ None`、≠ 当前上限、阶段非终态；否则 `Reply(Err)`，同值 `Reply(Ok)` | `Command::SetLevelCap`、`inbox.resolved(upgrade)`（取 `OpenInbox.target_level`） |
 | `Append(delivery.level_changed, kind = effective)` | 新值 > 当前且 ≤ `level_cap`（只升，P-57） | 加码求值（§7.10），M2 |
 | `Append(delivery.paused / resumed)` | 未暂停 / 已暂停；阶段非终态 | `Command::Pause` / `Resume` |
-| `Append(delivery.abandoned)` 及收尾 | 阶段非终态。同一决策另产出：`pending` / `queued` 节点的 `node.finished(cancelled)`、运行中 Workflow 的 `workflow.finished(cancelled)`、运行中尝试的 `CancelAttempt`、排队中 Outbox 的 `CancelOutbox`、活跃补丁审批的 `InvalidateApproval`；PR 仍 open 时 `update_pr(closed)` 进入期望动作集合；尝试全部终结后 `RemoveWorktree` | T13 / T14 |
+| `Append(delivery.abandoned)` 及收尾 | 阶段非终态。同一决策另产出：`pending` / `queued` 节点的 `node.finished(cancelled)`、运行中 Workflow 的 `workflow.finished(cancelled)`、运行中尝试的 `CancelAttempt`、排队中 Outbox 的 `CancelOutbox`、活跃补丁审批的 `InvalidateApproval`；PR 仍 open 时 `update_pr(closed)` 进入期望动作集合；尝试全部终结后 `RemoveWorktree`（锁已释放时由执行器先取锁） | T13 / T14 |
 | `Append(workflow.created)` + `budget.charged(nodes)` | 当前阶段有 agent 图；**自 `stage_entered` 以来尚未建过该阶段的 Workflow**（修正轮与 Low 的 `replan` 显式新建，见下）；追加后 `used.nodes ≤ limits.nodes`（否则走耗尽，§7.9）；ID 由 `mint` 生成 | 进入阶段后的 `Tick(Settle)` |
 | `Append(workflow.finished)` | 全部 `required` 节点 `succeeded` → `succeeded`；放弃或 `replan` 取代 → `cancelled`。**`required` 节点终态失败时不 finish**：下游保持 `pending`、Workflow 保持 `running`，等人工重试或放弃（core 中 Workflow `failed` 无出边，节点也没有 `pending → skipped`） | `Tick(Settle)` |
 | `Append(node.queued)` | 节点 `pending`；依赖已满足（§7.4 通则）；`may_dispatch` | `Tick(Settle)` |
 | `Effect(EnsureWorktree)` | 当前阶段需要写工作树（Low 起的 `implement`）且 `worktree` 为空 | `Tick(Settle)` |
-| `Effect(AcquireLock)` | 节点 `queued`、`exec = sandbox`；`worktree` 已建；`locks` 中无他人未过期租约；`may_dispatch` | `Tick(Settle)`、`LockBusy` 后的 `Timer(LeaseCheck)` |
+| `Effect(AcquireLock)` | 节点 `queued`、`exec = sandbox`；`worktree` 已建；`locks` 中无他人未过期租约；`lock_owner` 中该工作树未被本交付单元的其他节点占用（同持有者重入在 repo 是续租，交付单元内的互斥由引擎保证）；`may_dispatch` | `Tick(Settle)`、`LockBusy` 后的 `Timer(LeaseCheck)` |
 | `Append(node.started)` + `Append(attempt.started)` + `budget.charged(attempts)`；提交后 `Effect(RunAttempt)` | `may_dispatch`；节点 `queued`（每次从 `queued` 派发都写 `node.started`），或 `running` 且上一尝试已终结、`retry_not_before ≤ now`；`after_retry_request < MAX_ATTEMPTS_PER_NODE`；并发闸 1、2 通过；`exec = sandbox` 时 `lock_owner` 指向本节点；`reservation.reserve(...) > 0`；`models` 有表项 | `Tick(Settle)`、`Report::LockAcquired`、`Timer(RetryBackoff)` |
 | `Effect(RunAttempt { resume: true })` | 尝试有 `attempt.started` 无 `attempt.finished` | `Tick(Recover)` |
 | `Append(attempt.finished)` + `budget.charged`（tokens / wall_time）+ `node.finished`（节点因此进入终态时） | 该尝试无 `attempt.finished`；`Finalized.attempt_id` 匹配 | `Report::AttemptFinalized` |
 | `Effect(ReleaseSandbox)`、`Effect(ReleaseLock)` | 对应 `attempt.finished` 已提交；锁不再被其他未终结尝试使用 | 同上，及 `Tick(Recover)` |
-| `Append(node.retry_requested)` | 节点 `failed`、交付单元非终态；否则 `Reply(Err(InvalidState))` | `Command::RetryNode` |
+| `Append(node.retry_requested)` + `Resolve`（该节点的 `escalation(attempt_failed)`，`Resolution::System`） | 节点 `failed`、交付单元非终态；否则 `Reply(Err(InvalidState))`。同一决策关闭该上报，`stage_status` 回到 `running`，重试才能通过派发总闸 | `Command::RetryNode` |
+| `Resolve`（`escalation(models_not_configured)`） | 收到 `settings.updated` 后 `env.models` 已有所需表项 | `Observed(SettingsUpdated)` |
 | `Append(budget.charged(forge_writes))` | `outbox.succeeded` 的动作属于本交付单元且尚未记账 | `Observed(OutboxSucceeded)` |
 | `Append(budget.exhausted)` + `Raise(budget_exhausted)` | 某维度 `used ≥ limit` 且本阶段尚无同维度 `budget.exhausted` | 记账后的 `Tick(Settle)` |
 | `Effect(JudgeAction)` | 意图 ∈ `expected_actions(state)`；`outbox` 无该 `ActionKey`；不在 `env.denied`；需审批的动作在 `approvals` 中无同主体 `pending` | `Tick(Settle)` |
 | `Enqueue` | `Report::ActionJudged` 为 `Allow`；意图仍 ∈ `expected_actions`；`outbox` 仍无该键；`depends_on` 指向的动作已在 `outbox` | `Report::ActionJudged` |
 | `Effect(RequestApproval)` | 判定为 `NeedsApproval` 且 `pending = None` | `Report::ActionJudged` |
-| `Raise(approval_needed)` | `approvals` 中有本交付单元 `pending` 的审批，且 `open_inbox` 中没有带该 `approval_id` 的项（覆盖崩溃窗口与 T11 后回到 `merge`） | `Report::ApprovalRequested`、`Observed(ApprovalRequested)`、`Tick(Settle)` |
+| `Raise(approval_needed)` | 阶段为 `merge`；`approvals` 中有本交付单元 `pending` 的审批，且 `open_inbox` 中没有带该 `approval_id` 的项（覆盖崩溃窗口与 T11 后回到 `merge`） | `Report::ApprovalRequested`、`Observed(ApprovalRequested)`、`Tick(Settle)` |
 | `Raise(*)`（其余） | §7.11 对应情形成立；`open_inbox` 中无同 `dedup_key` 项。`Deny` 的上报取 `ReportHint`；`merge_pr` 无 `ReportHint` 时用 `merge_denied_by_policy`；其他动作见 7.14.6 E3 | 各情形 |
 | `Resolve` | `open_inbox` 中有对应项，且解除条件成立（节点重试成功、审批失效、GitHub 上已处理、`supersedes`） | `Observed`、`Tick(Settle)` |
 | Low 档 `inbox.resolved(replan)` | 当前 `low.implement` 的 `workflow.finished(cancelled)` + 其未终结节点 `node.finished(cancelled)` + 新 `low.implement` 的 `workflow.created`，同一决策完成；阶段不变（data-model："Low 档重新实现"） | `Observed(InboxResolved)` |
@@ -996,6 +999,8 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E1 | 本地提交的 `commit_oid` 不在任何事件里（repo.md OQ-R2）。T6 的 `push_branch.local_head_oid` = `Evidence.candidate_head` 无法从日志重建 | `attempt.finished` 增加可选 `result_commit`（有补丁且 `status = succeeded` 时必填，与 `result_tree` 同时出现） | **M1（阻塞端到端与"重启一致"）** |
 | E2 | 无进展检测的 finding 指纹没有落盘处 | 判定节点的 `node.finished` 增加可选 `fingerprints[]`（`FindingFingerprint` 十六进制，≤ 64 条，只在 `REVISE` / `REJECT` 时出现） | M2 / M3（M1 无轮次，`round_history` 恒空） |
 | E3 | `PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报（policy.md 未规定何时省略 `report`） | 二选一：policy.md 规定对 `engine` 发起的动作 `Deny` 必带 `ReportHint`；或 data-model 词表增加通用码 | M1（`merge_pr` 以外的动作） |
+| E5 | `open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态；§7.12 要求 `create_pr` 的 `title` / `body` 取自它 | `attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），执行器据 `result_ref` 从 CAS 取原文填入意图（内容寻址，恢复后一致） | M1（体验；未落地时用模板标题与正文，不阻塞） |
+| E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
 | E4 | `SandboxService::recover` 需区分"job 从未被受理"与"受理后丢失"，`RunAttempt { resume: true }` 才能避免把未起沙盒的尝试判成 `infra.lost` | sandbox.md §6.1 的 `recover` 结果增加"未知 job"一类 | M1（"重启一致"） |
 
 E1、E4 批准前，M1 实现可在测试里用 `FakeRepo` 的确定性 `commit_oid`（= f(`job_id`, `tree`)）与 `FakeSandboxService` 的受理记录推进，但 §12.2"重启一致"在 E1、E4 落地前不能宣布通过。
