@@ -1,0 +1,13 @@
+{
+  "bot": { "github_id": 9988776, "login": "gantry-acme[bot]" },
+  "pr": { "number": 57, "node_id": "PR_kwDOabc123_example", "head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486" },
+  "marker": "gantry:v1 act=act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+  "expected_effects": [
+    {
+      "event": "pull_request.opened",
+      "match": { "head_ref": "gantry/42-fix-pagination", "base_ref": "main" },
+      "matched_webhook_deliveries": ["72d3162e-cc78-11e3-81ab-4c9367dc0958"]
+    }
+  ],
+  "recorded_at": "2026-10-24T12:40:58.221Z"
+}

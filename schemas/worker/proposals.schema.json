@@ -1,0 +1,221 @@
+{
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "$ref": "#/$defs/WorkerProtocol"
+    },
+    "job_id": {
+      "$ref": "#/$defs/Id_att"
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Proposal"
+      }
+    }
+  },
+  "required": [
+    "protocol",
+    "job_id",
+    "proposals"
+  ],
+  "title": "Proposals",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "WorkerProtocol": {
+      "type": "string",
+      "const": "gantry-worker/1"
+    },
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Proposal": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "open_pr"
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "params": {
+              "$ref": "#/$defs/OpenPrParams"
+            },
+            "rationale": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "params",
+            "rationale"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "reply_review_thread"
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "params": {
+              "$ref": "#/$defs/ReplyReviewThreadParams"
+            },
+            "rationale": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "params",
+            "rationale"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "resolve_review_thread"
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "params": {
+              "$ref": "#/$defs/ResolveReviewThreadParams"
+            },
+            "rationale": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "params",
+            "rationale"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "escalate"
+            },
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "params": {
+              "$ref": "#/$defs/EscalateParams"
+            },
+            "rationale": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "params",
+            "rationale"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "OpenPrParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "draft": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title",
+        "body",
+        "draft"
+      ]
+    },
+    "ReplyReviewThreadParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "body"
+      ]
+    },
+    "ResolveReviewThreadParams": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "EscalateParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inbox_kind": {
+          "$ref": "#/$defs/EscalateInboxKind"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "inbox_kind",
+        "message"
+      ]
+    },
+    "EscalateInboxKind": {
+      "type": "string",
+      "enum": [
+        "decision_needed",
+        "spec_needed",
+        "security_finding",
+        "escalation"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "worker::Proposals"
+}

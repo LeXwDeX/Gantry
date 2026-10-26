@@ -1,0 +1,15 @@
+{
+  "rev": 18240,
+  "providers": {
+    "anthropic": { "kind": "anthropic", "base_url": "https://api.anthropic.com", "secret_ref": "model.anthropic.main" }
+  },
+  "groups": {
+    "model_api": { "hosts": ["api.anthropic.com"] },
+    "npm": { "hosts": ["registry.npmjs.org"] },
+    "crates": { "hosts": ["crates.io", "index.crates.io", "static.crates.io"] }
+  },
+  "profiles": { "default": { "groups": ["model_api", "npm", "crates"] } },
+  "default_profile": "default",
+  "injection": {},
+  "token_weights": { "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25 }
+}

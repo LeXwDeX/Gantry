@@ -1,0 +1,1111 @@
+/* 浮层专用样式。令牌来自 @/theme/tokens.css；这里不引入远程资源。 */
+
+.ov-settings-dialog .dialog__surface {
+  background: var(--bg);
+}
+
+.ov-settings {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  overflow-x: hidden;
+}
+
+.ov-settings__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-height: var(--topbar-h);
+  padding: 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--divider);
+}
+
+.ov-settings__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.ov-settings__back:hover {
+  background: var(--row-selected);
+}
+
+.ov-settings__title {
+  font-weight: 600;
+}
+
+.ov-scenario-mark {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  color: var(--need);
+  background: var(--need-soft);
+  border: 1px solid var(--need-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.ov-inbox__header .ov-scenario-mark,
+.ov-approval__head .ov-scenario-mark {
+  margin-left: auto;
+}
+
+.ov-settings__dirty {
+  color: var(--need);
+  font-size: var(--fs-small);
+}
+
+.ov-settings__connection {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+}
+
+.ov-settings__leave {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--need-border);
+  color: var(--need);
+  font-size: 12.5px;
+}
+
+.ov-settings__body {
+  display: grid;
+  grid-template-columns: var(--settings-nav-w) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+
+.ov-settings__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--divider);
+  background: var(--panel);
+  overflow: auto;
+}
+
+.ov-settings__nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ov-settings__nav-title {
+  padding: 10px 8px 6px;
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.4px;
+}
+
+.ov-settings__nav-empty {
+  padding: 0 8px 6px;
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+}
+
+.ov-settings__nav-item {
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--row-text);
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.ov-settings__nav-item:hover {
+  background: var(--row-selected);
+  color: var(--text);
+}
+
+.ov-settings__nav-item[aria-current="page"] {
+  background: var(--row-selected);
+  color: var(--text);
+}
+
+.ov-settings__main {
+  min-width: 0;
+  padding: 20px 24px;
+  overflow: auto;
+}
+
+.ov-settings__page {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: 100%;
+  max-width: var(--settings-content-w);
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ov-settings__lead {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: var(--settings-content-w);
+}
+
+.ov-settings__h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+
+.ov-settings__h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ov-settings__h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.ov-settings__muted {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.ov-settings__meta {
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+}
+
+.ov-settings__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: var(--settings-content-w);
+  min-width: 0;
+}
+
+.ov-settings__section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ov-placeholder {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.7;
+  max-width: 760px;
+}
+
+.ov-models__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  max-width: var(--settings-content-w);
+}
+
+.ov-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  min-width: 0;
+}
+
+.ov-tier__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ov-tier__badge {
+  padding: 0 6px;
+  border: 2px solid currentColor;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+}
+
+.ov-tier--planner .ov-tier__badge {
+  color: var(--planner);
+}
+
+.ov-tier--worker .ov-tier__badge {
+  color: var(--worker);
+}
+
+.ov-tier--utility .ov-tier__badge {
+  color: var(--utility);
+}
+
+.ov-tier__name {
+  font-weight: 600;
+}
+
+.ov-tier__desc {
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+}
+
+.ov-tier__coverage {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.ov-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.ov-field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.ov-input,
+.ov-select,
+.ov-textarea {
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--deep);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-small);
+}
+
+.ov-textarea {
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.ov-select--mono {
+  font-family: var(--font-mono);
+}
+
+.ov-select--sm,
+.ov-input--sm {
+  min-height: 28px;
+  font-size: var(--fs-small);
+}
+
+.ov-field-error {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--warn);
+  font-size: var(--fs-micro);
+}
+
+.ov-credentials {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ov-credential {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.ov-credential__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ov-table-wrap {
+  width: 100%;
+  max-width: var(--settings-content-w);
+  overflow-x: auto;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-lg);
+}
+
+.ov-table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.ov-table th {
+  padding: 8px 12px;
+  background: var(--panel);
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  text-align: left;
+}
+
+.ov-table td {
+  padding: 8px 12px;
+  border-top: 1px solid #1a1e24;
+  vertical-align: top;
+}
+
+.ov-table td .ov-select {
+  min-width: 180px;
+}
+
+.ov-save {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: var(--settings-content-w);
+}
+
+.ov-save__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ov-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--strong-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.ov-btn:hover:not(:disabled) {
+  background: var(--row-selected);
+}
+
+.ov-btn:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.ov-btn--sm {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: var(--fs-small);
+}
+
+.ov-btn--primary {
+  border-color: transparent;
+  background: var(--run);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.ov-btn--primary:hover:not(:disabled) {
+  background: #79b8ff;
+}
+
+.ov-btn--danger {
+  border-color: transparent;
+  background: var(--warn);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.ov-btn--danger-ghost {
+  border-color: var(--strong-border);
+  color: var(--warn);
+}
+
+.ov-btn--warn {
+  border-color: transparent;
+  background: var(--warn);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.ov-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  border: 1px solid var(--strong-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.ov-icon-btn:hover {
+  background: var(--row-selected);
+}
+
+.ov-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--need-border);
+  border-radius: var(--radius-md);
+  background: var(--warn-bg);
+  color: var(--need);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+}
+
+.ov-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+}
+
+.ov-notice--warn {
+  border-color: var(--need-border);
+  background: var(--warn-bg);
+  color: var(--need);
+}
+
+.ov-notice--info {
+  background: var(--deep);
+  color: var(--text-secondary);
+}
+
+.ov-notice--ok {
+  border-color: var(--divider);
+  background: var(--deep);
+  color: var(--ok);
+}
+
+.ov-issues__item {
+  display: block;
+  font-size: var(--fs-micro);
+}
+
+.ov-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.ov-badge--warn {
+  border-color: var(--need-border);
+  background: var(--need-bg);
+  color: var(--need);
+}
+
+.ov-mono {
+  font-family: var(--font-mono);
+}
+
+.ov-break {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.ov-selectable {
+  user-select: all;
+}
+
+.ov-kv {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.ov-kv--compact {
+  grid-template-columns: 116px minmax(0, 1fr);
+}
+
+.ov-kv dt {
+  color: var(--text-muted);
+}
+
+.ov-kv dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.ov-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--need-border);
+  border-radius: var(--radius-md);
+  background: var(--warn-bg);
+}
+
+.ov-write-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--deep);
+}
+
+.ov-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ov-device {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  min-width: 0;
+}
+
+.ov-device__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ov-device__name {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.ov-device__row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ov-device__actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------- 审批单 */
+
+.ov-approval-dialog .dialog__surface {
+  background: var(--panel);
+}
+
+.ov-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 100%;
+  padding: 18px;
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+}
+
+.ov-approval__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ov-approval__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ov-approval__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  font-size: var(--fs-small);
+}
+
+.ov-approval__status--need {
+  border-color: var(--need-border);
+  background: var(--need-soft);
+  color: var(--need);
+}
+
+.ov-approval__status--ok {
+  color: var(--ok);
+}
+
+.ov-approval__status--run {
+  color: var(--run);
+}
+
+.ov-approval__status--warn {
+  color: var(--warn);
+}
+
+.ov-approval__status--idle {
+  color: var(--text-muted);
+}
+
+.ov-approval__signed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--strong-border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.ov-approval__grid {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.ov-approval__grid dt {
+  color: var(--text-muted);
+}
+
+.ov-approval__grid dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ov-approval__tech {
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+.ov-approval__tech summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.ov-approval__unsigned {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px dashed var(--need-border);
+  border-radius: var(--radius-lg);
+  background: var(--need-soft);
+}
+
+.ov-approval__unsigned-title {
+  margin: 0;
+  color: var(--need);
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.ov-approval__snapshot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ov-approval__line {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.ov-approval__links {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.ov-link-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--run);
+  font-size: var(--fs-small);
+  text-align: left;
+}
+
+.ov-link-btn:hover {
+  color: #79b8ff;
+  text-decoration: underline;
+}
+
+.ov-approval__gates {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ov-gates {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+
+.ov-gates li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ov-approval__footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+}
+
+.ov-approval__block {
+  color: var(--need);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+}
+
+.ov-approval__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------- 收件箱 */
+
+.ov-inbox-dialog {
+  margin: 56px 12px auto auto;
+}
+
+.ov-inbox-dialog .dialog__surface {
+  height: auto;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+}
+
+.ov-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 380px;
+  max-width: calc(100vw - 24px);
+  max-height: min(74vh, 720px);
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--strong-border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+}
+
+.ov-inbox__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ov-inbox__eyebrow {
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.4px;
+}
+
+.ov-inbox__group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ov-inbox__group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.ov-inbox__item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 8px;
+}
+
+.ov-inbox__head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.ov-inbox__kind {
+  flex: none;
+  color: var(--need);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+}
+
+.ov-inbox__summary {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: left;
+  min-width: 0;
+}
+
+.ov-inbox__summary:hover {
+  color: var(--run);
+}
+
+.ov-inbox__approval {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  overflow-wrap: anywhere;
+}
+
+.ov-inbox__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.ov-inbox__actions .ov-btn {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+}
+
+.ov-inbox__missing {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+  line-height: 1.55;
+}
+
+.ov-inbox__actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ov-inbox__empty {
+  margin: 0;
+  padding: 6px 2px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* ------------------------------------------------------------- 配对 */
+
+.ov-pairing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+}
+
+.ov-pairing__card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(520px, 100%);
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+
+.ov-pairing__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ov-pairing__phase {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+}
+
+.ov-pairing__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.ov-pairing__code {
+  align-self: center;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 32px;
+  font-weight: 500;
+  letter-spacing: 8px;
+  user-select: all;
+}
+
+@media (max-width: 900px) {
+  .ov-settings__body {
+    display: block;
+    overflow: auto;
+  }
+
+  .ov-settings__nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--divider);
+    overflow: visible;
+  }
+
+  .ov-settings__main {
+    padding: 16px;
+    overflow: visible;
+  }
+
+  .ov-models__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ov-settings__header {
+    gap: 8px;
+  }
+
+  .ov-inbox-dialog {
+    margin: 8px auto auto;
+  }
+
+  .ov-approval {
+    padding: 14px;
+  }
+
+  .ov-approval__grid {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .ov-settings__nav {
+    grid-template-columns: 1fr;
+  }
+
+  .ov-pairing {
+    align-items: flex-start;
+    padding: 12px;
+  }
+
+  .ov-pairing__card {
+    padding: 16px;
+  }
+
+  .ov-kv,
+  .ov-kv--compact {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .ov-kv dd {
+    margin-bottom: 6px;
+  }
+}

@@ -1,0 +1,444 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "providers": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/ModelProviderPatch"
+      }
+    },
+    "retry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RetryPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "utility": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UtilityPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "planner": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlannerPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "worker": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkerPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "title": "ModelsPatch",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ModelProviderPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelCredentialWrite"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ProviderKind": {
+      "type": "string",
+      "enum": [
+        "anthropic"
+      ]
+    },
+    "ModelCredentialWrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "secret_ref"
+      ],
+      "properties": {
+        "type": {
+          "const": "api_key"
+        },
+        "secret_ref": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "present": {
+          "type": "boolean",
+          "readOnly": true
+        },
+        "value": {
+          "type": "string",
+          "writeOnly": true
+        }
+      },
+      "x-gantry-secret": true
+    },
+    "RetryPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "backoff_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "UtilityPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fallback": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Fallback"
+          }
+        },
+        "request_timeout_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total_timeout_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "Effort": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "description": "推理强度（`JobSpec.execution.reasoning_effort`）。"
+    },
+    "Fallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ]
+    },
+    "PlannerPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlannerEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effort_by_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffortByLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fallback": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Fallback"
+          }
+        },
+        "request_timeout_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total_timeout_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "PlannerEffort": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "max",
+        "by_level"
+      ]
+    },
+    "EffortByLevel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "low": {
+          "$ref": "#/$defs/EffortChoice"
+        },
+        "medium": {
+          "$ref": "#/$defs/EffortChoice"
+        },
+        "high": {
+          "$ref": "#/$defs/EffortChoice"
+        },
+        "max": {
+          "$ref": "#/$defs/EffortChoice"
+        }
+      },
+      "required": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ]
+    },
+    "EffortChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/Effort"
+        },
+        "critical": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "default"
+      ]
+    },
+    "WorkerPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkerAdapter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlannerEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effort_by_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffortByLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fallback": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Fallback"
+          }
+        },
+        "request_timeout_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "attempt_wall_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_turns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "WorkerAdapter": {
+      "type": "string",
+      "enum": [
+        "claude-code"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-resource": "models"
+}

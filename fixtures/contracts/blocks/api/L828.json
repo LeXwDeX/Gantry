@@ -1,0 +1,13 @@
+{
+  "valid": true,
+  "errors": [],
+  "warnings": [],
+  "relaxes": [],
+  "required_role": "approver",
+  "requires_signature": true,
+  "signing": {
+    "action": "settings_update",
+    "target": { "kind": "settings", "scope": "global", "resource": "models", "base_rev": 18236 },
+    "subject_digest": "sha256:0d5c4b6e2a91f3d87c0b5e4a3f2d1c6b8a7e9f0d1c2b3a4e5f6a7b8c9d0e1f2a"
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "attempt_id": {
+      "$ref": "#/$defs/Id_att"
+    },
+    "n": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "reasoning_effort": {
+      "$ref": "#/$defs/Effort"
+    },
+    "config_rev": {
+      "$ref": "#/$defs/Seq"
+    },
+    "base_sha": {
+      "$ref": "#/$defs/GitOid"
+    },
+    "tokens_total": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "wall_time_s": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "attempt_id",
+    "n",
+    "provider",
+    "model",
+    "reasoning_effort",
+    "config_rev",
+    "base_sha",
+    "tokens_total",
+    "wall_time_s"
+  ],
+  "description": "`attempt.started`（engine.md §11）。",
+  "title": "AttemptStartedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Effort": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "description": "推理强度（`JobSpec.execution.reasoning_effort`）。"
+    },
+    "Seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "attempt.started",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

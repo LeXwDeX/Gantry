@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "seq": 90211,
+      "at": "2026-10-24T12:41:03.120Z",
+      "caller": { "kind": "svc", "svc_token_id": "svt_01JBX5A2C4E6G8J1L3N5Q7S9UW", "call_id": "01JBX5D2F4H6K8M0P2R4T6V8XZ" },
+      "project_id": null,
+      "ledger": { "subject": "conversation", "id": "cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ", "day": "2026-10-24" },
+      "tier": "utility",
+      "provider": "anthropic",
+      "model": "example-utility-model",
+      "usage": { "input_tokens": 3201, "output_tokens": 410, "cache_read_tokens": 2800, "cache_write_tokens": 0, "requests": 1 },
+      "weighted_tokens": 5531,
+      "incomplete": false
+    },
+    {
+      "seq": 90212,
+      "at": "2026-10-24T12:41:04.877Z",
+      "caller": { "kind": "job", "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD" },
+      "project_id": "prj_01JBX2C7Q5N8D4F6G9H3K1M0PA",
+      "ledger": { "subject": "delivery", "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD" },
+      "tier": "worker",
+      "provider": "anthropic",
+      "model": "example-worker-model",
+      "usage": { "input_tokens": 18200, "output_tokens": 2400, "cache_read_tokens": 9000, "cache_write_tokens": 1200, "requests": 1 },
+      "weighted_tokens": 32600,
+      "incomplete": false
+    }
+  ],
+  "next_cursor": "90212"
+}

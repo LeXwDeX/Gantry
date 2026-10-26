@@ -1,0 +1,55 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "worktree_id": {
+      "$ref": "#/$defs/Id_wtr"
+    },
+    "project_id": {
+      "$ref": "#/$defs/Id_prj"
+    },
+    "delivery_id": {
+      "$ref": "#/$defs/Id_dlv"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "base_ref": {
+      "type": "string"
+    },
+    "base_sha": {
+      "$ref": "#/$defs/GitOid"
+    }
+  },
+  "required": [
+    "worktree_id",
+    "project_id",
+    "delivery_id",
+    "branch",
+    "base_ref",
+    "base_sha"
+  ],
+  "title": "WorktreeCreatedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_wtr": {
+      "type": "string",
+      "pattern": "^wtr_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_prj": {
+      "type": "string",
+      "pattern": "^prj_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Id_dlv": {
+      "type": "string",
+      "pattern": "^dlv_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "worktree.created",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

@@ -248,6 +248,8 @@ pub trait CapabilityTable: Send + Sync {
 
 `CapabilityTable` 回答：模型是否支持工具调用、支持哪些 `reasoning_effort`、上下文窗口；适配器支持哪些 `provider_kind`、是否支持降级。来源（内置表、配置声明还是探测）未定（config OQ-3，OQ-1）；本模块先定义 trait 与一份可注入实现，未知模型的处理（拒绝还是警告）由 OQ-1 决定。校验函数（供 `api` 的校验器调用）：`check_tools(tier, model)`（V04）、`check_effort(model, effort)`（V05）、`check_adapter(adapter, provider_kind, has_fallback)`（V06）、`class_hint(tier, cfg)`（V21）、`check_timeouts(cfg, sandbox_limits)`（V22）。
 
+本节 `budget.charged` data 的送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+
 ## 8. 不变式与安全要求
 
 | 不变式 / 决策 | 本模块如何保证 |

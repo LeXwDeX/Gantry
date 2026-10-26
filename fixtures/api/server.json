@@ -1,0 +1,22 @@
+{
+  "log_epoch": 1,
+  "head": 18240,
+  "server": {
+    "api_version": "v1",
+    "version": "0.1.0",
+    "time": "2026-10-24T12:41:03.456Z",
+    "log_epoch": 1
+  },
+  "certificate_chain": [
+    "-----BEGIN CERTIFICATE-----\nMIIBmock-leaf\n-----END CERTIFICATE-----\n",
+    "-----BEGIN CERTIFICATE-----\nMIIBmock-intermediate\n-----END CERTIFICATE-----\n",
+    "-----BEGIN CERTIFICATE-----\nMIIBmock-root\n-----END CERTIFICATE-----\n"
+  ],
+  "rate_limits": {
+    "read": { "limit": 600, "remaining": 600, "reset": 60 },
+    "write": { "limit": 120, "remaining": 120, "reset": 60 },
+    "message": { "limit": 30, "remaining": 30, "reset": 60 },
+    "sign": { "limit": 30, "remaining": 30, "reset": 60 },
+    "pair_ip": { "limit": 5, "remaining": 5, "reset": 60 }
+  }
+}

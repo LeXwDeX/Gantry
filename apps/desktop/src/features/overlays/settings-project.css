@@ -1,0 +1,226 @@
+/* 项目覆盖页：沿用设置页的紧凑密度与石墨色令牌。 */
+
+.sp-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.sp-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  padding: 6px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sp-tab:hover {
+  border-color: var(--strong-border);
+  color: var(--text);
+}
+
+.sp-tab--active {
+  border-color: var(--focus);
+  background: var(--card);
+  color: var(--text);
+}
+
+.sp-tab__count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sp-resource-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.sp-dirty {
+  color: var(--need);
+}
+
+.sp-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sp-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sp-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.55fr) minmax(0, 2fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.sp-row--clamped {
+  border-color: var(--need);
+}
+
+.sp-row__global {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sp-row__caption {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.sp-row__editor {
+  min-width: 0;
+}
+
+.sp-row__editor .sr-project-row {
+  border-top: 0;
+  padding: 0;
+}
+
+.sp-row__editor .sr-project-row:first-of-type {
+  border-top: 0;
+}
+
+.sp-clamp {
+  margin-top: 2px;
+  padding: 1px 5px;
+  border: 1px solid var(--need);
+  border-radius: 999px;
+  color: var(--need);
+  font-size: 10px;
+  width: fit-content;
+}
+
+.sp-effort {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+}
+
+.sp-effort__head,
+.sp-effort__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sp-effort__title {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.sp-effort__foot {
+  justify-content: space-between;
+}
+
+.sp-effort__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px 10px;
+}
+
+.sp-effort__field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sp-inherit {
+  padding: 6px 8px;
+  border: 1px dashed var(--divider);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sp-save {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+}
+
+.sp-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--strong-border);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.sp-preview__kind {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.sp-preview__json {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .sp-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sp-tab--dirty .sp-tab__count {
+  color: var(--need);
+}

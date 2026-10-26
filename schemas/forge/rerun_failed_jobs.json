@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "run_id": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "expected_run_attempt": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "head_sha": {
+      "$ref": "#/$defs/GitOid"
+    }
+  },
+  "required": [
+    "repo",
+    "run_id",
+    "expected_run_attempt",
+    "head_sha"
+  ],
+  "title": "RerunFailedJobsPayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "RerunFailedJobsPayload",
+  "x-gantry-action-kind": "rerun_failed_jobs"
+}

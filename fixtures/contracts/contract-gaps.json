@@ -1,0 +1,92 @@
+{
+  "generated_by": "manual; consumed by cargo xtask schemas --check",
+  "gaps": [
+    {
+      "id": "G-03",
+      "summary": "ConfigView.injection 的非空形状仍未定义（egress-control §4.6 只有空对象示例）；Rust/schema 只接受空对象，拒绝非空",
+      "source": "docs/interfaces/egress-control.md#46",
+      "affects": [
+        "schemas/egress/config-view.json"
+      ]
+    },
+    {
+      "id": "G-04",
+      "summary": "forge drift 示例有丰富字段，core 只有无载荷的 DriftKind；drift schema 拒绝而不是伪造",
+      "source": "docs/interfaces/forge-actions.md#74",
+      "affects": [
+        "schemas/forge/drift.json",
+        "schemas/events/forge.drift_detected.json"
+      ]
+    },
+    {
+      "id": "G-05",
+      "summary": "core §7.5 的 14 个事件 data 形状未定；每个事件文件生成拒绝型 schema + x-gantry-unresolved",
+      "source": "docs/m0-contract-gaps.md",
+      "affects": [
+        "schemas/events/attempt.progress.json 等 14 个文件"
+      ]
+    }
+  ],
+  "fixed": [
+    {
+      "id": "G-01",
+      "summary": "OutboxAction.payload 已改为按 kind 解码的 ActionPayload；新增 schemas/forge/outbox-action.json"
+    },
+    {
+      "id": "G-02",
+      "summary": "Proposal.params 已按 kind 收窄为 4 个强类型变体；proposals.schema.json 使用判别 oneOf"
+    },
+    {
+      "id": "G-14",
+      "summary": "ProposalsMode 已实现 worker-protocol §4.2 的 \"forbidden\" / {allowed_kinds,max} 线上形状；job/spec 夹具恢复 verify"
+    },
+    {
+      "id": "G-16",
+      "summary": "delivery.stage_changed 的 stage_status 已按 data-model §5.2 改为必填，并同步 OpenAPI 与夹具"
+    },
+    {
+      "id": "G-17",
+      "summary": "inbox.raised 已按 notify.md §7.3 统一为唯一 {item, supersedes?} 形状，移除扁平 InboxItem 的 untagged 兼容"
+    },
+    {
+      "id": "G-06",
+      "summary": "新增 ports::OutboxEnqueueEnvelope：独立可序列化/JsonSchema 的入队信封，含 enqueued_by；OutboxAction 仍不含该字段，ActorCtx 端口签名未变"
+    },
+    {
+      "id": "G-07",
+      "summary": "config.md §12 聚合文档按 8/6 个 resource 的生产 schema 与 *Patch 类型逐资源验证；不生成新 wrapper，示例省略字段的 catalog 仍标 partial"
+    },
+    {
+      "id": "G-18",
+      "summary": "Approval 与 approval.requested 的 schema 由 APPROVAL_SHAPES 生成联动约束；未定义 shape 的动作 fail-closed"
+    },
+    {
+      "id": "G-19",
+      "summary": "ForgeEventEnvelope 按 kind 绑定强类型 data，并要求 origin=self 时 caused_by_action 非空"
+    },
+    {
+      "id": "G-20",
+      "summary": "Card schema 增加未知 kind 降级分支；已知 kind 的坏形状仍被拒绝"
+    },
+    {
+      "id": "G-21",
+      "summary": "Id/Ulid/Subject 与 OpenAPI path/query ID pattern 的首字符限制为 0-7；IdGen 对超出 48 位的时间戳返回 Overflow"
+    },
+    {
+      "id": "G-22",
+      "summary": "settings.updated 按 resource 校验真实内部文档，schema 与 Rust 都拒绝 SecretRef.value（含 null）；负例改用 value.providers 等真实形状"
+    },
+    {
+      "id": "G-23",
+      "summary": "ConfigView.injection 的 serde/schema/Debug 只支持空对象；非空注入仍未定，不猜测结构"
+    },
+    {
+      "id": "G-13",
+      "summary": "egress-control §4.4 暂存示例的 request_id 已改为合法 26 位 ULID；schema 校验通过，按 schema-only 验证（StageSecretRequest 只实现 Serialize）"
+    },
+    {
+      "id": "G-15",
+      "summary": "api.md §4.5 的 Message 示例 id 已改为合法 26 位 ULID；示例仍省略 created_at/updated_at，保持 partial"
+    }
+  ]
+}

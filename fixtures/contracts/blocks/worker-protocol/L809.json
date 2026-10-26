@@ -1,0 +1,25 @@
+{
+  "kind": "arbiter",
+  "verdict": "REVISE",
+  "round": 1,
+  "rationale": "One security finding is upheld; the style finding is a duplicate of an existing lint rule.",
+  "blocking_reasons": [],
+  "rulings": [
+    {
+      "finding_ref": { "node_id": "nod_01JBX3G7K9M1N3P5Q7R9S1T3VW", "finding_id": "f1" },
+      "ruling": "upheld",
+      "severity_final": "major",
+      "duplicate_of": null,
+      "reason": "Reproducible; the bound is missing on the only public entry point."
+    }
+  ],
+  "required_changes": [
+    {
+      "id": "c1",
+      "description": "Clamp per_page to a configured maximum and add a test.",
+      "finding_refs": [{ "node_id": "nod_01JBX3G7K9M1N3P5Q7R9S1T3VW", "finding_id": "f1" }]
+    }
+  ],
+  "pr_summary": "One blocking issue remains: per_page is unbounded (src/api/items.rs). Everything else looks good.",
+  "escalate": { "needed": false, "reason_code": null }
+}

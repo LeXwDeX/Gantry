@@ -1,0 +1,14 @@
+{
+  "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+  "sandbox_id": "sbx_01JBX4R2M6P8Q1S3T5V7W9Y0ZA",
+  "project_id": "prj_01JBX2C7Q5N8D4F6G9H3K1M0PA",
+  "ledger": { "subject": "delivery", "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD" },
+  "tier": "worker",
+  "provider": "anthropic",
+  "profile": "default",
+  "groups": ["model_api", "npm", "crates"],
+  "tokens_total": 800000,
+  "token_weights": { "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25 },
+  "wall_time_s": 1800,
+  "config_rev": 18240
+}

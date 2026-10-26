@@ -1032,3 +1032,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | OQ-25 | 本文对 api.md 的诉求 A1–A9（§2.7）已被采纳，仍待定：(a) resource 从任务清单点名的三个扩到八个是否接受；(c) 没有独立的版本列表 / 回滚路由，历史取自事件流；(d) `catalog` / `status` 结构（§2.8）是否够用。(b) 已决：见 decisions.md P-22；`status` 字段名统一为 `applied_rev` 已决：见第二轮裁决 C26 | 以 api.md 与本文当前文本一致为准 | `api`、`desktop-ui` |
 | OQ-26 | `forge.merge.method`（项目级合并方式）是否做成设置键：目前是 forge 内部常量（`webhook_secret_previous` 已决：见 decisions.md P-29） | 不收录 `forge.*` | `forge`、`deploy` |
 | OQ-27 | ~~档位条目键的大小写~~ | 已决：见 decisions.md P-71（配置里的档位键一律小写，`levels.none.daily_tokens`；线上 `Level` 值仍首字母大写） | — |
+
+## 补充范围（送审，尚未批准）
+
+`ConfigView.injection` 非空视图送审字段见 [config-view-injection.md](config-view-injection.md)；settings 读写契约与 V10/V11/V13 不变。

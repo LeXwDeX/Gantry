@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "by": {
+      "type": "string"
+    },
+    "status_after": {
+      "$ref": "#/$defs/StageStatus"
+    }
+  },
+  "required": [
+    "by",
+    "status_after"
+  ],
+  "title": "DeliveryResumedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "StageStatus": {
+      "type": "string",
+      "enum": [
+        "running",
+        "waiting_human",
+        "blocked",
+        "paused",
+        "done"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "delivery.resumed",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

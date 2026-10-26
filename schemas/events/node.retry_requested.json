@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "node_id": {
+      "$ref": "#/$defs/Id_nod"
+    },
+    "by": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "node_id",
+    "by"
+  ],
+  "title": "NodeRetryRequestedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_nod": {
+      "type": "string",
+      "pattern": "^nod_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "node.retry_requested",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

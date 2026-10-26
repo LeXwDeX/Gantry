@@ -1,0 +1,6 @@
+{
+  "repo": "acme/shop-api",
+  "pull_number": 57,
+  "reviewers": ["alice"],
+  "team_reviewers": []
+}

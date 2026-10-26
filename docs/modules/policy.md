@@ -420,6 +420,8 @@ pub struct PolicyBuild { pub patch_approvals: bool, pub settings: SettingsSource
 7. **失败即关闭**：读 `store` 失败、配置装载失败、审批链路不可用（无法创建 / 读取审批行）→ `approve` 按 `deny` 处理，`Deny(ApprovalChainUnavailable)`，`ReportHint` 建议 `escalation`（config.md §5 fail-closed）。
 8. **审计**：`Deny` 追加 `policy.denied`：`data = {action_id, kind, target, reason_code, config_rev, subject?}`，`dedup_key = hash(project, delivery, action_id, target, subject_digest?, reason_code, config_rev)`，同一判定被反复调用不会刷屏。`NeedsApproval` 的事件是创建审批时的 `approval.requested`（`data` 含 `action`、`target`、`subject_digest`、`expires_at`、`config_rev`、`requested_by`）。
 
+本节 `policy.denied` 的 data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+
 ### 7.4 补丁策略算法 `evaluate_patch`
 
 在 repo 已完成机械检查（能干净应用、P2–P4、二进制 / 符号链接 / 子模块拒绝）的前提下（P-69：a 行大小上限由本模块判定，阈值由本模块持有；b–d 行是对 repo 所给事实的纵深防御复查），按下表顺序逐条取"最严"结论（`deny` > `needs_approval` > `allow`），**收集全部命中的 reasons**（不在首个 deny 处停止，便于审计；但任一 deny 即整体 deny）。规则取调用时的**当前**配置（worker-protocol §8.3 P8）。
@@ -495,6 +497,8 @@ stateDiagram-v2
 
 这些比较与 forge-actions §2.5 / forge.md §7.8 的机械复核重复，是有意的纵深防御；规则重判是 `forge` 做不了的部分。消费之后执行失败（终态）**不退回**审批：`forge` 追加 `outbox.failed`，入队方要重做须新 `epoch` 并取得新审批（P-54）。
 
+本节涉及的 `approval.invalidated` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+
 ### 7.7 失效与过期（后台任务）
 
 | 任务 | 触发 | 动作 |
@@ -504,6 +508,8 @@ stateDiagram-v2
 | `ConfigSubscriber` | `settings.updated` | §7.2 |
 
 补丁审批（`patch_apply_protected`，`target.rules` / `target.paths`）的主体是补丁摘要，不随 PR head 变；它的失效由 `engine` 在补丁被新 Attempt 取代或交付单元放弃时调用 `invalidate`。**`forge.base_advanced` 是否使审批失效契约未定**（OQ-P9）；本规格不失效。
+
+本节涉及的 `approval.invalidated` / `approval.expired` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
 
 ### 7.8 并发模型与持久化
 

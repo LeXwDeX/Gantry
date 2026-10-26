@@ -1,0 +1,17 @@
+[package]
+name = "gantry-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Gantry 契约工具：JSON Schema 生成、漂移检查与契约夹具校验"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+jsonschema = { version = "0.59", default-features = false }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

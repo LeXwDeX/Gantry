@@ -1,0 +1,60 @@
+{
+  "items": [
+    {
+      "id": "inb_01JB7P2K6R9T3X5N8Q1V4W7YZJ",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "kind": "approval_needed",
+      "severity": "blocker",
+      "summary": "PR #12 可以合并，需要你的审批。",
+      "payload": {
+        "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK"
+      },
+      "status": "open",
+      "dedup_key": "approval:apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "created_at": "2026-10-24T12:21:00.000Z",
+      "updated_at": "2026-10-24T12:21:00.000Z"
+    },
+    {
+      "id": "inb_01JB7P3M7S1T4X6N9Q2V5W8YZK",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "kind": "escalation",
+      "severity": "warn",
+      "summary": "改动触及 auth 路径，需要升到 Max 才能插入对抗评审。",
+      "payload": {
+        "reason_code": "level_cap_exceeded",
+        "node_id": null,
+        "attempt_id": null,
+        "target_level": "Max",
+        "evidence": [{ "kind": "pr", "repo": "acme/web", "number": 12 }],
+        "options": [
+          { "id": "upgrade", "label": "升到 Max 并继续", "primary": true },
+          { "id": "narrow", "label": "保持当前，缩小范围" },
+          { "id": "abandon", "label": "放弃" }
+        ]
+      },
+      "status": "open",
+      "dedup_key": "escalation:dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB:level_cap_exceeded:Max",
+      "created_at": "2026-10-24T12:25:00.000Z",
+      "updated_at": "2026-10-24T12:25:00.000Z"
+    },
+    {
+      "id": "inb_01JB7P4N8T2X5V7P9Q3W6X0YZM",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "delivery_id": "dlv_01JB7M5P9R3X7V2N6Q4T8W1YZD",
+      "kind": "spec_needed",
+      "severity": "info",
+      "summary": "需要补充验收标准，任务才能继续规划。",
+      "payload": {
+        "missing": [
+          { "aspect": "acceptance_criteria", "question": "登录超时改为 30 秒的验收标准是什么？" }
+        ]
+      },
+      "status": "dismissed",
+      "dedup_key": "spec_needed:dlv_01JB7M5P9R3X7V2N6Q4T8W1YZD",
+      "created_at": "2026-10-20T10:05:00.000Z",
+      "updated_at": "2026-10-20T10:30:00.000Z"
+    }
+  ]
+}

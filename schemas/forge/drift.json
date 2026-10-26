@@ -1,0 +1,11 @@
+{
+  "title": "forge drift (contract undefined)",
+  "not": {},
+  "x-gantry-unresolved": {
+    "reason": "forge-actions §7.4 给出 drift 示例，但 core 只有无载荷的 ports::forge::DriftKind，没有可生成的形状",
+    "source": "docs/interfaces/forge-actions.md#74-drift-目录",
+    "rejects_all_data": true
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema"
+}

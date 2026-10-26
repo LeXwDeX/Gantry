@@ -1,0 +1,188 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "$ref": "#/$defs/AttemptStatus"
+    },
+    "result_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "failure_class": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FailureClass"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "failure_detail": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "usage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TokenUsage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "result_tree": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GitOid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "served_by": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ServedBy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "description": "`attempt.finished`（engine.md §11）。",
+  "title": "AttemptFinishedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "AttemptStatus": {
+      "type": "string",
+      "enum": [
+        "preparing",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "FailureClass": {
+      "type": "string",
+      "enum": [
+        "timeout",
+        "exec_failed",
+        "verdict_fail",
+        "policy_denied",
+        "cancelled",
+        "budget_exhausted",
+        "infra_error"
+      ]
+    },
+    "TokenUsage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "requests"
+      ]
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ServedBy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Effort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "description": "实际使用的 provider / model / effort（models.md `ServedBy` 的文档化字段）。"
+    },
+    "Effort": {
+      "type": "string",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "description": "推理强度（`JobSpec.execution.reasoning_effort`）。"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "attempt.finished",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

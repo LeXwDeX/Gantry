@@ -226,7 +226,7 @@
 
 ```json
 {
-  "request_id": "01JBX5C7E9G2J4L6N8Q0S3U5WY",
+  "request_id": "01JBX5C7E9G2J4K6N8Q0S3T5WY",
   "secret_ref": "model.anthropic.main",
   "value": "example-value-not-a-real-key"
 }
@@ -467,3 +467,7 @@
 | OQ-8 | ~~控制面与 `models` 通道缺契约（modules/egress.md OQ-E2、models.md OQ-2）~~ | 已决：见 decisions.md P-50（本文） | — |
 | OQ-9 | ~~沙盒调用方按网络身份（源地址）映射到 job~~ | 已决：见 decisions.md P-49（`job_token`） | — |
 | OQ-10 | ~~`models` 经 Unix socket（`models_uds`）还是 HTTP 调用 Egress~~ | 已决：见 decisions.md P-50（回环 HTTP + `svc_token`；`egress.sock` 只承载控制面） | — |
+
+## 补充范围（送审，尚未批准）
+
+§4.6 注入视图细节见 [config-view-injection.md](config-view-injection.md)；§4.2/§4.5 调用级终结候选见 [egress-call-terminal.md](egress-call-terminal.md)。两份都未批准；未批准前，端点行为不变。

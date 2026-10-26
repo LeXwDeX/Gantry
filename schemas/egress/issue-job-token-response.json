@@ -1,0 +1,71 @@
+{
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "$ref": "#/$defs/Id_att"
+    },
+    "job_token": {
+      "$ref": "#/$defs/JobToken"
+    },
+    "model_base_urls": {
+      "$ref": "#/$defs/ModelBaseUrls"
+    },
+    "connect_proxy_url": {
+      "$ref": "#/$defs/ConnectProxyUrl"
+    },
+    "effective_groups": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "issued_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "reissued": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "job_id",
+    "job_token",
+    "model_base_urls",
+    "connect_proxy_url",
+    "effective_groups",
+    "issued_at",
+    "expires_at",
+    "reissued"
+  ],
+  "title": "IssueJobTokenResponse",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "JobToken": {
+      "type": "string",
+      "pattern": "^gjt1_[A-Za-z0-9_-]{43}$"
+    },
+    "ModelBaseUrls": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "含 `job_token` 的基址表；`Debug` 只输出 provider 键。"
+    },
+    "ConnectProxyUrl": {
+      "type": "string",
+      "description": "已含 `job:<job_token>@` 的代理地址；`Debug` 脱敏。"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::IssueJobTokenResponse"
+}

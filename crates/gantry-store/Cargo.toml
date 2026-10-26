@@ -1,0 +1,21 @@
+[package]
+name = "gantry-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 事件存储：M0 内存实现（testing feature）"
+
+[features]
+default = []
+testing = ["gantry-core/testing"]
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+tokio.workspace = true

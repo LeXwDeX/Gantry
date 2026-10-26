@@ -1,0 +1,65 @@
+{
+  "default_level": "Medium",
+  "token_weights": { "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25 },
+  "none": { "daily_tokens": 500000 },
+  "low": {
+    "graph_template": "low.single",
+    "budget": {
+      "tokens_by_tier": { "utility": 100000, "planner": 50000, "worker": 1000000 },
+      "nodes": 6,
+      "rounds": 2,
+      "wall_time_s": 1800,
+      "concurrency": 1,
+      "forge_writes": 30,
+      "forge_writes_per_hour": 20
+    }
+  },
+  "medium": {
+    "graph_template": "medium.plan_build_verify",
+    "budget": {
+      "tokens_by_tier": { "utility": 200000, "planner": 150000, "worker": 3000000 },
+      "nodes": 20,
+      "rounds": 3,
+      "wall_time_s": 5400,
+      "concurrency": 2,
+      "forge_writes": 60,
+      "forge_writes_per_hour": 40
+    }
+  },
+  "high": {
+    "graph_template": "high.multi_review",
+    "budget": {
+      "tokens_by_tier": { "utility": 400000, "planner": 300000, "worker": 8000000 },
+      "nodes": 40,
+      "rounds": 4,
+      "wall_time_s": 10800,
+      "concurrency": 3,
+      "forge_writes": 120,
+      "forge_writes_per_hour": 60
+    }
+  },
+  "max": {
+    "graph_template": "max.adversarial",
+    "budget": {
+      "tokens_by_tier": { "utility": 800000, "planner": 800000, "worker": 20000000 },
+      "nodes": 80,
+      "rounds": 6,
+      "wall_time_s": 21600,
+      "concurrency": 4,
+      "forge_writes": 200,
+      "forge_writes_per_hour": 80
+    }
+  },
+  "ultimate": {
+    "graph_template": "ultimate.milestone",
+    "budget": {
+      "tokens_by_tier": { "utility": 3000000, "planner": 3000000, "worker": 100000000 },
+      "nodes": 400,
+      "rounds": 40,
+      "wall_time_s": 172800,
+      "concurrency": 4,
+      "forge_writes": 1000,
+      "forge_writes_per_hour": 150
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "repo": "acme/shop-api",
+  "client_ref": "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM:followup:1",
+  "title": "Follow-up: add regression test for empty result pages",
+  "body": "由 Gantry 在处理 #42 时发现，范围超出 #42，另开跟进。",
+  "labels": ["gantry/follow-up"],
+  "assignees": [],
+  "milestone": null
+}

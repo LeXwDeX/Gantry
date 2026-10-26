@@ -1,0 +1,231 @@
+{
+  "models": {
+    "providers": {
+      "anthropic": {
+        "kind": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "credential": { "type": "api_key", "secret_ref": "model.anthropic.main" }
+      }
+    },
+    "retry": { "max_attempts": 3, "backoff_ms": 1000 },
+    "utility": {
+      "provider": "anthropic",
+      "model": "example-utility-model",
+      "reasoning_effort": "low",
+      "fallback": [],
+      "request_timeout_s": 60,
+      "total_timeout_s": 120
+    },
+    "planner": {
+      "provider": "anthropic",
+      "model": "example-planner-model",
+      "reasoning_effort": "high",
+      "fallback": [
+        { "provider": "anthropic", "model": "example-planner-fallback-model" }
+      ],
+      "request_timeout_s": 300,
+      "total_timeout_s": 900
+    },
+    "worker": {
+      "adapter": "claude-code",
+      "provider": "anthropic",
+      "model": "example-worker-model",
+      "reasoning_effort": "by_level",
+      "effort_by_level": {
+        "low": { "default": "low" },
+        "medium": { "default": "medium" },
+        "high": { "default": "medium", "critical": "high" },
+        "max": { "default": "high", "critical": "max" }
+      },
+      "fallback": [],
+      "request_timeout_s": 600,
+      "attempt_wall_s": 3600
+    }
+  },
+  "levels": {
+    "default_level": "Medium",
+    "token_weights": { "input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25 },
+    "none": { "daily_tokens": 500000 },
+    "low": {
+      "graph_template": "low.single",
+      "budget": {
+        "tokens_by_tier": { "utility": 100000, "planner": 50000, "worker": 1000000 },
+        "nodes": 6, "rounds": 2, "wall_time_s": 1800, "concurrency": 1, "forge_writes": 30, "forge_writes_per_hour": 20
+      }
+    },
+    "medium": {
+      "graph_template": "medium.plan_build_verify",
+      "budget": {
+        "tokens_by_tier": { "utility": 200000, "planner": 150000, "worker": 3000000 },
+        "nodes": 20, "rounds": 3, "wall_time_s": 5400, "concurrency": 2, "forge_writes": 60, "forge_writes_per_hour": 40
+      }
+    },
+    "high": {
+      "graph_template": "high.multi_review",
+      "budget": {
+        "tokens_by_tier": { "utility": 400000, "planner": 300000, "worker": 8000000 },
+        "nodes": 40, "rounds": 4, "wall_time_s": 10800, "concurrency": 3, "forge_writes": 120, "forge_writes_per_hour": 60
+      }
+    },
+    "max": {
+      "graph_template": "max.adversarial",
+      "budget": {
+        "tokens_by_tier": { "utility": 800000, "planner": 800000, "worker": 20000000 },
+        "nodes": 80, "rounds": 6, "wall_time_s": 21600, "concurrency": 4, "forge_writes": 200, "forge_writes_per_hour": 80
+      }
+    },
+    "ultimate": {
+      "graph_template": "ultimate.milestone",
+      "budget": {
+        "tokens_by_tier": { "utility": 3000000, "planner": 3000000, "worker": 100000000 },
+        "nodes": 400, "rounds": 40, "wall_time_s": 172800, "concurrency": 4, "forge_writes": 1000, "forge_writes_per_hour": 150
+      }
+    }
+  },
+  "policies": {
+    "allow_globs": ["**"],
+    "actions": {
+      "merge_pr": "approve",
+      "force_push": "approve",
+      "push_outside_prefix": "approve",
+      "resolve_review_thread_human": "deny",
+      "delete_branch": "deny",
+      "publish_release": "deny",
+      "change_repo_settings": "deny",
+      "push_branch": "auto",
+      "create_pr": "auto",
+      "update_pr": "auto",
+      "upsert_status_comment": "auto",
+      "create_comment": "auto",
+      "reply_review_thread": "auto",
+      "resolve_review_thread": "auto",
+      "create_issue": "auto",
+      "update_issue": "auto",
+      "close_issue": "auto",
+      "add_labels": "auto",
+      "request_reviewers": "auto",
+      "rerun_failed_jobs": "auto"
+    },
+    "unlisted_action": "approve",
+    "paths": {
+      "workflows": { "globs": [".github/workflows/**"], "disposition": "deny" },
+      "dependency_manifests": {
+        "globs": [
+          "package.json", "**/package.json", "Cargo.toml", "**/Cargo.toml",
+          "pyproject.toml", "**/pyproject.toml", "requirements*.txt",
+          "go.mod", "**/go.mod", "Gemfile", "pom.xml", "build.gradle*"
+        ],
+        "disposition": "approve"
+      },
+      "lockfiles": {
+        "globs": [
+          "package-lock.json", "**/package-lock.json", "pnpm-lock.yaml", "**/pnpm-lock.yaml",
+          "yarn.lock", "**/yarn.lock", "Cargo.lock", "**/Cargo.lock", "poetry.lock",
+          "uv.lock", "go.sum", "**/go.sum", "Gemfile.lock"
+        ],
+        "disposition": "approve"
+      },
+      "sensitive_files": {
+        "globs": [".env", ".env.*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/.npmrc"],
+        "disposition": "deny"
+      },
+      "repo_meta": {
+        "globs": [".github/actions/**", ".github/CODEOWNERS", "CODEOWNERS", ".github/dependabot.yml", ".devcontainer/**"],
+        "disposition": "approve"
+      }
+    },
+    "escalation": {
+      "enabled": true,
+      "rules": {
+        "sensitive_paths": {
+          "when": { "paths": ["**/auth/**", "**/security/**", "**/crypto/**", "**/migrations/**"] },
+          "raise_to": "Max"
+        },
+        "large_diff": {
+          "when": { "diff": { "files_gte": 30, "lines_gte": 1000 } },
+          "raise_to": "High"
+        },
+        "risk_labels": {
+          "when": { "labels": ["security", "breaking-change", "risk:high"] },
+          "raise_to": "Max"
+        }
+      }
+    },
+    "approval": { "ttl_s": 86400 },
+    "patch": { "max_files": 200, "max_bytes": 5000000, "max_changed_lines": 10000, "max_file_bytes": 1000000 }
+  },
+  "guardian": {
+    "triage": {
+      "ci_failure_in_scope": "silent_fix",
+      "bot_finding_valid": "silent_fix",
+      "bot_finding_invalid": "silent_reply",
+      "nit": "batch",
+      "mechanical_conflict": "escalate"
+    },
+    "no_progress": { "same_class_repeats": 2, "stalled_rounds": 2 },
+    "status_checklist": { "enabled": true, "min_update_interval_s": 30 },
+    "patrol_interval_s": 1800
+  },
+  "sandbox": {
+    "driver": "podman",
+    "runtime": "runsc",
+    "base_image": "registry.example/gantry/gantry-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "limits": { "cpu_cores": 2, "mem_mb": 4096, "disk_mb": 10240, "pids": 512, "wall_time_s": 3600 },
+    "max_concurrent_sandboxes": 6,
+    "idle_timeout_s": 300,
+    "kill_grace_s": 10,
+    "io": {
+      "progress": { "max_line_bytes": 8192, "max_lines": 20000, "max_rate_per_s": 20 },
+      "artifacts": {
+        "result_max_bytes": 1048576, "report_max_bytes": 262144,
+        "proposals_max_bytes": 262144, "proposals_max_count": 20
+      },
+      "materials": { "max_item_bytes": 65536, "max_total_bytes": 524288 },
+      "logs_tail_bytes": 1048576
+    },
+    "prewarm": { "enabled": false, "pool_size": 0 },
+    "devcontainer": { "mode": "safe_subset" }
+  },
+  "egress": {
+    "groups": {
+      "model_api": { "hosts": ["api.anthropic.com"] },
+      "npm": { "hosts": ["registry.npmjs.org"] },
+      "pypi": { "hosts": ["pypi.org", "files.pythonhosted.org"] },
+      "crates": { "hosts": ["crates.io", "index.crates.io", "static.crates.io"] },
+      "go": { "hosts": ["proxy.golang.org", "sum.golang.org"] },
+      "private_registry": { "hosts": ["npm.corp.example"] }
+    },
+    "profiles": {
+      "default": { "groups": ["model_api", "npm", "pypi", "crates", "go", "private_registry"] }
+    },
+    "default_profile": "default",
+    "injection": {
+      "npm_private": {
+        "hosts": ["npm.corp.example"],
+        "kind": "bearer",
+        "credential": { "secret_ref": "registry.npm.corp" }
+      }
+    }
+  },
+  "notify": {
+    "channels": { "desktop": { "enabled": true } },
+    "routes": {
+      "urgent": {
+        "kinds": ["security_finding", "approval_needed", "budget_exhausted", "escalation"],
+        "channels": ["desktop"]
+      },
+      "normal": { "kinds": ["decision_needed", "spec_needed"], "channels": ["desktop"] }
+    }
+  },
+  "github": {
+    "app": {
+      "app_id": 1234567,
+      "private_key": { "secret_ref": "github.app.private_key" },
+      "webhook_secret": { "secret_ref": "github.app.webhook_secret" }
+    },
+    "commit_identity": {
+      "name": "gantry-acme[bot]",
+      "email": "9988776+gantry-acme[bot]@users.noreply.github.com"
+    }
+  }
+}

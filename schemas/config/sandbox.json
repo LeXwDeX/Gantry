@@ -1,0 +1,337 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "driver": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SandboxDriver"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runtime": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SandboxRuntime"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "base_image": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limits": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SandboxLimitsPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "max_concurrent_sandboxes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "prewarm": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PrewarmPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "devcontainer": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DevcontainerPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "idle_timeout_s": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "kill_grace_s": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "io": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SandboxIoPatch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "title": "SandboxPatch",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SandboxDriver": {
+      "type": "string",
+      "enum": [
+        "podman"
+      ]
+    },
+    "SandboxRuntime": {
+      "type": "string",
+      "enum": [
+        "runsc",
+        "runc"
+      ]
+    },
+    "SandboxLimitsPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu_cores": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "mem_mb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "disk_mb": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "pids": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wall_time_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "PrewarmPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "pool_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "DevcontainerPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DevcontainerMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DevcontainerMode": {
+      "type": "string",
+      "enum": [
+        "off",
+        "safe_subset"
+      ]
+    },
+    "SandboxIoPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgressIoPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactIoPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materials": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MaterialIoPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logs_tail_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "ProgressIoPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_line_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_lines": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_rate_per_s": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "ArtifactIoPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "result_max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "report_max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "proposals_max_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "proposals_max_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "MaterialIoPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_item_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_total_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-resource": "sandbox"
+}

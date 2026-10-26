@@ -1,0 +1,31 @@
+{
+  "models": {
+    "worker": {
+      "model": "example-worker-model-alt",
+      "reasoning_effort": "high"
+    }
+  },
+  "levels": {
+    "high": { "budget": { "nodes": 20, "wall_time_s": 7200 } }
+  },
+  "policies": {
+    "actions": { "rerun_failed_jobs": "deny" },
+    "paths": {
+      "infra": { "globs": ["deploy/**", "terraform/**"], "disposition": "approve" }
+    },
+    "escalation": {
+      "rules": {
+        "payments": { "when": { "paths": ["src/payments/**"] }, "raise_to": "Max" }
+      }
+    }
+  },
+  "guardian": {
+    "triage": { "nit": "escalate" },
+    "no_progress": { "same_class_repeats": 1 },
+    "status_checklist": { "enabled": false }
+  },
+  "sandbox": { "limits": { "mem_mb": 2048 } },
+  "egress": {
+    "profiles": { "default": { "groups": ["model_api"] } }
+  }
+}

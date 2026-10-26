@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "id": "wfl_01JB7M6T3X9V2N5R8Q1K4W7YZF",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "conversation_id": null,
+      "stage": "implement",
+      "graph_rev": 1,
+      "status": "succeeded",
+      "template": "medium.implement",
+      "created_at": "2026-10-24T12:15:00.000Z",
+      "updated_at": "2026-10-24T12:40:00.000Z"
+    }
+  ],
+  "next_cursor": null
+}

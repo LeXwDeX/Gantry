@@ -1,0 +1,71 @@
+{
+  "items": [
+    {
+      "id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "title": "登录接口超时改为 30 秒",
+      "level_cap": "High",
+      "level_effective": "Medium",
+      "stage": "review",
+      "stage_status": "running",
+      "issues": [
+        {
+          "repo": "acme/web",
+          "number": 5,
+          "node_id": "I_kwDOAbCdEf5",
+          "title": {
+            "text": "Login request times out too early",
+            "source": "github:issue.title",
+            "truncated": false
+          },
+          "state": "open",
+          "state_reason": null,
+          "synced_at": "2026-10-24T12:40:58.000Z"
+        }
+      ],
+      "pr": {
+        "repo": "acme/web",
+        "number": 12,
+        "node_id": "PR_kwDOAbCdEs4",
+        "title": {
+          "text": "fix: raise login timeout to 30s",
+          "source": "github:pr.title",
+          "truncated": false
+        },
+        "state": "open",
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "base_ref": "main",
+        "base_sha": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+        "draft": false,
+        "mergeable_state": "blocked",
+        "in_merge_queue": false,
+        "checks": { "passed": 6, "failed": 0, "pending": 1, "required_ok": false },
+        "review_state": "none",
+        "synced_at": "2026-10-24T12:40:58.000Z"
+      },
+      "worktree_id": "wtr_01JB7M8Q2X5V9N3R6T1K4W0YZE",
+      "parent_id": null,
+      "depends_on": [],
+      "origin": "conversation",
+      "created_at": "2026-10-24T12:10:00.000Z",
+      "updated_at": "2026-10-24T12:40:58.000Z"
+    },
+    {
+      "id": "dlv_01JB7M5P9R3X7V2N6Q4T8W1YZD",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "title": "旧任务：补文档",
+      "level_cap": "Low",
+      "level_effective": "Low",
+      "stage": "closed",
+      "stage_status": "done",
+      "issues": [],
+      "pr": null,
+      "worktree_id": null,
+      "parent_id": null,
+      "depends_on": [],
+      "origin": "conversation",
+      "created_at": "2026-10-20T10:00:00.000Z",
+      "updated_at": "2026-10-21T10:00:00.000Z"
+    }
+  ]
+}

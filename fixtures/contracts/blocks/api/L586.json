@@ -1,0 +1,5 @@
+{
+  "text": "把登录接口的超时改成 30 秒，参考 #5",
+  "level_cap": "High",
+  "refs": [{ "kind": "issue", "repo": "acme/web", "number": 5 }]
+}

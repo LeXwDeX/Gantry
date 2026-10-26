@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "$ref": "#/$defs/RepoSlug"
+    },
+    "pull_number": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "team_reviewers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "repo",
+    "pull_number",
+    "reviewers",
+    "team_reviewers"
+  ],
+  "title": "RequestReviewersPayload",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RepoSlug": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "RequestReviewersPayload",
+  "x-gantry-action-kind": "request_reviewers"
+}

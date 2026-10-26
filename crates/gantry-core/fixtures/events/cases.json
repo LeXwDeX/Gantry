@@ -1,0 +1,1314 @@
+{
+  "valid": {
+    "project.added": {
+      "id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "bot_user_id": 2,
+      "default_branch": "main",
+      "allowed_merge_methods": [
+        "squash"
+      ],
+      "merge_queue_enabled": false,
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "project.updated": {
+      "id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "bot_user_id": 2,
+      "default_branch": "main",
+      "allowed_merge_methods": [
+        "merge",
+        "squash"
+      ],
+      "merge_queue_enabled": true,
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:45:00.000Z"
+    },
+    "settings.updated": {
+      "scope": "global",
+      "resource": "levels",
+      "schema_version": 1,
+      "base_rev": 18236,
+      "value": {
+        "high": {
+          "budget": {
+            "nodes": 30
+          }
+        }
+      },
+      "relaxes": [],
+      "secret_changes": []
+    },
+    "conversation.created": {
+      "id": "cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "delivery.created": {
+      "title": "fix timeout",
+      "level_cap": "High",
+      "level_effective": "Medium",
+      "origin": "conversation",
+      "source_message_id": "msg_01JBX2E3G5J7K9N1Q3S5T7W9YA",
+      "issues": [],
+      "config_rev": 10,
+      "budget": {
+        "template": "high.multi_review",
+        "limits": {
+          "tokens_by_tier": {
+            "utility": 400000,
+            "planner": 300000,
+            "worker": 8000000
+          },
+          "tokens": null,
+          "nodes": 40,
+          "rounds": 4,
+          "wall_time": 10800,
+          "concurrency": 3,
+          "forge_writes": 120
+        }
+      }
+    },
+    "delivery.stage_changed": {
+      "from": "implement",
+      "to": "review",
+      "stage_status": "running"
+    },
+    "delivery.level_changed": {
+      "from": "Medium",
+      "to": "High",
+      "kind": "effective",
+      "reason": "escalation:auth_paths"
+    },
+    "delivery.abandoned": {
+      "reason": "不做了",
+      "by": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"
+    },
+    "delivery.paused": {
+      "by": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+      "status_before": "running"
+    },
+    "delivery.resumed": {
+      "by": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+      "status_after": "running"
+    },
+    "workflow.created": {
+      "stage": "implement",
+      "template": "medium.implement",
+      "graph_rev": 1,
+      "nodes": [
+        {
+          "key": "build",
+          "role": "build",
+          "depends_on": [],
+          "required": true,
+          "critical": false
+        }
+      ],
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "conversation_id": null
+    },
+    "workflow.revised": {
+      "graph_rev": 2,
+      "reason": "revise",
+      "round": 1,
+      "added": [
+        {
+          "key": "verify@r2",
+          "role": "verify",
+          "depends_on": [
+            "build"
+          ],
+          "required": true,
+          "critical": false
+        }
+      ],
+      "superseded": [
+        "nod_01JB7M8V5X1Z3N6R9Q2K4W7YZC"
+      ]
+    },
+    "workflow.finished": {
+      "status": "succeeded"
+    },
+    "node.queued": {
+      "node_id": "nod_01JB7M8V5X1Z3N6R9Q2K4W7YZC",
+      "status": "queued"
+    },
+    "node.started": {
+      "node_id": "nod_01JB7M8V5X1Z3N6R9Q2K4W7YZC",
+      "status": "running"
+    },
+    "node.finished": {
+      "node_id": "nod_01JB7M8V5X1Z3N6R9Q2K4W7YZC",
+      "status": "succeeded",
+      "verdict": "ACCEPT"
+    },
+    "node.superseded": {
+      "node_id": "nod_01JB7M8V5X1Z3N6R9Q2K4W7YZC",
+      "status": "superseded",
+      "superseded_by": "nod_01JB7M8W6X2Z4P7R8Q3K5V1YZD"
+    },
+    "node.retry_requested": {
+      "node_id": "nod_01JB7M8V5X1Z3N6R9Q2K4W7YZC",
+      "by": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"
+    },
+    "attempt.started": {
+      "attempt_id": "att_01JB7X4Q9ZK3M8T5V2N7RHC6WY",
+      "n": 1,
+      "provider": "anthropic",
+      "model": "claude",
+      "reasoning_effort": "medium",
+      "config_rev": 10,
+      "base_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+      "tokens_total": 1000,
+      "wall_time_s": 600
+    },
+    "attempt.finished": {
+      "status": "succeeded",
+      "result_ref": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+      "failure_class": null,
+      "failure_detail": null,
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "requests": 1
+      },
+      "result_tree": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+      "served_by": {
+        "provider": "anthropic",
+        "model": "claude",
+        "effort": "medium"
+      }
+    },
+    "patch.validated": {
+      "job_id": "att_01JB7X4Q9ZK3M8T5V2N7RHC6WY",
+      "sha256": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+      "base_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+      "result_tree": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+      "verdict": "allow",
+      "files": [
+        {
+          "path": "src/lib.rs",
+          "status": "modified",
+          "is_binary": false,
+          "is_symlink": false,
+          "is_submodule": false,
+          "added": 2,
+          "deleted": 1
+        }
+      ],
+      "reasons": [],
+      "config_rev": 10
+    },
+    "patch.rejected": {
+      "job_id": "att_01JB7X4Q9ZK3M8T5V2N7RHC6WY",
+      "sha256": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+      "reason": "not_applicable",
+      "detail": "git apply failed"
+    },
+    "sandbox.created": {
+      "sandbox_id": "sbx_01JBA1E1R5NV8Y3D7F9J0K2QTW",
+      "attempt_id": "att_01JB7X4Q9ZK3M8T5V2N7RHC6WY",
+      "driver": "podman",
+      "runtime": "runsc",
+      "image_digest": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+      "limits": {
+        "cpu_cores": 2.0,
+        "mem_mb": 4096,
+        "disk_mb": 10240,
+        "pids": 512,
+        "wall_time_s": 3600
+      },
+      "egress_profile": "default",
+      "worktree_snapshot": {
+        "mirror": "acme/web",
+        "base_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "pr_base_sha": null
+      },
+      "trust": "untrusted"
+    },
+    "sandbox.destroyed": {
+      "sandbox_id": "sbx_01JBA1E1R5NV8Y3D7F9J0K2QTW",
+      "final_status": "destroyed",
+      "reason": "done"
+    },
+    "worktree.created": {
+      "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "branch": "gantry/dlv-12",
+      "base_ref": "main",
+      "base_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345"
+    },
+    "worktree.locked": {
+      "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "holder": "engine",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "lease_until": "2026-10-24T12:45:00.000Z"
+    },
+    "worktree.unlocked": {
+      "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "reason": "released"
+    },
+    "worktree.removed": {
+      "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "branch": "gantry/dlv-12"
+    },
+    "message.posted": {
+      "id": "msg_01JBX2E3G5J7K9N1Q3S5T7W9YA",
+      "conversation_id": "cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ",
+      "role": "agent",
+      "agent_kind": null,
+      "tone": null,
+      "text": "hello",
+      "level_cap": null,
+      "refs": [],
+      "cards": [],
+      "delivery_id": null,
+      "created_at": "2026-10-24T12:41:03.120Z",
+      "updated_at": "2026-10-24T12:41:03.120Z"
+    },
+    "inbox.raised": {
+      "item": {
+        "id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+        "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "kind": "approval_needed",
+        "severity": "blocker",
+        "summary": "需要审批",
+        "payload": {
+          "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK"
+        },
+        "status": "open",
+        "dedup_key": "approval:apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+        "created_at": "2026-10-24T12:41:03.120Z",
+        "updated_at": "2026-10-24T12:41:03.120Z"
+      }
+    },
+    "inbox.resolved": {
+      "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+      "resolution": "chosen",
+      "option_id": "upgrade",
+      "note": "ok"
+    },
+    "inbox.dismissed": {
+      "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+      "note": "known"
+    },
+    "approval.requested": {
+      "action": "merge_pr",
+      "target": {
+        "kind": "pr",
+        "repo": "acme/web",
+        "number": 12
+      },
+      "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+      "expires_at": "2026-10-24T12:45:00.000Z",
+      "config_rev": 10,
+      "requested_by": {
+        "kind": "engine",
+        "id": "engine"
+      }
+    },
+    "approval.granted": {
+      "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+      "approval_pubkey_fpr": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+      "payload_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "approval.consumed": {
+      "approval_id": "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK",
+      "consumed_by": "act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+      "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345"
+    },
+    "outbox.succeeded": {
+      "github_ref": {
+        "bot": {
+          "github_id": 2,
+          "login": "gantry[bot]"
+        },
+        "pr": {
+          "number": 12,
+          "node_id": "PR_x",
+          "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345"
+        },
+        "marker": "gantry:v1",
+        "recorded_at": "2026-10-24T12:41:03.120Z"
+      }
+    },
+    "outbox.failed": {
+      "code": "transient",
+      "message": "timeout"
+    },
+    "budget.exhausted": {
+      "dimension": "nodes",
+      "limit": 40,
+      "used": 40
+    },
+    "device.paired": {
+      "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+      "name": "laptop",
+      "platform": "macos",
+      "role": "approver",
+      "cert_serial": "01",
+      "pubkey_fpr": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+      "approval_pubkey": "BAbc",
+      "approval_pubkey_fpr": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "device.updated": {
+      "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+      "changed": {
+        "name": "desk"
+      }
+    },
+    "device.revoked": {
+      "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+      "cert_serials": [
+        "01"
+      ],
+      "remaining_approvers": 0
+    },
+    "forge.pr_opened": {
+      "schema": "forge.event.v1",
+      "kind": "pr_opened",
+      "dedup_key": "dedup:pr_opened:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "number": 12,
+        "node_id": "PR_x",
+        "title": "t",
+        "body": "b",
+        "head": {
+          "ref": "gantry/x",
+          "sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+          "repo": "acme/web"
+        },
+        "base": {
+          "ref": "main"
+        },
+        "draft": false,
+        "labels": [],
+        "author": {
+          "login": "alice",
+          "github_id": 7,
+          "type": "user",
+          "association": "OWNER"
+        },
+        "closing_issues": [],
+        "created_by_gantry": true
+      }
+    },
+    "forge.pr_reopened": {
+      "schema": "forge.event.v1",
+      "kind": "pr_reopened",
+      "dedup_key": "dedup:pr_reopened:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "number": 12,
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "base_ref": "main"
+      }
+    },
+    "forge.pr_synchronized": {
+      "schema": "forge.event.v1",
+      "kind": "pr_synchronized",
+      "dedup_key": "dedup:pr_synchronized:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "previous_head_sha": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+        "head_epoch": 2,
+        "forced": false,
+        "base_ref": "main",
+        "commits_added": 1
+      }
+    },
+    "forge.pr_updated": {
+      "schema": "forge.event.v1",
+      "kind": "pr_updated",
+      "dedup_key": "dedup:pr_updated:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "changed": [
+          "title"
+        ]
+      }
+    },
+    "forge.pr_closed": {
+      "schema": "forge.event.v1",
+      "kind": "pr_closed",
+      "dedup_key": "dedup:pr_closed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "closed_by": {
+          "login": "alice",
+          "github_id": 7,
+          "type": "user",
+          "association": "OWNER"
+        }
+      }
+    },
+    "forge.pr_merged": {
+      "schema": "forge.event.v1",
+      "kind": "pr_merged",
+      "dedup_key": "dedup:pr_merged:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "merge_commit_sha": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "base_ref": "main",
+        "merged_by": {
+          "login": "alice",
+          "github_id": 7,
+          "type": "user",
+          "association": "OWNER"
+        },
+        "via_merge_queue": false,
+        "merge_method": "squash"
+      }
+    },
+    "forge.base_advanced": {
+      "schema": "forge.event.v1",
+      "kind": "base_advanced",
+      "dedup_key": "dedup:base_advanced:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "base_ref": "main",
+        "before": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+        "after": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "affected_prs": [
+          12
+        ]
+      }
+    },
+    "forge.pr_enqueued": {
+      "schema": "forge.event.v1",
+      "kind": "pr_enqueued",
+      "dedup_key": "dedup:pr_enqueued:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "number": 12,
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345"
+      }
+    },
+    "forge.pr_dequeued": {
+      "schema": "forge.event.v1",
+      "kind": "pr_dequeued",
+      "dedup_key": "dedup:pr_dequeued:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "number": 12,
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "reason": "merged"
+      }
+    },
+    "forge.merge_group_checks_requested": {
+      "schema": "forge.event.v1",
+      "kind": "merge_group_checks_requested",
+      "dedup_key": "dedup:merge_group_checks_requested:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "head_ref": "gh-readonly-queue/main",
+        "base_ref": "main",
+        "base_sha": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+        "pr_numbers": [
+          12
+        ]
+      }
+    },
+    "forge.merge_group_destroyed": {
+      "schema": "forge.event.v1",
+      "kind": "merge_group_destroyed",
+      "dedup_key": "dedup:merge_group_destroyed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "reason": "merged"
+      }
+    },
+    "forge.check_suite_completed": {
+      "schema": "forge.event.v1",
+      "kind": "check_suite_completed",
+      "dedup_key": "dedup:check_suite_completed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "check_suite_id": 1,
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "conclusion": "failure",
+        "app": {
+          "id": 1,
+          "slug": "github-actions"
+        },
+        "pr_numbers": [
+          12
+        ],
+        "is_current_head": true,
+        "workflow_runs": [],
+        "failed_check_runs": []
+      }
+    },
+    "forge.check_run_completed": {
+      "schema": "forge.event.v1",
+      "kind": "check_run_completed",
+      "dedup_key": "dedup:check_run_completed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "check_run_id": 2,
+        "check_suite_id": 1,
+        "name": "test",
+        "head_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "conclusion": "failure",
+        "app": {
+          "id": 1,
+          "slug": "github-actions"
+        },
+        "details_url": "https://example.invalid/1",
+        "output": {
+          "title": "failure",
+          "summary": "tests failed"
+        },
+        "annotations_count": 0,
+        "required": null,
+        "is_current_head": true
+      }
+    },
+    "forge.review_submitted": {
+      "schema": "forge.event.v1",
+      "kind": "review_submitted",
+      "dedup_key": "dedup:review_submitted:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "review_id": 3,
+        "state": "approved",
+        "commit_id": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "reviewer": {
+          "login": "alice",
+          "github_id": 7,
+          "type": "user",
+          "association": "OWNER"
+        },
+        "body": "",
+        "is_current_head": true,
+        "is_bot": false
+      }
+    },
+    "forge.review_dismissed": {
+      "schema": "forge.event.v1",
+      "kind": "review_dismissed",
+      "dedup_key": "dedup:review_dismissed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "review_id": 3,
+        "dismissed_by": {
+          "login": "alice",
+          "github_id": 7,
+          "type": "user",
+          "association": "OWNER"
+        }
+      }
+    },
+    "forge.review_comment": {
+      "schema": "forge.event.v1",
+      "kind": "review_comment",
+      "dedup_key": "dedup:review_comment:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "comment_id": 4,
+        "review_id": 3,
+        "thread_node_id": "TH_x",
+        "in_reply_to_id": null,
+        "path": "src/lib.rs",
+        "line": 3,
+        "side": "head",
+        "commit_id": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "body": "nit",
+        "diff_hunk": "@@ -1 +1 @@",
+        "outdated": false
+      }
+    },
+    "forge.review_thread_changed": {
+      "schema": "forge.event.v1",
+      "kind": "review_thread_changed",
+      "dedup_key": "dedup:review_thread_changed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "thread_node_id": "TH_x",
+        "state": "resolved",
+        "thread_epoch": 1
+      }
+    },
+    "forge.issue_comment": {
+      "schema": "forge.event.v1",
+      "kind": "issue_comment",
+      "dedup_key": "dedup:issue_comment:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "comment_id": 5,
+        "on": "pull_request",
+        "number": 12,
+        "action": "created",
+        "body": "hi",
+        "author_association": "OWNER"
+      }
+    },
+    "forge.issue_closed": {
+      "schema": "forge.event.v1",
+      "kind": "issue_closed",
+      "dedup_key": "dedup:issue_closed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "number": 12,
+        "state_reason": "completed",
+        "closed_by": {
+          "login": "alice",
+          "github_id": 7,
+          "type": "user",
+          "association": "OWNER"
+        },
+        "closed_via_pr": 12
+      }
+    },
+    "forge.issue_reopened": {
+      "schema": "forge.event.v1",
+      "kind": "issue_reopened",
+      "dedup_key": "dedup:issue_reopened:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "number": 12
+      }
+    },
+    "forge.issue_updated": {
+      "schema": "forge.event.v1",
+      "kind": "issue_updated",
+      "dedup_key": "dedup:issue_updated:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "number": 12,
+        "changed": [
+          "title"
+        ]
+      }
+    },
+    "forge.installation_changed": {
+      "schema": "forge.event.v1",
+      "kind": "installation_changed",
+      "dedup_key": "dedup:installation_changed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "action": "suspend",
+        "repos": [
+          "acme/web"
+        ]
+      }
+    },
+    "forge.repo_changed": {
+      "schema": "forge.event.v1",
+      "kind": "repo_changed",
+      "dedup_key": "dedup:repo_changed:1",
+      "source": "webhook",
+      "delivery_ids": [],
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "repo": "acme/web",
+      "installation_id": 1,
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "target": {
+        "type": "pr",
+        "number": 12,
+        "node_id": "PR_x"
+      },
+      "actor": {
+        "login": "alice",
+        "github_id": 7,
+        "type": "user",
+        "association": "OWNER"
+      },
+      "origin": "external",
+      "caused_by_action": null,
+      "occurred_at": "2026-10-24T12:41:03.120Z",
+      "observed_at": "2026-10-24T12:41:03.120Z",
+      "stale": false,
+      "data": {
+        "action": "renamed",
+        "default_branch": "main",
+        "renamed_from": "acme/old"
+      }
+    }
+  },
+  "invalid": [
+    {
+      "type": "settings.updated",
+      "data": {
+        "scope": "global",
+        "resource": "models",
+        "schema_version": 1,
+        "base_rev": 1,
+        "value": {
+          "models": {
+            "providers": {
+              "anthropic": {
+                "credential": {
+                  "secret_ref": "model_key",
+                  "value": "sk-secret"
+                }
+              }
+            }
+          }
+        },
+        "relaxes": [],
+        "secret_changes": []
+      },
+      "pointer_contains": "credential"
+    },
+    {
+      "type": "settings.updated",
+      "data": {
+        "scope": "global",
+        "resource": "models",
+        "schema_version": 1,
+        "base_rev": 1,
+        "value": {},
+        "relaxes": [],
+        "secret_changes": [
+          {
+            "ref": "model_key",
+            "op": "set",
+            "version": 1,
+            "value": "sk"
+          }
+        ]
+      },
+      "pointer_contains": "/secret_changes"
+    },
+    {
+      "type": "delivery.stage_changed",
+      "data": {
+        "from": "implement",
+        "to": "review",
+        "trigger": "x"
+      },
+      "pointer_contains": "/trigger"
+    },
+    {
+      "type": "delivery.level_changed",
+      "data": {
+        "from": "Medium",
+        "to": "High",
+        "kind": "bogus",
+        "reason": "x"
+      },
+      "pointer_contains": "/kind"
+    },
+    {
+      "type": "inbox.resolved",
+      "data": {
+        "inbox_id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+        "resolution": "chosen"
+      },
+      "pointer_contains": "/option_id"
+    },
+    {
+      "type": "approval.requested",
+      "data": {
+        "action": "merge_pr",
+        "target": {
+          "kind": "device",
+          "id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"
+        },
+        "subject_digest": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+        "expires_at": "2026-10-24T12:45:00.000Z",
+        "config_rev": 10,
+        "requested_by": {
+          "kind": "engine",
+          "id": "engine"
+        }
+      },
+      "pointer_contains": "/target"
+    }
+  ],
+  "contract_undefined": [
+    "attempt.progress",
+    "guardian.triaged",
+    "guardian.heal_requested",
+    "guardian.escalated",
+    "approval.invalidated",
+    "approval.expired",
+    "approval.denied",
+    "outbox.enqueued",
+    "outbox.executing",
+    "outbox.cancelled",
+    "forge.synced",
+    "forge.drift_detected",
+    "budget.charged",
+    "policy.denied"
+  ]
+}

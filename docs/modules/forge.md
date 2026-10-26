@@ -82,7 +82,7 @@
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
 | `core` | ID 类型、`ForgeActionKind`（14）/ `ForgeEventKind`（23）、`ForgeEventEnvelope`、14 个动作的 payload 类型（`deny_unknown_fields`）、`IdempotencyKey::derive`（`forge` 只负责每个 `kind` 的 `target` / `intent` 推导，core OQ-9）、`OutboxAction`、`UntrustedText`、`PullRequestRef` / `IssueRef`、`EffectiveSettings`；端口 trait `core::ports::{OutboxPort, ForgeReader}`（本模块实现）、`RepoService`、`PolicyPort`、`InboxPort`（本模块调用），P-51 | data-model §1–§3；FA §2.2、§6.2；[core.md §6.6、§6.10](core.md) |
-| `store` | `WriteTx`（事件追加 + 投影 + `outbox()` + `module_conn("forge")` 同一事务）、`OutboxTx`（`enqueue` / `claim` / `record_effects` / `renew_lease` / `complete` / `fail` / `requeue` / `cancel` / `cancel_blocked`，`coalesce_key`）、事件 `dedup_key` 唯一索引（`Appended::Duplicate`）、`ModuleSpec`（注册 `forge_*` 表的迁移）、消费者游标、`Store::open_temp` / `open_in_memory`（测试）| [store.md §6.1、§6.3、§7.10](store.md)；data-model [OutboxAction](../data-model.md#outboxaction)、§4.3、§5 |
+| `store` | `WriteTx`（事件追加 + 投影 + `outbox()` + `module_conn("forge")` 同一事务）、`OutboxTx`（`enqueue` / `claim` / `record_effects` / `renew_lease` / `complete` / `fail` / `requeue` / `cancel` / `cancel_blocked` / `count_succeeded_since`，`coalesce_key`）、事件 `dedup_key` 唯一索引（`Appended::Duplicate`）、`ModuleSpec`（注册 `forge_*` 表的迁移）、消费者游标、`Store::open_temp` / `open_in_memory`（测试）| [store.md §6.1、§6.3、§7.10](store.md)；data-model [OutboxAction](../data-model.md#outboxaction)、§4.3、§5 |
 | `repo` | `core::ports::RepoService`：`ensure_mirror`、`mirror_access(Fetch \| Push)`（得到 `MirrorGuard{git_dir, fetch_refspecs}`，持共享锁）、`check_mirror`、`has_commit`、`provenance(oid)`（提交 ← 已校验补丁的溯源，I8）。初次 clone 与之后的 fetch / push 由 `forge` 执行 | [repo.md §6.1、§6.3](repo.md)；FA §3.3、§8 |
 | `secrets` | `forge` 使用方视图：App 私钥、webhook secret（当前与上一个）；App Manifest 回调时经引导期写入路径写入新 App 的密钥（P-65、P-66）（P-59：依赖列加 `secrets`） | [config.md §2.4、§10](../interfaces/config.md)；architecture §6 |
 | `policy`（经 `core::ports::PolicyPort` 注入，P-59）| 只用 `consume_for_execution`（执行开始前验证并消费审批，P-54）与 `scan_text`（出站密钥扫描）；**不读 `policies.*`**（P-62）| [policy.md §6.5](policy.md)；FA §2.5；[api.md §6](../interfaces/api.md) |
@@ -382,6 +382,8 @@ CREATE TABLE forge_project_state (
 6. **`forge.synced` 的 `data`（本文提议，F-OQ-7）**：`{target, source: "webhook"|"reconcile", changes: [{field, from, to}], synced_at}`，`field` 取 `IssueRef` / `PullRequestRef` 的字段名（`head_sha`、`state`、`mergeable_state`、`review_state`、`checks`、`draft`、`in_merge_queue` 等）。快照每次变化都发一条，使 `guardian` 能响应"合并状态变脏""review 状态变化"这类没有对应 webhook 事件的事实。
 7. **`review_state` 口径**：优先取 GraphQL `reviewDecision`；为空（仓库没有"必需 review"规则时它为空）则由各 reviewer 最新一条非 `COMMENTED`、未被撤销的 review 推出：存在 `CHANGES_REQUESTED` → `changes_requested`；否则存在 `APPROVED` → `approved`；否则 `none`（保守：任何人的 approve 都算，供 `guardian` 的"已审批不得静默推送"使用，F-OQ-16）。
 
+本节 `forge.synced` data 的送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+
 ### 7.6 自身事件归因
 
 输入：归一化前的候选事件。实现 FA §4.4 的 5 条规则，查询靠 `forge_effect_index` 与 `Project.bot_user_id`，不扫 Outbox 全表：
@@ -425,6 +427,8 @@ loop (patrol, 周期 = guardian.patrol_interval_s ±20% 抖动，最小 300 s):
 
 - 差异一律"GitHub 为准"：快照按回读值更新；**不补做**被删除 / 改变的对象，是否重做由 `engine` / `guardian` 入队 `epoch + 1` 的新动作（FA §7.3）。
 - 对账的成本粗算与降级见 FA §7.1；GraphQL 点数需核实（FA OQ-9）。
+
+本节产生的 `forge.synced` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）；`forge.drift_detected` 由独立 drift 契约定义。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
 
 ### 7.8 Outbox 执行器
 
@@ -483,6 +487,8 @@ stateDiagram-v2
 | `request_reviewers` | `POST …/pulls/{n}/requested_reviewers` | 已在列表则跳过 |
 | `merge_pr` | 优先 merge-async（需核实，FA OQ-1）；无队列回退 `PUT …/pulls/{n}/merge`（带 `sha`）；队列入队回退 GraphQL `enqueuePullRequest` | 审批复核三方一致；`merge_method` 被仓库允许；**绝不**传 `bypass_rules`；超时是未知结局，必须先重读 PR |
 | `rerun_failed_jobs` | `POST /repos/{o}/{r}/actions/runs/{run_id}/rerun-failed-jobs` | `expected_run_attempt`、`head_sha`；`forge.rerun.max_per_run` |
+
+本节涉及的 `outbox.enqueued` / `outbox.executing` / `outbox.cancelled` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
 
 ### 7.9 限流闸
 

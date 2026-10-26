@@ -1,0 +1,537 @@
+/* 只读执行图。令牌来自 @/theme/tokens.css；不引入图依赖或远程资源。 */
+
+.eg-dialog .dialog__surface {
+  background: var(--bg);
+}
+
+.eg {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+}
+
+.eg__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-height: var(--topbar-h);
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--divider);
+}
+
+.eg__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.eg__meta {
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+.eg__demo {
+  margin-left: auto;
+  padding: 2px 6px;
+  color: var(--need);
+  background: var(--need-soft);
+  border: 1px solid var(--need-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+
+.eg__state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 24px;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+.eg__state p {
+  margin: 0;
+}
+
+.eg__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);
+  flex: 1;
+  min-height: 0;
+}
+
+.eg__graph {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 12px;
+  border-right: 1px solid var(--divider);
+}
+
+.eg__graph-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+  font-size: var(--fs-small);
+}
+
+.eg__boundary,
+.eg__hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+.eg__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--deep);
+}
+
+.eg__scroll:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.eg__canvas {
+  position: relative;
+  min-width: 100%;
+}
+
+.eg__edges {
+  display: block;
+  pointer-events: none;
+}
+
+.eg-edge {
+  fill: none;
+  stroke: var(--strong-border);
+  stroke-width: 1.4;
+}
+
+.eg-edge--muted {
+  stroke: var(--idle);
+  stroke-dasharray: 4 3;
+}
+
+/* 与 ExecutionGraph.tsx 的 NODE_W / NODE_H 一致；SVG 连线按这两个尺寸计算。 */
+.eg-node {
+  position: absolute;
+  width: 200px;
+  height: 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 8px 10px;
+  overflow: hidden;
+  background: var(--card);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.eg-node:hover {
+  border-color: var(--strong-border);
+  background: var(--row-selected);
+}
+
+.eg-node:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.eg-node--run {
+  border-left: 3px solid var(--run);
+}
+
+.eg-node--ok {
+  border-left: 3px solid var(--ok);
+}
+
+.eg-node--warn {
+  border-left: 3px solid var(--warn);
+}
+
+.eg-node--idle {
+  border-left: 3px solid var(--idle);
+}
+
+.eg-node--superseded {
+  border-style: dashed;
+  background: var(--deep);
+  color: var(--text-secondary);
+}
+
+.eg-node--selected {
+  outline: 2px solid var(--run);
+  outline-offset: -2px;
+}
+
+/* 中性状态文字：`--idle` 对图内背景不足 4.5:1，改用对比度 6.19:1 的次要文字。 */
+.eg-status-text--neutral {
+  color: var(--text-muted);
+}
+
+.eg-node__role {
+  width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eg-node__status {
+  width: 100%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--fs-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eg-node__foot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+}
+
+.eg__empty,
+.eg-muted {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-small);
+}
+
+.eg__empty {
+  padding: 12px;
+}
+
+.eg__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.eg-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.eg-detail__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.eg-detail__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.eg-detail__status {
+  font-size: var(--fs-small);
+}
+
+.eg-kv {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  font-size: var(--fs-small);
+}
+
+.eg-kv--tight {
+  grid-template-columns: 44px minmax(0, 1fr);
+}
+
+.eg-kv dt {
+  color: var(--text-muted);
+}
+
+.eg-kv dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.eg-deps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eg-dep {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.eg-dep__id {
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+}
+
+.eg-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+.eg-section-title {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.4px;
+}
+
+.eg-inline-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--fs-small);
+}
+
+.eg-inline-state p {
+  margin: 0;
+}
+
+.eg-attempt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eg-attempt {
+  padding-top: 8px;
+  border-top: 1px solid var(--divider);
+}
+
+.eg-attempt__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.eg-attempt__title {
+  margin: 0;
+  font-size: var(--fs-small);
+  font-weight: 600;
+}
+
+.eg-usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  color: var(--text-secondary);
+  font-size: var(--fs-micro);
+}
+
+.eg-ref {
+  overflow-wrap: anywhere;
+}
+
+.eg-retry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: var(--fs-micro);
+}
+
+.eg-activity__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eg-activity__item {
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: var(--deep);
+  font-size: var(--fs-small);
+}
+
+.eg-activity__item summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.eg-activity__name {
+  font-weight: 600;
+}
+
+.eg-activity__state {
+  color: var(--text-secondary);
+}
+
+.eg-activity__target {
+  margin: 0;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.eg-activity__item p {
+  margin-bottom: 6px;
+  padding: 0 8px;
+}
+
+.eg-summary__text {
+  margin: 0 0 6px;
+  font-size: var(--fs-small);
+  line-height: 1.55;
+}
+
+.eg-budget {
+  padding-top: 10px;
+  border-top: 1px solid var(--divider);
+}
+
+.eg-budget__template {
+  margin: 0 0 6px;
+  color: var(--text-secondary);
+  font-size: var(--fs-micro);
+  overflow-wrap: anywhere;
+}
+
+.eg-budget__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-micro);
+}
+
+.eg-budget__table th,
+.eg-budget__table td {
+  padding: 3px 6px 3px 0;
+  text-align: left;
+  vertical-align: top;
+  font-weight: 400;
+}
+
+.eg-budget__table thead th {
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--divider);
+  font-weight: 500;
+}
+
+.eg-budget__table tbody th {
+  color: var(--text-secondary);
+}
+
+.eg-budget__table tbody tr {
+  border-bottom: 1px solid var(--divider);
+}
+
+.eg-budget__meter-cell {
+  width: 56px;
+  padding-top: 6px;
+}
+
+.eg-meter {
+  width: 48px;
+  height: 3px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--divider);
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.eg-meter::-webkit-progress-bar {
+  border-radius: 2px;
+  background: var(--divider);
+}
+
+.eg-meter::-webkit-progress-value {
+  border-radius: 2px;
+  background: var(--run);
+}
+
+.eg-meter--full::-webkit-progress-value {
+  background: var(--warn);
+}
+
+.eg-meter::-moz-progress-bar {
+  border-radius: 2px;
+  background: var(--run);
+}
+
+.eg-meter--full::-moz-progress-bar {
+  background: var(--warn);
+}
+
+@media (max-width: 900px) {
+  .eg__body {
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .eg__graph {
+    flex: 0 0 auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .eg__scroll {
+    flex: 0 0 auto;
+    max-height: 56vh;
+    overflow: auto;
+  }
+
+  .eg__detail {
+    overflow: visible;
+  }
+}

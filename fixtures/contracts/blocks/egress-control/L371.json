@@ -1,0 +1,6 @@
+{
+  "sandbox_model_base": "http://10.89.0.1:8081",
+  "connect_proxy_url": "http://10.89.0.1:3128",
+  "loopback_model_base": "http://127.0.0.1:8082",
+  "registry_base": null
+}

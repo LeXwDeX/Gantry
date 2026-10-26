@@ -583,6 +583,8 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 **档位变化与台账**（P-57）：台账 `limits` 在创建时按 `level_cap` 固定，`set_level_cap` 与自动加码都不改台账；已触发的闸门保留。耗尽后追加预算的方式仍未决（config OQ-10）。
 
+本节 `budget.charged` data 的送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+
 ### 7.10 自动加码
 
 输入 `RiskSignals { touched_paths, estimated_path_globs, diff_stats, labels, admission_risk_flags }`：
@@ -762,6 +764,8 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | `attempt.progress` | 采样节流后的展示字段 |
 | `budget.charged`（引擎写的部分） | `dimension`、`tier?`、`delta`（含加权值）、`used_after`、`source = {kind, id}`、`delivery_id` 或 `conversation_id`；`direct` 调用的 token 由 `models` 写 |
 | `budget.exhausted` | `dimension`、`limit`、`used` |
+
+上表涉及的 `attempt.progress` / `budget.charged` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
 
 `inbox.raised` / `resolved` / `dismissed` 由 `notify`（`InboxPort`）写（`data` 见 notify.md §7.3），引擎不直接追加。
 
