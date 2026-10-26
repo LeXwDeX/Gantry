@@ -566,6 +566,8 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 
 守护的编排状态以事件日志为准（I4）。P-60 新增三种事件（形状以 data-model §5.2 与 `schemas/events/` 为准，下表为本模块需要的字段）；`conversation` 把它们渲染为事件行：
 
+本节事件 data 的送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+
 | 事件 | `data`（要点） |
 | --- | --- |
 | `guardian.triaged` | `{event_ref, class, action, delivery_id, rule, reason_code?, fingerprint?, also_matched[], config_rev, round_id?, inbox_id?, action_ids[]}`。`event_ref` 是触发它的事件（`forge.*` 的 `{kind, dedup_key, head_sha}`，或轮结束时的 `attempt.finished` / 结算检查）；`action` 即处置（`silent_fix` / `silent_reply` / `batch` / `defer` / `finalize` / `round_closed` …）。除 `noop` / `ignore` / `bookkeeping` 外每个处置都写；`defer` 与"抑制重复上报"也写（它们改变行为）。轮结束也写一条（`action = round_closed`，附 `outcome`、`head_before`、`head_after?`、`failing_before[]`、`failing_after[]?`、`progress`、`stalled_rounds`）。外部字符串放在 `UntrustedText` 字段 |
