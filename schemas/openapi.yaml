@@ -4982,14 +4982,7 @@
             ]
           },
           "limits": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/DeliveryBudgetLimits"
-              },
-              {
-                "$ref": "#/components/schemas/ConversationBudgetLimits"
-              }
-            ]
+            "$ref": "#/components/schemas/DeliveryBudgetLimits"
           },
           "used": {
             "$ref": "#/components/schemas/BudgetUsed"
@@ -5904,7 +5897,8 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "reason_code"
+              "reason_code",
+              "evidence"
             ],
             "properties": {
               "reason_code": {

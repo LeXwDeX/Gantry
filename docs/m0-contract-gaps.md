@@ -282,3 +282,21 @@
 - `contract-gaps.json` 的 G-03 / G-04 / G-05 / G-23 已移入 `fixed`；`gaps` 为空。
 - `forge-actions §7.4` 的 drift 示例仍缺契约必填的 `target.repo`，保留为 `example` skip；这不表示 drift 类型未实现。
 - 目标平台证据仍不完整：macOS / Ubuntu / 契约与 Mock 作业通过，Windows 与 Rust 1.85 未验证。
+
+## 10. OpenAPI 与 core 的视图差异（2026-10-26）
+
+`schemas/openapi.yaml` 是 `api` 泳道手写契约，`xtask` 只读；M0 的一致性以 `docs/interfaces/api.md` 为权威，core schema 描述内部类型。两者不完全相同不等于 openapi 与 api.md 漂移。
+
+本轮修复两处真实不一致：
+
+- `BudgetLedger.limits`：OpenAPI 原为 `oneOf(DeliveryBudgetLimits, ConversationBudgetLimits)`，改为单一 `DeliveryBudgetLimits`。依据是 api.md §4.4 的交付台账示例与“会话台账不经本路由暴露”。
+- `inbox-item.payload` 的 escalation 分支：`evidence` 按 data-model 的 `evidence[]` 改为必填。
+
+其余 `xtask schemas --check` 的 info 属于已解释的视图差异，不清零、不隐藏：
+
+- API 响应总是完整对象，core 内部实体允许可选字段，因此 `required` 集合不同。
+- OpenAPI 默认允许未知响应字段，core 实体 `deny_unknown_fields`，因此 `additionalProperties` 不同；客户端应容忍新增字段。
+- `Device.approval_pubkey` 由 core 持有、不进 API；`Workflow.nodes` 是 API 聚合字段；`event-envelope.type` 在 OpenAPI 更宽、由具体事件分支约束。这些已由检查器注明。
+- `node.role` 的 pattern 与 enum、`inbox-item.payload` 的枚举展开是表示差异，语义一致。
+
+核对证据：48 个操作与 api.md §4.1 逐条相等；53 个响应夹具通过；`SettingsUpdatedData` 的 16 个 scope×resource 分支与 core 一致；Approval 覆盖 8 个形状。上述结论不等于所有实体字段已逐项人工签字；若后续发现真实漂移，按独立契约 PR 修正。
