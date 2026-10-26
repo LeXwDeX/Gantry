@@ -16,7 +16,7 @@ use gantry_core::entities::{
 use gantry_core::events::{validate_event_data, EventType};
 use gantry_core::forge::{
     AddLabelsPayload, CloseIssuePayload, CreateCommentPayload, CreateIssuePayload, CreatePrPayload,
-    ForgeEventEnvelope, MergePrPayload, PushBranchPayload, ReplyReviewThreadPayload,
+    DriftPayload, ForgeEventEnvelope, MergePrPayload, PushBranchPayload, ReplyReviewThreadPayload,
     RequestReviewersPayload, RerunFailedJobsPayload, ResolveReviewThreadPayload,
     UpdateIssuePayload, UpdatePrPayload, UpsertStatusCommentPayload,
 };
@@ -49,6 +49,7 @@ pub fn check_annotation(kind: &str, data: &Value) -> Result<(), String> {
         "worker::StructuredOutput" => roundtrip::<StructuredOutput>(data),
         "worker::ProgressEvent" => roundtrip::<ProgressEvent>(data),
         "forge::PushBranchPayload" => roundtrip::<PushBranchPayload>(data),
+        "forge::DriftPayload" => roundtrip::<DriftPayload>(data),
         "forge::CreatePrPayload" => roundtrip::<CreatePrPayload>(data),
         "forge::UpdatePrPayload" => roundtrip::<UpdatePrPayload>(data),
         "forge::UpsertStatusCommentPayload" => roundtrip::<UpsertStatusCommentPayload>(data),

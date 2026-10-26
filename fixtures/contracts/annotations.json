@@ -450,13 +450,6 @@
       "note": "github_ref 与 expected_effects 的组合展示；无单一 core 类型"
     },
     {
-      "sha256": "10f1313ecf27202b8dc74528f167e67c093b321dc4374188e4c9f025cdb6f73e",
-      "schema": "schemas/forge/drift.json",
-      "rust": "none",
-      "mode": "skip",
-      "note": "drift 示例；core 只有无载荷 DriftKind，drift schema 显式拒绝"
-    },
-    {
       "sha256": "9911a924ae311ede157cdec544883b47658407b10d3b0d341fb1e98f4ed5a927",
       "schema": "schemas/forge/forge.event.v1.json",
       "rust": "none",
@@ -469,6 +462,12 @@
       "rust": "none",
       "mode": "skip",
       "note": "ResultBundle 仍为 [提议]；core 无对应类型，不猜形状"
+    },
+    {
+      "sha256": "32a37a78e3033a458ac22cdc0c47c3d0820442bd2c7be1a6f66794b65d1338d4",
+      "schema": "schemas/forge/drift.json",
+      "rust": "forge::DriftPayload",
+      "note": "forge-actions §7.4 head_diverged 示例；target.repo 已补齐，按 DriftPayload 完整验证"
     }
   ]
 }

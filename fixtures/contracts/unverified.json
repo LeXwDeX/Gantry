@@ -10,13 +10,6 @@
       "note": "github_ref 与 expected_effects 的组合展示；没有单一 core 类型，不能据此声明完整 OutboxAction 通过。"
     },
     {
-      "sha256": "10f1313ecf27202b8dc74528f167e67c093b321dc4374188e4c9f025cdb6f73e",
-      "source": "docs/interfaces/forge-actions.md",
-      "line": 873,
-      "kind": "example",
-      "note": "forge-actions §7.4 的 head_diverged 示例省略了契约必填的 target.repo（并省略 pushed_by.association）；drift 形状已由 forge-drift 契约定为生产类型，但该示例仍不能作为完整实现通过证据。"
-    },
-    {
       "sha256": "9911a924ae311ede157cdec544883b47658407b10d3b0d341fb1e98f4ed5a927",
       "source": "docs/interfaces/forge-actions.md",
       "line": 990,
