@@ -17,7 +17,7 @@ use gantry_core::machines::TransitionError;
 use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::engine::TemplateCatalog;
 use gantry_core::ports::inbox::{InboxPort, RaiseError, RaiseRequest};
-use gantry_store::{EventFilter, Store, StoreError};
+use gantry_store::{Appended, EventFilter, Store, StoreError};
 
 use crate::create::{created_event, NewDelivery};
 use crate::projection::{DeliveryProjection, NodeProjection, Projection, ProjectionError};
@@ -93,14 +93,25 @@ impl Engine {
         }
     }
 
-    /// 在单个写事务中追加 `delivery.created`；相同 `source_message_id` 不重复追加。
+    /// 在单个写事务中追加 `delivery.created`；相同 `source_message_id` 不重复追加，
+    /// 并返回已存在的那个交付单元（engine.md §6：同一条消息重复调用返回同一个交付单元）。
     pub async fn create_delivery(&self, delivery: NewDelivery) -> Result<DeliveryId, EngineError> {
-        let id_text = delivery.id.to_string();
         let event = created_event(delivery)?;
         let mut tx = self.store.begin_write().await?;
-        tx.append(event).await?;
+        let appended = tx.append(event).await?;
         tx.commit().await?;
-        Ok(id_text.parse()?)
+        let subject = match appended {
+            Appended::New(event) => event.subject,
+            Appended::Duplicate { existing_seq } => {
+                self.store
+                    .events()
+                    .get_by_seq(existing_seq)
+                    .await?
+                    .ok_or(EngineError::NotFound)?
+                    .subject
+            }
+        };
+        Ok(subject.as_str().parse()?)
     }
 
     /// 校验转移并追加 `delivery.stage_changed`。

@@ -133,3 +133,23 @@ async fn event_time_comes_from_the_store_clock() {
         .unwrap();
     assert_eq!(page.events[0].ts, Timestamp::from_millis(1_700_000_000_000));
 }
+
+/// 同一条消息重复创建：不追加第二条事件，返回第一次创建的交付单元（engine.md §6）。
+#[tokio::test]
+async fn duplicate_message_returns_the_existing_delivery() {
+    let engine = engine().await;
+    let first = engine.create_delivery(delivery()).await.expect("created");
+    let mut again = delivery();
+    again.id = "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZC"
+        .parse::<DeliveryId>()
+        .unwrap();
+    let second = engine.create_delivery(again).await.expect("deduped");
+    assert_eq!(second, first);
+    let page = engine
+        .store()
+        .events()
+        .scan(Seq::ZERO, &empty_filter(), 10)
+        .await
+        .unwrap();
+    assert_eq!(page.events.len(), 1);
+}
