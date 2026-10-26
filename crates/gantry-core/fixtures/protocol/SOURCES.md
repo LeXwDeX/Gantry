@@ -22,7 +22,7 @@
 
 ## 已知偏差
 
-- `SvcTokenId` / `StagedId` 的后缀：文档示例 `svt_01JBX5A2C4E6G8J1L3N5Q7S9UW` / `stg_01JBX5C8F0H3K5M7P9R1T4V6XZ` 同样含 Crockford 之外的字母。类型按 `^svt_[0-9A-Z]{26}$` / `^stg_[0-9A-Z]{26}$` 宽松校验，理由见 `src/egress.rs` 注释。
+- `SvcTokenId` 的后缀：文档示例 `svt_01JBX5A2C4E6G8J1L3N5Q7S9UW` 含 Crockford 之外的字母 `L`、`U`。类型按 `^svt_[0-9A-Z]{26}$` 宽松校验，理由见 `src/egress.rs` 注释。`StagedId` 的现有示例后缀合法；同一宽松 pattern 只用于兼容历史值，不表示当前示例非法。
 
 ## 未定形状（不生成夹具、不猜测）
 
