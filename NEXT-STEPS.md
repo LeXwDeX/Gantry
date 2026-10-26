@@ -67,7 +67,7 @@ Node 工程均按现有锁文件以 `npm ci --offline` 安装，复用本机依�
 | OpenAPI / core 一致性 | 本轮检查仍给出 13 个实体的人工核对信息；字段必填、未知字段及嵌套约束未全部判定。例如 escalation 的 `evidence` 在 core schema 必填、在 OpenAPI 不必填。另有 5 个 settings 路由的响应夹具跳过逐值校验，文档块仍有 15 个仅 schema、21 个部分验证 | 按权威契约逐项区分允许的视图差异与漂移，为真实差异补回归并按批准写集修正；补齐或明确验收例外。不能把 info 当 warning，也不能由“0 failure”推导完全一致 |
 | 端口与替身验收 | 全部替身都有使用示例测试；PR #11 已合入 `main`，把 `state_fakes.rs` 的编译期绑定从 7 个扩到 18 个，覆盖除 `AddedLineSource`（由 repo 调用方实现）外的端口与 `PathRuleSet`。共享一致性辅助用例仍是 7 个，不证明全部行为覆盖 | 真实提供方在对应里程碑接入同一用例；不把 M1 未实现算成 M0 功能缺陷，也不宣称共享行为已全覆盖 |
 | Mock 录制事件验收（已复核） | `crates/gantry-core/tests/events.rs::api_fixture_events_deserialize_and_validate` 已对 `fixtures/api/events.json` 的 7 条事件做 `Event<Value>` 反序列化、`data` 校验及往返测试。Mock 加载同一夹具；`smoke.test.mjs` 验证监听器启动，`http.test.mjs` 验证游标 / `Last-Event-ID` / 过滤后心跳，本次均复跑通过 | 本机相关证据已具备，无须新增同类测试；本项不再列作代码缺口。结果仅覆盖内存 Mock 与录制夹具，不代表真实前后端联调、目标平台或完整 M0 验收通过 |
-| 目标工具链与平台 | macOS、Ubuntu、契约与 Mock 作业已通过；Windows 作业卡在 OpenSSL 安装，Rust 1.85 仍无作业。前端检查因 npm 自身 `Exit handler never called` 失败。 | 仍需取得 Rust 1.85 与 Windows 的可追溯结果；本机版本通过不替代最低版本或远端证据 |
+| 目标工具链与平台 | PR #17 的远端 run 已取得 macOS、Ubuntu、Windows、Rust 1.85、前端与契约/Mock 全部 success（run 40334369717）。之后 GitHub Actions 出现 runner 分配故障（job 无步骤、数秒失败，main 同样受影响），后续 PR 改用管理员合并，不冒充 CI 通过。 | 已具备一次可追溯的全绿结果；CI 基础设施故障属于外部状态，恢复后应重跑确认 |
 
 **不重做或不扩展的事项**：B1–B9、R1 和草案字段对齐已完成；M1 真实服务、桌面原生外壳、
 生产鉴权与前后端联调仍未交付，不属于这次文档收尾。协作扩展 P-83–P-86 及
@@ -117,7 +117,18 @@ Node 工程均按现有锁文件以 `npm ci --offline` 安装，复用本机依�
 
 本机门禁实测：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`、`cargo test --workspace --all-features --locked` 均通过（2 项 ignored 为看门狗子进程入口）；store 无默认特性与 testing 特性检查通过；`npm test --prefix tools/mock-api` 29 项通过；`cargo xtask schemas --check` 为 0 failure、0 warning，36 完整 / 15 schema-only / 21 partial / 4 显式跳过，负例 36 个。
 
-边界：Windows 与 Rust 1.85 仍未验证；前端 CI 受 npm 自身故障影响；真实 Egress / 引擎 / GitHub / SQLite、M1 控制面与真实联调均未实现或未验证。
+边界：该段记录当时的状态；后续由 PR #17 取得全绿结果，另见下方 M0 收口记录。前端 CI 的 npm 故障与真实 Egress / 引擎 / GitHub / SQLite、M1 控制面及真实联调仍未验证。
+
+**M0 收口记录（2026-10-26）**：按 `docs/milestones.md` 的 M0 退出标准逐条核对：
+
+- schema 与接口一致：`xtask schemas --check` 为 0 failure、0 warning；151 个生成文件；37 完整 / 15 schema-only / 21 partial / 3 显式跳过；36 个负例。OpenAPI 与 core 的视图差异已记录，并修复 `BudgetLedger.limits` 与 escalation `evidence` 两处真实不一致（PR #21）。
+- Mock API 与游标续传：`tools/mock-api` 29 项通过，覆盖监听器启动、`Last-Event-ID`、过滤后心跳与 `cursor_ahead`。
+- 每个替身有使用示例：`state_fakes` 10 项、`runtime_fakes` 11 项覆盖全部替身；PR #11 把编译期端口绑定扩到 18 个断言。
+- 目标平台：PR #17 的远端 run（40334369717）macOS、Ubuntu、Windows、Rust 1.85、前端、契约/Mock 全部 success。此后 GitHub Actions runner 分配故障，PR #19 / #21 / #23 无步骤秒失败，改用管理员合并；这不等于 CI 通过。
+- 显式未验证块：6 → 3，剩余为 `github_ref` 组合、App Manifest 与 `ResultBundle`，均按 `example` / `contract-undefined` 登记。
+- 依赖安全：Dependabot 的 5 个 npm 告警（2 critical、3 medium）已全部 `fixed`（vitest 4.1.12）。
+
+M0 的代码、schema、夹具与可追溯 CI 证据已具备。契约文本仍标注“送审、尚未批准”；正式批准标记与 M1 启动仍待用户决定。M1 的真实 GitHub App、模型凭据、Podman / 目标主机与桌面安装包不在本机环境内。
 
 ## 历史：后端第八轮验收（2026-10-25）
 
