@@ -24,6 +24,7 @@ use http::header::{
 };
 use http::{HeaderMap, Method, Response, StatusCode, Uri};
 use serde_json::Value;
+use tokio::sync::watch;
 
 use crate::auth::{self, AuthContext, DeviceLookup, PeerCert};
 use crate::consts::{IDEMPOTENCY_KEY_MAX, IDEMPOTENCY_KEY_MIN};
@@ -33,6 +34,7 @@ use crate::problem::{Problem, ProblemCode};
 use crate::query::{self, Query};
 use crate::rate::{RateLimiter, RateState};
 use crate::registry::{self, IdemPolicy, Milestone, RateClass, Registry, RouteMatch, RouteSpec};
+use crate::sse::{EventStream, StreamRegistry};
 
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 pub const X_LOG_EPOCH: HeaderName = HeaderName::from_static("x-log-epoch");
@@ -110,7 +112,39 @@ impl RequestHead {
     }
 }
 
-pub type ApiResponse = Response<Bytes>;
+pub type ApiResponse = Response<Body>;
+
+/// 响应体：普通 JSON / problem，或事件流（#41）。
+pub enum Body {
+    Full(Bytes),
+    Events(EventStream),
+}
+
+impl Body {
+    /// 普通响应的字节；事件流为空切片（帧从 [`Body::into_events`] 读取）。
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Body::Full(bytes) => bytes,
+            Body::Events(_) => &[],
+        }
+    }
+
+    pub fn into_events(self) -> Option<EventStream> {
+        match self {
+            Body::Events(stream) => Some(stream),
+            Body::Full(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Body::Full(bytes) => f.debug_tuple("Full").field(bytes).finish(),
+            Body::Events(_) => f.write_str("Events"),
+        }
+    }
+}
 
 /// 步骤 1–7 通过后的请求。
 pub struct Admitted {
@@ -172,6 +206,8 @@ pub struct Reply {
     pub headers: Vec<(HeaderName, HeaderValue)>,
     /// `X-Event-Seq`：读 = 快照反映到的最大 `seq`；写 = 本次写入的最后一个事件。
     pub event_seq: Seq,
+    /// 事件流（#41）；有值时忽略 `body`。
+    pub stream: Option<EventStream>,
 }
 
 impl Reply {
@@ -181,6 +217,17 @@ impl Reply {
             body: Some(body),
             headers: Vec::new(),
             event_seq,
+            stream: None,
+        }
+    }
+
+    pub fn events(stream: EventStream, event_seq: Seq) -> Self {
+        Self {
+            status: StatusCode::OK,
+            body: None,
+            headers: Vec::new(),
+            event_seq,
+            stream: Some(stream),
         }
     }
 }
@@ -197,6 +244,8 @@ pub struct ApiCore {
     registry: Registry,
     limiter: RateLimiter,
     handler: Arc<dyn RouteHandler>,
+    streams: Arc<StreamRegistry>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl ApiCore {
@@ -211,7 +260,22 @@ impl ApiCore {
             cfg,
             svc,
             handler,
+            streams: Arc::default(),
+            shutdown: watch::channel(false).0,
         }
+    }
+
+    /// 优雅关停：所有事件流尽力收到 `close(server_shutdown)` 后结束。
+    pub fn shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    pub(crate) fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    pub(crate) fn streams(&self) -> &Arc<StreamRegistry> {
+        &self.streams
     }
 
     pub fn config(&self) -> &ApiConfig {
@@ -459,12 +523,12 @@ fn stored(resp: &ApiResponse) -> StoredResponse {
             .iter()
             .filter_map(|name| resp.headers().get(name).map(|v| (name.clone(), v.clone())))
             .collect(),
-        body: resp.body().to_vec(),
+        body: resp.body().as_bytes().to_vec(),
     }
 }
 
 fn replay_response(stored: StoredResponse, log_epoch: u64, rate: RateState) -> ApiResponse {
-    let mut resp = Response::new(Bytes::from(stored.body));
+    let mut resp = Response::new(Body::Full(Bytes::from(stored.body)));
     *resp.status_mut() = stored.status;
     let request_id = stored
         .headers
@@ -585,7 +649,7 @@ pub(crate) fn problem_response(
     rate: Option<RateState>,
 ) -> ApiResponse {
     let body = serde_json::to_vec(&problem.body(instance, request_id)).expect("problem serializes");
-    let mut resp = Response::new(Bytes::from(body));
+    let mut resp = Response::new(Body::Full(Bytes::from(body)));
     *resp.status_mut() = problem.code.status();
     let headers = resp.headers_mut();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
@@ -602,15 +666,20 @@ fn success_response(
     log_epoch: u64,
     rate: RateState,
 ) -> ApiResponse {
-    let body = reply
-        .body
-        .map(|v| serde_json::to_vec(&v).expect("json serializes"))
-        .unwrap_or_default();
-    let has_body = !body.is_empty();
-    let mut resp = Response::new(Bytes::from(body));
+    let (body, is_json) = match (reply.stream, reply.body) {
+        (Some(stream), _) => (Body::Events(stream), false),
+        (None, Some(value)) => (
+            Body::Full(Bytes::from(
+                serde_json::to_vec(&value).expect("json serializes"),
+            )),
+            true,
+        ),
+        (None, None) => (Body::Full(Bytes::new()), false),
+    };
+    let mut resp = Response::new(body);
     *resp.status_mut() = reply.status;
     let headers = resp.headers_mut();
-    if has_body {
+    if is_json {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(JSON_UTF8));
     }
     for (name, value) in reply.headers {

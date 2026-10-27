@@ -459,7 +459,7 @@ async fn message_bodies_reject_configuration_fields_and_bad_refs() {
     let probe = json!({"text": "x", "level_cap": "PROBE-<script>-7f3a"}).to_string();
     let resp = send(&h, post(&op, cnv, "message-probe-000001"), &probe).await;
     assert_eq!(resp.status(), 422);
-    let raw = String::from_utf8(resp.body().to_vec()).unwrap();
+    let raw = String::from_utf8(resp.body().as_bytes().to_vec()).unwrap();
     assert!(!raw.contains("<script>"), "{raw}");
 }
 
@@ -475,7 +475,7 @@ async fn idempotent_replay_is_byte_identical_and_calls_once() {
     let second = send(&h, post(&op, cnv, KEY), r#"{ "text" : "hi" }"#).await;
     assert_eq!(first.status(), 201);
     assert_eq!(second.status(), 201);
-    assert_eq!(first.body(), second.body());
+    assert_eq!(first.body().as_bytes(), second.body().as_bytes());
     assert_eq!(header(&second, "idempotent-replayed"), Some("true"));
     assert!(header(&first, "idempotent-replayed").is_none());
     assert_eq!(
@@ -507,7 +507,7 @@ async fn four_xx_is_registered_five_xx_is_not() {
     assert_problem(&first, 404, "not_found");
     let again = send(&h, post(&op, missing, KEY), r#"{"text":"hi"}"#).await;
     assert_eq!(again.status(), 404);
-    assert_eq!(first.body(), again.body());
+    assert_eq!(first.body().as_bytes(), again.body().as_bytes());
     assert_eq!(header(&again, "idempotent-replayed"), Some("true"));
     assert_eq!(
         header(&again, "x-request-id"),

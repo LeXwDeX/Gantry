@@ -18,9 +18,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util"] }
