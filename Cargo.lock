@@ -783,6 +783,7 @@ dependencies = [
  "gantry-core",
  "gantry-fakes",
  "gantry-pki",
+ "gantry-policy",
  "gantry-store",
  "http",
  "jsonschema",

@@ -9,6 +9,7 @@ description = "Gantry API 网关（api.md）：设备鉴权、路由注册表、
 [dependencies]
 gantry-core = { path = "../gantry-core" }
 gantry-pki = { path = "../gantry-pki" }
+gantry-policy = { path = "../gantry-policy" }
 gantry-store = { path = "../gantry-store" }
 async-trait.workspace = true
 base64 = "0.22"
@@ -26,6 +27,7 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 pem = "3"
+base64 = "0.22"
 x509-parser = "0.16"
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
