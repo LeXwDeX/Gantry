@@ -20,6 +20,10 @@ use serde_json::json;
 /// 沙盒内的 CLI 程序名。
 pub const PROGRAM: &str = "claude";
 
+/// 镜像钉死的 CLI 版本（worker-protocol §10.2）。升级时必须同时重新录制
+/// `fixtures/claude-stream-json/`、更新镜像的 `CLAUDE_CODE_VERSION` 与黄金断言（测试强制三者一致）。
+pub const PINNED_CLAUDE_VERSION: &str = "2.1.303";
+
 /// 无人值守：未预先批准的工具一律拒绝，不提示（OQ-W4 的暂用值）。
 /// **不使用** `bypassPermissions` 或跳过权限检查类标志。
 pub const PERMISSION_MODE: &str = "dontAsk";

@@ -13,6 +13,7 @@ pub mod prompt;
 pub mod proposals;
 #[cfg(unix)]
 pub mod runner;
+pub mod selftest;
 pub mod startup;
 pub mod stream;
 

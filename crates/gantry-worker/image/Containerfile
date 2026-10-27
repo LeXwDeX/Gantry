@@ -1,0 +1,37 @@
+# 官方 worker 镜像（worker.md §7.8、K6；worker-protocol §2.2、§10.2）。
+#
+# 构建（仓库根目录，构建期联网，运行期不联网）：
+#   podman build -f crates/gantry-worker/image/Containerfile -t gantry-worker:dev .
+#
+# 发布时按 digest 引用（`sandbox.base_image` 的默认值，P-66）。构建与发布流程归 deploy / CI（OQ-W5）。
+# 基础镜像的 digest 与 claude CLI 的安装来源 **需核实**：发布流水线落地时把下面两个 FROM 换成
+# `@sha256:` 固定的引用。
+
+FROM docker.io/library/rust:1.85-alpine AS build
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY . .
+# musl 目标默认静态链接。
+RUN cargo build --locked --release -p gantry-worker --bin gantry-worker
+
+FROM docker.io/library/debian:bookworm-slim
+# 与 `claude_cli::PINNED_CLAUDE_VERSION`、`fixtures/claude-stream-json/` 的录制版本一致（测试强制）。
+ARG CLAUDE_CODE_VERSION=2.1.303
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ripgrep jq ca-certificates nodejs npm \
+ && npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && apt-get purge -y npm \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/* /root/.npm
+COPY crates/gantry-worker/image/gitconfig /etc/gitconfig
+COPY --from=build /src/target/release/gantry-worker /usr/local/bin/gantry-worker
+# 无 setuid / setgid；无 gh；无 SSH 私钥；运行期 uid 1000。
+RUN find / -xdev -type f -perm /6000 -exec chmod a-s {} + \
+ && mkdir -p /gantry/home /gantry/tmp \
+ && chown 1000:1000 /gantry/home /gantry/tmp
+ENV HOME=/gantry/home TMPDIR=/gantry/tmp
+USER 1000:1000
+WORKDIR /gantry/work
+# 构建的最后一步：自检不过则镜像构建失败。
+RUN gantry-worker selftest
+ENTRYPOINT ["gantry-worker", "run"]

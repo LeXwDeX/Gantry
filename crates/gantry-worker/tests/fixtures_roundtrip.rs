@@ -108,3 +108,18 @@ fn result_fixture_artifact_paths_are_out_relative() {
         );
     }
 }
+
+/// 在 `.tmp` 写完与 `rename` 之间崩溃：`out/` 里只有 `result.json.tmp`；`rename` 之后文件完整。
+#[test]
+fn crash_between_tmp_and_rename_leaves_only_the_tmp_file() {
+    use gantry_worker::artifacts::{commit_tmp, write_tmp, RESULT_JSON};
+    let result: ResultJson = serde_json::from_str(RESULT).unwrap();
+    let bytes = serde_json::to_vec(&result).unwrap();
+    let out = out_dir();
+    write_tmp(out.path(), RESULT_JSON, &bytes).unwrap();
+    // 模拟此刻进程被杀：服务端提取时看不到 result.json。
+    assert_eq!(listing(out.path()), ["result.json.tmp"]);
+    commit_tmp(out.path(), RESULT_JSON).unwrap();
+    assert_eq!(listing(out.path()), ["result.json"]);
+    assert_eq!(fs::read(out.path().join("result.json")).unwrap(), bytes);
+}

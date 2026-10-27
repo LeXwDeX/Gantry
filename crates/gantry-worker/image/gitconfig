@@ -1,0 +1,7 @@
+# 系统级 git 配置（worker.md §7.8）。
+[credential]
+	# 置空：沙盒内没有任何凭据助手。
+	helper =
+[safe]
+	# 工作区属主在用户命名空间映射下可能显示为"别人"；沙盒本身是信任边界。
+	directory = *
