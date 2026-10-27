@@ -14,7 +14,7 @@ use gantry_core::ids::DeliveryId;
 use gantry_core::ports::{
     BranchName, CreateWorktree, LockError, RepoError, RepoService, WorktreeLocks,
 };
-use gantry_fakes::repo::{lock_conformance, FakeRepo};
+use gantry_fakes::repo::{human_lock_conformance, lock_conformance, FakeRepo};
 
 const LEASE: Duration = Duration::from_secs(900);
 
@@ -143,6 +143,14 @@ async fn shared_lock_conformance_passes_for_real_and_fake() {
         .await
         .unwrap();
     lock_conformance(&fake, &fx.ctx(), &fake_wt.id, &delivery, LEASE)
+        .await
+        .unwrap();
+
+    // 人工锁优先于围栏判定：真实与替身给出同一个错误。
+    human_lock_conformance(&fx.repo, &fx.ctx(), &wt.id, &delivery, LEASE)
+        .await
+        .unwrap();
+    human_lock_conformance(&fake, &fx.ctx(), &fake_wt.id, &delivery, LEASE)
         .await
         .unwrap();
 }

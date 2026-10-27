@@ -37,7 +37,9 @@ use gantry_fakes::forge::{outbox_conformance, FakeForge, FakeWebhook};
 use gantry_fakes::inbox::{dedup_conformance, FakeInbox};
 use gantry_fakes::models::FakeModelProvider;
 use gantry_fakes::policy::{action_conformance, execution_conformance, FakePathRules, FakePolicy};
-use gantry_fakes::repo::{lock_conformance, patch_idempotency_conformance, FakeRepo};
+use gantry_fakes::repo::{
+    human_lock_conformance, lock_conformance, patch_idempotency_conformance, FakeRepo,
+};
 use gantry_fakes::sandbox::FakeSandboxService;
 use gantry_fakes::secrets::{secrets_conformance, MemorySecretStore, MemorySecrets};
 use gantry_fakes::worker::StubWorkerAdapter;
@@ -375,6 +377,15 @@ async fn repo_locks_expire_and_patch_commit_is_idempotent() {
     )
     .await
     .expect("lock conformance");
+    human_lock_conformance(
+        &repo,
+        &ctx,
+        &worktree.id,
+        &delivery,
+        Duration::from_secs(60),
+    )
+    .await
+    .expect("human lock conformance");
 
     let engine = repo
         .acquire_lock(

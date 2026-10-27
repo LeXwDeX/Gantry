@@ -251,11 +251,13 @@ impl FakeRepo {
     ) -> Result<(), RepoError> {
         let worktree = Self::require_worktree(state, id)?;
         let lock = worktree.lock.as_ref().ok_or(RepoError::LockRequired)?;
+        // 与真实实现同序（repo.md §12.B）：有效的人工锁优先报 WorktreeLocked，
+        // 再判围栏 / 租约。
+        if lock.holder == LockHolder::Human && lock.lease_until > state.now {
+            return Err(RepoError::WorktreeLocked { lock: lock.info() });
+        }
         if lock.lease_until <= state.now || lock.fence != token.fence.as_u64() {
             return Err(RepoError::StaleLock);
-        }
-        if lock.holder == LockHolder::Human {
-            return Err(RepoError::WorktreeLocked { lock: lock.info() });
         }
         if lock.delivery_id != token.delivery_id || lock.holder != token.holder {
             return Err(RepoError::LockRequired);
@@ -851,6 +853,52 @@ pub async fn lock_conformance(
         .release_lock(ctx, &renewed)
         .await
         .map_err(|error| format!("release_lock must be idempotent: {error}"))?;
+    Ok(())
+}
+
+/// 人工锁不可被抢占，且有效期内 engine 的写入得到 `WorktreeLocked`
+/// （repo.md §12.B；写入用 `remove_worktree` 代表，它与 `commit_patch` 走同一锁校验）。
+///
+/// 前置条件：`id` 已存在，且当前没有有效锁。结束时人工锁已释放。
+pub async fn human_lock_conformance(
+    service: &dyn RepoService,
+    ctx: &ActorCtx,
+    id: &WorktreeId,
+    delivery: &DeliveryId,
+    lease: Duration,
+) -> Result<(), String> {
+    let engine = service
+        .acquire_lock(ctx, id, LockHolder::Engine, delivery, lease)
+        .await
+        .map_err(|error| format!("engine acquire_lock failed: {error}"))?;
+    service
+        .release_lock(ctx, &engine)
+        .await
+        .map_err(|error| format!("release_lock failed: {error}"))?;
+    let human = service
+        .acquire_lock(ctx, id, LockHolder::Human, delivery, lease)
+        .await
+        .map_err(|error| format!("human acquire_lock failed: {error}"))?;
+    if !matches!(
+        service
+            .acquire_lock(ctx, id, LockHolder::Engine, delivery, lease)
+            .await,
+        Err(RepoError::WorktreeLocked { .. })
+    ) {
+        return Err("engine must not preempt a human lock".into());
+    }
+    match service.remove_worktree(ctx, id, &engine).await {
+        Err(RepoError::WorktreeLocked { lock }) if lock.holder == LockHolder::Human => {}
+        other => {
+            return Err(format!(
+                "engine write under a human lock must be WorktreeLocked, got {other:?}"
+            ))
+        }
+    }
+    service
+        .release_lock(ctx, &human)
+        .await
+        .map_err(|error| format!("release human lock failed: {error}"))?;
     Ok(())
 }
 

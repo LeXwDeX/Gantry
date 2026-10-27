@@ -1,0 +1,52 @@
+# gantry-egress：独立的出网代理进程（architecture §4）。先于 gantryd 启动。
+[Unit]
+Description=Gantry egress proxy
+Documentation=https://github.com/LeXwDeX/gantry/blob/main/docs/modules/deploy.md
+After=network-online.target gantry-firewall.service
+Wants=network-online.target
+PartOf=gantry.target
+
+[Service]
+Type=notify
+User=gantry-egress
+Group=gantry-egress
+ExecStart=/opt/gantry/current/bin/gantry-egress --config /etc/gantry-egress/egress.toml
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+StateDirectory=gantry-egress
+StateDirectoryMode=0700
+# 只在 /run/gantry 里创建 egress.sock（gantry-egress:gantry-link 0660，P-50）。
+SupplementaryGroups=gantry-link
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/gantry-egress /run/gantry
+ReadOnlyPaths=/etc/gantry-egress
+InaccessiblePaths=-/var/lib/gantry -/etc/gantry -/var/lib/gantry-sbx -/var/backups/gantry
+SyslogIdentifier=gantry-egress
+
+[Install]
+WantedBy=gantry.target

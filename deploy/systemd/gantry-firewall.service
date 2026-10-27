@@ -1,0 +1,20 @@
+# 主机防火墙（deploy.md §7.8）：装载独立表 inet gantry，不清空管理员已有的规则。
+[Unit]
+Description=Gantry host firewall (nftables table inet gantry)
+Documentation=https://github.com/LeXwDeX/gantry/blob/main/docs/modules/deploy.md
+DefaultDependencies=no
+Before=network-pre.target gantry-egress.service gantryd.service
+Wants=network-pre.target
+PartOf=gantry.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 先校验再装载；规则文件开头的 `destroy table` 让重复装载幂等。
+ExecStartPre=/usr/sbin/nft -c -f /etc/gantry/gantry.nft
+ExecStart=/usr/sbin/nft -f /etc/gantry/gantry.nft
+ExecStop=/usr/sbin/nft destroy table inet gantry
+SyslogIdentifier=gantry-firewall
+
+[Install]
+WantedBy=gantry.target
