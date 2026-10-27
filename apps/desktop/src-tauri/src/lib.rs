@@ -1,15 +1,18 @@
 //! Gantry 桌面外壳的 Tauri 层（desktop-shell.md §6、§7.6）。
 //!
 //! 这里只做三件事：注册 §6.1 白名单命令、配置 WebView 安全（导航、新窗口、单实例）、
-//! 把错误整形成 `ShellError`。可信逻辑都在 `gantry-desktop-shell`；本骨架阶段尚未接上的
-//! 命令返回 `shell.unavailable` / `shell.not_paired`，不伪造成功。
+//! 把错误整形成 `ShellError`。可信逻辑都在 `gantry-desktop-shell`（状态与编排在 [`Shell`]）；
+//! 尚未接上的命令返回 `shell.unavailable` / `shell.not_paired`，不伪造成功。
 //!
 //! 命令参数一律 `snake_case`（`rename_all`），与 `apps/desktop/src/ipc/tauri.ts` 一致。
 
 use std::collections::BTreeMap;
 
+use gantry_desktop_shell::http::HttpPairTransport;
 use gantry_desktop_shell::ipc::{ShellError, ShellErrorCode};
+use gantry_desktop_shell::keys::{platform_key_store, KeyStore, UnavailableKeyStore};
 use gantry_desktop_shell::links;
+use gantry_desktop_shell::session::{system_clock, Shell};
 use gantry_desktop_shell::storage::{AppStore, Prefs};
 use serde::Serialize;
 use serde_json::Value;
@@ -22,16 +25,6 @@ use tauri_plugin_opener::OpenerExt;
 type CmdResult<T> = Result<T, ShellError>;
 
 #[derive(Serialize)]
-struct IdentityStatus {
-    state: &'static str,
-    server_host: Option<String>,
-    ca_fingerprint: Option<String>,
-    device: Option<Value>,
-    cert: Option<Value>,
-    key_backend: Option<&'static str>,
-}
-
-#[derive(Serialize)]
 struct ConnectionState {
     phase: &'static str,
     epoch: u64,
@@ -42,39 +35,42 @@ struct ConnectionState {
     clock_skew_ms: Option<i64>,
 }
 
-fn unpaired_status() -> IdentityStatus {
-    IdentityStatus {
-        state: "unpaired",
-        server_host: None,
-        ca_fingerprint: None,
-        device: None,
-        cert: None,
-        key_backend: None,
-    }
-}
-
 // ---- 身份与配对 ----
 
 #[tauri::command(rename_all = "snake_case")]
-fn identity_status() -> CmdResult<IdentityStatus> {
-    Ok(unpaired_status())
+fn identity_status(shell: State<'_, Shell>) -> CmdResult<Value> {
+    shell.identity_status()
+}
+
+/// `platform` 由外壳填，不接受 UI 传入（§6.1）。
+#[tauri::command(rename_all = "snake_case")]
+async fn pairing_begin(
+    shell: State<'_, Shell>,
+    pairing_string: String,
+    device_name: String,
+) -> CmdResult<Value> {
+    shell.pairing_begin(&pairing_string, &device_name).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn pairing_begin(pairing_string: String, device_name: String) -> CmdResult<Value> {
-    let _ = (pairing_string, device_name);
-    Err(ShellError::unavailable("pairing_begin"))
+async fn pairing_confirm(shell: State<'_, Shell>, matches: bool) -> CmdResult<Value> {
+    shell.pairing_confirm(matches).await
 }
 
+/// 先弹原生确认框（WebView 不参与），确认后才删除本机密钥、证书与身份文件。
 #[tauri::command(rename_all = "snake_case")]
-fn pairing_confirm(matches: bool) -> CmdResult<IdentityStatus> {
-    let _ = matches;
-    Err(ShellError::unavailable("pairing_confirm"))
-}
-
-#[tauri::command(rename_all = "snake_case")]
-fn identity_reset() -> CmdResult<IdentityStatus> {
-    Err(ShellError::unavailable("identity_reset"))
+async fn identity_reset(app: AppHandle, shell: State<'_, Shell>) -> CmdResult<Value> {
+    let confirmed = confirm(
+        &app,
+        "重置设备身份",
+        "将删除本机的设备密钥、证书与身份文件，并清除各项目的界面状态。\n\n之后需要在服务端重新生成配对串并重新配对。",
+        "删除并重置",
+    )
+    .await?;
+    if !confirmed {
+        return Err(ShellError::new(ShellErrorCode::UserCancelled, "用户取消"));
+    }
+    shell.identity_reset()
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -92,16 +88,25 @@ fn connection_state() -> CmdResult<ConnectionState> {
 
 // ---- API 与事件流（需要已配对）----
 
+/// `route` 是枚举 ID，`path` 必须与该路由的模板逐段吻合；UI 不能传任何头（§7.1）。
 #[tauri::command(rename_all = "snake_case")]
-fn api_request(
+async fn api_request(
+    shell: State<'_, Shell>,
     route: String,
-    path: Option<Value>,
+    path: String,
     query: Option<Value>,
     body: Option<Value>,
     idempotency_key: Option<String>,
 ) -> CmdResult<Value> {
-    let _ = (route, path, query, body, idempotency_key);
-    Err(ShellError::not_paired())
+    shell
+        .api_request(
+            &route,
+            &path,
+            query.as_ref(),
+            body.as_ref(),
+            idempotency_key.as_deref(),
+        )
+        .await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -175,28 +180,28 @@ fn guarded_write_discard(pending_id: String) -> CmdResult<()> {
 // ---- 本机存储（§7.5）----
 
 #[tauri::command(rename_all = "snake_case")]
-fn prefs_get(store: State<'_, AppStore>) -> CmdResult<Prefs> {
-    Ok(store.prefs())
+fn prefs_get(shell: State<'_, Shell>) -> CmdResult<Prefs> {
+    Ok(shell.store().prefs())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn prefs_set(store: State<'_, AppStore>, patch: Value) -> CmdResult<Prefs> {
-    store.set_prefs(&patch)
+fn prefs_set(shell: State<'_, Shell>, patch: Value) -> CmdResult<Prefs> {
+    shell.store().set_prefs(&patch)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_get(store: State<'_, AppStore>, project_id: String) -> CmdResult<Option<Value>> {
-    store.ui_state_get(&project_id)
+fn ui_state_get(shell: State<'_, Shell>, project_id: String) -> CmdResult<Option<Value>> {
+    shell.store().ui_state_get(&project_id)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_set(store: State<'_, AppStore>, project_id: String, state: Value) -> CmdResult<()> {
-    store.ui_state_set(&project_id, &state)
+fn ui_state_set(shell: State<'_, Shell>, project_id: String, state: Value) -> CmdResult<()> {
+    shell.store().ui_state_set(&project_id, &state)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_list(store: State<'_, AppStore>) -> CmdResult<BTreeMap<String, Value>> {
-    store.ui_state_list()
+fn ui_state_list(shell: State<'_, Shell>) -> CmdResult<BTreeMap<String, Value>> {
+    shell.store().ui_state_list()
 }
 
 // ---- 外链与诊断 ----
@@ -207,25 +212,11 @@ fn ui_state_list(store: State<'_, AppStore>) -> CmdResult<BTreeMap<String, Value
 async fn open_external(app: AppHandle, url: String) -> CmdResult<()> {
     let link = links::check_external(&url)?;
     if link.needs_confirm {
-        let dialog = app.clone();
-        let host = link.host_display.clone();
-        let confirmed = tauri::async_runtime::spawn_blocking(move || {
-            dialog
-                .dialog()
-                .message(format!(
-                    "即将在系统浏览器中打开外部网站。\n\n主机：{host}\n\n请确认这是你要访问的网站。"
-                ))
-                .title("打开外部链接")
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom(
-                    "打开".into(),
-                    "取消".into(),
-                ))
-                .blocking_show()
-        })
-        .await
-        .map_err(|_| ShellError::unavailable("确认框"))?;
-        if !confirmed {
+        let message = format!(
+            "即将在系统浏览器中打开外部网站。\n\n主机：{}\n\n请确认这是你要访问的网站。",
+            link.host_display
+        );
+        if !confirm(&app, "打开外部链接", &message, "打开").await? {
             return Err(ShellError::new(ShellErrorCode::UserCancelled, "用户取消"));
         }
     }
@@ -243,6 +234,23 @@ fn open_github(
 ) -> CmdResult<()> {
     let url = links::GithubTarget::from_args(&kind, &repo, number, sha.as_deref())?.url()?;
     open_in_browser(&app, &url)
+}
+
+/// 外壳自己渲染的原生确认框（不在 WebView 里）。阻塞等待用户，放在阻塞线程里。
+async fn confirm(app: &AppHandle, title: &str, message: &str, ok: &str) -> CmdResult<bool> {
+    let dialog = app.clone();
+    let (title, message, ok) = (title.to_string(), message.to_string(), ok.to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        dialog
+            .dialog()
+            .message(message)
+            .title(title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(ok, "取消".into()))
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| ShellError::unavailable("确认框"))
 }
 
 fn open_in_browser(app: &AppHandle, url: &str) -> CmdResult<()> {
@@ -305,7 +313,17 @@ pub fn run() {
         .setup(|app| {
             // 应用数据目录：identity.json、prefs.json、ui-state/（§7.5），仅当前用户可访问。
             let data_dir = app.path().app_data_dir()?;
-            app.manage(AppStore::open(&data_dir)?);
+            // 硬件密钥库不可用时 fail-closed：配对会失败并给出明确错误，不降级为软件密钥（OQ-S2）。
+            let keys: Box<dyn KeyStore> = match platform_key_store(&data_dir.join("keys")) {
+                Ok(store) => store,
+                Err(e) => Box::new(UnavailableKeyStore(e.to_string())),
+            };
+            app.manage(Shell::new(
+                AppStore::open(&data_dir)?,
+                keys,
+                Box::new(HttpPairTransport::default()),
+                system_clock(),
+            ));
             let config = app
                 .config()
                 .app

@@ -151,6 +151,9 @@ pub struct IdentityFile {
     /// 离线根 CA 证书 DER 的 SHA-256：`sha256:` + 64 位小写十六进制（P-64）。
     pub ca_fingerprint: String,
     pub device_id: String,
+    /// 配对时提交的设备名与平台（非秘密，供 `identity_status` 展示）。
+    pub device_name: String,
+    pub platform: String,
     /// `[叶子, 中间 CA, 根]`。
     pub cert_chain_pem: Vec<String>,
     pub tls_key_label: String,
