@@ -27,7 +27,7 @@ deploy/tests/run.sh
 
 `run.sh` 先跑静态检查（`shellcheck`、`systemd-analyze verify`、`nft -c`、`caddy adapt`），再跑 `tests/test_*.sh`。工具缺失时打印 `SKIP` 与原因，不静默通过；在 Linux 环境设 `DEPLOY_STRICT=1`，工具缺失即失败。改了模板后用 `UPDATE_GOLDEN=1 bash deploy/tests/test_render.sh` 更新快照，并在 PR 里说明差异。
 
-macOS 上没有 systemd 与 nftables，`systemd-analyze verify` 与 `nft -c` 会被跳过，单元约束改由 `test_units.sh` 的结构检查兜底；这两项在 M1.4 的虚拟机上补跑（#106）。
+macOS 上没有 systemd 与 nftables，`systemd-analyze verify` 与 `nft -c` 会被跳过，单元约束改由 `test_units.sh` 的结构检查兜底。M0 的 CI 还没有 deploy 任务：需要在 `.github/workflows/m0.yml` 里加一个 Ubuntu 24.04 任务，以 root 运行 `DEPLOY_STRICT=1 deploy/tests/run.sh`。改 workflow 文件需要带 `workflow` 权限的令牌，见 #104。在此之前，这两项检查在 M1.4 的虚拟机上补跑（#106）。
 
 本机替身覆盖的规格 §12 条目（A 级）：模板渲染快照、渲染值注入防护、配置无密钥形字符串、webhook 只监听回环、两种入口模板只转发两条路径且不暴露 API / 配对端口、单元加固项与依赖关系、`/run/gantry` 共用、防火墙表独立且幂等、布局表与权限审计、参数校验与退出码 10、步骤顺序（入口先于 App，P-65）、续跑与“重跑不再执行已完成步骤”、预检检查器（系统版本、端口、NTP、磁盘、同名用户）、备份范围 / `MANIFEST.json` 哈希 / 明文无哨兵 / 错误私钥无法解密 / 吊销日志不完整行丢弃 / `post_hook` 失败即失败且不删上一份 / 带 tag 的归档不参与轮转 / 轮转数量。
 
