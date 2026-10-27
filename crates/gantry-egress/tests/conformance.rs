@@ -58,6 +58,7 @@ impl Subject for Stub {
 
 struct Real {
     client: EgressClient,
+    clock: Arc<gantry_core::testing::FakeClock>,
     _ca: TestCA,
     _mock: MockUpstream,
     _dir: TempDir,
@@ -148,6 +149,7 @@ async fn real(name: &str) -> Real {
     );
     Real {
         client,
+        clock,
         _ca: ca,
         _mock: mock,
         _dir: TempDir(dir),
@@ -462,3 +464,60 @@ conformance!(config, config_revisions);
 conformance!(jobs, job_token_lifecycle);
 conformance!(svc, svc_tokens_and_usage);
 conformance!(secrets, secrets_write_only);
+
+// ---------------------------------------------------------------------------
+// 客户端自身的语义（只对真实 Egress 跑）
+// ---------------------------------------------------------------------------
+
+/// 并发首次取 `svc_token` 只签发一次：签发会吊销此前全部令牌，不能让某个调用拿到刚被吊销的。
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_service_token_calls_share_one_issuance() {
+    let real = real("svcrace").await;
+    configure(&real).await;
+    let c = ctx();
+    let (a, b, d, e) = tokio::join!(
+        real.client.service_token(&c),
+        real.client.service_token(&c),
+        real.client.service_token(&c),
+        real.client.service_token(&c),
+    );
+    let ids: std::collections::BTreeSet<_> = [a, b, d, e]
+        .into_iter()
+        .map(|grant| grant.unwrap().svc_token_id)
+        .collect();
+    assert_eq!(ids.len(), 1, "one token for every concurrent caller");
+    let rotated = real.client.rotate_service_token(&ctx()).await.unwrap();
+    assert_eq!(
+        rotated.revoked_previous,
+        ids.into_iter().collect::<Vec<_>>()
+    );
+    assert_eq!(real.client.service_token(&ctx()).await.unwrap(), rotated);
+}
+
+/// 会话台账的尝试跨 UTC 午夜重试：复用首次签发的 `day`，按重放语义得到新令牌而非冲突。
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_retries_across_midnight_keep_the_first_day() {
+    let real = real("midnight").await;
+    configure(&real).await;
+    let mut req = job(5);
+    req.delivery_id = None;
+    req.conversation_id = Some("cnv_01JBX2D1F3H5K7M9P2R4T6V8XZ".parse().unwrap());
+    let first = real
+        .client
+        .issue_job_token(req.clone(), &ctx())
+        .await
+        .unwrap();
+    assert!(!first.reissued);
+    real.clock.advance_secs(86_400);
+    let retry = real
+        .client
+        .issue_job_token(req.clone(), &ctx())
+        .await
+        .unwrap();
+    assert!(retry.reissued, "a replay, not binding_mismatch");
+    real.client
+        .revoke_job_token(&req.job_id, &ctx())
+        .await
+        .unwrap();
+    real.client.forget_job(&req.job_id, &ctx()).await.unwrap();
+}
