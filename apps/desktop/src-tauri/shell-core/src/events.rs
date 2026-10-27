@@ -178,6 +178,9 @@ async fn run(
             &mut attempt,
         )
         .await;
+        if !matches!(outcome, Outcome::Stop) {
+            shell.diag().count("sse_reconnects", &[]);
+        }
         match outcome {
             Outcome::Stop => return,
             Outcome::RetryNow => attempt = 0,
@@ -279,6 +282,7 @@ async fn connect_once(
             let action = state.lock().unwrap().handle(&raw);
             match action {
                 Action::Forward(frame) => {
+                    shell.diag().count("events_forwarded", &[]);
                     if !sink.send(frame) {
                         return Outcome::Stop;
                     }

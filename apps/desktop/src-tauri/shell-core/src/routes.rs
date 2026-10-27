@@ -423,3 +423,28 @@ pub fn shape_response(status: u16, headers: &[(String, String)], body: &[u8]) ->
 pub fn network_failure(kind: &str) -> Value {
     json!({ "ok": false, "network": kind })
 }
+
+/// 由方法与路径（可带查询串）反查 `operationId`，供日志使用；匹配不到时返回 `other`。
+pub fn operation_for(method: &str, path_and_query: &str) -> &'static str {
+    let path = path_and_query.split('?').next().unwrap_or_default();
+    let contract = Contract::get();
+    for spec in ROUTES.iter() {
+        let Some(op) = contract.operation(spec.operation_id) else {
+            continue;
+        };
+        if op.method != method {
+            continue;
+        }
+        let want: Vec<&str> = op.template.split('/').collect();
+        let got: Vec<&str> = path.split('/').collect();
+        if want.len() == got.len()
+            && want
+                .iter()
+                .zip(&got)
+                .all(|(w, g)| w == g || (w.starts_with('{') && w.ends_with('}')))
+        {
+            return spec.operation_id;
+        }
+    }
+    "other"
+}

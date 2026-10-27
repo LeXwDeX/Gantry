@@ -39,6 +39,8 @@ struct S {
     /// 注入：dry_run 返回的 subject_digest 与请求体不符。
     tamper_digest: bool,
     writes: Vec<(String, String, Vec<u8>, Option<String>)>,
+    /// 服务端收到的签名值（检查它不进日志）。
+    signature: Option<String>,
     all_bodies: Vec<String>,
 }
 
@@ -172,6 +174,7 @@ fn handler(state: Arc<Mutex<S>>, approval_pubkey: P256PublicKey) -> AnyHandler {
                     .unwrap()
                     .verify(&bytes, &sig)
                     .is_ok());
+                st.signature = body["signature"].as_str().map(str::to_string);
                 st.approval.as_mut().unwrap()["status"] = json!("granted");
                 json_resp(200, st.approval.clone().unwrap())
             }
@@ -273,6 +276,7 @@ async fn env(name: &str, role: &str) -> Env {
             Box::new(HttpPairTransport::default()),
             system_clock(),
         )
+        .with_log_dir(&dir.join("logs"))
         .with_events_config(EventsConfig {
             idle: Duration::from_secs(5),
             backoff_scale: 0.001,
@@ -348,15 +352,22 @@ async fn model_credential_write_goes_through_the_signing_chain() {
     assert!(e.presence.prompts()[0]
         .summary
         .starts_with("settings settings/models @ "));
-    // 日志 / 诊断以外的本机文件里也没有秘密值。
+    // 本机任何文件（含日志）与诊断快照里都没有秘密值、签名值与 Gantry-Approval 的值。
+    let signature = e.state.lock().unwrap().signature.clone().unwrap();
+    let snapshot = e.shell.diagnostics_snapshot().to_string();
     for entry in walk(&e.dir) {
-        assert!(
-            !std::fs::read_to_string(&entry)
-                .unwrap_or_default()
-                .contains(SENTINEL),
-            "{entry:?}"
-        );
+        let text = std::fs::read_to_string(&entry).unwrap_or_default();
+        for sentinel in [SENTINEL, signature.as_str(), APR] {
+            assert!(!text.contains(sentinel), "{entry:?} 含 {sentinel}");
+        }
     }
+    for sentinel in [SENTINEL, signature.as_str(), APR] {
+        assert!(!snapshot.contains(sentinel), "诊断快照含 {sentinel}");
+    }
+    assert!(
+        e.dir.join("logs").join("shell.log").exists(),
+        "日志确实写了"
+    );
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

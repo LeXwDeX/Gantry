@@ -312,9 +312,9 @@ impl Shell {
             ));
         }
         let digest = digest_of(&body);
-        let resp = c
-            .client
-            .send(
+        let resp = self
+            .send_logged(
+                c,
                 "PUT",
                 &format!("{path}?dry_run=true"),
                 Some(&bytes),
@@ -425,9 +425,8 @@ impl Shell {
                     body: Some(body),
                     idempotency_key: Some(format!("gw_{pending_id}")),
                 };
-                let resp = c
-                    .client
-                    .send_prepared(&req)
+                let resp = self
+                    .send_prepared_logged(c, &req)
                     .await
                     .map_err(|_| ShellError::new(ShellErrorCode::NotConnected, "连接中断"))?;
                 if resp.status != 201 && resp.status != 200 {
@@ -508,9 +507,8 @@ impl Shell {
             None => &empty,
         };
         let body = (!body.is_empty()).then_some(body);
-        let resp = c
-            .client
-            .send(write.method, &write.path, body, &headers)
+        let resp = self
+            .send_logged(c, write.method, &write.path, body, &headers)
             .await
             .map_err(|_| ShellError::new(ShellErrorCode::NotConnected, "连接中断"))?;
         if let Some(epoch) = resp.log_epoch() {
