@@ -19,6 +19,7 @@ sha2.workspace = true
 serde_jcs.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
+zeroize = { version = "1", features = ["std"] }
 
 [dev-dependencies]
 serde_json.workspace = true

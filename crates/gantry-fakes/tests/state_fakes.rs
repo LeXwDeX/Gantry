@@ -887,7 +887,7 @@ fn secrets_versions_isolation_and_debug() {
     secrets_conformance(&sink, &name, &ctx).expect("secrets conformance");
 
     let secret = sink.get(&name).expect("get").expect("secret");
-    assert_eq!(secret.version.get(), 3);
+    assert_eq!(secret.version.get(), 4);
     assert!(!format!("{secret:?}").contains("three"));
     assert!(!format!("{sink:?}").contains("three"));
 
