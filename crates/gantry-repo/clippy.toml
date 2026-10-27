@@ -1,0 +1,5 @@
+# repo.md §7.2：git 子进程只经 `GitCmd` 构造。
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "git 子进程只经 git::GitCmd 构造（repo.md §7.2）" },
+    { path = "tokio::process::Command::new", reason = "git 子进程只经 git::GitCmd 构造（repo.md §7.2）" },
+]
