@@ -750,6 +750,14 @@ impl AttemptRunner {
         Ok(out)
     }
 
+    /// 本次运行组装 SandboxSpec 所用的修订与权重（`job_token` 口径，§7.14.2）。
+    fn weight_audit(&self) -> gantry_core::events::WeightAudit {
+        gantry_core::events::WeightAudit::JobToken {
+            config_rev: self.config.config_rev.as_u64(),
+            weights: self.config.token_weights,
+        }
+    }
+
     /// 沙盒基础设施失败：`infra.<步骤>`（worker-protocol §9），没有产物与计量。
     fn infra_failure(&self, plan: &AttemptPlan, detail: InfraDetail) -> Finalized {
         let code = match detail {
@@ -768,6 +776,7 @@ impl AttemptRunner {
             result_ref: None,
             usage_metered: TokenUsage::default(),
             weighted_tokens: 0,
+            weight_audit: self.weight_audit(),
             wall_time_s: 0,
             verdict: None,
             patch: PatchResult::None,
@@ -871,6 +880,7 @@ impl AttemptRunner {
             result_ref,
             usage_metered: outcome.usage_metered,
             weighted_tokens: outcome.weighted_tokens,
+            weight_audit: self.weight_audit(),
             wall_time_s: wall_time_s(outcome),
             verdict: if output_ok && check.protocol_ok {
                 verdict
