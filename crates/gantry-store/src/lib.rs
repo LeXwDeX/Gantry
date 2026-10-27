@@ -40,8 +40,12 @@ use gantry_core::ids::{
 use gantry_core::time::Timestamp;
 use serde_json::Value;
 
+use module::{ModuleRegistry, ModuleTables};
+
+pub mod module;
 pub mod projection;
 
+pub use module::{ModuleConn, ModuleReader, ModuleRow, ModuleSpec, MODULE_SCAN_MAX};
 pub use projection::{DeliveryRow, FoldError, StageEntered};
 
 // ---------------------------------------------------------------------------
@@ -53,20 +57,17 @@ pub struct StoreDeps {
     pub ids: Arc<IdGen>,
 }
 
-/// 模块注册项；M0 只接受空列表（§7.10 的投影器注册从 M1 开始）。
-pub struct ModuleSpec {
-    pub module: &'static str,
-}
-
 #[derive(Clone)]
 pub struct Store {
     inner: Arc<RwLock<Inner>>,
     gate: Arc<WriteGate>,
     deps: Arc<StoreDeps>,
+    modules: Arc<ModuleRegistry>,
 }
 
 impl Store {
-    /// M0 内存实现。`modules` 非空时返回 `Unsupported`，避免假装已支持模块投影器。
+    /// M0 内存实现。`modules` 声明各模块的私有表（§7.10）；名字不合规返回
+    /// `InvalidModuleSpec`。
     #[cfg(feature = "testing")]
     pub async fn open_in_memory(
         deps: StoreDeps,
@@ -86,11 +87,7 @@ impl Store {
         deps: StoreDeps,
         modules: &[ModuleSpec],
     ) -> Result<Store, StoreError> {
-        if !modules.is_empty() {
-            return Err(StoreError::Unsupported(
-                "module projectors are M1 (store.md §7.10)",
-            ));
-        }
+        let registry = ModuleRegistry::new(modules)?;
         let log_id = deps.ids.next_ulid().map_err(StoreError::Id)?.to_string();
         Ok(Store {
             inner: Arc::new(RwLock::new(Inner {
@@ -101,6 +98,7 @@ impl Store {
             })),
             gate: Arc::new(WriteGate::new()),
             deps: Arc::new(deps),
+            modules: Arc::new(registry),
         })
     }
 
@@ -137,6 +135,7 @@ impl Store {
     pub fn snapshot_sync(&self) -> Result<ReadSnapshot, StoreError> {
         Ok(ReadSnapshot {
             inner: self.inner.read().map_err(|_| StoreError::Poisoned)?.clone(),
+            modules: Arc::clone(&self.modules),
         })
     }
 
@@ -148,6 +147,7 @@ impl Store {
     pub async fn snapshot(&self) -> Result<ReadSnapshot, StoreError> {
         Ok(ReadSnapshot {
             inner: self.inner.read().map_err(|_| StoreError::Poisoned)?.clone(),
+            modules: Arc::clone(&self.modules),
         })
     }
 
@@ -343,6 +343,8 @@ struct Inner {
     deliveries: BTreeMap<DeliveryId, DeliveryRow>,
     /// 内置 `inbox_items` 投影（store.md §7.2）；收件箱状态的唯一来源。
     inbox: BTreeMap<InboxId, InboxItem>,
+    /// 模块私有表（§7.10）；不是投影，重建投影时不动。
+    module_tables: ModuleTables,
     unprojected: Vec<UnprojectedEvent>,
     /// testing 的 typed 模块快照；克隆时逐项深拷贝，避免浅共享可变状态。
     #[cfg(feature = "testing")]
@@ -367,6 +369,7 @@ impl Clone for Inner {
             next_enqueue_seq: self.next_enqueue_seq,
             deliveries: self.deliveries.clone(),
             inbox: self.inbox.clone(),
+            module_tables: self.module_tables.clone(),
             unprojected: self.unprojected.clone(),
             #[cfg(feature = "testing")]
             module_states: self
@@ -769,6 +772,16 @@ impl WriteTx {
 
     pub fn outbox(&mut self) -> OutboxTx<'_> {
         OutboxTx { tx: self }
+    }
+
+    /// 本事务内读写 `module` 的私有表（§7.10）；与本事务的事件一起提交或回滚。
+    /// 访问未注册或属于其他模块的表返回 `PreconditionFailed`。
+    pub fn module_conn(&mut self, module: &'static str) -> ModuleConn<'_> {
+        ModuleConn {
+            module,
+            registry: &self.store.modules,
+            tables: &mut self.snapshot.module_tables,
+        }
     }
 
     pub async fn commit(self) -> Result<Committed, StoreError> {
@@ -1262,9 +1275,19 @@ impl TxReader<'_> {
 
 pub struct ReadSnapshot {
     inner: Inner,
+    modules: Arc<ModuleRegistry>,
 }
 
 impl ReadSnapshot {
+    /// 快照上只读访问 `module` 的私有表（§7.10）。
+    pub fn module_conn(&self, module: &'static str) -> ModuleReader<'_> {
+        ModuleReader {
+            module,
+            registry: &self.modules,
+            tables: &self.inner.module_tables,
+        }
+    }
+
     pub fn head_seq(&self) -> Seq {
         Seq::from_wire(self.inner.head).unwrap_or(Seq::ZERO)
     }
@@ -2348,6 +2371,12 @@ pub enum StoreError {
     Unsupported(&'static str),
     #[error("store lock poisoned")]
     Poisoned,
+    /// `ModuleSpec` 的模块名或表名不合规（§7.10 的前缀检查）。
+    #[error("invalid module spec: {0}")]
+    InvalidModuleSpec(String),
+    /// 模块表文档无法编码 / 解码为调用方给的类型。
+    #[error("module table value: {0}")]
+    ModuleValue(String),
 }
 
 impl StoreError {

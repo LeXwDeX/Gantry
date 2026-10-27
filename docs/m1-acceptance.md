@@ -54,6 +54,8 @@ B 级与 C 级之间最大的差别是 GitHub：`FakeGitHub` 只能证明 Gantry
 
 注：Secure Enclave 中带"用户在场"访问控制的密钥，在未签名或临时签名（ad-hoc）的开发构建里能否创建与使用，取决于钥匙串访问组授权（entitlement）要求，**需核实**。若不能，第 7 行的 B 级证据也要等 macOS 签名证书，这时它应提前到清单首位。
 
+**核实结果（2026-10-27，[#102](https://github.com/LeXwDeX/gantry/issues/102)，探针见 [`apps/desktop/src-tauri/probe/`](../apps/desktop/src-tauri/probe/README.md)）**：在没有任何代码签名身份的 Apple Silicon 机器上，ad-hoc 签名的二进制**不能**把 SE 密钥持久化到钥匙串（`-34018`，缺授权），但**能**创建带 `userPresence` 访问控制的非持久 SE 密钥，并把 SE 加密的包装块存进应用数据目录、在新进程中恢复。不允许交互时审批签名密钥签名失败（`LAError -1004`），mTLS 客户端密钥无提示签名成功；以上已自动验证。Touch ID 通过后签名成功这一项需要人在场，手动步骤写在探针 README 里，**尚未执行**。结论：第 7 行的 B 级证据**不需要**等 macOS 签名证书，签名证书仍排在清单原位，用于安装包形态与把密钥改存钥匙串（包装块文件不受访问组保护，见探针 README"注意两点"）。
+
 ## 5. 推进方式与宣布方式（已确定）
 
 1. **现在**：各泳道按替身推进到 A 级全绿；`be-engine` 先补 [engine.md §7.14](modules/engine.md) 定义的决策器（#58），再补 §12.2 全部 A 级用例。

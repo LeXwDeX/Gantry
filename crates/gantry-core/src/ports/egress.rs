@@ -74,7 +74,7 @@ pub struct EgressEndpoints {
     pub add_host: Option<(String, IpAddr)>,
 }
 
-/// 为一个 Attempt 签发 `job_token`。
+/// 为一个 Attempt 签发 `job_token`。会话台账的 `day` 取签发当天（UTC，P-58）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct IssueJobToken {
     pub job_id: AttemptId,
@@ -88,6 +88,11 @@ pub struct IssueJobToken {
     pub groups: Vec<GroupName>,
     pub tokens_total: u64,
     pub weights: TokenWeights,
+    /// 令牌硬上限 = 签发时刻 + `wall_time_s` + 600 s（egress-control §3.1、§4.1）。
+    pub wall_time_s: u64,
+    /// `weights` 所属的配置修订；Egress 写进该尝试每条用量记录的 `weight_rev`
+    /// （egress-control §4.5「加权」行）。
+    pub config_rev: Seq,
 }
 
 impl IssueJobToken {

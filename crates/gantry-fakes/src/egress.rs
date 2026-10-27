@@ -638,7 +638,8 @@ impl EgressControl for EgressStub {
 
         let issued_at = now();
         let job_ttl = state.job_ttl;
-        let weight_rev = state.applied_rev.unwrap_or(0);
+        // 权重快照所属的配置修订由调用方随签发请求给出（#94 拍板）。
+        let weight_rev = req.config_rev.as_u64();
         state.jobs.insert(
             req.job_id,
             JobEntry {

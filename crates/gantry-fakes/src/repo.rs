@@ -193,6 +193,24 @@ impl FakeRepo {
         self.lock().refs.insert((project, name.into()), oid);
     }
 
+    /// 把项目镜像仓指向一个真实目录（forge 的拉取 / 推送测试在真实 git 仓上跑）。
+    pub fn set_mirror(&self, project: ProjectId, remote: RepoSlug, git_dir: PathBuf) {
+        let info = MirrorInfo {
+            git_dir,
+            fetch_refspecs: vec![REFSPEC.to_owned()],
+        };
+        self.lock()
+            .mirrors
+            .insert(project, (remote, info, MirrorHealth::Healthy));
+    }
+
+    /// 直接登记一条提交溯源（I8），不经 `validate_patch` / `commit_patch`。
+    pub fn insert_provenance(&self, project: ProjectId, record: CommitRecord) {
+        self.lock()
+            .provenance
+            .insert((project, record.commit_oid), record);
+    }
+
     pub fn set_mirror_health(&self, project: ProjectId, health: MirrorHealth) {
         let mut state = self.lock();
         if let Some((_, _, current)) = state.mirrors.get_mut(&project) {
