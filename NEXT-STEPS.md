@@ -50,7 +50,7 @@
 | #67 E6：Outbox 终态失败后的重做入口 | #73（decide 切片 5，控制面与异常路径） | 已决：方案 A，见 [#67](https://github.com/LeXwDeX/gantry/issues/67) |
 | #125 `create_pr` 的 `ActionKey` 与 CAS 提议原文如何衔接（#68 遗留） | #69、#70 | 已决：方案 1，见 [#125](https://github.com/LeXwDeX/gantry/issues/125) |
 | #87 M1 宣布方式：单步还是两步（[m1-acceptance.md §5](docs/m1-acceptance.md#5-推进方式与宣布方式已确定)） | M1 对外的中间状态怎么说；不阻塞开发 | 已决：两步，见 [#87](https://github.com/LeXwDeX/gantry/issues/87) |
-| #87 `decisions.md` 待决的 Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算） | 分别阻塞 `pki` 的安装引导期、`notify` 的选项与引擎预算追加 | 已决：见 [#87](https://github.com/LeXwDeX/gantry/issues/87)，写入 decisions.md D-18、D-19；`budget.limit_raised` 的契约另开 issue |
+| #87 `decisions.md` 待决的 Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算） | 分别阻塞 `pki` 的安装引导期、`notify` 的选项与引擎预算追加 | 已决：见 [#87](https://github.com/LeXwDeX/gantry/issues/87)，写入 decisions.md D-18、D-19；`budget.limit_raised` 的契约见 #129 |
 | GitHub 账户计费（#86，由用户处理） | 远端 CI；恢复前所有 PR 只能靠本机检查合入 | 待用户处理 |
 | Q-12（结果对象读取路由） | M2 的补丁签名审批；不在 M1 范围 | 待决 |
 

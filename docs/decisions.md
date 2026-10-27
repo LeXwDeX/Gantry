@@ -26,7 +26,7 @@
 | D-16 | GraphAgent（`graph-agent` 仓库）是 Gantry 的前身项目，Gantry 是其继任者；GraphAgent 是 AGPL 许可，只借鉴设计与教训，不复用代码 | 用户（[AGENTS.md §1](../AGENTS.md#1-项目当前情况)）；原 Q-05 |
 | D-17 | SpecGit 是 Gantry 的前身项目：并入其交付语义（Issue → PR → 验证完成），不作为独立 CLI 调用 | 用户（[AGENTS.md §1](../AGENTS.md#1-项目当前情况)）；原 Q-06 |
 | D-18 | **第一台配对设备是手机档案时**：安装引导期（P-66）一直持续到第一台**桌面**设备配对；第一台桌面设备成为 approver（P-23）；在此之前配对的手机都是 `operator`（P-76） | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-10 |
-| D-19 | **`budget_exhausted` 的 `raise_cap`**（P-79）：每选一次，给耗尽的那个维度追加一份该档模板的原值（如 `rounds` 3 → 6）；新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`），其契约另开 issue 跟踪；operator 即可操作，不需要签名，只在桌面档案出现 | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-11 |
+| D-19 | **`budget_exhausted` 的 `raise_cap`**（P-79）：每选一次，给耗尽的那个维度追加一份该档模板的原值（如 `rounds` 3 → 6）；新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`），其契约见 [#129](https://github.com/LeXwDeX/gantry/issues/129)；operator 即可操作，不需要签名，只在桌面档案出现 | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-11 |
 
 D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计算与工作树隔离推导出的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 行新增的用户机制决定；机制见待契约批准提案节的 P-83–P-86。
 
