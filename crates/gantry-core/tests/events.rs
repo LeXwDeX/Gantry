@@ -519,3 +519,23 @@ fn undefined_events_are_never_projected_as_success() {
         assert!(validate_event_data(&ty, &json!({})).is_err(), "{ty}");
     }
 }
+
+/// #122：人工锁不绑定交付单元，`delivery_id: null` 合法；engine / guardian 锁照常绑定。
+#[test]
+fn worktree_locked_delivery_binding() {
+    let data = |holder: &str, delivery_id: Value| {
+        json!({
+            "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+            "holder": holder,
+            "delivery_id": delivery_id,
+            "lease_until": "2026-10-24T12:45:00.000Z",
+        })
+    };
+    let delivery = json!("dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB");
+    let ty = EventType::WorktreeLocked;
+    assert!(validate_event_data(&ty, &data("human", Value::Null)).is_ok());
+    assert!(validate_event_data(&ty, &data("engine", delivery.clone())).is_ok());
+    assert!(validate_event_data(&ty, &data("guardian", delivery.clone())).is_ok());
+    assert!(validate_event_data(&ty, &data("engine", Value::Null)).is_err());
+    assert!(validate_event_data(&ty, &data("human", delivery)).is_err());
+}

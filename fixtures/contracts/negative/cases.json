@@ -908,5 +908,81 @@
     "should_fail": [
       "rust"
     ]
+  },
+  {
+    "id": "event-worktree-locked-engine-without-delivery",
+    "schema": "schemas/events/worktree.locked.json",
+    "rust": "event:worktree.locked",
+    "event_type": "worktree.locked",
+    "data": {
+      "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "holder": "engine",
+      "delivery_id": null,
+      "lease_until": "2026-10-24T12:45:00.000Z"
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "event-worktree-locked-human-with-delivery",
+    "schema": "schemas/events/worktree.locked.json",
+    "rust": "event:worktree.locked",
+    "event_type": "worktree.locked",
+    "data": {
+      "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "holder": "human",
+      "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+      "lease_until": "2026-10-24T12:45:00.000Z"
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "worktree-guardian-lock-without-delivery",
+    "schema": "schemas/entities/worktree.json",
+    "rust": "entities::Worktree",
+    "data": {
+      "id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "branch": "gantry/dlv-12",
+      "base_ref": "main",
+      "path": "/var/lib/gantry/worktrees/acme-web/dlv-12",
+      "lock": {
+        "holder": "guardian",
+        "delivery_id": null,
+        "acquired_at": "2026-10-24T12:38:00.000Z",
+        "lease_until": "2026-10-24T12:45:00.000Z"
+      },
+      "created_at": "2026-10-24T12:30:00.000Z",
+      "updated_at": "2026-10-24T12:30:00.000Z"
+    },
+    "should_fail": [
+      "rust"
+    ]
+  },
+  {
+    "id": "worktree-human-lock-with-delivery",
+    "schema": "schemas/entities/worktree.json",
+    "rust": "entities::Worktree",
+    "data": {
+      "id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+      "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+      "branch": "gantry/dlv-12",
+      "base_ref": "main",
+      "path": "/var/lib/gantry/worktrees/acme-web/dlv-12",
+      "lock": {
+        "holder": "human",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "acquired_at": "2026-10-24T12:38:00.000Z",
+        "lease_until": "2026-10-24T12:45:00.000Z"
+      },
+      "created_at": "2026-10-24T12:30:00.000Z",
+      "updated_at": "2026-10-24T12:30:00.000Z"
+    },
+    "should_fail": [
+      "rust"
+    ]
   }
 ]

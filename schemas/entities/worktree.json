@@ -61,7 +61,16 @@
           "$ref": "#/$defs/LockHolder"
         },
         "delivery_id": {
-          "$ref": "#/$defs/Id_dlv"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id_dlv"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "engine / guardian 锁必填；人工锁为 `null`（#122）。",
+          "default": null
         },
         "acquired_at": {
           "$ref": "#/$defs/Timestamp"
@@ -72,7 +81,6 @@
       },
       "required": [
         "holder",
-        "delivery_id",
         "acquired_at",
         "lease_until"
       ]

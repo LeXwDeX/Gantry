@@ -111,11 +111,6 @@ pub const REGISTERED: &[(&str, &str)] = &[
         "schemas/entities/device.json.cert_serial/pattern",
         "待决 OQ-10：cert_serial 格式未定，API 暂按示例写十六进制",
     ),
-    (
-        "schemas/entities/worktree.json.lock/anyOf/0/properties/delivery_id/",
-        "待决 #122：人工锁（holder=human）是否绑定交付单元未写明；core 的 WorktreeLock.delivery_id 不可空，\
-         API 与 Mock 允许 null",
-    ),
 ];
 
 /// 去掉不影响接受集合的表示差异。

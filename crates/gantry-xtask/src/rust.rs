@@ -93,7 +93,9 @@ pub fn check_annotation(kind: &str, data: &Value) -> Result<(), String> {
         "entities::Workflow" => roundtrip::<Workflow>(data),
         "entities::Node" => roundtrip::<Node>(data),
         "entities::Attempt" => roundtrip::<Attempt>(data),
-        "entities::Worktree" => roundtrip::<Worktree>(data),
+        "entities::Worktree" => checked_roundtrip::<Worktree>(data, |worktree| {
+            worktree.validate().map_err(|error| error.to_string())
+        }),
         "entities::Message" => roundtrip::<Message>(data),
         "entities::Conversation" => roundtrip::<Conversation>(data),
         "entities::Device" => roundtrip::<Device>(data),

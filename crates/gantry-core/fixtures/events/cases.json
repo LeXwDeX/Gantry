@@ -2272,6 +2272,26 @@
         }
       },
       "pointer_contains": "/item"
+    },
+    {
+      "type": "worktree.locked",
+      "data": {
+        "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+        "holder": "guardian",
+        "delivery_id": null,
+        "lease_until": "2026-10-24T12:45:00.000Z"
+      },
+      "pointer_contains": "/delivery_id"
+    },
+    {
+      "type": "worktree.locked",
+      "data": {
+        "worktree_id": "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV",
+        "holder": "human",
+        "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+        "lease_until": "2026-10-24T12:45:00.000Z"
+      },
+      "pointer_contains": "/delivery_id"
     }
   ],
   "contract_undefined": []

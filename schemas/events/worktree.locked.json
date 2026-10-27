@@ -9,7 +9,16 @@
       "$ref": "#/$defs/LockHolder"
     },
     "delivery_id": {
-      "$ref": "#/$defs/Id_dlv"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Id_dlv"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "与 `WorktreeLock.delivery_id` 同一规则：engine / guardian 必填，human 为 `null`（#122）。",
+      "default": null
     },
     "lease_until": {
       "$ref": "#/$defs/Timestamp"
@@ -18,7 +27,6 @@
   "required": [
     "worktree_id",
     "holder",
-    "delivery_id",
     "lease_until"
   ],
   "description": "`worktree.locked`（repo.md §11）。",

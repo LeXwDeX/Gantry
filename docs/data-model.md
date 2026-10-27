@@ -134,7 +134,7 @@ erDiagram
 
 | 实体 | 字段 | 说明 |
 | --- | --- | --- |
-| Worktree | project_id, branch, base_ref, path, lock | `lock`：{holder: `engine`/`guardian`/`human`, delivery_id, acquired_at, lease_until}；租约到期自动释放 |
+| Worktree | project_id, branch, base_ref, path, lock | `lock`：{holder: `engine`/`guardian`/`human`, delivery_id?, acquired_at, lease_until}；租约到期自动释放。`delivery_id` 的规则：`holder` 为 `engine` / `guardian` 时必填（锁代表该交付单元在写）；为 `human` 时必须为 `null`，人工锁不绑定交付单元（`PUT /v1/worktrees/{id}/lock` 的请求体本来就没有交付单元）。`worktree.locked` 的 data 适用同一规则（#122） |
 | Sandbox | driver, trust, image_digest, limits, status, worktree_snapshot, egress_profile | `trust`：trusted / untrusted；`limits`：cpu、mem、disk、pids、wall_time；`status`：`created`（已建、已注入、未启动）/ `running` / `stopped` / `destroyed` / `lost`；`worktree_snapshot`：`{mirror, base_sha, pr_base_sha?}`，即镜像仓引用 + 基线提交 SHA |
 
 ### Conversation / Message
