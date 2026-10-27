@@ -8,7 +8,7 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 
 截至 2026-10-26：
 
-- **M0 统一开发基线已合入。** 已有领域核心、跨模块端口、内存存储、测试替身、内存模拟接口（Mock API）和浏览器模拟场景前端。前后端尚未接线，真实联调未验证。M0 各份契约文本仍标注"送审、尚未批准"。
+- **M0 统一开发基线已合入。** 已有领域核心、跨模块端口、内存存储、测试替身、内存模拟接口（Mock API）和浏览器模拟场景前端。前后端尚未接线，真实联调未验证。M0 各份契约文本已于 2026-10-27 由用户统一批准。
 - **M1 已启动，只完成引擎的局部。** `crates/gantry-engine` 已有 `low.single` 模板、事件投影、预算台账、阶段推进、Outbox 意图构造和控制面写入（创建、暂停 / 继续、放弃、调档、重试）。决策器 `decide`、执行体、调度和终结管线都还没有实现；它们的类型契约见 [engine.md §7.14](docs/modules/engine.md)。
 - **M1 端到端路径上的其他模块都还没有 crate**：`forge`、`repo`、`sandbox`、`worker`、`egress`、`models`、`policy`、`notify`、`conversation`、`api`、`pki`、`secrets`、`desktop-shell`（`apps/desktop` 目前没有 `src-tauri`）。
 - **当前里程碑**：[M1.1 决策器：契约补缺与 decide 实现](https://github.com/LeXwDeX/gantry/milestone/1)。逐项计划、依赖和完成标准在里程碑的 issue 里；全局顺序（阶段 0–6）见 [NEXT-STEPS.md「后续规划」](NEXT-STEPS.md)。

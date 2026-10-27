@@ -1,5 +1,7 @@
 # M0 实施与验收边界
 
+> **历史记录，不作为规格。** 本文是 M0 时期的实施与验收过程记录，保留作追溯。现行规格见 [architecture.md](architecture.md)、[decisions.md](decisions.md)、[interfaces/](interfaces/) 与 [modules/](modules/)，当前状态见 [AGENTS.md](../AGENTS.md) 与 [NEXT-STEPS.md](../NEXT-STEPS.md)；与现行文档冲突时以现行文档为准。
+
 本次工作只交付后端开发基线、共享契约与测试替身，不修改 `apps/**`，不实现 M1 的真实业务，也不提交或推送 Git。
 
 ## 权威与未决项

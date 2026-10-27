@@ -6,7 +6,7 @@
 
 基线 `main@b90437b`。
 
-- **M0 已合入。** 领域核心、端口、内存存储、测试替身、内存模拟接口和浏览器模拟场景前端都在 `main` 上；前后端尚未接线，真实联调未验证。契约文本仍标注"送审、尚未批准"。
+- **M0 已合入。** 领域核心、端口、内存存储、测试替身、内存模拟接口和浏览器模拟场景前端都在 `main` 上；前后端尚未接线，真实联调未验证。契约文本已于 2026-10-27 由用户统一批准。
 - **M1 只做了引擎的局部。** `crates/gantry-engine` 约 1100 行，已实现部分见下表；`decide`、执行体、调度和终结管线都还没有。M1 端到端路径上另外 13 个服务端 / 桌面 crate（`forge`、`repo`、`sandbox`、`worker`、`egress`、`models`、`policy`、`notify`、`conversation`、`api`、`pki`、`secrets`、`desktop-shell`）都还没有。
 
 | 已实现（`crates/gantry-engine`） | PR |
@@ -36,7 +36,7 @@
 
 **M0 遗留**（里程碑 [M0.9 M0 遗留收口](https://github.com/LeXwDeX/gantry/milestone/2)）：
 
-- #82：B-01 Egress 调用级终结：`core::ports::egress::EgressControl` 只有 `call_usage` 等用量查询和整令牌吊销，还没有调用级关闭屏障；候选方案见 [调用级终结（送审草案）](docs/interfaces/egress-call-terminal.md)。在它批准并实现之前，直接调用的最终结算、释放和零判定都没有可信证据。
+- #82：B-01 Egress 调用级终结：`core::ports::egress::EgressControl` 只有 `call_usage` 等用量查询和整令牌吊销，还没有调用级关闭屏障；候选方案见 [调用级终结](docs/interfaces/egress-call-terminal.md)。在它批准并实现之前，直接调用的最终结算、释放和零判定都没有可信证据。
 - #83：`xtask schemas --check` 报告的 OpenAPI / core 人工核对差异尚未逐项判定是允许的视图差异还是漂移。
 - #84：3 个显式未验证文档块（`github_ref` 组合、App Manifest、`ResultBundle`）仍按 `example` / `contract-undefined` 登记。
 
@@ -53,7 +53,7 @@
 | #87 `decisions.md` 待决的 Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算） | 分别阻塞 `pki` 的安装引导期、`notify` 的选项与引擎预算追加 |
 | Q-12（结果对象读取路由） | M2 的补丁签名审批；不在 M1 范围 |
 
-M0 契约文本的"送审、尚未批准"标注已由用户在 2026-10-27 统一批准，改标注见 #85。
+M0 契约文本已由用户在 2026-10-27 统一批准，状态标注已在 #85 更新。
 
 ## 后续规划（2026-10-26 起，按顺序；每步单独授权）
 

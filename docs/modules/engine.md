@@ -589,7 +589,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 **档位变化与台账**（P-57）：台账 `limits` 在创建时按 `level_cap` 固定，`set_level_cap` 与自动加码都不改台账；已触发的闸门保留。耗尽后追加预算的方式仍未决（config OQ-10）。
 
-本节 `budget.charged` data 的送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+本节 `budget.charged` data 的字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
 
 ### 7.10 自动加码
 
@@ -1148,7 +1148,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 | `budget.charged`（引擎写的部分） | `dimension`、`tier?`、`delta`（含加权值）、`used_after`、`source = {kind, id}`、`delivery_id` 或 `conversation_id`；`direct` 调用的 token 由 `models` 写 |
 | `budget.exhausted` | `dimension`、`limit`、`used` |
 
-上表涉及的 `attempt.progress` / `budget.charged` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+上表涉及的 `attempt.progress` / `budget.charged` data 字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
 
 `inbox.raised` / `resolved` / `dismissed` 由 `notify`（`InboxPort`）写（`data` 见 notify.md §7.3），引擎不直接追加。
 

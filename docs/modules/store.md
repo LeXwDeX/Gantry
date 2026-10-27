@@ -286,7 +286,7 @@ pub enum AfterFailure { Terminal, Retry { not_before: Timestamp } }
 //   count_succeeded_since(delivery_id, since)
 ```
 
-本节涉及的 `outbox.enqueued` / `outbox.executing` / `outbox.cancelled` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+本节涉及的 `outbox.enqueued` / `outbox.executing` / `outbox.cancelled` data 字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
 
 ### 6.4 CAS
 
@@ -507,7 +507,7 @@ LIMIT 1;
 | `record_effects` 之后、变更调用成功之前或之后、`complete` 之前 | `executing` + `expected_effects` 已持久 | 同上；`forge` 靠 probe 发现对象已存在，补记 `github_ref` 后 `complete`，**不再创建** |
 | `complete` 之后 | `succeeded` + `github_ref` + `outbox.succeeded` 同事务 | 无事 |
 
-本节涉及的 `outbox.enqueued` / `outbox.executing` / `outbox.cancelled` data 送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+本节涉及的 `outbox.enqueued` / `outbox.executing` / `outbox.cancelled` data 字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
 
 ### 7.7 内容寻址存储
 

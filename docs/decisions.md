@@ -23,6 +23,8 @@
 | D-13 | 先落地设计文档，按模块拆分，使 agent 能凭模块规格独立开发 | 用户 |
 | D-14 | 项目主对话统筹多个工作树并行 | 用户 |
 | D-15 | 同项目 agent 间可只读观察、通信和跨树文件阅读 | 用户 |
+| D-16 | GraphAgent（`graph-agent` 仓库）是 Gantry 的前身项目，Gantry 是其继任者；GraphAgent 是 AGPL 许可，只借鉴设计与教训，不复用代码 | 用户（[AGENTS.md §1](../AGENTS.md#1-项目当前情况)）；原 Q-05 |
+| D-17 | SpecGit 是 Gantry 的前身项目：并入其交付语义（Issue → PR → 验证完成），不作为独立 CLI 调用 | 用户（[AGENTS.md §1](../AGENTS.md#1-项目当前情况)）；原 Q-06 |
 
 D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计算与工作树隔离推导出的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 行新增的用户机制决定；机制见待契约批准提案节的 P-83–P-86。
 
@@ -136,8 +138,6 @@ P-83–P-86 只记录目标设计提案，均待契约批准，不作为当前�
 | Q-02 | 服务端主机在公网还是内网 | 两者都支持，文档以内网 + 隧道为默认 | webhook 入口 |
 | Q-03 | Worker 调用模型用 API key 还是订阅登录 | API key（无人值守更稳定，便于计费） | 部署、成本 |
 | Q-04 | 任务入口是否支持 GitHub 原生（Issue label、`/gantry` 评论命令） | M2 以后支持 | 规格阶段交互 |
-| Q-05 | `graph-agent` 仓库与 Gantry 的关系 | 待用户说明 | 代码复用 |
-| Q-06 | SpecGit 是并入还是作为独立 CLI 被调用 | 并入其交付语义，不调用其 CLI | forge 模块 |
 | Q-07 | 上报的离线通知渠道（桌面端关闭时） | 手机端推送；之前用邮件或 GitHub 通知兜底 | notify 模块 |
 | Q-08 | 依赖指向 `github.com` 源（git 依赖）时如何供给：沙盒内无 GitHub 网络（I1），第一版默认拒绝 | 服务端代理缓存（由服务端用只读令牌拉取，沙盒经 Egress 读缓存） | egress、repo、sandbox |
 | Q-09 | 仓库中的二进制资源（图片、字体、数据文件等）如何供给：补丁格式不携带二进制（P-68 一律拒绝），需要改二进制文件的任务目前无法完成 | 第一版一律拒绝并上报；M3 起"经审批放行"：worker 在 `out/` 另交二进制清单与内容（受大小上限约束），`repo` 校验后进入补丁审批 `patch_apply_protected` | worker-protocol、`repo`、`policy`、`worker` |
@@ -145,3 +145,5 @@ P-83–P-86 只记录目标设计提案，均待契约批准，不作为当前�
 | Q-11 | `budget_exhausted` 的 `raise_cap` 选项（P-79）追加多少预算、记什么事件：预算模板在创建时按 `level_cap` 固定（P-57），追加方式此前未定（config OQ-10） | 每选一次把耗尽维度的上限追加一份该档模板的原值（如 `rounds` 3 → 6），新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`）；operator 即可，不需要签名，只在桌面档案 | `engine`、`notify`、`desktop-ui`、data-model、config |
 | Q-12 | 结果对象（补丁、`result_ref`）的读取路由：`patch_apply_protected` 审批要签补丁摘要，但客户端拿不到补丁内容（补丁尚未提交，GitHub 上也看不到），只能"盲签"；`manual_action` 的 workflow 补丁也没有下载入口（api.md OQ-11、desktop-shell OQ-S9） | 新增 `GET /v1/results/{sha256}`（viewer，仅桌面档案，M2；按内容寻址返回原始字节，大小上限同 `policies.patch.max_bytes`，客户端校验 `sha256` 后按不可信文本渲染）；补丁审批单在取不到内容时不允许签名。无论路由形态，`engine` / `api` 读取内部 CAS 前须校验同项目、用户授权与已发布快照映射，未授权对外不确认对象存在，不给沙盒直接入口，不以 digest 当权限 | `api`、`desktop-shell`、`desktop-ui`、`engine`（CAS 保留期）、M2 退出标准"签名批准后才提交推送"；该权限前置待 G1 冻结，Q-12 仍未决 |
 | Q-13 | 同项目 agent 之间是否需要在运行中即时通信（而不是只在下一次尝试投递） | 推荐只在下一次尝试投递（P-84）：不注入运行中 Attempt，未答复前不算已确认 | 协作契约、`core::ports`、worker 协议、desktop 呈现；不解决 Q-01–Q-12 |
+
+Q-05（`graph-agent` 仓库与 Gantry 的关系）、Q-06（SpecGit 的定位）已于 2026-10-27 移至已确定，见 D-16、D-17；编号不复用。

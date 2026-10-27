@@ -1,10 +1,10 @@
-# Forge drift 契约（送审）
+# Forge drift 契约
 
-> **状态：送审（under review），尚未批准（not approved），非权威（non-authoritative）。**
+> **状态：已批准（2026-10-27，用户统一批准）。** 原为送审草案；正文中「推荐」「送审」「待审」等措辞是送审时的原文，批准范围即正文所写内容，不另改字段或语义。
 >
-> 本文把 [M0 契约冻结提案](../m0-contract-proposal.md) §4 的 drift 推荐规格整理为独立待审契约，供契约审查。它不是已批准契约，也不表示任何 schema 已冻结。
+> 本文把 [M0 契约冻结提案](../m0-contract-proposal.md) §4 的 drift 推荐规格整理为独立待审契约，供契约审查。
 >
-> 当前运行时保持 fail-closed：`schemas/forge/drift.json` 与 `schemas/events/forge.drift_detected.json` 仍拒绝一切；`validate_event_data` 继续返回 `ContractUndefined`，`store` 继续拒绝追加。只有契约批准并另获实现授权后，才落地 schema、夹具、Rust、Mock 或前端。
+> 当前运行时保持 fail-closed：`schemas/forge/drift.json` 与 `schemas/events/forge.drift_detected.json` 仍拒绝一切；`validate_event_data` 继续返回 `ContractUndefined`，`store` 继续拒绝追加。schema、夹具、Rust、Mock 与前端的落地另行排期，落地前保持上述行为。
 
 ## 1. 范围
 

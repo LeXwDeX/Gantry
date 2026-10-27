@@ -6,7 +6,7 @@ Gantry（龙门架）是 [GraphAgent](https://github.com/LeXwDeX/OpenCode-GraphA
 
 **状态：M0 统一开发基线已合入，M1 进行中（只完成引擎的局部）。** 已有 Rust 领域核心、跨模块端口、内存存储与测试替身、可运行的内存模拟接口（Mock API）和浏览器模拟场景（scenario）前端，以及引擎的事件写入与控制面。前后端尚未接线，真实前后端联调未验证。
 
-M0 契约文本仍为"送审、尚未批准"。真实业务、持久化服务和生产鉴权尚未实现；前端不是生产客户端或桌面安装包。当前状态与目录入口见 [AGENTS.md](AGENTS.md)，迭代计划见 [NEXT-STEPS.md](NEXT-STEPS.md)。
+M0 契约文本已于 2026-10-27 由用户统一批准。真实业务、持久化服务和生产鉴权尚未实现；前端不是生产客户端或桌面安装包。当前状态与目录入口见 [AGENTS.md](AGENTS.md)，迭代计划见 [NEXT-STEPS.md](NEXT-STEPS.md)。
 
 ## 本地接入
 

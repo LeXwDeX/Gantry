@@ -1033,6 +1033,6 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | OQ-26 | `forge.merge.method`（项目级合并方式）是否做成设置键：目前是 forge 内部常量（`webhook_secret_previous` 已决：见 decisions.md P-29） | 不收录 `forge.*` | `forge`、`deploy` |
 | OQ-27 | ~~档位条目键的大小写~~ | 已决：见 decisions.md P-71（配置里的档位键一律小写，`levels.none.daily_tokens`；线上 `Level` 值仍首字母大写） | — |
 
-## 补充范围（送审，尚未批准）
+## 补充范围（已批准（2026-10-27，用户统一批准））
 
-`ConfigView.injection` 非空视图送审字段见 [config-view-injection.md](config-view-injection.md)；settings 读写契约与 V10/V11/V13 不变。
+`ConfigView.injection` 非空视图字段见 [config-view-injection.md](config-view-injection.md)；settings 读写契约与 V10/V11/V13 不变。

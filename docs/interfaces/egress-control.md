@@ -475,5 +475,5 @@
 
 ## 补充范围
 
-- §4.6 注入视图细节见 [config-view-injection.md](config-view-injection.md)（送审，尚未批准；未批准前端点行为不变）。
+- §4.6 注入视图细节见 [config-view-injection.md](config-view-injection.md)（已批准（2026-10-27，用户统一批准）；分阶段启用见该文，端点行为不变）。
 - §4.3 / §4.5 的调用级终结见 [egress-call-terminal.md](egress-call-terminal.md)（2026-10-27 批准，#82）。

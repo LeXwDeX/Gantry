@@ -1,12 +1,12 @@
-# 事件 data 送审契约（草案）
+# 事件 data 契约
 
-> **状态：送审（proposal）；尚未批准、非权威（non-authoritative）。**
+> **状态：已批准（2026-10-27，用户统一批准）。** 原为送审草案；正文中「推荐规格，待契约审查」「候选」等措辞是送审时的原文，批准范围即正文所写内容，不另改字段或语义。
 >
-> 本文件只定义下列 13 个事件的 `data` 候选规格，供契约审查使用。它不修改生产契约、schema、fixture、Rust、Mock 或前端，也不表示任何字段、枚举或一致性规则已经冻结。契约批准且另获实现授权后，运行时行为才可能改变；当前运行时仍按 fail-closed（失败闭合）拒绝这些未定义的 `data`。
+> 本文件只定义下列 13 个事件的 `data` 候选规格，供契约审查使用。它不修改生产契约、schema、fixture、Rust、Mock 或前端，也不表示任何字段、枚举或一致性规则已经冻结。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地（`ContractUndefined`）的仍按 fail-closed（失败闭合）拒绝。
 >
 > 本文件的来源、理由与取舍记录是 [docs/m0-contract-proposal.md](../m0-contract-proposal.md) §2。这里只把该节中 13 个事件的推荐规格独立成送审文档，不新增取舍、字段或枚举；该提案的待决状态不因本文件而改变。
 >
-> 权威优先级：`decisions.md` > `architecture.md` 的不变式 > `interfaces/` > `modules/` > 其余文档。冲突时以更高优先级的权威文档为准。本文件位于 `interfaces/`，但仍是送审草案，不是已批准契约。
+> 权威优先级：`decisions.md` > `architecture.md` 的不变式 > `interfaces/` > `modules/` > 其余文档。冲突时以更高优先级的权威文档为准。本文件位于 `interfaces/`。
 
 ## 1. 范围与排除
 

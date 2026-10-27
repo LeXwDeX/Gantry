@@ -1,6 +1,8 @@
 # Gantry 设计讨论记录
 
-> 状态：历史记录（2026-10-24）。本文保留最初的设计讨论，已被 [architecture.md](architecture.md)、[decisions.md](decisions.md) 等正式文档取代；两者冲突时以正式文档为准。对本文的评审见 [reviews/2026-10-24-design-review.md](reviews/2026-10-24-design-review.md)。
+> **历史记录，不作为规格。** 本文是最初的设计讨论记录（2026-10-24），保留作追溯。现行规格见 [architecture.md](architecture.md)、[decisions.md](decisions.md)、[interfaces/](interfaces/) 与 [modules/](modules/)，当前状态见 [AGENTS.md](../AGENTS.md) 与 [NEXT-STEPS.md](../NEXT-STEPS.md)；与现行文档冲突时以现行文档为准。
+>
+> 对本文的评审见 [reviews/2026-10-24-design-review.md](reviews/2026-10-24-design-review.md)。
 
 ## 背景与定位
 

@@ -1,5 +1,7 @@
 # M0 契约冻结提案（草案）
 
+> **历史记录，不作为规格。** 本文是 M0 时期的契约冻结草案，已被 [interfaces/](interfaces/) 下的正式契约取代，保留作取舍与来源追溯。现行规格见 [architecture.md](architecture.md)、[decisions.md](decisions.md)、[interfaces/](interfaces/) 与 [modules/](modules/)，当前状态见 [AGENTS.md](../AGENTS.md) 与 [NEXT-STEPS.md](../NEXT-STEPS.md)；与现行文档冲突时以现行文档为准。
+
 > **状态：proposal（草案）；非权威（non-authoritative），未接线，不是已批准契约。**
 >
 > 本文件只供用户审核。它不改变 M0 / M1 的范围，不接入任何运行路径，不修改任何生产契约、schema、fixture、Rust、Mock 或前端，也不表示任何 schema 已经冻结。真正的契约变更必须另开独立契约 PR；实现必须在契约批准后另开实现 PR。
