@@ -48,8 +48,19 @@ const READ_ONLY_BASH: [&str; 5] = [
 /// 不论 `paths.deny` 如何，`.git/**` 一律不可编辑。
 const ALWAYS_DENY_PATHS: [&str; 1] = [".git/**"];
 
-/// `reasoning_effort` → 思考预算（OQ-W3：适配层内的编译期常量，不进设置）。
-/// 取值为 **[建议值，待调优]**；`none` 关闭思考。
+/// `reasoning_effort` → `--effort`。自适应推理模型忽略 `MAX_THINKING_TOKENS` 的正值，
+/// 强度只能经 `--effort` 生效；`none` 没有对应档位，取最低档并把思考预算置 0。
+pub fn cli_effort(effort: Effort) -> &'static str {
+    match effort {
+        Effort::None | Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+        Effort::Max => "max",
+    }
+}
+
+/// `reasoning_effort` → 思考预算（OQ-W3：适配层内的编译期常量，不进设置），
+/// 对非自适应推理模型生效。取值为 **[建议值，待调优]**；`none` 关闭思考。
 pub fn thinking_tokens(effort: Effort) -> u32 {
     match effort {
         Effort::None => 0,
@@ -100,11 +111,12 @@ pub fn permission_profile(job: &JobSpec) -> Result<PermissionProfile, Invocation
             .copied()
             .chain(job.constraints.paths.deny.iter().map(String::as_str))
         {
-            let pattern = cwd_relative(pattern)?;
-            for tool in EDIT_TOOLS {
-                let rule = format!("{tool}({pattern})");
-                if !profile.deny.contains(&rule) {
-                    profile.deny.push(rule);
+            for path in deny_rule_paths(pattern)? {
+                for tool in EDIT_TOOLS {
+                    let rule = format!("{tool}({path})");
+                    if !profile.deny.contains(&rule) {
+                        profile.deny.push(rule);
+                    }
                 }
             }
         }
@@ -120,19 +132,47 @@ pub fn permission_profile(job: &JobSpec) -> Result<PermissionProfile, Invocation
     Ok(profile)
 }
 
-/// 规则里的路径相对 cwd（`/gantry/work`）；以 `/`、`~` 开头的模式在 CLI 里另有含义，
-/// 括号与控制符会改变规则结构，一律拒绝而不是转义。
-fn cwd_relative(pattern: &str) -> Result<String, InvocationError> {
-    let pattern = pattern.strip_prefix("./").unwrap_or(pattern);
-    if pattern.is_empty()
-        || pattern.starts_with(['/', '~'])
+/// 把 policy 的路径规则（gitignore 子集，policy.md §7.2）翻译成相对 cwd（仓库根
+/// `/gantry/work`）的 CLI 规则路径，保持同样的命中范围：
+///
+/// - 含 `/`（开头的 `/` 可省略）：相对仓库根锚定 → `./<body>`；
+/// - 不含 `/`：命中任一层级的组件 → `./**/<body>`；
+/// - 命中目录即命中其下全部文件 → 另加 `<path>/**`；末尾 `/` 只匹配目录 → 只给 `<path>/**`。
+///
+/// `~`、`!`、`\`、括号、逗号与控制符会改变 CLI 规则或 policy 语义，一律拒绝而不是转义。
+fn deny_rule_paths(pattern: &str) -> Result<Vec<String>, InvocationError> {
+    if pattern.starts_with(['~', '!'])
         || pattern
             .chars()
-            .any(|c| c.is_control() || matches!(c, '(' | ')' | ','))
+            .any(|c| c.is_control() || matches!(c, '(' | ')' | ',' | '\\'))
     {
         return Err(InvocationError::UnsupportedDenyPattern);
     }
-    Ok(format!("./{pattern}"))
+    let (body, dir_only) = match pattern.strip_suffix('/') {
+        Some(body) => (body, true),
+        None => (pattern, false),
+    };
+    let anchored = body.contains('/');
+    let body = body
+        .strip_prefix("./")
+        .or_else(|| body.strip_prefix('/'))
+        .unwrap_or(body);
+    if body.is_empty() || body.split('/').any(str::is_empty) {
+        return Err(InvocationError::UnsupportedDenyPattern);
+    }
+    let base = if anchored {
+        format!("./{body}")
+    } else {
+        format!("./**/{body}")
+    };
+    let mut paths = Vec::with_capacity(2);
+    if !dir_only {
+        paths.push(base.clone());
+    }
+    if !body.ends_with("**") {
+        paths.push(format!("{base}/**"));
+    }
+    Ok(paths)
 }
 
 /// 构造调用。`system_prompt` 是固定前言 + `task.instructions`（A3），经
@@ -152,6 +192,8 @@ pub fn build_invocation(
         job.execution.model.clone(),
         "--max-turns".into(),
         job.constraints.limits.max_turns.to_string(),
+        "--effort".into(),
+        cli_effort(job.execution.reasoning_effort).into(),
         "--permission-mode".into(),
         PERMISSION_MODE.into(),
         "--setting-sources".into(),

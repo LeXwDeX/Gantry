@@ -11,8 +11,8 @@ use gantry_core::entities::{role_profile, Exec, Role, Tier};
 use gantry_core::level::Effort;
 use gantry_core::worker::{JobSpec, PatchMode};
 use gantry_worker::claude_cli::{
-    build_invocation, permission_profile, thinking_tokens, write_home, Invocation, InvocationError,
-    EMPTY_MCP_CONFIG, USER_SETTINGS,
+    build_invocation, cli_effort, permission_profile, thinking_tokens, write_home, Invocation,
+    InvocationError, EMPTY_MCP_CONFIG, USER_SETTINGS,
 };
 use serde_json::{json, Value};
 
@@ -62,6 +62,8 @@ fn build_invocation_golden_for_build_role() {
         "claude-sonnet-5-5",
         "--max-turns",
         "60",
+        "--effort",
+        "medium",
         "--permission-mode",
         "dontAsk",
         "--setting-sources",
@@ -182,7 +184,10 @@ fn thinking_budget_follows_effort() {
         Effort::Max,
     ] {
         job.execution.reasoning_effort = effort;
-        let tokens: u32 = invocation(&job).env["MAX_THINKING_TOKENS"].parse().unwrap();
+        let inv = invocation(&job);
+        // 自适应推理模型只认 `--effort`；思考预算对其余模型生效。
+        assert_eq!(value_of(&inv.args, "--effort"), Some(cli_effort(effort)));
+        let tokens: u32 = inv.env["MAX_THINKING_TOKENS"].parse().unwrap();
         assert_eq!(tokens, thinking_tokens(effort));
         seen.push(tokens);
     }
@@ -269,9 +274,48 @@ fn read_only_roles_get_read_only_bash_only() {
     assert_eq!(with_role(Role::Plan).execution.tier, Tier::Planner);
 }
 
+/// policy 路径规则（gitignore 子集）→ CLI 规则路径，命中范围不变。
+#[test]
+fn deny_patterns_keep_policy_glob_semantics() {
+    let cases: [(&str, &[&str]); 8] = [
+        // 根锚定（开头 `/` 可省略），命中目录即命中其下文件。
+        ("/CODEOWNERS", &["./CODEOWNERS", "./CODEOWNERS/**"]),
+        ("/secrets/**", &["./secrets/**"]),
+        ("secrets/**", &["./secrets/**"]),
+        ("./infra/*.tf", &["./infra/*.tf", "./infra/*.tf/**"]),
+        ("docs/private", &["./docs/private", "./docs/private/**"]),
+        // 不含 `/`：任一层级的组件。
+        ("*.pem", &["./**/*.pem", "./**/*.pem/**"]),
+        (
+            "package.json",
+            &["./**/package.json", "./**/package.json/**"],
+        ),
+        // 末尾 `/` 只匹配目录。
+        ("build/", &["./**/build/**"]),
+    ];
+    for (pattern, expected) in cases {
+        let mut job = with_role(Role::Build);
+        job.constraints.paths.deny = vec![pattern.into()];
+        let deny = permission_profile(&job).unwrap().deny;
+        for path in expected {
+            for tool in ["Edit", "Write", "NotebookEdit"] {
+                let rule = format!("{tool}({path})");
+                assert!(
+                    deny.contains(&rule),
+                    "{pattern}: missing {rule} in {deny:?}"
+                );
+            }
+        }
+        // 除 `.git/**` 外没有多余规则。
+        assert_eq!(deny.len(), 3 * (1 + expected.len()), "{pattern}: {deny:?}");
+    }
+}
+
 #[test]
 fn deny_patterns_that_change_rule_structure_are_rejected() {
-    for pattern in ["/etc/**", "~/x", "a)b", "a(b", "x\ny", "a,b", ""] {
+    for pattern in [
+        "~/x", "a)b", "a(b", "x\ny", "a,b", "", "/", "!x", "a\\b", "a//b",
+    ] {
         let mut job = job();
         job.constraints.paths.deny = vec![pattern.into()];
         assert_eq!(
