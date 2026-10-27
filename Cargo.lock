@@ -282,6 +282,7 @@ dependencies = [
  "gantry-store",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
 ]
 

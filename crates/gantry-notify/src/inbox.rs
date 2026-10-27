@@ -57,6 +57,13 @@ impl Notify {
         &self.store
     }
 
+    /// 本模块自行发起的写（自动关闭）也要有 `request_id`（P-78）。
+    pub(crate) fn request_id(&self) -> gantry_core::ids::Ulid {
+        self.ids
+            .next_ulid()
+            .unwrap_or_else(|_| gantry_core::ids::Ulid::from_parts(0, 0).expect("zero ulid"))
+    }
+
     async fn raise_on(
         &self,
         tx: &mut WriteTx,
