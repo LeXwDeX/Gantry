@@ -28,7 +28,12 @@ use gantry_core::time::Timestamp;
 use gantry_store::{AfterFailure, CancelReason, ClaimOpts, Store, StoreError};
 use serde_json::{json, Value};
 
-use super::marker;
+use super::{marker, sanitize};
+
+/// 出站文本的长度上限（字符数）。GitHub 的实际上限需核实（FA OQ-8）；正文预留标记与
+/// `Closes #N` 的空间。
+const TITLE_MAX_CHARS: usize = 256;
+const BODY_MAX_CHARS: usize = 60_000;
 use crate::auth::{TokenProvider, TokenPurpose};
 use crate::config::{ForgeConfig, Permission, ProjectBinding};
 use crate::github::{ApiError, GithubClient, PullView};
@@ -476,6 +481,14 @@ impl Run<'_> {
         self.binding.project.bot_user_id
     }
 
+    /// 出站净化 + 密钥扫描（FA §2.4）。命中密钥 → `validation_failed(secret_detected)`，
+    /// 不写出、不重试。扫描的是净化后真正要写出的文本。
+    /// 返回 `None` 表示命中密钥，调用方以 [`secret_detected`] 结束。
+    fn outbound(&self, raw: &str, max_chars: usize) -> Option<String> {
+        let text = sanitize::outbound(raw, self.binding.project.repo.as_str(), max_chars);
+        self.exec.policy.scan_text(&text).is_empty().then_some(text)
+    }
+
     fn is_ours(&self, pr: &PullView) -> bool {
         // 标记只是索引：必须叠加作者 == bot（FA §2.4，I5）。
         pr.user_id == Some(self.bot_id()) && marker::carries_act(&pr.body, &self.action.id)
@@ -530,7 +543,14 @@ impl Run<'_> {
         )];
         self.exec.record_effects(self.action, effects).await?;
 
-        let mut body = marker::strip_html_comments(&p.body).trim_end().to_owned();
+        let mut body = match self.outbound(&p.body, BODY_MAX_CHARS) {
+            Some(body) => body.trim_end().to_owned(),
+            None => return Ok(secret_detected()),
+        };
+        let title = match self.outbound(&p.title, TITLE_MAX_CHARS) {
+            Some(title) => title,
+            None => return Ok(secret_detected()),
+        };
         // `Closes #N` 只在 base 为默认分支时写，且只出现在 forge 生成的位置（FA §2.4、§3.3）。
         if p.base == self.binding.project.default_branch && !p.closes.is_empty() {
             body.push_str("\n\n");
@@ -544,7 +564,7 @@ impl Run<'_> {
             self.action.kind,
         ));
         let request = json!({
-            "title": marker::strip_html_comments(&p.title),
+            "title": title,
             "head": p.head,
             "base": p.base,
             "body": body,
@@ -584,13 +604,19 @@ impl Run<'_> {
         let current = github.get_pull(self.token, &p.repo, p.pull_number).await?;
         let mut patch = serde_json::Map::new();
         if let Some(title) = &p.title {
-            let title = marker::strip_html_comments(title);
+            let title = match self.outbound(title, TITLE_MAX_CHARS) {
+                Some(title) => title,
+                None => return Ok(secret_detected()),
+            };
             if current.title != title {
                 patch.insert("title".into(), json!(title));
             }
         }
         if let Some(body) = &p.body {
-            let wanted = marker::strip_html_comments(body).trim_end().to_owned();
+            let wanted = match self.outbound(body, BODY_MAX_CHARS) {
+                Some(body) => body.trim_end().to_owned(),
+                None => return Ok(secret_detected()),
+            };
             if marker::without_markers(&current.body) != wanted {
                 // 保留创建时的标记，使 create_pr 的 probe 仍能认出对象。
                 let mut next = wanted;
@@ -689,6 +715,24 @@ impl Run<'_> {
         if !project.allowed_merge_methods.contains(&p.merge_method) {
             return Ok(terminal("validation_failed", "merge method not allowed"));
         }
+        // 出站文本在消费审批之前净化并扫描：命中密钥时审批保持未消费。
+        let method = serde_json::to_value(&p.merge_method).unwrap_or(Value::Null);
+        let mut request = json!({
+            "sha": p.expected_head_sha.to_string(),
+            "merge_method": method,
+        });
+        if let Some(title) = &p.commit_title {
+            match self.outbound(title, TITLE_MAX_CHARS) {
+                Some(title) => request["commit_title"] = json!(title),
+                None => return Ok(secret_detected()),
+            }
+        }
+        if let Some(message) = &p.commit_message {
+            match self.outbound(message, BODY_MAX_CHARS) {
+                Some(message) => request["commit_message"] = json!(message),
+                None => return Ok(secret_detected()),
+            }
+        }
         let github = &self.exec.github;
         // 执行前强制回读 GitHub 实时 head（forge.md §7.7、FA §2.5 #3）。
         let live = github.get_pull(self.token, &p.repo, p.pull_number).await?;
@@ -758,17 +802,6 @@ impl Run<'_> {
             ],
         )];
         self.exec.record_effects(self.action, effects).await?;
-        let method = serde_json::to_value(&p.merge_method).unwrap_or(Value::Null);
-        let mut request = json!({
-            "sha": p.expected_head_sha.to_string(),
-            "merge_method": method,
-        });
-        if let Some(title) = &p.commit_title {
-            request["commit_title"] = json!(marker::strip_html_comments(title));
-        }
-        if let Some(message) = &p.commit_message {
-            request["commit_message"] = json!(marker::strip_html_comments(message));
-        }
         // 超时是未知结局：classify 成 transient，重放时先重读 PR（上面的 probe）再决定。
         github
             .merge_pull(self.token, &p.repo, p.pull_number, &request)
@@ -786,6 +819,10 @@ fn settle(probe: Probe) -> Option<Disposition> {
         Probe::Conflict { code, detail } => Some(Disposition::Terminal { code, detail }),
         Probe::Miss => None,
     }
+}
+
+fn secret_detected() -> Disposition {
+    terminal("validation_failed", "secret_detected")
 }
 
 fn terminal(code: &'static str, detail: &str) -> Disposition {
