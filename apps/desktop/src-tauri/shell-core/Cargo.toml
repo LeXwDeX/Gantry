@@ -25,6 +25,7 @@ pem = "3"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
 x509-parser = { version = "0.16", features = ["verify"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+jsonschema = { version = "0.59", default-features = false }
 p256 = { version = "0.13", features = ["ecdsa"], optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 

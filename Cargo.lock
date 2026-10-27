@@ -843,6 +843,7 @@ dependencies = [
  "gantry-pki",
  "getrandom 0.2.17",
  "idna",
+ "jsonschema",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
