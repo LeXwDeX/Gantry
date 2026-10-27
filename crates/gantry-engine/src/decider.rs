@@ -11,7 +11,6 @@
 //! 本切片不覆盖、留给后续切片的（每项在 #70 记录）：
 //! - 命令（`SetLevelCap` 等）与异常路径（放弃收尾、T11、T14）：切片 5（#73）；
 //! - 预算不足时的 `budget.exhausted` 与上报、`models_not_configured` 上报：本切片只"不产出"，上报归切片 5；
-//! - token 维度的 `budget.charged`：需要 `weight_audit`（权重与 `config_rev`），`DecideEnv` 还没有。
 
 use std::collections::BTreeMap;
 
@@ -901,6 +900,36 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -
             accepted_open_pr: accepted_open_pr.filter(|_| finalized.result_ref.is_some()),
         },
     )];
+    // tokens_by_tier：Egress 计量（不是自报），加权口径与组装 spec 时一致（§7.14.2、§7.9）。
+    if finalized.weighted_tokens > 0 {
+        let used = state
+            .ledger
+            .used
+            .tokens_by_tier
+            .get(&node.tier)
+            .copied()
+            .unwrap_or(0);
+        out.push(delivery_event(
+            state,
+            EventType::BudgetCharged,
+            &state.delivery.id.to_string(),
+            &BudgetChargedData {
+                ledger: LedgerRef::Delivery {
+                    id: state.delivery.id,
+                },
+                dimension: BudgetChargedDimension::TokensByTier,
+                delta: finalized.weighted_tokens,
+                used_after: used + finalized.weighted_tokens,
+                source: BudgetChargeSource::Attempt {
+                    attempt_id: attempt.id,
+                },
+                tier: Some(node.tier),
+                usage: Some(finalized.usage_metered),
+                weighted_tokens: Some(finalized.weighted_tokens),
+                weight_audit: Some(finalized.weight_audit.clone()),
+            },
+        ));
+    }
     if finalized.wall_time_s > 0 {
         out.push(delivery_event(
             state,

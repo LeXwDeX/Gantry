@@ -29,8 +29,9 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
   - `api_request`（路由表校验 → mTLS 发送与重试 → 响应整形；`X-Log-Epoch` 变化时丢弃待签内容）；
   - `events_open` / `events_ack` / `events_close` / `connection_state`（唯一事件流：游标、退避重连、45 s 空闲、`close` 帧、`409 cursor_ahead`、`log_epoch` 重同步、连续 3 次 TLS 失败 → `handshake_failed`、吊销即删密钥）；
   - `approval_prepare` / `approval_sign` / `approval_discard`（时钟偏差校正、非 approver 不取 challenge、展示前自检、连接 live 才签、重检后在阻塞线程里等用户在场、`grant`；`approval_sign` 严格只收 `prepared_id`）；
-  - `prefs_*`、`ui_state_*`、`open_external`、`open_github`；`guarded_write_discard`。
-  - 其余命令（受保护写入、诊断）返回 `shell.not_paired` 或 `shell.unavailable`，不伪造成功。
+  - `guarded_write_prepare` / `guarded_write_submit` / `guarded_write_discard`（settings 先 dry_run、设备动作本地组装 signing；核对内部摘要后发起审批 → 签名 → 带 `Gantry-Approval` 重发；请求体用 `Zeroizing` 保存，提交或丢弃后清零）；
+  - `prefs_*`、`ui_state_*`、`open_external`、`open_github`。
+  - 其余命令（诊断）返回 `shell.not_paired` 或 `shell.unavailable`，不伪造成功。
 - 硬件密钥库不可用时用 `UnavailableKeyStore`：配对失败并给出 `shell.key_unavailable`，不降级为软件密钥。
 - 导航只放行应用自己的来源（`tauri://localhost`、`http(s)://tauri.localhost`），新窗口一律拒绝。
 
