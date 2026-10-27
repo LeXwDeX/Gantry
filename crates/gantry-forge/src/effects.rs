@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use gantry_core::canon::RepoSlug;
+use gantry_core::canon::{GitOid, RepoSlug};
 use gantry_core::entities::ExpectedEffect;
 use gantry_core::ids::{ActionId, DeliveryId};
 use gantry_store::{ModuleConn, StoreError};
@@ -27,6 +27,18 @@ pub fn effect_key(repo: &RepoSlug, event: &str, matches: &BTreeMap<String, Value
         "effect|{repo}|{event}|{}",
         serde_json::to_string(matches).unwrap_or_default()
     )
+}
+
+/// 分支最近一次**成功**的 `push_branch`：`push|{repo}|{branch}`（head_diverged 的依据，§7.7）。
+pub fn push_key(repo: &RepoSlug, branch: &str) -> String {
+    format!("push|{repo}|{branch}")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastPush {
+    pub action_id: ActionId,
+    pub delivery_id: DeliveryId,
+    pub head_sha: GitOid,
 }
 
 /// Gantry 创建的 PR 的绑定行：`pr|{repo}#{n}`。
