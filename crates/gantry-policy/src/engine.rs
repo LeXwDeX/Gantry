@@ -49,7 +49,7 @@ pub struct PolicyDeps {
 
 pub struct PolicyEngine {
     pub(crate) store: Store,
-    forge: Arc<dyn ForgeReader>,
+    pub(crate) forge: Arc<dyn ForgeReader>,
     pub(crate) clock: Arc<dyn Clock>,
     ids: Arc<IdGen>,
     build: PolicyBuild,

@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod desk;
+
 use std::sync::Arc;
 use std::time::Duration;
 
