@@ -603,6 +603,8 @@ dependencies = [
  "pkcs8",
  "rand_core",
  "rcgen",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.21",
  "time",
