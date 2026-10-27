@@ -227,6 +227,37 @@ impl GithubClient {
         issue_view(&value)
     }
 
+    /// `POST /app/installations/{id}/access_tokens`（以 App JWT 认证，FA §9.4）。
+    pub async fn create_installation_token(
+        &self,
+        jwt: &SecretString,
+        installation_id: i64,
+        body: &Value,
+    ) -> Result<Value, ApiError> {
+        self.json(
+            jwt,
+            "POST",
+            &format!("/app/installations/{installation_id}/access_tokens"),
+            Some(body),
+        )
+        .await
+    }
+
+    /// `GET /app/installations/{id}`（以 App JWT 认证；返回结构需核实，forge.md §7.12）。
+    pub async fn get_installation(
+        &self,
+        jwt: &SecretString,
+        installation_id: i64,
+    ) -> Result<Value, ApiError> {
+        self.json(
+            jwt,
+            "GET",
+            &format!("/app/installations/{installation_id}"),
+            None,
+        )
+        .await
+    }
+
     /// 远端分支 head；分支不存在返回 `None`。
     pub async fn branch_head(
         &self,
