@@ -1,17 +1,19 @@
-//! 读类路由（本文 §6.2"投影"列）：收件箱 #21 #22 #46。
+//! 读类路由：消息 #11、收件箱 #21 #22 #46。
 //!
-//! 读响应在同一读快照内取投影与最大 `seq`，写入 `X-Event-Seq`（api.md §3.6）。
+//! 收件箱使用读快照的 `seq`；消息使用下游返回的读取水位（api.md §3.6）。
 //! 分页游标对客户端不透明：本模块把下游游标包成 `base64url`，解析失败、跨资源、
 //! 方向不符一律 `400 invalid_cursor`（本文 §7.7）。
 //!
 //! 项目、交付单元、工作流、节点尝试（#3–#6、#17–#20）要等 `store` 的完整
 //! `ProjectionRead`（store.md §6.2），当前 M0 内存实现只有收件箱与交付单元行；
-//! 对话与消息（#10 #11）要等 `PageQuery` 带上 `order`（见 issue #99 评论）。
+//! 项目对话列表 #10 仍需项目存在性的读取支持。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use gantry_core::entities::{InboxKind, InboxStatus};
-use gantry_core::ids::{InboxId, ProjectId};
+use gantry_core::ids::{ConversationId, InboxId, ProjectId};
+use gantry_core::ports::context::{PageOrder, PageQuery, StoreError as PortStoreError};
+use gantry_core::ports::conversation::ConvError;
 use gantry_store::{InboxQuery, Order, Page, PageCursor, StoreError};
 use http::StatusCode;
 use serde_json::{json, Value};
@@ -79,6 +81,56 @@ fn to_json<T: serde::Serialize>(value: &T) -> Result<Value, Problem> {
 fn parse<T: std::str::FromStr>(raw: &str) -> Result<T, Problem> {
     raw.parse()
         .map_err(|_| Problem::new(ProblemCode::InvalidRequest, "parameter is invalid"))
+}
+
+/// #11 `GET /v1/conversations/{conversation_id}/messages`。
+pub async fn list_messages(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Problem> {
+    let id: ConversationId = parse(req.param("conversation_id"))?;
+    let (direction, page_order) = match req.query.str("order") {
+        Some("asc") => ("asc", PageOrder::Asc),
+        _ => ("desc", PageOrder::Desc),
+    };
+    let tag = format!("v1:messages:{id}:{direction}");
+    let cursor = req
+        .query
+        .str("cursor")
+        .map(|cursor| {
+            let inner = unwrap_cursor(&tag, cursor)?;
+            // HTTP 分页按 ID 排序，不接受旧的内部事件序号游标。
+            if inner.starts_with("seq:") {
+                return Err(invalid_cursor());
+            }
+            Ok(inner)
+        })
+        .transpose()?;
+    let page = core
+        .services()
+        .conversation
+        .list_messages(
+            &id,
+            PageQuery {
+                cursor,
+                limit: limit(req.query),
+                order: Some(page_order),
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            ConvError::NotFound => Problem::not_found(),
+            ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor" => invalid_cursor(),
+            ConvError::Forbidden => {
+                Problem::forbidden_role(gantry_core::entities::DeviceRole::Viewer)
+            }
+            ConvError::Store(PortStoreError::Unavailable { .. }) => unavailable(),
+            _ => Problem::internal(),
+        })?;
+    let items = page.items.iter().map(to_json).collect::<Result<_, _>>()?;
+    let next = page.next_cursor.map(|cursor| wrap_cursor(&tag, &cursor));
+    Ok(Reply::json(
+        StatusCode::OK,
+        page_body(items, next),
+        page.last_seq,
+    ))
 }
 
 /// #21 `GET /v1/inbox`。
