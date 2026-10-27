@@ -271,7 +271,7 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 | `decision_needed` | 原因模板 + 选项说明；`payload.kind = manual_action`（workflow 补丁，P-48）时说明"需手动应用补丁"并给补丁引用；`review_dispute` 说明"是否交回前台改代码" | `choice { inbox_id, options[] }`（选项取 `payload.options`，`{id, label, primary?}`，词表 P-79） |
 | `spec_needed` | 逐条列出 `missing[].question` | `choice { inbox_id, options: [] }`——`spec_needed` 没有选项（P-79），空选项表示"需要自由文本答复"，客户端渲染为"回复补充…" |
 | `escalation` | 原因模板 + 证据引用；升档类（`level_cap_exceeded`）说明"需在桌面处理"（P-63） | `escalation { inbox_id }`（data-model Card 形状；按钮由客户端取该 InboxItem 的 `payload.options`，只有 `level_cap_exceeded` 有选项，P-79） |
-| `budget_exhausted` | "预算已耗尽：{dimension}（{used}/{limit}）" | `escalation { inbox_id }`（按钮取 `payload.options`：`raise_cap`（仅桌面，Q-11）/ `abandon`，P-79） |
+| `budget_exhausted` | "预算已耗尽：{dimension}（{used}/{limit}）" | `escalation { inbox_id }`（按钮取 `payload.options`：`raise_cap`（仅桌面，D-19）/ `abandon`，P-79） |
 | `security_finding` | "发现安全问题" + `source` 引用 | `escalation { inbox_id }` |
 
 其他卡片：`plan`（`node.finished` 的 `plan` 节点成功时：`{delivery_id, workflow_id, summary}`，`summary` 为 `UntrustedText`，`source` 记结果来源，截断标记照实填）；`summary`（交付单元 `closed` 时，M2，`classify` 生成：`Card.summary` 为 `items[]`，每项 `{text, ref}`，`text` 为不可信文本、`ref` 指向对应对象，C26）。卡片只放资源 ID，不内嵌任何可签名内容（data-model §1.1）。

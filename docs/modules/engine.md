@@ -620,7 +620,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | 判定 `BLOCKED` | `escalation` | blocker | `gate_blocked`；evidence 含 `result_ref` | `blocked` |
 | 评审 / 裁决要求人 | `escalation` | blocker | `arbiter_escalate` | `waiting_human` |
 | 超过 `level_cap` | `escalation`（P-63） | blocker | `level_cap_exceeded`；`upgrade`（primary）/ `narrow` / `abandon` | `waiting_human` |
-| 预算耗尽 | `budget_exhausted` | blocker | `{dimension, limit, used}`；`raise_cap`（仅桌面，追加方式待决 Q-11）/ `abandon` | `waiting_human` |
+| 预算耗尽 | `budget_exhausted` | blocker | `{dimension, limit, used}`；`raise_cap`（仅桌面，追加方式见 decisions D-19）/ `abandon` | `waiting_human` |
 | 策略拒绝（含 M1 受保护路径） | 取 `ReportHint`（M1 依赖清单 / lockfile 为 `escalation`；workflow 为 `decision_needed` + `payload.kind = manual_action`，附补丁，P-48） | 取 `ReportHint` | `ReportHint.reason_code`（如 `policy.path_protected:workflows`）；`manual_action` 的选项 `done`（primary）/ `abandon` | `waiting_human` |
 | 重试耗尽 / 无进展 / 无补丁 | `escalation` | blocker | `attempt_failed` / `no_progress` / `no_change` | `waiting_human` |
 | 合并需要 Gantry 审批 | `approval_needed` | blocker | `{approval_id}` | `waiting_human`（GitHub 闸门未满足时同样，由用户在 GitHub 上完成） |
@@ -631,7 +631,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 **关闭与执行**（notify.md §7.4–§7.5）：
 
-- `choose` 由 `notify` 校验并写 `inbox.resolved`（`resolution = chosen`、`option_id`），**不调用引擎**；引擎订阅该事件后执行：`abandon` → `abandon`；`replan` → T7；`upgrade` → `set_level_cap(target_level)`；`narrow` → 保持上限、`level_effective = level_cap` 继续；`done` → 解除阻塞并按 GitHub 快照重新求值当前阶段；`continue` → 解除阻塞并重新求值；`raise_cap` → 按 Q-11 追加额度后继续（追加量与事件待决）；`fix`（守护的 `review_dispute`）→ T9；`keep` → 不动作。失败节点的重试走 `POST /v1/nodes/{id}/retry`，不是选项。执行失败是引擎的错误（再上报），不回滚选择。
+- `choose` 由 `notify` 校验并写 `inbox.resolved`（`resolution = chosen`、`option_id`），**不调用引擎**；引擎订阅该事件后执行：`abandon` → `abandon`；`replan` → T7；`upgrade` → `set_level_cap(target_level)`；`narrow` → 保持上限、`level_effective = level_cap` 继续；`done` → 解除阻塞并按 GitHub 快照重新求值当前阶段；`continue` → 解除阻塞并重新求值；`raise_cap` → 按 D-19 给耗尽维度追加一份该档模板原值后继续（记录追加的事件见 #129）；`fix`（守护的 `review_dispute`）→ T9；`keep` → 不动作。失败节点的重试走 `POST /v1/nodes/{id}/retry`，不是选项。执行失败是引擎的错误（再上报），不回滚选择。
 - 自动关闭：`notify` 内置 R1（审批 `granted` / `denied` / `invalidated` / `expired` / `consumed` 关闭对应 `approval_needed`）、R2（交付单元 `abandoned` / `closed` 关闭其全部 open 项）；其余由引擎显式 `InboxPort::resolve`（R4，如节点重试成功、GitHub 上已处理、`supersedes`）。自由文本答复 `spec_needed` 由 `conversation` 在 `supply_spec` 成功后 `resolve(Answered)`。
 - `dismiss` 只表示"不再提醒"：**不改变交付单元状态，引擎不得依赖收件箱状态推进**（notify.md I3）。引擎用自己事件日志里的"未决阻塞项"集合（`DeliveryState.open_inbox`，由引擎创建时加入、由 `inbox.resolved` 移出，不看 `dismissed`）判断 `waiting_human`，所以 dismiss 一个阻塞项不会解除暂停（OQ-13）。
 - **`open_inbox` 与 store 的 `inbox_items` 投影是两回事，不要合并**：store 的 `inbox_items`（store.md §6.2）跟踪每一项的 `open` / `resolved` / `dismissed` 状态，供展示与计数，dismiss 后该项就不再是 open。引擎的 `open_inbox` 只由 `inbox.raised` 加入、由 `inbox.resolved`（及 `supersedes`）移出，dismiss 不影响它。两者对同一批 `inbox.*` 事件各自折叠，但语义不同，不属于 M1 收尾评审 A1 所说的重复投影。如果改为从 store 的 open 项读取，dismiss 就会解除阻塞，违反上一条（测试 `dismiss_does_not_unblock` 锁定这一点）。
@@ -1224,7 +1224,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 - [ ] **新推送使审批失效**：`FakeForge` 注入 `pr_synchronized` / `FakePolicy` 发 `approval.invalidated` → `merge → review`，原 `approval_needed` 被引擎 `resolve`，head 变化后旧 `judged_head` 不再满足 T10。
 - [ ] **base 前移**：`merge` 阶段注入 `forge.base_advanced`（`affected_prs` 含本 PR）→ `merge → review(reason = base_advanced)`；快照刷新后条件满足则回到 `merge`；`merge` 之外的阶段不受影响。
 - [ ] **关闭客户端任务继续**：全程没有任何订阅者 / 客户端，交付单元照常推进到 `closed`；之后新订阅者从任意游标回放得到的事件序列与实时一致。
-- [ ] **上报幂等**：重放同一决策，`InboxPort::raise` 因 `dedup_key` 相同返回 `Deduped`，收件箱只有一项；`dismiss` 一个阻塞项后 `stage_status` 不变、引擎不推进；`choose` 产生的 `inbox.resolved(option_id)` 驱动 `abandon` / `replan` / `upgrade` / `narrow` / `done` / `fix`；`raise_cap` 在 Q-11 定案后补用例。
+- [ ] **上报幂等**：重放同一决策，`InboxPort::raise` 因 `dedup_key` 相同返回 `Deduped`，收件箱只有一项；`dismiss` 一个阻塞项后 `stage_status` 不变、引擎不推进；`choose` 产生的 `inbox.resolved(option_id)` 驱动 `abandon` / `replan` / `upgrade` / `narrow` / `done` / `fix`；`raise_cap` 的用例在 #129（追加事件契约）合入后补。
 - [ ] **release**：每个 `attempt.finished` 落库后调用 `SandboxService::release`：进程不重启时恰一次，跨重启至少一次且幂等（sandbox.md §12 的 `release` 幂等），未终结的尝试从不被 `release`；重启后对存活 `job_id` 调 `sweep_orphans`。
 - [ ] **重启一致**：在每个崩溃点（`delivery.created` 后、`attempt.started` 后、`collect` 后提交前、提交后 `attempt.finished` 前、入队后、`outbox.succeeded` 后）杀掉引擎并重建，最终状态与不崩溃一致；`outbox` 表中同一幂等键只有一行；同一 `job_id` 只有一个本地提交；没有重复的 `attempt.started`。
 - [ ] **不重复创建 PR**：重放 T6 的决策得到相同的 `create_pr` 幂等键（与 `FakeForge` 联测：崩溃发生在"GitHub 已创建、本地未记录"时不新增 PR）。黄金结果带 `open_pr` 提议时，重启（`env.proposals` 清空后重新预取）前后的幂等键相同。
@@ -1298,7 +1298,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 | OQ-10 | **已决：见裁决 C13 / P-59（`engine` 依赖 `forge`，只用 `ForgeReader` 按需读取 Issue / PR 正文与评论，作为不可信文本，不进快照）**。原问题：材料来源：worker-protocol §4.4 要求引擎"从 forge 的快照取原始文本"，但 data-model 快照只有标题，forge.md 的 `ForgeReader` 也只有快照与 CI 日志 / 改动文件 / 线程 / 注解的实时读（forge.md F-OQ-6），没有 Issue 正文与评论；architecture §4 引擎不依赖 `forge`。Issue 正文 / 评论 / CI 日志由谁读取、放在哪里 | 已落实到 §3、§7.8（`ForgeReader::discussion`） | 准入、规划、评审的输入 |
 | OQ-11 | （`answer` 部分**已决：见裁决 C12 / P-58**——`Workflow.delivery_id` 可空并带 `conversation_id`，用量记入会话台账，每日上限 `levels.none.daily_tokens`；`heal` 的挂靠仍未决）没有交付单元的节点：`answer`（None 档）与 `heal`——`Workflow.delivery_id` 必填；None 档没有台账，`answer` 的 token 封顶无处可取。`heal` 应挂在哪个 Workflow | `heal`：每轮单独的 `stage = review` Workflow（`<level>.heal`）；`answer` 按 P-58 落实到 §6、§7.9 | `conversation`、`guardian` |
 | OQ-12 | （暂停 / 继续事件**已决：P-56**；`Workflow.status` 示例**已决：C26**，统一为 `succeeded`；`Delivery.pr` 绑定取 `create_pr` 的 `outbox.succeeded.github_ref.pr`、提交 OID 与 finding 指纹的落盘处见 §7.14.6 E1 / E2，待契约 PR）事件 / 实体缺口：台账创建无事件（暂放 `delivery.created.data`）；`Delivery.pr` 绑定由哪个事件投影；消息与交付单元的关联无事件；`critical` / `required` 不是 Node 字段；worker-protocol §1 责任表未列 V3 / V4 / 分类归属 | 见各处标注 | `schemas/events`、data-model |
-| OQ-13 | ~~上报词表：`reason_code` 与选项 `id`~~ | 已决：见 decisions.md P-79（词表固定在 data-model）；`dismiss` 阻塞项不解除 `waiting_human`（§7.11）；`raise_cap` 的追加量待决（Q-11） | — |
+| OQ-13 | ~~上报词表：`reason_code` 与选项 `id`~~ | 已决：见 decisions.md P-79（词表固定在 data-model）；`dismiss` 阻塞项不解除 `waiting_human`（§7.11）；`raise_cap` 的追加量已决：见 decisions D-19 | — |
 | OQ-14 | base 前移后：forge-actions 没有 update-branch / rebase 动作，分支 `behind` / `dirty` 时无手段；审批是否随 base 前移失效；`merge_pr.merge_method` 由引擎还是 `forge` 填；仓库没有必需 check 时 `checks.required_ok` 是否为真（T10 依赖它，由 `forge` 定义） | 回 `review` 刷新快照；审批不因 base 前移失效；`merge_method` 取仓库允许方法与 forge 默认优先级的交集 | `merge` 阶段 |
 | OQ-15 | `build` / `single` 无补丁（`no_change_reason`）如何处理；非受保护路径的 `deny` 是否一律上报（worker-protocol OQ-5） | 无补丁 → `escalation(no_change)`；其他 `deny` 重试 1 次后上报 | 体验 |
 | OQ-16 | （部分**已决：见裁决 C14 / P-60**——端口为 `request_heal` 与 `classify`，M2 交付；守护静默自愈不改变阶段）守护自愈的接口（guardian.md G-OQ-2，阻塞 M2）：`HealPort` / `ClassifyPort` 的签名以本文 §6 为准（guardian.md §6 已对齐）；`heal` 的推送与 proposals 由 `guardian` 入队（引擎不入队）；`HealRequest.head_sha` 与 `base_sha`（P10）的关系；愈合轮是否改变 `stage`；`mechanical_conflict` 由谁执行 | 引擎不改 `stage`，不入队推送；head 变化按 T10 重新取得证据 | `guardian` |
