@@ -1043,7 +1043,14 @@ fn github_client_has_no_approve_and_is_crate_private() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!code.to_ascii_lowercase().contains("approve"));
-        assert!(!code.contains("/reviews"));
+        // reviews 只允许读（GET，用于 review_state 口径）；不得有提交 / 修改 review 的调用。
+        for (at, _) in code.match_indices("/reviews") {
+            let call = &code[at.saturating_sub(300)..at];
+            assert!(
+                call.contains("\"GET\"") && !call.contains("\"POST\"") && !call.contains("\"PUT\""),
+                "reviews endpoint may only be read"
+            );
+        }
     }
     // 模块本身私有、且不被重导出，crate 外拿不到任何客户端类型。
     let lib = include_str!("../src/lib.rs");
