@@ -55,10 +55,16 @@ pub fn schema(name: &str) -> Value {
     serde_json::from_slice(&fs::read(&path).unwrap()).unwrap()
 }
 
+pub fn validator(schema_name: &str) -> jsonschema::Validator {
+    jsonschema::validator_for(&schema(schema_name)).expect("schema compiles")
+}
+
 /// 用 `schemas/worker/<name>` 校验，失败时列出全部错误。
 pub fn assert_valid(schema_name: &str, instance: &Value) {
-    let schema = schema(schema_name);
-    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    assert_valid_with(&validator(schema_name), schema_name, instance);
+}
+
+pub fn assert_valid_with(validator: &jsonschema::Validator, schema_name: &str, instance: &Value) {
     let errors: Vec<String> = validator
         .iter_errors(instance)
         .map(|e| format!("{} at {}", e, e.instance_path()))

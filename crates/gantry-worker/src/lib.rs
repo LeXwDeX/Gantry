@@ -6,7 +6,9 @@
 pub mod artifacts;
 pub mod claude_cli;
 pub mod claude_code;
+pub mod events;
 pub mod layout;
+pub mod proposals;
 pub mod startup;
 
 pub use claude_code::ClaudeCodeAdapter;
