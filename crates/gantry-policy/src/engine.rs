@@ -47,9 +47,9 @@ pub struct PolicyDeps {
 }
 
 pub struct PolicyEngine {
-    store: Store,
+    pub(crate) store: Store,
     forge: Arc<dyn ForgeReader>,
-    clock: Arc<dyn Clock>,
+    pub(crate) clock: Arc<dyn Clock>,
     ids: Arc<IdGen>,
     build: PolicyBuild,
     rules: RwLock<Arc<PolicyRules>>,
@@ -425,8 +425,8 @@ fn same_subject(approval: &Approval, spec: &ApprovalSpec) -> bool {
         && approval.subject_digest == spec.subject_digest
 }
 
-/// 拒绝的上报建议。只给出上报词表里已有的码；其余情形是否以及用什么码上报
-/// 待 #66（E3）拍板，在那之前返回 `None`。
+/// 拒绝的上报建议（policy.md §6.1，#66）：只取上报词表已列出的码。其余
+/// `DenyReason` 在词表里没有对应码（OQ-P15），拍板前没有合法取值，返回 `None`。
 fn report_for(id: PolicyActionId, reason: &DenyReason) -> Option<ReportHint> {
     let code = match (id, reason) {
         (PolicyActionId::MergePr, DenyReason::ActionDenied) => REPORT_MERGE_DENIED,

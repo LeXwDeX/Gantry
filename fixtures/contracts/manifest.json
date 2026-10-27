@@ -1057,23 +1057,23 @@
       "source": "docs/interfaces/worker-protocol.md",
       "line": 499,
       "context": "### 5.2 result.json",
-      "sha256": "f3a4a967c6f5acecc4391d94e6e79e06b0bed68bbafce345bc29dff2a5bc9429",
-      "bytes": 1564,
+      "sha256": "35541422987dbe365443c33265fa66db6bb1ff7edf3798193d72ba58efc67b8f",
+      "bytes": 2372,
       "file": "fixtures/contracts/blocks/worker-protocol/L499.json",
-      "status": "skipped",
-      "schema": "schemas/worker/result.schema.json",
-      "rust": "none",
-      "note": "ResultBundle 仍为 [提议]；core 无对应类型，不猜形状",
+      "status": "verified",
+      "schema": "schemas/worker/result-bundle.schema.json",
+      "rust": "worker::ResultBundle",
+      "note": "worker-protocol §5.2 ResultBundle 清单；#84 拍板形状，schema + Rust round-trip + validate",
       "error": null
     },
     {
-      "id": "worker-protocol-L572",
+      "id": "worker-protocol-L596",
       "source": "docs/interfaces/worker-protocol.md",
-      "line": 572,
+      "line": 596,
       "context": "### 5.4 proposals.json",
       "sha256": "7a6d0afb9e340283b313969cef9b28a1d84bf14cc7b73f1747e5a1fc343a3cbc",
       "bytes": 768,
-      "file": "fixtures/contracts/blocks/worker-protocol/L572.json",
+      "file": "fixtures/contracts/blocks/worker-protocol/L596.json",
       "status": "verified",
       "schema": "schemas/worker/proposals.schema.json",
       "rust": "worker::Proposals",
@@ -1081,13 +1081,13 @@
       "error": null
     },
     {
-      "id": "worker-protocol-L751",
+      "id": "worker-protocol-L775",
       "source": "docs/interfaces/worker-protocol.md",
-      "line": 751,
+      "line": 775,
       "context": "### 6.3 示例",
       "sha256": "79499705562ed5b9678eb5f52b9e53171131d49b297641f78b7841933d64c0f2",
       "bytes": 891,
-      "file": "fixtures/contracts/blocks/worker-protocol/L751.json",
+      "file": "fixtures/contracts/blocks/worker-protocol/L775.json",
       "status": "verified",
       "schema": "schemas/worker/output.plan.schema.json",
       "rust": "worker::StructuredOutput",
@@ -1095,13 +1095,13 @@
       "error": null
     },
     {
-      "id": "worker-protocol-L783",
+      "id": "worker-protocol-L807",
       "source": "docs/interfaces/worker-protocol.md",
-      "line": 783,
+      "line": 807,
       "context": "### 6.3 示例",
       "sha256": "fc14badf12b9edf0ade4aeea4864a1f2bce3aa3dea6d26c9703dfab5b3390d22",
       "bytes": 776,
-      "file": "fixtures/contracts/blocks/worker-protocol/L783.json",
+      "file": "fixtures/contracts/blocks/worker-protocol/L807.json",
       "status": "verified",
       "schema": "schemas/worker/output.review.schema.json",
       "rust": "worker::StructuredOutput",
@@ -1109,13 +1109,13 @@
       "error": null
     },
     {
-      "id": "worker-protocol-L809",
+      "id": "worker-protocol-L833",
       "source": "docs/interfaces/worker-protocol.md",
-      "line": 809,
+      "line": 833,
       "context": "### 6.3 示例",
       "sha256": "8a27044da2a942fb0f46285a905306b1864990bdf845aaf9b741f4fac9c29217",
       "bytes": 892,
-      "file": "fixtures/contracts/blocks/worker-protocol/L809.json",
+      "file": "fixtures/contracts/blocks/worker-protocol/L833.json",
       "status": "partial",
       "schema": "schemas/worker/output.arbiter.schema.json",
       "rust": "none",
@@ -1126,7 +1126,7 @@
   "summary": {
     "partial": 22,
     "schema-only": 15,
-    "skipped": 2,
-    "verified": 41
+    "skipped": 1,
+    "verified": 42
   }
 }

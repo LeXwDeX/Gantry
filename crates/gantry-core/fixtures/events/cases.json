@@ -356,6 +356,12 @@
       "limit": 40,
       "used": 40
     },
+    "budget.limit_raised": {
+      "dimension": "rounds",
+      "from": 3,
+      "to": 6,
+      "by": 3
+    },
     "device.paired": {
       "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
       "name": "laptop",
@@ -2203,6 +2209,140 @@
         "config_rev": 1
       },
       "pointer_contains": "/subject"
+    },
+    {
+      "type": "inbox.raised",
+      "data": {
+        "item": {
+          "id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+          "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+          "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+          "kind": "escalation",
+          "severity": "warn",
+          "summary": "Outbox 动作终态失败",
+          "payload": {
+            "reason_code": "outbox_failed:not_mergeable",
+            "evidence": [],
+            "options": [
+              {
+                "id": "retry",
+                "label": "重试",
+                "primary": true
+              },
+              {
+                "id": "abandon",
+                "label": "放弃",
+                "primary": false
+              }
+            ]
+          },
+          "status": "open",
+          "dedup_key": "outbox_failed:test",
+          "created_at": "2026-10-24T12:41:03.120Z",
+          "updated_at": "2026-10-24T12:41:03.120Z"
+        }
+      },
+      "pointer_contains": "/item"
+    },
+    {
+      "type": "inbox.raised",
+      "data": {
+        "item": {
+          "id": "inb_01JBX2F5H7K9M1P3R5T7V9X0ZC",
+          "project_id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+          "delivery_id": "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB",
+          "kind": "escalation",
+          "severity": "warn",
+          "summary": "Outbox 动作终态失败",
+          "payload": {
+            "reason_code": "attempt_failed",
+            "evidence": [],
+            "options": [
+              {
+                "id": "retry",
+                "label": "重试",
+                "primary": true
+              },
+              {
+                "id": "abandon",
+                "label": "放弃",
+                "primary": false
+              }
+            ],
+            "action_id": "act_01JB7Q2M8T4X6N9R3P5K1V7WZA"
+          },
+          "status": "open",
+          "dedup_key": "outbox_failed:test",
+          "created_at": "2026-10-24T12:41:03.120Z",
+          "updated_at": "2026-10-24T12:41:03.120Z"
+        }
+      },
+      "pointer_contains": "/item"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "rounds",
+        "from": 3,
+        "to": 3,
+        "by": 0
+      },
+      "pointer_contains": "/by"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "tokens_by_tier.worker",
+        "from": 100,
+        "to": 250,
+        "by": 100
+      },
+      "pointer_contains": "/to"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "nodes",
+        "from": 18446744073709551615,
+        "to": 18446744073709551615,
+        "by": 1
+      },
+      "pointer_contains": "/to"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "nodes",
+        "from": 4,
+        "to": 8,
+        "by": 4,
+        "reason": "raise_cap"
+      },
+      "pointer_contains": "reason"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "nodes",
+        "to": 8,
+        "by": 4
+      },
+      "pointer_contains": "from"
+    },
+    {
+      "type": "project.added",
+      "data": {
+        "id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+        "repo": "acme/web",
+        "installation_id": 1,
+        "bot_user_id": 2,
+        "default_branch": "main",
+        "allowed_merge_methods": [],
+        "merge_queue_enabled": false,
+        "created_at": "2026-10-24T12:41:03.120Z",
+        "updated_at": "2026-10-24T12:41:03.120Z"
+      },
+      "pointer_contains": "allowed_merge_methods"
     }
   ],
   "contract_undefined": []

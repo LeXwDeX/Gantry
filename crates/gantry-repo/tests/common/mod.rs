@@ -10,6 +10,8 @@ use gantry_core::entities::{Actor, ActorKind};
 use gantry_core::events::{Event, EventType};
 use gantry_core::ids::{DeliveryId, IdGen, ProjectId};
 use gantry_core::ports::{ActorCtx, RepoService};
+use gantry_fakes::policy::FakePolicy;
+use gantry_repo::cas::MemoryCas;
 use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
 use gantry_store::testing::{FakeClock, SeqEntropy};
 use gantry_store::{EventFilter, Store, StoreDeps};
@@ -44,12 +46,24 @@ impl Drop for TempDir {
     }
 }
 
+/// 构造自定义 `PolicyPort` 时可用的部件（与 Fixture 共享 Store / 时钟 / ID）。
+pub struct PolicyParts {
+    pub fake: FakePolicy,
+    pub store: Store,
+    pub clock: Arc<FakeClock>,
+    pub ids: Arc<IdGen>,
+    pub project: ProjectId,
+}
+
 pub struct Fixture {
     pub tmp: TempDir,
     pub clock: Arc<FakeClock>,
     pub ids: Arc<IdGen>,
     pub store: Store,
     pub repo: GitRepo,
+    pub policy: FakePolicy,
+    pub counting: Arc<CountingPolicy>,
+    pub cas: Arc<MemoryCas>,
     pub project: ProjectId,
     pub slug: RepoSlug,
 }
@@ -60,6 +74,22 @@ impl Fixture {
     }
 
     pub async fn with_config(label: &str, tweak: impl FnOnce(&mut RepoConfig)) -> Self {
+        Self::build(label, tweak, |parts| Arc::new(parts.fake)).await
+    }
+
+    /// 用自定义的 `PolicyPort`（外面仍包一层计数）。
+    pub async fn with_policy(
+        label: &str,
+        policy: impl FnOnce(PolicyParts) -> Arc<dyn PolicyPort>,
+    ) -> Self {
+        Self::build(label, |_| {}, policy).await
+    }
+
+    async fn build(
+        label: &str,
+        tweak: impl FnOnce(&mut RepoConfig),
+        make_policy: impl FnOnce(PolicyParts) -> Arc<dyn PolicyPort>,
+    ) -> Self {
         let tmp = TempDir::new(label);
         let clock = Arc::new(FakeClock::new(T0));
         let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
@@ -74,23 +104,37 @@ impl Fixture {
         .unwrap();
         let mut cfg = RepoConfig::new(tmp.path().join("data"));
         tweak(&mut cfg);
+        let policy = FakePolicy::new_in(store.clone());
+        let project: ProjectId = ids.next().unwrap();
+        let counting = Arc::new(CountingPolicy::new(make_policy(PolicyParts {
+            fake: policy.clone(),
+            store: store.clone(),
+            clock: clock.clone(),
+            ids: ids.clone(),
+            project,
+        })));
+        let cas = Arc::new(MemoryCas::new());
         let repo = GitRepo::open(
             cfg,
             RepoDeps {
                 store: store.clone(),
                 clock: clock.clone(),
                 ids: ids.clone(),
+                policy: counting.clone(),
+                cas: cas.clone(),
             },
         )
         .await
         .unwrap();
-        let project = ids.next().unwrap();
         Self {
             tmp,
             clock,
             ids,
             store,
             repo,
+            policy,
+            counting,
+            cas,
             project,
             slug: RepoSlug::parse("acme/widgets").unwrap(),
         }
@@ -105,6 +149,8 @@ impl Fixture {
                 store: self.store.clone(),
                 clock: self.clock.clone(),
                 ids: self.ids.clone(),
+                policy: self.counting.clone(),
+                cas: self.cas.clone(),
             },
         )
         .await
@@ -252,4 +298,142 @@ pub fn refs(git_dir: &Path) -> String {
         git_dir,
         &["for-each-ref", "--format=%(refname) %(objectname)"],
     )
+}
+
+// ---------------------------------------------------------------------------
+// 统计 evaluate_patch 调用次数的 PolicyPort（其余方法原样转给 FakePolicy）
+// ---------------------------------------------------------------------------
+
+use async_trait::async_trait;
+use gantry_core::ports::{
+    ActionDecision, ActionRequest, AddedLineSource, ApprovalSpec, ExecutionCheck, ExecutionPermit,
+    GateError, InvalidateReason, PatchApprovalCheck, PatchPermit, PatchPolicyVerdict, PathRuleSet,
+    PolicyError, PolicyPort, ProposalContext, ProposalDecision, SecretFinding, TxHandle,
+};
+use gantry_core::worker::{PatchFacts, PathConstraints, Proposal};
+use std::sync::Mutex;
+
+pub struct CountingPolicy {
+    inner: Arc<dyn PolicyPort>,
+    pub facts: Mutex<Vec<PatchFacts>>,
+    pub added: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl CountingPolicy {
+    pub fn new(inner: Arc<dyn PolicyPort>) -> Self {
+        Self {
+            inner,
+            facts: Mutex::new(Vec::new()),
+            added: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn evaluations(&self) -> usize {
+        self.facts.lock().unwrap().len()
+    }
+
+    pub fn last_facts(&self) -> Option<PatchFacts> {
+        self.facts.lock().unwrap().last().cloned()
+    }
+}
+
+#[async_trait]
+impl PolicyPort for CountingPolicy {
+    async fn decide_action(
+        &self,
+        req: ActionRequest,
+        ctx: &ActorCtx,
+    ) -> Result<ActionDecision, PolicyError> {
+        self.inner.decide_action(req, ctx).await
+    }
+
+    async fn request_approval(
+        &self,
+        spec: ApprovalSpec,
+        ctx: ActorCtx,
+    ) -> Result<gantry_core::entities::Approval, PolicyError> {
+        self.inner.request_approval(spec, ctx).await
+    }
+
+    async fn invalidate(
+        &self,
+        id: &gantry_core::ids::ApprovalId,
+        reason: InvalidateReason,
+        ctx: &ActorCtx,
+    ) -> Result<gantry_core::entities::Approval, PolicyError> {
+        self.inner.invalidate(id, reason, ctx).await
+    }
+
+    async fn live_approvals_for_pr(
+        &self,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Vec<gantry_core::entities::Approval>, PolicyError> {
+        self.inner.live_approvals_for_pr(repo, number).await
+    }
+
+    async fn decide_proposals(
+        &self,
+        proposal_ctx: ProposalContext,
+        items: &[Proposal],
+        ctx: &ActorCtx,
+    ) -> Result<Vec<ProposalDecision>, PolicyError> {
+        self.inner.decide_proposals(proposal_ctx, items, ctx).await
+    }
+
+    async fn evaluate_patch(
+        &self,
+        facts: &PatchFacts,
+        added: &dyn AddedLineSource,
+        ctx: &ActorCtx,
+    ) -> Result<PatchPolicyVerdict, PolicyError> {
+        self.facts.lock().unwrap().push(facts.clone());
+        for file in &facts.files {
+            let lines: Vec<String> = added
+                .added_lines(&file.path)
+                .map(|line| line.unwrap())
+                .collect();
+            self.added
+                .lock()
+                .unwrap()
+                .push((file.path.as_str().to_owned(), lines));
+        }
+        self.inner.evaluate_patch(facts, added, ctx).await
+    }
+
+    async fn consume_patch_approval(
+        &self,
+        tx: &mut dyn TxHandle,
+        approval: &gantry_core::ids::ApprovalId,
+        check: &PatchApprovalCheck,
+        ctx: &ActorCtx,
+    ) -> Result<PatchPermit, GateError> {
+        self.inner
+            .consume_patch_approval(tx, approval, check, ctx)
+            .await
+    }
+
+    fn path_rules(&self, project: &ProjectId) -> Arc<dyn PathRuleSet> {
+        self.inner.path_rules(project)
+    }
+
+    fn path_rules_snapshot(&self, project: &ProjectId) -> PathConstraints {
+        self.inner.path_rules_snapshot(project)
+    }
+
+    fn scan_text(&self, text: &str) -> Vec<SecretFinding> {
+        self.inner.scan_text(text)
+    }
+
+    async fn consume_for_execution(
+        &self,
+        approval: &gantry_core::ids::ApprovalId,
+        check: &ExecutionCheck,
+        act: &gantry_core::ids::ActionId,
+        ctx: &ActorCtx,
+    ) -> Result<ExecutionPermit, GateError> {
+        self.inner
+            .consume_for_execution(approval, check, act, ctx)
+            .await
+    }
 }

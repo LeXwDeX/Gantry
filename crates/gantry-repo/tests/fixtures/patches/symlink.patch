@@ -1,0 +1,7 @@
+diff --git a/link b/link
+new file mode 120000
+--- /dev/null
++++ b/link
+@@ -0,0 +1 @@
++/etc/passwd
+\ No newline at end of file

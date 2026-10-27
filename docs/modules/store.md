@@ -62,7 +62,7 @@
 | 追加请求（`NewEvent`，经 `WriteTx`） | `engine`、`conversation`、`guardian`、`policy`、`notify`、`models`、`repo`、`sandbox`、`forge`、`pki`、`api` | [core §6.5](core.md#65-事件) | 调用方可信；`data` 里可含 `UntrustedText`（GitHub / 沙盒文本），**原样存储、不解释、不规范化** |
 | Outbox 请求 | `engine`、`guardian`、`repo`（经入队）、`forge`（执行） | §6.3 | 同上 |
 | 读请求与分页游标 | `api` 转发客户端的筛选与游标 | §6.2 | 游标**不可信**：必须严格解码并校验所属资源 |
-| CAS 写入 | `sandbox`（collect 的产物）、`engine`（结果包清单） | 字节 | 沙盒产物**不可信**；存为不透明对象 |
+| CAS 写入 | `sandbox`（collect 的产物）、`engine`（结果包清单 `ResultBundle`，以及被接受提议的净化文本，清单经 `text_ref` 引用） | 字节 | 沙盒产物**不可信**；存为不透明对象 |
 | 引导配置 | `deploy` | §10 | 可信 |
 | `Clock`、`IdGen` | 组装时注入 | [core §6.1](core.md#61-标识符时间基础值) | 可信 |
 
@@ -300,7 +300,7 @@ impl Cas {
     pub async fn has(&self, d: &Sha256Digest) -> Result<bool>;
     pub async fn stat(&self, d: &Sha256Digest) -> Result<Option<CasStat>>;               // {bytes, kind, created_at, quarantined}
     /// 结果包清单：JCS 规范化后存入，使"重复 collect 得到相同的 result_ref"（worker-protocol §3.5）。
-    pub async fn put_manifest(&self, manifest: &ResultManifest) -> Result<Sha256Digest>;
+    pub async fn put_bundle(&self, bundle: &ResultBundle) -> Result<Sha256Digest>;     // core::worker::ResultBundle（worker-protocol §5.2）
     pub async fn gc(&self, policy: &RetentionPolicy) -> Result<GcReport>;                // 默认策略 = 不删除（OQ-5）
 }
 ```
@@ -516,7 +516,7 @@ LIMIT 1;
 - 读取只接受 `Sha256Digest` 类型，路径由摘要拼出，**没有调用方可控的路径片段**，不存在目录穿越。`get_bytes` 带 `max` 上限；小对象读取后重算摘要校验（`verify_on_read`）。
 - 文件权限 `0640`、目录 `0750`，属主为服务进程用户；不设置可执行位，且 `store` 之外没有任何代码把这个目录当静态文件服务。
 - 隔离区（被拒产物）用 `kind = Quarantine`，`quarantined = 1`，不进入常规引用；保留期未定（OQ-3、OQ-5），`gc` 默认不删。
-- 清单（`ResultManifest`）用 `core::jcs` 规范化后存入，所以对同一已停止沙盒的 `out/` 重复 `collect` 得到同一个 `result_ref`。
+- 清单（`core::worker::ResultBundle`，worker-protocol §5.2）用 `core::jcs` 规范化后存入；清单里的 `collected_at` 是确定性时间（沙盒停止时间，截到秒），所以对同一已停止沙盒的 `out/` 重复 `collect` 得到同一个 `result_ref`。
 
 ### 7.8 备份、恢复、完整性
 
@@ -653,7 +653,7 @@ LIMIT 1;
 
 ### 12.5 CAS、备份、迁移、故障
 
-- [ ] CAS：`put` 去重（同内容同摘要、只存一份）；并发 `put` 同内容安全；`get_bytes` 超过 `max` 被拒；构造的目录穿越摘要字符串无法通过 `Sha256Digest` 解析；文件写入后崩溃（有文件无行）经 `verify` 补行；`put_manifest` 对键序不同但内容相同的清单得到同一摘要。
+- [ ] CAS：`put` 去重（同内容同摘要、只存一份）；并发 `put` 同内容安全；`get_bytes` 超过 `max` 被拒；构造的目录穿越摘要字符串无法通过 `Sha256Digest` 解析；文件写入后崩溃（有文件无行）经 `verify` 补行；`put_bundle` 对键序不同但内容相同的清单得到同一摘要。
 - [ ] `backup_to` 在写者持续写入时产出的副本：`integrity_check` 通过，`head_seq` 对应一个已提交前缀；副本可被 `restore_from` 恢复，`log_epoch` 加一，`log_identity()` 返回新值（P-67）。
 - [ ] 迁移：从 `schema_version = n` 升到 n+1 成功；更高版本 → `SchemaTooNew`；模块迁移表名不带前缀被拒。
 - [ ] 第二个 `open` 同目录得到 `AlreadyRunning`。

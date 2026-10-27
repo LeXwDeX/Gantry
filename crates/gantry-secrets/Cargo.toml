@@ -1,0 +1,37 @@
+[package]
+name = "gantry-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 密钥存储：按使用方隔离的加密本地存储与加密备份（secrets.md）"
+
+[features]
+default = []
+# 测试用崩溃注入点：设置环境变量 GANTRY_SECRETS_CRASH=<点名> 时在该点 SIGKILL 自身。
+fault-injection = []
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "getrandom"] }
+hkdf = "0.12"
+zeroize = { version = "1", features = ["std"] }
+subtle = "2.6"
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-fakes = { path = "../gantry-fakes" }
+trybuild = "1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
+[[test]]
+name = "crash"
+required-features = ["fault-injection"]

@@ -54,6 +54,8 @@ function makeNode(
 ): WorkflowNode {
   return {
     id,
+    created_at: "2026-10-24T12:00:00.000Z",
+    updated_at: "2026-10-24T12:00:00.000Z",
     workflow_id: "wfl_contrast",
     role: options.role ?? "build",
     tier: "worker",
@@ -73,6 +75,8 @@ function makeAttempt(
 ): Attempt {
   return {
     id,
+    created_at: "2026-10-24T12:00:00.000Z",
+    updated_at: "2026-10-24T12:00:00.000Z",
     node_id: nodeId,
     n: 1,
     sandbox_id: null,
@@ -109,6 +113,8 @@ function makeState(
 ): DesktopState {
   const workflow: Workflow = {
     id: "wfl_contrast",
+    created_at: "2026-10-24T12:00:00.000Z",
+    updated_at: "2026-10-24T12:00:00.000Z",
     delivery_id: null,
     conversation_id: null,
     stage: "implement",

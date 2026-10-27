@@ -1,0 +1,6 @@
+diff --git a/src/.git/config b/src/.git/config
+new file mode 100644
+--- /dev/null
++++ b/src/.git/config
+@@ -0,0 +1 @@
++x

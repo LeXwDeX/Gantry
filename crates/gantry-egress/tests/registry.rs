@@ -1041,11 +1041,19 @@ fn secrets_are_staged_then_activated_or_discarded() {
             .unwrap()[&name]
     );
     assert!(harness.registry.staged_secrets(&ctx()).unwrap().is_empty());
-    // 已激活的再激活原样成功。
-    assert!(harness
+    // 已激活的再激活原样成功（同一激活时刻）。
+    let first = harness
         .registry
         .activate_secret(&staged.staged_id, &ctx())
-        .is_ok());
+        .unwrap();
+    harness.clock.advance_secs(5);
+    assert_eq!(
+        harness
+            .registry
+            .activate_secret(&staged.staged_id, &ctx())
+            .unwrap(),
+        first
+    );
 
     // 被当前视图引用的 secret 不能回收。
     assert!(matches!(

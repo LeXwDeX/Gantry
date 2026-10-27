@@ -185,6 +185,7 @@ pub enum SecretsError {
     InsecurePermissions { path: PathBuf, mode: u32 },
     UnsupportedFormat { found: u8 },
     TooLarge { limit: usize },
+    EmptyValue,                                        // 空值不允许写入（OQ-6 已决）
     NotStaged, AlreadyStaged,
     Io(std::io::Error),
 }   // 所有 Display / Debug 都不含值
@@ -302,6 +303,7 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 | `stage` / `put` 中途崩溃 | 只可能留下 `.tmp.*`（启动时清理）或 `.staged`（`staged()` / `staged_all()` 报告，由调用方对账，见 §7.4）；`.sec` 永远是完整文件 |
 | `commit` 时 `.staged` 不见了 | `NotStaged` |
 | 值超过 `max_value_bytes` | `TooLarge`，不写入 |
+| 空值 | `EmptyValue`，不写入（OQ-6 已决） |
 | 磁盘满 | `Io`，写入失败；已存在的 `.sec` 不受影响 |
 | `rewrap` / `import_backup` 中途崩溃 | 可重入（逐文件原子；`Merge` 模式只补缺）；重跑即可 |
 | 多处同时写同名 | 由 `.lock` 串行化；后到者按 `expect` 得到 `Conflict` 或在新版本上继续 |
@@ -350,7 +352,7 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 - [ ] 版本：删除后再 `put`，版本号 > 删除前最大版本；`Expect::Absent` / `Version(n)` 冲突返回 `Conflict`；`retain_versions = 2` 时第三次写入后最旧版本被清理，`get_version` 对已清理版本返回 `None`。
 - [ ] `stage` / `commit` / `abort`：暂存版本对 `get` / `present` / `list` 不可见；同名第二次 `stage` → `AlreadyStaged`；`commit` 后版本可见；`abort` 后无痕；崩溃注入（子进程 `SIGKILL`）在 `.tmp` 写完、`rename` 前后、`commit` 前后各一次，重开后 `.sec` 都是完整文件，`staged()` 报告遗留暂存项，`secrets` 不自动提交或丢弃。
 - [ ] 并发：多线程同时 `put` 同名（带 `Expect::Any`），版本号恰好是 1..N 无重复无跳变；读者并发读取始终得到完整的某个版本，从不报 `Corrupt`。
-- [ ] 值大小：恰好 `max_value_bytes` 通过，+1 → `TooLarge`；空值是否允许见 OQ-6，测试固化最终决定。
+- [ ] 值大小：恰好 `max_value_bytes` 通过，+1 → `TooLarge`；空值 → `EmptyValue`（OQ-6 已决），任意二进制字节往返。
 
 ### 12.3 不泄露与内存
 
@@ -384,7 +386,7 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 | OQ-3 | **备份加密方案与接收方密钥保管**：本文提议 `age`（X25519 接收方）、接收方私钥离线保管（与根 CA 同样处理）。architecture §6 只写"加密备份" | 如提议；备份流格式见 §7.6 | `deploy`、运维手册 |
 | OQ-4 | **已决：见裁决 C19 / C20（P-65、P-66）**（第一台设备配对之前，主机命令（需 root）可写入 `github.*` 等"仅 approver"配置并写审计事件；App Manifest 经 `gantry github setup` 与同一入口的 `/setup/github/callback` 写入；之后改为需要审批签名）。CLI 细节仍由 `deploy` 定。原问题：**写入入口**：`api` 的 settings 路由可写；但 `deploy` 的安装流程要在没有任何设备之前写入 App 私钥、webhook secret（App Manifest 回调）和 CA 中间私钥，需要一个主机侧入口（例如 `gantry secrets …` 子命令）。skeleton 只定义了 `gantry pair` 与 `gantry device recover` | 本库提供 `init` / `put`；离线操作（`init`、`import_backup`、`rewrap`）需在对应进程停止后执行，或经守护进程的管理入口 | `deploy`、`pki`、`forge` |
 | OQ-5 | **ref 与使用方的对应**：config.md §2.4 允许"多个字段引用同一个 ref"，而本库按使用方隔离（同名 ref 在不同使用方命名空间里是不同的密钥）。是否在校验层禁止跨使用方共用同名 ref（core.md OQ-14）；`github.app.*` → `Forge`、`models.providers.*` 与 `egress.injection.*` → `Egress`、中间 CA 私钥 → `Pki` 的映射是否确认 | 按左侧映射；跨使用方同名视为校验错误 | `core`、`api` |
-| OQ-6 | 空值与非 UTF-8 值：是否允许存空凭据；二进制凭据是否需要 | 拒绝空值；允许任意字节（PEM 恰好是 UTF-8） | `core`（V02/V03）、`api` |
+| OQ-6 | **已决（#97，2026-10-27）**：拒绝空值，返回 `SecretsError::EmptyValue`；任意二进制字节照常接受。原问题：空值与非 UTF-8 值：是否允许存空凭据；二进制凭据是否需要 | 如左 | `core`（V02/V03）、`api` |
 | OQ-7 | **回收未被引用的 ref**（config.md §2.4 [提议]）由谁触发：引用关系分散在 settings 文档里，`secrets` 看不到 | `secrets` 只提供 `delete`；`api` 在 `settings.updated` 之后计算引用并调用 | `api` |
 | OQ-8 | Egress 的**重载信号**（config.md §2.4"收到重载信号后换新"，M3）：信号形态（SIGHUP、管理接口、轮询 `version()`）未定 | `SecretHandle` 轮询 + `invalidate()`；信号绑定由 `egress` 做 | `egress`（M3） |
 | OQ-9 | （引导期主机写入的审计**已决：见裁决 C20 / P-66**——写审计事件，由调用方追加；读取与 `deploy` 其余安装步骤是否进审计仍未决）secrets 读写是否要进入审计事件（事件目录里没有 `secret.*` 类型；`settings.updated.secret_changes[]` 只覆盖经 settings 的写入，不覆盖 `deploy` 安装流程与读取） | 不进事件日志；只有日志与指标 | `core`（事件目录）、`policy`（审计） |

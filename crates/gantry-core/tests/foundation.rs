@@ -322,6 +322,48 @@ fn workflow_node_and_inbox_invariants() {
     assert_eq!(inbox.validate(), Err(EntityError::InboxPayloadKindMismatch));
 }
 
+// #67：`outbox_failed:<code>` 的 escalation 必带 action_id，其余 reason_code 不得带。
+#[test]
+fn escalation_action_id_tracks_outbox_failed() {
+    let escalation = |code: &str, action_id: Option<ActionId>| {
+        let mut item = builders::inbox_item();
+        item.kind = InboxKind::Escalation;
+        item.payload = InboxPayload::Escalation {
+            reason_code: ReasonCode::parse(code).unwrap(),
+            node_id: None,
+            attempt_id: None,
+            target_level: None,
+            action_id,
+            evidence: vec![],
+            options: Some(vec![
+                InboxOption::new("retry", "重试", true),
+                InboxOption::new("abandon", "放弃", false),
+            ]),
+        };
+        item
+    };
+    let act: ActionId = Id::from_parts(1, 1).unwrap();
+    assert!(escalation("outbox_failed:not_mergeable", Some(act))
+        .validate()
+        .is_ok());
+    assert_eq!(
+        escalation("outbox_failed:not_mergeable", None).validate(),
+        Err(EntityError::EscalationActionIdMismatch)
+    );
+    assert_eq!(
+        escalation("attempt_failed", Some(act)).validate(),
+        Err(EntityError::EscalationActionIdMismatch)
+    );
+    // 空码不是 outbox_failed 码族。
+    assert_eq!(
+        escalation("outbox_failed:", Some(act)).validate(),
+        Err(EntityError::EscalationActionIdMismatch)
+    );
+    assert!(ReasonCode::parse("outbox_failed:rate_limited")
+        .unwrap()
+        .is_outbox_failed());
+}
+
 #[test]
 fn card_unknown_kind_is_preserved() {
     let raw = json!({"kind":"future_card","payload":{"x":1}});

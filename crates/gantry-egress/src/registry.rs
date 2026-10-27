@@ -381,6 +381,7 @@ struct StagedRow {
     staged_at: Timestamp,
     expires_at: Timestamp,
     state: StagedState,
+    activated_at: Option<Timestamp>,
 }
 
 const META_CONFIG: &str = "config";
@@ -1059,6 +1060,7 @@ impl Registry {
                 .checked_add_secs(self.inner.options.staged_ttl_s)
                 .unwrap_or(now),
             state: StagedState::Staged,
+            activated_at: None,
         };
         if let Err(error) = state
             .db
@@ -1085,7 +1087,9 @@ impl Registry {
             .ok_or(ControlError::NotFound)?
             .clone();
         match row.state {
-            StagedState::Activated => return Ok((row.secret_ref, row.version, row.expires_at)),
+            StagedState::Activated => {
+                return Ok((row.secret_ref, row.version, row.activated_at.unwrap_or(now)))
+            }
             StagedState::Discarded => return Err(ControlError::StagedExpired),
             StagedState::Staged if now >= row.expires_at => {
                 self.discard_row(&mut state, row, ctx)?;
@@ -1100,7 +1104,7 @@ impl Registry {
             .map_err(|error| ControlError::Unavailable(format!("secrets: {error}")))?;
         let mut row = row;
         row.state = StagedState::Activated;
-        // 激活时刻复用 expires_at 字段之外单独返回；行里只需要状态。
+        row.activated_at = Some(now);
         state
             .db
             .tx(|tx| tx.put(Table::Staged, staged_id.as_str(), &row))?;

@@ -130,6 +130,8 @@ pub struct Project {
     pub installation_id: i64,
     pub bot_user_id: i64,
     pub default_branch: String,
+    /// 至少一项（与 `project.added` / `updated` 的校验一致，#70）。
+    #[schemars(length(min = 1))]
     pub allowed_merge_methods: Vec<MergeMethod>,
     pub merge_queue_enabled: bool,
     pub created_at: Timestamp,
@@ -1092,6 +1094,16 @@ impl InboxItem {
         if self.kind != self.payload.kind() {
             return Err(EntityError::InboxPayloadKindMismatch);
         }
+        if let InboxPayload::Escalation {
+            reason_code,
+            action_id,
+            ..
+        } = &self.payload
+        {
+            if reason_code.is_outbox_failed() != action_id.is_some() {
+                return Err(EntityError::EscalationActionIdMismatch);
+            }
+        }
         Ok(())
     }
 }
@@ -1128,6 +1140,9 @@ pub enum InboxPayload {
         attempt_id: Option<AttemptId>,
         #[serde(default)]
         target_level: Option<Level>,
+        /// 终态失败的 Outbox 动作；`reason_code = outbox_failed:<code>` 时必填，其余不得出现（#67）。
+        #[serde(default)]
+        action_id: Option<ActionId>,
         evidence: Vec<EvidenceRef>,
         #[serde(default)]
         options: Option<Vec<InboxOption>>,
@@ -1181,7 +1196,16 @@ impl ReasonCode {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// `outbox_failed:<code>`：Outbox 动作终态失败的上报码族（engine.md §9）。
+    pub fn is_outbox_failed(&self) -> bool {
+        self.0
+            .strip_prefix(OUTBOX_FAILED_PREFIX)
+            .is_some_and(|code| !code.is_empty())
+    }
 }
+
+pub const OUTBOX_FAILED_PREFIX: &str = "outbox_failed:";
 
 impl fmt::Display for ReasonCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2825,6 +2849,10 @@ pub enum EntityError {
     UnknownForgeEventKind,
     #[error("inbox payload does not match inbox kind")]
     InboxPayloadKindMismatch,
+    #[error(
+        "escalation action_id must be present exactly when reason_code is outbox_failed:<code>"
+    )]
+    EscalationActionIdMismatch,
     #[error("budget ledger subject and id columns are inconsistent")]
     BudgetSubject,
 }

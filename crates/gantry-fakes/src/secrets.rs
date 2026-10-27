@@ -1,8 +1,9 @@
 //! `MemorySecrets`：按使用方隔离的内存 `SecretSource` + `SecretSink`。
 //!
 //! 与真实文件实现保持同样的可观察语义：版本从 1 起、`expect` 比较并写入、
-//! `stage` 对读者不可见、`commit` 才生效、`abort` 无痕、删除留墓碑（版本号
-//! 不复用），`check_refs` 把墓碑与暂存视为缺失。
+//! `stage` 对读者不可见、`commit` 才生效、`abort` 无痕、删除留墓碑（墓碑占用
+//! `c + 1`，之后 `put` 从 `c + 2` 继续，secrets.md §7.4），空值被拒
+//! （`EmptyValue`），`check_refs` 把墓碑与暂存视为缺失。
 //!
 //! 值只在 `SecretValue` 中传递；`Debug` 不打印值。
 
@@ -310,6 +311,9 @@ impl SecretSink for MemorySecrets {
         expect: Expect,
         _ctx: &ActorCtx,
     ) -> Result<PutOutcome, SecretsError> {
+        if value.expose().is_empty() {
+            return Err(SecretsError::EmptyValue);
+        }
         let mut state = self.lock();
         let key = self.key(name);
         let current = state.entries.get(&key).and_then(|entry| entry.current());
@@ -356,6 +360,9 @@ impl SecretSink for MemorySecrets {
         expect: Expect,
         _ctx: &ActorCtx,
     ) -> Result<StagedSecret, SecretsError> {
+        if value.expose().is_empty() {
+            return Err(SecretsError::EmptyValue);
+        }
         let mut state = self.lock();
         let key = self.key(name);
         if state.staged.contains_key(&key) {
@@ -481,6 +488,7 @@ impl SecretSink for MemorySecrets {
         };
         let previous = entry.meta(self.who, name);
         entry.versions.clear();
+        entry.max_version += 1;
         entry.tombstoned = true;
         entry.updated_at = now;
         Ok(previous)
@@ -656,8 +664,20 @@ pub fn secrets_conformance(
             ctx,
         )
         .map_err(|error| format!("put after delete failed: {error}"))?;
-    if recreated.meta.version.get() != 3 || recreated.previous.is_some() {
-        return Err("a tombstoned name must continue from the old version".into());
+    if recreated.meta.version.get() != 4 || recreated.previous.is_some() {
+        return Err("the tombstone takes version 3, so the next put must be version 4".into());
+    }
+    if !matches!(
+        sink.put(name, SecretValue::from_bytes(Vec::new()), Expect::Any, ctx),
+        Err(SecretsError::EmptyValue)
+    ) {
+        return Err("an empty value must be rejected with EmptyValue".into());
+    }
+    if !matches!(
+        sink.stage(name, SecretValue::from_bytes(Vec::new()), Expect::Any, ctx),
+        Err(SecretsError::EmptyValue)
+    ) {
+        return Err("an empty staged value must be rejected with EmptyValue".into());
     }
     let missing = SecretName::parse("missing-conformance")
         .map_err(|error| format!("invalid test name: {error}"))?;

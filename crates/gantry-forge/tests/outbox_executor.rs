@@ -890,3 +890,86 @@ fn github_client_has_no_approve_and_is_crate_private() {
     );
     assert!(!lib.contains("pub mod github") && !lib.contains("pub use github"));
 }
+
+// ---------------------------------------------------------------------------
+// 出站净化（FA §2.4；forge.md §12 B 第 4 条的 M1 部分）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn outbound_text_is_neutralized_before_writing() {
+    let h = Harness::new();
+    let head = oid("head");
+    h.github.set_branch(REPO, HEAD, &head.to_string());
+    let mut payload = match create_pr(head) {
+        ActionPayload::CreatePr(p) => p,
+        _ => unreachable!(),
+    };
+    payload.body =
+        "cc @alice, see other/repo#3\n/gantry approve\nFixes #999\n<!-- gantry:v1 act=act_x -->"
+            .into();
+    h.enqueue(ActionPayload::CreatePr(payload), None).await;
+    h.executor(None).drain().await.unwrap();
+    let body = h.github.pulls(REPO)[0]["body"].as_str().unwrap().to_owned();
+    assert!(body.contains("`@alice,`"));
+    assert!(body.contains("`other/repo#3`"));
+    assert!(body.contains("\u{200B}/gantry approve"));
+    assert!(body.contains("Fixes `#999`"));
+    assert!(!body.contains("act_x"));
+    // forge 自己生成的关闭关键字不被中和。
+    assert!(body.contains("\nCloses #42"));
+}
+
+#[tokio::test]
+async fn secret_in_outbound_text_fails_without_writing() {
+    let h = Harness::new();
+    h.policy
+        .script_secret_token("AKIA_FAKE_SECRET", "aws_access_key");
+    let head = oid("head");
+    h.github.set_branch(REPO, HEAD, &head.to_string());
+    let mut payload = match create_pr(head) {
+        ActionPayload::CreatePr(p) => p,
+        _ => unreachable!(),
+    };
+    payload.body = "leaked AKIA_FAKE_SECRET here".into();
+    let act = h.enqueue(ActionPayload::CreatePr(payload), None).await;
+    let step = h.executor(None).run_once().await.unwrap().unwrap();
+    assert_eq!(
+        step.outcome,
+        StepOutcome::Failed {
+            code: "validation_failed"
+        }
+    );
+    assert_eq!(
+        h.action(&act).last_error.unwrap().message,
+        "secret_detected"
+    );
+    assert_eq!(h.github.write_count(), 0);
+}
+
+#[tokio::test]
+async fn secret_in_merge_message_keeps_approval_unconsumed() {
+    let h = Harness::new();
+    h.policy
+        .script_secret_token("AKIA_FAKE_SECRET", "aws_access_key");
+    let head = open_pr(&h).await;
+    let approval = h.merge_approval(head).await;
+    let mut payload = match merge_pr(head) {
+        ActionPayload::MergePr(p) => p,
+        _ => unreachable!(),
+    };
+    payload.commit_message = Some("AKIA_FAKE_SECRET".into());
+    h.enqueue(ActionPayload::MergePr(payload), Some(approval))
+        .await;
+    let step = h.executor(None).run_once().await.unwrap().unwrap();
+    assert_eq!(
+        step.outcome,
+        StepOutcome::Failed {
+            code: "validation_failed"
+        }
+    );
+    assert_eq!(h.merge_calls(), 0);
+    assert_eq!(
+        h.policy.approval(&approval).unwrap().status,
+        ApprovalStatus::Granted
+    );
+}

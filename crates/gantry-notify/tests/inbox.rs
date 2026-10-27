@@ -108,6 +108,23 @@ async fn invalid_payloads_are_rejected_and_not_stored() {
         "escalation option outside vocabulary",
         escalation("level_cap_exceeded", Some(&["upgrade", "replan"]), "e2"),
     ));
+    cases.push((
+        "outbox_failed without action_id",
+        escalation(
+            "outbox_failed:not_mergeable",
+            Some(&["retry", "abandon"]),
+            "e4",
+        ),
+    ));
+    cases.push((
+        "outbox_failed option outside vocabulary",
+        outbox_failed(Some(&["retry", "upgrade"]), "e5"),
+    ));
+    let mut stray_action = escalation("attempt_failed", None, "e6");
+    if let InboxPayload::Escalation { action_id, .. } = &mut stray_action.payload {
+        *action_id = Some(Id::from_parts(NOW_MS as u64, 7).unwrap());
+    }
+    cases.push(("action_id on a non-outbox reason_code", stray_action));
     cases.push(("budget without options", budget(&[], "b1")));
     cases.push((
         "budget option outside vocabulary",
@@ -124,6 +141,15 @@ async fn invalid_payloads_are_rejected_and_not_stored() {
     assert!(inbox_events(&h.store).await.is_empty());
     assert_eq!(h.notify.summary().await.unwrap().total_open, 0);
 
+    // outbox_failed:<code> 带 action_id 与 retry / abandon 是合法的（#67）。
+    h.notify
+        .raise(
+            None,
+            outbox_failed(Some(&["retry", "abandon"]), "e7"),
+            &ctx(),
+        )
+        .await
+        .unwrap();
     // escalation 的其他 reason_code 不带选项是合法的。
     h.notify
         .raise(None, escalation("attempt_failed", None, "e3"), &ctx())

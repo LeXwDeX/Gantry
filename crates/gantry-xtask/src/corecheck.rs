@@ -14,6 +14,8 @@ const ALLOWED_DEPENDENCIES: &[&str] = &[
     "schemars",
     "thiserror",
     "sha2",
+    // core.md §3："`zeroize` / `secrecy`"。
+    "zeroize",
     "serde_jcs",
     "async-trait",
     "futures-core",

@@ -820,7 +820,7 @@ function NodeDetail({
                   </dd>
                   <dt>结果</dt>
                   <dd className="mono eg-ref">
-                    <UntrustedText value={attempt.result_ref} identifier />
+                    {attempt.result_ref ? <UntrustedText value={attempt.result_ref} identifier /> : "—"}
                     <span className="eg-note">
                       仅结果编号；内容读取接口未定义（Q-12）。
                     </span>

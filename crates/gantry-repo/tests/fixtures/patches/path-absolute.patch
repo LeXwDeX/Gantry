@@ -1,0 +1,6 @@
+diff --git a//etc/passwd b//etc/passwd
+new file mode 100644
+--- /dev/null
++++ b//etc/passwd
+@@ -0,0 +1 @@
++x

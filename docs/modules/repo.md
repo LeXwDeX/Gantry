@@ -76,7 +76,7 @@
 | `policy` 判定 | `policy` | `PatchPolicyVerdict`（[policy.md §6.2](policy.md)） | 可信 |
 | 提交说明 | `engine`（来自 `models` 的 `classify.commit_message` 或模板） | `CommitMessage` | 含模型输出，按**不可信文本**净化 |
 | 提交身份 | 配置 `github.commit_identity`（经 `EffectiveSettings`；App 创建时写入，P-69） | `CommitIdentity` | 可信 |
-| 时间戳 | `engine` | `Timestamp` | 可信（时间戳取 ResultBundle 的 `collected_at`，保证重放得到同一 OID） |
+| 时间戳 | `engine` | `Timestamp` | 可信（时间戳取 `ResultBundle.collected_at`：沙盒停止时间截到秒，`lost` 时取判定丢失那条事件的时间；[worker-protocol §5.2](../interfaces/worker-protocol.md)。重放得到同一 OID） |
 | 已 `granted` 的 `patch_apply_protected` 审批 ID（`held` 补丁，M2） | `engine` | `ApprovalId`；`repo` 在提交前经 `PolicyPort::consume_patch_approval` 核对并消费（P-54） | 可信，但复核 |
 
 ## 5. 输出
@@ -236,7 +236,7 @@ pub struct CommitPatch {
     pub project_id: ProjectId, pub job_id: AttemptId, pub worktree_id: WorktreeId, pub lock: LockToken,
     pub approval: Option<ApprovalId>,      // held 补丁必填（patch_apply_protected）；repo 在提交前经 PolicyPort::consume_patch_approval 核对并消费（P-54）
     pub message: CommitMessage,            // {subject, body}
-    pub timestamp: Timestamp,              // 确定性；取 ResultBundle.collected_at（秒）
+    pub timestamp: Timestamp,              // 确定性；取 ResultBundle.collected_at（秒）。result_commit 只进 attempt.finished，不进清单
     // 提交身份不由调用方传入：取 EffectiveSettings 的 github.commit_identity（P-69）；未配置 → RepoError::CommitIdentityMissing
 }
 pub struct CommitRecord { pub commit_oid: GitOid, pub tree_oid: GitOid, pub parent: GitOid,
