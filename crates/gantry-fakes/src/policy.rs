@@ -599,9 +599,14 @@ impl PolicyPort for FakePolicy {
     ) -> Result<ActionDecision, PolicyError> {
         let state = self.state();
         if let Some(decision) = state.decisions.get(&req.kind) {
-            // policy.md §6.1（#66）：engine 发起的动作，Deny 必带 ReportHint。
+            // policy.md §6.1（#66、#133）：engine 发起的动作，Deny 必带 ReportHint；
+            // HeadMismatch 例外，由 engine 刷新快照后重判，不上报。
             if req.requested_by.kind == ActorKind::Engine
-                && matches!(decision, ActionDecision::Deny { report: None, .. })
+                && matches!(
+                    decision,
+                    ActionDecision::Deny { report: None, reason, .. }
+                        if *reason != DenyReason::HeadMismatch
+                )
             {
                 panic!(
                     "FakePolicy: Deny for engine-requested {:?} must carry a ReportHint (policy.md §6.1)",

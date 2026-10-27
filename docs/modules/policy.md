@@ -185,14 +185,22 @@ pub enum DenyReason {
 
 `PolicyActionId` 取 [config.md §5.1](../interfaces/config.md) 的 20 个 id 之一（判定用）；`ApprovalAction`（审批用，P-54）= `ForgeActionKind`（14 个）∪ {`settings_update`、`device_role_change`、`device_revoke`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、`patch_apply_protected`}，线上序列化为同一字符串空间（data-model Approval.`action`）；预留的 `delete_branch`、`publish_release`、`change_repo_settings` 不是审批动作。
 
-**`engine` 发起的动作，`Deny` 必带 `ReportHint`**（#66，E3）：`requested_by.kind = engine` 时，`decide_action` 返回的每个 `Deny` 都必须带 `report = Some(ReportHint)`，不得省略；`engine` 直接按 `ReportHint` 上报，不自行推断上报码。`ReportHint.reason_code` 与 `payload_kind` 只能取 [data-model 上报词表](../data-model.md)（P-79）里该 `inbox_kind` 已列出的值，本条不新增词表项。已有对应码的拒绝原因：
+**`engine` 发起的动作，`Deny` 必带 `ReportHint`**（#66，E3；映射见 #133）：`requested_by.kind = engine` 时，`decide_action` 返回的 `Deny` 除 `HeadMismatch` 外都必须带 `report = Some(ReportHint)`，不得省略；`engine` 直接按 `ReportHint` 上报，不自行推断上报码。`ReportHint.reason_code` 与 `payload_kind` 只能取 [data-model 上报词表](../data-model.md)（P-79）里该 `inbox_kind` 已列出的值。映射如下（`severity` 一律 `blocker`，`attach_patch = false`）：
 
 | 判定 | `ReportHint` |
 | --- | --- |
 | `merge_pr` 的 `Deny(ActionDenied)` | `{escalation, reason_code = merge_denied_by_policy}` |
 | `Deny(ApprovalShapeUndefined)`（任何动作） | `{escalation, reason_code = approval_shape_undefined}` |
+| `merge_pr` 以外的 `Deny(ActionDenied)` | `{escalation, reason_code = policy.action_denied:action_denied}` |
+| `Deny(ApprovalDenied)` | `{escalation, reason_code = policy.action_denied:approval_denied}` |
+| `Deny(ApprovalConsumed)` | `{escalation, reason_code = policy.action_denied:approval_consumed}` |
+| `Deny(NoValidatedPatch)` | `{escalation, reason_code = policy.action_denied:no_validated_patch}` |
+| `Deny(PatchDenied)` | `{escalation, reason_code = policy.action_denied:patch_denied}` |
+| `Deny(MultipleApprovalsRequired)` | `{escalation, reason_code = policy.action_denied:multiple_approvals_required}` |
+| `Deny(ApprovalChainUnavailable)` | `{escalation, reason_code = policy.action_denied:approval_chain_unavailable}` |
+| `Deny(HeadMismatch)` | **不带 `ReportHint`**：`engine` 自处理，先 `ForgeReader::reconcile_now` 刷新快照再重新判定（[engine.md §7.12](engine.md#712-outbox-入队与审批流程)），不上报 |
 
-其余 `DenyReason` 在词表里还没有对应码，映射待决（见 §13 OQ-P15）：拍板前 `PolicyEngine` 对这些原因的 `ReportHint` 没有合法取值，`engine` 也不得自拟上报码，这是已知缺口。`guardian` 发起的动作仍可省略 `report`，由守护按 [guardian.md §7.9](guardian.md#79-上报) 用 `guardian.action_denied` 上报。`FakePolicy` 执行同一条规定：为 `engine` 请求脚本化了不带 `report` 的 `Deny` 时直接 panic，让测试在脚本层暴露违约。
+`policy.action_denied:<deny_reason>` 码族的后缀是 `DenyReason` 的 snake_case 名，与 [event-data.md §2.2.6.4](../interfaces/event-data.md) `policy.denied` 的候选码 `policy.<deny_reason>` 一一对应；`DenyReason` 新增变体时须经契约 PR 同时扩充本表与 data-model 词表。`guardian` 发起的动作仍可省略 `report`，由守护按 [guardian.md §7.9](guardian.md#79-上报) 用 `guardian.action_denied` 上报。`FakePolicy` 执行同一条规定：为 `engine` 请求脚本化了不带 `report` 的 `Deny`（`HeadMismatch` 除外）时直接 panic，让测试在脚本层暴露违约。
 
 ### 6.2 补丁规则判定与路径规则（`repo`、`engine`、`guardian`）
 
@@ -723,4 +731,4 @@ stateDiagram-v2
 | OQ-P12 | **已决：见裁决 C2 / P-48**（Gantry 不修改 `.github/workflows/`，workflow 补丁一律拒绝并附补丁上报 `manual_action`）。原问题：**M2 退出标准与 App 权限冲突**（同 forge.md F-OQ-1）：milestones M2 要求"改动 `.github/workflows/` 的补丁进入'需要审批'，签名批准后才提交推送"，但 forge-actions §9.2 / §9.5 规定 App **不申请** `Workflows` 权限（出现即拒绝启动），没有该权限的令牌推不了 workflow 文件改动（需核实）。本模块的路径规则审批按契约产出，但推送这一步可能 `permission_denied` | 已落实到 §1、§7.4（g0 行）、§12.2 | milestones M2、forge-actions §9、`forge` |
 | OQ-P13 | **已决：见裁决 C23 / P-69**（`repo` 机械检查并产出 `PatchFacts`、发 `patch.rejected`；本模块做路径规则与大小上限判定）。原问题：补丁校验的归属措辞并存：architecture I8、config.md §5.4 把"大小 / 路径 / 敏感文件"校验归 `policy`；worker-protocol §8.3 的"归属"列把 P1（大小）、P4、P5、P7 归 `repo` 的闸门，P6 / P8 / P9 归 `policy` | 已落实到 §6.2、§7.4；`patch_limits` 已删除 | worker-protocol §8.3、config.md §5.4、repo.md §7.4 |
 | OQ-P14 | **已决：见裁决 C5 / P-51**（统一为 `core::ports::PolicyPort`，方法名以本文 §6 为准，各邻接规格已改）。原问题：邻接规格与本文的接口形状尚未对齐：repo.md §6.4 的 `PatchFacts` / `PolicyDecision`（repo.md OQ-R6）、forge.md §3 表里的 `mark_consumed`（本文为 `consume`）、engine.md / guardian.md 使用的 `FakePolicy` | 已落实 | repo、forge、engine、guardian 规格 |
-| OQ-P15 | `engine` 发起的动作被 `Deny` 时，`ActionDenied`（`merge_pr` 以外）、`ApprovalDenied`、`ApprovalConsumed`、`HeadMismatch`、`NoValidatedPatch`、`PatchDenied`、`MultipleApprovalsRequired`、`ApprovalChainUnavailable` 在 data-model 上报词表里没有对应的 `reason_code`；#66 定了"必带 `ReportHint`、不新增词表项"，两者合起来缺一张映射 | 未定（#133，needs-decision）；实现遇到这些原因时不能自拟上报码，需先拍板 | data-model 上报词表、`engine` §7.11、`notify` |
+| OQ-P15 | **已决：见 #133（方案 A，`HeadMismatch` 例外）**：data-model 词表新增 `escalation` 码族 `policy.action_denied:<deny_reason>`，§6.1 映射表已补全；`HeadMismatch` 不带 `ReportHint`，由 `engine` 刷新后重判。原问题：`engine` 发起的动作被 `Deny` 时，`merge_pr` 的 `ActionDenied` 与 `ApprovalShapeUndefined` 以外的原因在词表里没有对应码 | 已落实到 §6.1 | data-model 上报词表、`engine` §7.11 |
