@@ -15,5 +15,6 @@ pub mod invariants;
 pub mod podman;
 pub mod podman_driver;
 pub mod progress;
+pub mod service;
 pub mod spec;
 pub mod stage;
