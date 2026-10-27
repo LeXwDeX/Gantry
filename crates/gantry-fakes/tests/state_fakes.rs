@@ -524,6 +524,33 @@ async fn policy_engine_deny_without_report_hint_panics() {
     let _ = policy.decide_action(merge_request(actor()), &ctx()).await;
 }
 
+// #133：HeadMismatch 由 engine 刷新后重判，不需要 ReportHint。
+#[tokio::test]
+async fn policy_engine_head_mismatch_may_omit_report_hint() {
+    let policy = FakePolicy::new(ts());
+    policy.script_decision(
+        ForgeActionKind::MergePr,
+        ActionDecision::Deny {
+            action_id: PolicyActionId::MergePr,
+            reason: DenyReason::HeadMismatch,
+            report: None,
+            config_rev: Seq::ZERO,
+        },
+    );
+    let decision = policy
+        .decide_action(merge_request(actor()), &ctx())
+        .await
+        .expect("decision");
+    assert!(matches!(
+        decision,
+        ActionDecision::Deny {
+            reason: DenyReason::HeadMismatch,
+            report: None,
+            ..
+        }
+    ));
+}
+
 #[tokio::test]
 async fn policy_guardian_deny_may_omit_report_hint() {
     let policy = FakePolicy::new(ts());
