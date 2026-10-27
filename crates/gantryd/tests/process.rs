@@ -3,6 +3,8 @@
 //! 替身装配的进程由本测试二进制重新执行自身得到（见 `support`）；只测真实装配
 //! 启动行为的用例直接跑 `gantryd` 二进制。
 
+#![cfg(unix)]
+
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
@@ -423,4 +425,115 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
     let order: Vec<&str> = stages.iter().map(|(to, _)| to.as_str()).collect();
     assert_eq!(order, ["implement", "propose", "review", "merge", "closed"]);
     assert_eq!(stages[0].1, "admission_skipped");
+}
+
+// ---------------------------------------------------------------------------
+// `gantry` CLI ↔ 运行中的 gantryd（控制通道）
+// ---------------------------------------------------------------------------
+
+const CLI: &str = env!("CARGO_BIN_EXE_gantry");
+
+fn gantry(scratch: &Scratch, args: &[&str]) -> Output {
+    Command::new(CLI)
+        .arg("--config")
+        .arg(scratch.config())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn cli_reads_the_socket_path_from_the_boot_config() {
+    let scratch = Scratch::new();
+    let _daemon = Daemon::spawn(&scratch, scratch.uid());
+    let output = gantry(
+        &scratch,
+        &["settings", "bootstrap-set", "github", "app_owner=org:acme"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result,
+        json!({"resource": "github", "applied": ["app_owner"]})
+    );
+}
+
+#[test]
+fn cli_bootstrap_set_is_refused_after_the_bootstrap_period() {
+    let scratch = Scratch::new();
+    let _daemon = Daemon::spawn(&scratch, scratch.uid());
+    Client::connect(&scratch).ok(json!({"cmd": "fake.end_bootstrap"}));
+    let output = gantry(
+        &scratch,
+        &["settings", "bootstrap-set", "github", "app_owner=x"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not_bootstrap_period"));
+}
+
+#[test]
+fn cli_reports_a_refused_peer_and_a_missing_daemon() {
+    let scratch = Scratch::new();
+    let args = ["settings", "bootstrap-set", "github", "app_owner=x"];
+    let missing = gantry(&scratch, &args);
+    assert_eq!(missing.status.code(), Some(1));
+
+    let _daemon = Daemon::spawn(&scratch, scratch.uid() + 1);
+    let refused = gantry(&scratch, &args);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("forbidden"),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn cli_usage_errors_exit_2_without_touching_the_daemon() {
+    let scratch = Scratch::new();
+    for args in [
+        &["github", "setup"][..],
+        &["pair"],
+        &["settings", "bootstrap-set", "x"],
+    ] {
+        assert_eq!(gantry(&scratch, args).status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn cli_doctor_host_emits_a_json_report() {
+    let scratch = Scratch::new();
+    let output = gantry(&scratch, &["doctor", "host", "--json"]);
+    assert!(matches!(output.status.code(), Some(0..=2)), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report.is_object(), "{report}");
+}
+
+/// deploy/README.md「与 gantry CLI 的接线」：begin → status（pending → completed），
+/// 并发 begin 被拒，应答不含任何密钥字段。
+#[test]
+fn github_setup_commands_follow_the_deploy_contract() {
+    let scratch = Scratch::new();
+    let _daemon = Daemon::spawn(&scratch, scratch.uid());
+    let mut client = Client::connect(&scratch);
+    let begin = json!({"cmd": "github.setup.begin", "args": {
+        "webhook_url": "https://hooks.gantry.test/webhook",
+        "redirect_url": "https://hooks.gantry.test/setup/github/callback",
+        "ttl_secs": 900,
+    }});
+    let begun = client.ok(begin.clone());
+    let state = begun["state"].as_str().unwrap().to_owned();
+    assert!(state.len() >= 32 && state.bytes().all(|b| b.is_ascii_alphanumeric()));
+    assert_eq!(client.call(begin)["error"]["code"], "setup_in_progress");
+
+    let status = json!({"cmd": "github.setup.status", "args": {"state": state}});
+    assert_eq!(client.ok(status.clone())["status"], "pending");
+    let done = client.ok(status);
+    assert_eq!(done["status"], "completed");
+    assert_eq!(done["app"]["permissions"]["contents"], "write");
+    let text = done.to_string();
+    for secret in ["pem", "private_key", "webhook_secret", "client_secret"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+    let wrong = json!({"cmd": "github.setup.status", "args": {"state": "nope"}});
+    assert_eq!(client.ok(wrong)["status"], "expired");
 }
