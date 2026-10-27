@@ -1074,6 +1074,7 @@ dependencies = [
  "gantry-core",
  "gantry-sandbox",
  "jsonschema",
+ "libc",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
