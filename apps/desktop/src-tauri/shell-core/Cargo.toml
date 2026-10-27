@@ -38,6 +38,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext"] }
 
 [dev-dependencies]
+sha2.workspace = true
+base64 = "0.22"
 # 配对测试用的替身服务端：TestCA 与 pki 的签发 / CSR 校验（只作测试，外壳代码不依赖 pki）。
 gantry-fakes = { path = "../../../../crates/gantry-fakes" }
 gantry-pki = { path = "../../../../crates/gantry-pki" }
