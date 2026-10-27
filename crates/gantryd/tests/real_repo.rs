@@ -7,6 +7,10 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "support/engine_cfg.rs"]
+#[allow(dead_code)]
+mod engine_cfg;
+
 use async_trait::async_trait;
 use gantry_core::canon::{sha256, GitOid, RepoSlug};
 use gantry_core::entities::{Actor, ActorKind, LockHolder, Seq};
@@ -14,11 +18,27 @@ use gantry_core::events::{EventType, NewEvent, PatchRejectedData, PatchValidated
 use gantry_core::ids::IdGen;
 use gantry_core::ports::{
     ActorCtx, BranchName, CommitMessage, CommitPatch, CreateWorktree, DeclaredPatch, PatchOutcome,
-    RepoError, RepoService, ValidatePatch,
+    RepoError, RepoService, RevSpec, ValidatePatch,
 };
 use gantry_core::time::Timestamp;
 use gantry_core::worker::{PatchRejectReason, PatchVerdict, PathConstraints};
+use gantry_core::{
+    entities::DeliveryOrigin,
+    level::Level,
+    settings::resource::{LevelBudget, LevelEntry, TierBudget},
+};
+use gantry_engine::{
+    actor::EffectRunner,
+    attempt::AttemptPorts,
+    create::{budget_from_level, NewDelivery},
+    decide::{Effect, EffectErrorClass, EffectReport},
+    engine::{load_delivery_state, Engine},
+    PortEffects,
+};
 use gantry_fakes::policy::FakePolicy;
+use gantry_fakes::{
+    forge::FakeForge, inbox::FakeInbox, sandbox::FakeSandboxService, worker::StubWorkerAdapter,
+};
 use gantry_repo::cas::{CasKind, PatchCas};
 use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
 use gantry_store::testing::{FakeClock, SeqEntropy};
@@ -190,6 +210,264 @@ async fn open_repo(store: &Store, dir: &Path, clock: Arc<FakeClock>, ids: Arc<Id
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn engine_resolves_real_mirror_branch_without_local_fallback() {
+    let tmp = TempDir::new();
+    let clock = Arc::new(FakeClock::new(1_800_000_000_000));
+    let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
+    let store = Store::open(
+        StoreConfig::new(tmp.path.join("sqlite")),
+        StoreDeps {
+            clock: clock.clone(),
+            ids: ids.clone(),
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    let repo = Arc::new(open_repo(&store, &tmp.path, clock.clone(), ids.clone()).await);
+    let ctx = context(&ids);
+    let project = ids.next().unwrap();
+    repo.ensure_mirror(&ctx, &project, &RepoSlug::parse("fixture/local").unwrap())
+        .await
+        .unwrap();
+    let mirror = tmp.path.join("repo/mirrors/fixture/local.git");
+    let upstream = tmp.path.join("upstream");
+    std::fs::create_dir(&upstream).unwrap();
+    git(
+        &upstream,
+        &["init", "-q", "-b", "main", "--template=/dev/null"],
+    );
+    std::fs::write(upstream.join("README"), "first\n").unwrap();
+    git(&upstream, &["add", "README"]);
+    git(&upstream, &["commit", "-q", "-m", "first"]);
+    let first = GitOid::parse(git(&upstream, &["rev-parse", "HEAD"]).trim()).unwrap();
+    std::fs::write(upstream.join("README"), "second\n").unwrap();
+    git(&upstream, &["add", "README"]);
+    git(&upstream, &["commit", "-q", "-m", "second"]);
+    let second = GitOid::parse(git(&upstream, &["rev-parse", "HEAD"]).trim()).unwrap();
+    git(&upstream, &["tag", "-a", "annotated", "-m", "fixture"]);
+    git(
+        &upstream,
+        &[
+            "push",
+            "-q",
+            mirror.to_str().unwrap(),
+            "HEAD:refs/mirror/heads/main",
+            "HEAD:refs/mirror/heads/feature/x",
+            "HEAD:refs/mirror/heads/topic/a\u{a0}b",
+            "refs/tags/annotated:refs/tags/annotated",
+            &format!("{first}:refs/heads/local-only"),
+        ],
+    );
+    let forge = Arc::new(FakeForge::new(Timestamp::from_millis(1_800_000_000_000)));
+    let fx = PortEffects::new(
+        AttemptPorts {
+            repo: repo.clone(),
+            sandbox: Arc::new(FakeSandboxService::new()),
+            policy: Arc::new(FakePolicy::new_in(store.clone())),
+            forge: forge.clone(),
+            cas: Arc::new(store.cas()),
+            adapter: Arc::new(StubWorkerAdapter::new()),
+            clock: clock.clone(),
+            entropy: Arc::new(SeqEntropy::new(99)),
+        },
+        forge,
+        engine_cfg::runner_config(),
+        Duration::from_secs(60),
+        Arc::new(|_, _, _| {}),
+    );
+    let engine = Engine::new(store.clone(), Arc::new(FakeInbox::new_in(store.clone())));
+    let budget = budget_from_level(&LevelEntry {
+        graph_template: "low.single".into(),
+        budget: LevelBudget {
+            tokens_by_tier: TierBudget {
+                utility: 100,
+                planner: 100,
+                worker: 100,
+            },
+            nodes: 8,
+            rounds: 0,
+            wall_time_s: 3600,
+            concurrency: 1,
+            forge_writes: 20,
+            forge_writes_per_hour: 30,
+        },
+    });
+    let delivery = ids.next().unwrap();
+    engine
+        .create_delivery(NewDelivery {
+            id: delivery,
+            project_id: project,
+            title: "test".into(),
+            user_text: "test".into(),
+            level_cap: Level::Low,
+            level_effective: Level::Low,
+            origin: DeliveryOrigin::Conversation,
+            source_message_id: ids.next().unwrap(),
+            issues: vec![],
+            budget,
+            config_rev: Seq::new(1).unwrap(),
+            actor: Actor::new(ActorKind::Engine, "test"),
+        })
+        .await
+        .unwrap();
+    let mut state = load_delivery_state(&store, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    let describe_name = format!("missing-0-g{second}");
+    assert_eq!(
+        git(
+            &mirror,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/mirror/heads/{describe_name}^{{commit}}")
+            ]
+        )
+        .trim(),
+        second.to_string()
+    );
+    assert_eq!(
+        repo.resolve(&project, &RevSpec::new(second.to_string()))
+            .await
+            .unwrap(),
+        second
+    );
+    assert_eq!(
+        repo.resolve(&project, &RevSpec::new(format!("{second}^")))
+            .await
+            .unwrap(),
+        first
+    );
+    assert_eq!(
+        repo.resolve(&project, &RevSpec::new("refs/tags/annotated"))
+            .await
+            .unwrap(),
+        second
+    );
+    assert!(matches!(
+        repo.resolve(&project, &RevSpec::new("refs/mirror/heads/main^"))
+            .await,
+        Err(RepoError::BaseNotInMirror { .. })
+    ));
+    let blob = git(
+        &mirror,
+        &[
+            "hash-object",
+            "-w",
+            upstream.join("README").to_str().unwrap(),
+        ],
+    );
+    git(
+        &mirror,
+        &["update-ref", "refs/mirror/heads/blob", blob.trim()],
+    );
+    assert!(matches!(
+        repo.resolve(&project, &RevSpec::new("refs/mirror/heads/blob"))
+            .await,
+        Err(RepoError::BaseNotInMirror { .. })
+    ));
+    let refs_before = git(
+        &mirror,
+        &["for-each-ref", "--format=%(refname) %(objectname)"],
+    );
+    for base in [
+        "local-only",
+        describe_name.as_str(),
+        "main~1",
+        "main^",
+        "refs/heads/main",
+        "..",
+        "",
+        "main\0x",
+    ] {
+        let result = fx
+            .run(
+                &state,
+                Effect::EnsureWorktree {
+                    branch: BranchName::new("gantry/test"),
+                    base_ref: base.into(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(result, Some(EffectReport::EffectFailed { .. })),
+            "{base:?}"
+        );
+        if base != "local-only" && base != describe_name {
+            assert!(matches!(
+                result,
+                Some(EffectReport::EffectFailed {
+                    error: EffectErrorClass::Defect {
+                        what: "default_branch_invalid"
+                    },
+                    ..
+                })
+            ));
+        }
+        assert!(events(&store, EventType::WorktreeCreated).await.is_empty());
+        assert_eq!(
+            git(
+                &mirror,
+                &["for-each-ref", "--format=%(refname) %(objectname)"]
+            ),
+            refs_before
+        );
+    }
+    for (base, expected) in [
+        ("main", second),
+        ("feature/x", second),
+        ("topic/a\u{a0}b", second),
+    ] {
+        state.delivery.id = ids.next().unwrap();
+        let result = fx
+            .run(
+                &state,
+                Effect::EnsureWorktree {
+                    branch: BranchName::new("gantry/test"),
+                    base_ref: base.into(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(result, Some(EffectReport::WorktreeReady { .. })));
+        let created = events(&store, EventType::WorktreeCreated).await;
+        let data = &created.last().unwrap().data;
+        assert_eq!(data["base_ref"], base);
+        assert_eq!(data["base_sha"], expected.to_string());
+        if base == "main" {
+            git(
+                &upstream,
+                &[
+                    "push",
+                    "-q",
+                    mirror.to_str().unwrap(),
+                    &format!("{first}:refs/heads/main"),
+                ],
+            );
+        }
+    }
+    // 本地 main 指向另一个提交时，新交付单元仍取镜像分支。
+    state.delivery.id = ids.next().unwrap();
+    assert!(matches!(
+        fx.run(
+            &state,
+            Effect::EnsureWorktree {
+                branch: BranchName::new("gantry/test"),
+                base_ref: "main".into()
+            },
+            &ctx
+        )
+        .await,
+        Some(EffectReport::WorktreeReady { .. })
+    ));
+    let created = events(&store, EventType::WorktreeCreated).await;
+    assert_eq!(created.last().unwrap().data["base_sha"], second.to_string());
 }
 
 #[tokio::test]

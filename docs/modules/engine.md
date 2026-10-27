@@ -528,7 +528,7 @@ flowchart LR
 3. 生成 `SandboxSpec`（[sandbox.md §6.1](sandbox.md)）：
    - `job: JobSpecTrusted`：`task.instructions` = 角色模板（引擎内置）+ `CreateDelivery.user_text` / `supply_spec` 的用户原文；**任何来自 GitHub、沙盒、模型产出的文字不得进入此字段**（W5、I5）。`context.previous_attempts[]` 只含 `{attempt_id, failure_class, failure_detail}` 码值；重试反馈的文本以 `upstream_output` 材料进入。`constraints.paths` = `PolicyPort::path_rules_snapshot`；`constraints.limits`、`output.*`（含 `proposals.allowed_kinds`）按 role 取；`sandbox_ro` 节点 `tools.edit = false`、`output.patch = forbidden`。
    - `raw_materials`（`issue_body`、评论等，经 `ForgeReader::discussion` 按需拉取，P-59；CI 日志经 `ci_log`）与 `upstream`（`{node_id, role, attempt_id, ref, files}`，从 CAS 取）交给 `sandbox.stage` 做规范化 / 截断 / 隔离包装。
-   - `workspace = {repo, base_sha, pr_base_sha?, mode}`：`base_sha`（首个 `build` / `single` 取 `RepoService::resolve(默认分支)`；`verify` 与评审取候选 head；修正轮取当前候选 head），评审 / `verify` 另给 `pr_base_sha`；工作区由 `sandbox` 向 `repo` 准备，引擎不碰。
+   - `workspace = {repo, base_sha, pr_base_sha?, mode}`：`base_sha`（首个 `build` / `single` 取工作树事件中解析后的默认分支镜像引用，见 §7.14.3；`verify` 与评审取候选 head；修正轮取当前候选 head），评审 / `verify` 另给 `pr_base_sha`；工作区由 `sandbox` 向 `repo` 准备，引擎不碰。
    - `exec = {image_digest, argv, env}` 取自 `WorkerAdapter`；`limits`、`timers`、`io` 取自 `sandbox.*` 设置；`egress = {profile, groups, tokens_total, weights}` 的 `tokens_total` 即预留值，`weights` 取 `levels.token_weights`（P-70）；`config_rev` 取组装这份 spec 时所读 `ConfigView` 的 `rev`（与 `weights`、`limits`、`timers`、`io` 同一份快照），`sandbox` 原样填进签发请求，Egress 写成用量记录的 `weight_rev`（#220）；`job_token` 由 `sandbox` 向 Egress 申请（P-49），引擎不接触。
    - None 档 `answer` 节点：`SandboxSpec.delivery_id = None`、`conversation_id` 必填（P-58）。
 4. `exec = sandbox | sandbox_ro` → `SandboxService::submit`，再 `SandboxService::wait(job_id)` 取 `JobOutcome`（进度经 `SandboxService::progress(job_id)` 采样转发为 `attempt.progress`）；`exec = direct` → `models.invoke_direct`（同样有 Attempt，`sandbox_id` 为空；材料同样隔离包装，由 `models` 执行）。
@@ -917,7 +917,7 @@ pub enum EffectKey {
 
 `Missing` 能退回模板，前提是缺失永久不变：CAS 在 M1 不删除对象（store.md OQ-5）。将来引入 CAS 保留期时，必须保留非终态交付单元的 `attempt.finished.result_ref` 所指对象，否则同一意图在恢复前后会得到不同的键。
 
-`EnsureWorktree` 不带 `base_sha`（#70 A）：进入 implement 时还没有工作树与 PR，默认分支的 head 只能由 IO 取得。执行器在执行该副作用时先 `RepoService::resolve(base_ref)`，再 `create_worktree`。解析得到的 sha 记入 `worktree.created.base_sha`，之后的 `single` / `build` 都取它，重放时从事件读，`decide` 保持纯函数。
+`EnsureWorktree` 不带 `base_sha`（#70 A）：进入 implement 时还没有工作树与 PR，默认分支的 head 只能由 IO 取得。执行器按 Git 引用的字节规则校验 `base_ref` 是合法短分支名，拒绝完整引用及修订表达式；然后只解析 `refs/mirror/heads/<base_ref>`，要求该完整引用精确存在且指向提交，不回退到本地分支或 Git 的 describe 解析，再调用 `create_worktree`。请求与 `worktree.created.base_ref` 保留原始短分支名。解析得到的 sha 记入 `worktree.created.base_sha`，之后的 `single` / `build` 都取它，重放时从事件读，`decide` 保持纯函数。
 
 有效 `wall_time_s`（§7.8）= min(`ResolvedModel.sandbox.attempt_wall_s`，`settings.sandbox.wall_time_s`，预算剩余 `wall_time`）；锁租约 `lease_s`（§7.7）= 有效 `wall_time_s` + `settings.sandbox.kill_grace_s` + 锁租约余量（`EngineConsts`，60 s）。两者都只读 `DecideEnv`（#70 C）。
 
@@ -1003,7 +1003,7 @@ pub enum Decision {
 }
 
 pub enum Effect {
-    EnsureWorktree { branch: BranchName, base_ref: String },   // T2 / T5（§7.12 分支名）；执行器先 resolve(base_ref) 得到 base_sha 再 create_worktree（#70 A）
+    EnsureWorktree { branch: BranchName, base_ref: String },   // T2 / T5（§7.12 分支名）；执行器解析镜像分支得到 base_sha 再 create_worktree（#70 A）
     RemoveWorktree { worktree_id: WorktreeId, lock: Option<LockToken> }, // T12 / T13 释放工作树；lock 为空时执行器先以 engine 身份取锁再删（remove_worktree 需要 LockToken）
     AcquireLock { worktree_id: WorktreeId, node_id: NodeId, holder: LockHolder, lease_s: u64 },
     ReleaseLock { token: LockToken },

@@ -207,12 +207,36 @@ pub async fn has_commit(env: &GitEnv, git_dir: &Path, oid: &GitOid) -> Result<bo
     Ok(out.success())
 }
 
-/// 只解析镜像仓内已有的 ref / OID；`-` 开头或含空白的输入一律视为不存在。
+/// 完整 ref 必须精确存在；其他修订按既有 Git 语义解析。
 pub async fn resolve(env: &GitEnv, git_dir: &Path, rev: &str) -> Result<Option<GitOid>, RepoError> {
-    if rev.is_empty() || rev.starts_with('-') || rev.chars().any(|c| c.is_whitespace() || c == '\0')
-    {
+    if rev.is_empty() || rev.starts_with('-') {
         return Ok(None);
     }
+    let oid;
+    let rev = if rev.starts_with("refs/") {
+        if rev.bytes().any(|b| b <= b' ' || b == 0x7f) {
+            return Ok(None);
+        }
+        // rev-parse 对不存在的 ref 可能按 git describe 解析；先按字面精确查找。
+        let out = GitCmd::new("show-ref", git_dir)
+            .args(["show-ref", "--verify", "--hash", "--"])
+            .arg(rev)
+            .output(env)
+            .await?;
+        if !out.success() {
+            return Ok(None);
+        }
+        let Some(found) = GitOid::parse(out.stdout_str()?.trim()).ok() else {
+            return Ok(None);
+        };
+        oid = found.to_string();
+        oid.as_str()
+    } else {
+        if rev.chars().any(|c| c.is_whitespace() || c == '\0') {
+            return Ok(None);
+        }
+        rev
+    };
     let out = GitCmd::new("rev-parse", git_dir)
         .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
         .arg(format!("{rev}^{{commit}}"))

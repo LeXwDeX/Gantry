@@ -151,6 +151,124 @@ async fn read_only_queries_resolve_mirror_objects() {
 }
 
 #[tokio::test]
+async fn full_refs_are_exact_and_non_ref_revisions_keep_their_semantics() {
+    use gantry_repo::git::{GitCmd, GitEnv};
+    use gantry_repo::mirror::resolve;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct OwnedDir(std::path::PathBuf, u64, u64);
+    impl Drop for OwnedDir {
+        fn drop(&mut self) {
+            if let Ok(m) = std::fs::symlink_metadata(&self.0) {
+                if m.is_dir()
+                    && !m.file_type().is_symlink()
+                    && (m.dev(), m.ino()) == (self.1, self.2)
+                {
+                    std::fs::remove_dir_all(&self.0).unwrap();
+                }
+            }
+        }
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = std::env::temp_dir().canonicalize().unwrap();
+    let dir = loop {
+        let name = format!(
+            "gantry-repo-exact-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = parent.join(name);
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => {
+                let m = std::fs::symlink_metadata(&path).unwrap();
+                break OwnedDir(path, m.dev(), m.ino());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("创建测试目录失败：{e}"),
+        }
+    };
+    let env = GitEnv {
+        git_bin: "/usr/bin/git".into(),
+        home: dir.0.clone(),
+        timeout: Duration::from_secs(30),
+        max_output: 1024 * 1024,
+    };
+    let cmd = |op| GitCmd::new(op, &dir.0);
+    cmd("init")
+        .args(["init", "--bare", "--quiet", "--template=/dev/null"])
+        .run(&env)
+        .await
+        .unwrap();
+    let tree = cmd("mktree")
+        .arg("mktree")
+        .stdin(Vec::new())
+        .run(&env)
+        .await
+        .unwrap();
+    let tree = tree.stdout_str().unwrap().trim();
+    let commit = cmd("commit-tree")
+        .args(["commit-tree", tree])
+        .stdin(b"test\n".to_vec())
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .run(&env)
+        .await
+        .unwrap();
+    let oid = GitOid::parse(commit.stdout_str().unwrap().trim()).unwrap();
+    let full = "refs/mirror/heads/topic/a\u{a0}b";
+    cmd("update-ref")
+        .args(["update-ref", full, &oid.to_string()])
+        .run(&env)
+        .await
+        .unwrap();
+    assert_eq!(resolve(&env, &dir.0, full).await.unwrap(), Some(oid));
+    assert_eq!(
+        resolve(&env, &dir.0, &oid.to_string()).await.unwrap(),
+        Some(oid)
+    );
+    let missing = format!("refs/mirror/heads/missing-0-g{oid}");
+    let raw = cmd("rev-parse")
+        .args(["rev-parse", "--verify", &format!("{missing}^{{commit}}")])
+        .run(&env)
+        .await
+        .unwrap();
+    assert_eq!(raw.stdout_str().unwrap().trim(), oid.to_string());
+    for bad in [
+        missing,
+        format!("{full}^"),
+        format!("{full}~1"),
+        "refs/mirror/heads/a b".into(),
+        "refs/mirror/heads/a\0b".into(),
+    ] {
+        assert_eq!(resolve(&env, &dir.0, &bad).await.unwrap(), None, "{bad:?}");
+    }
+    let blob = cmd("hash-object")
+        .args(["hash-object", "-w", "--stdin"])
+        .stdin(b"blob".to_vec())
+        .run(&env)
+        .await
+        .unwrap();
+    cmd("update-ref")
+        .args([
+            "update-ref",
+            "refs/mirror/heads/blob",
+            blob.stdout_str().unwrap().trim(),
+        ])
+        .run(&env)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(&env, &dir.0, "refs/mirror/heads/blob")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn restart_rediscovers_mirrors() {
     let mut fx = Fixture::new("mirror-restart").await;
     let base = fx.seed().await;

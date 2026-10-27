@@ -32,6 +32,22 @@ use crate::state::DeliveryState;
 /// 长时副作用完成后的投递口：调用方把它接到执行体的输入队列（`DeliveryActor::handle`）。
 pub type Deliver = Arc<dyn Fn(DeliveryId, Input, InputIdentity) + Send + Sync>;
 
+fn valid_default_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name != "@"
+        && !name.starts_with('-')
+        && !name.starts_with("refs/")
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name.bytes().any(|c| {
+            c <= b' ' || c == 0x7f || matches!(c, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
 pub struct PortEffects {
     ports: AttemptPorts,
     outbox: Arc<dyn OutboxPort>,
@@ -97,8 +113,19 @@ impl EffectRunner for PortEffects {
         let repo = &self.ports.repo;
         match effect {
             Effect::EnsureWorktree { branch, base_ref } => {
+                if !valid_default_branch(&base_ref) {
+                    return Self::failed(
+                        key,
+                        EffectErrorClass::Defect {
+                            what: "default_branch_invalid",
+                        },
+                    );
+                }
                 let base_sha = match repo
-                    .resolve(&project, &RevSpec::new(base_ref.clone()))
+                    .resolve(
+                        &project,
+                        &RevSpec::new(format!("refs/mirror/heads/{base_ref}")),
+                    )
                     .await
                 {
                     Ok(oid) => oid,

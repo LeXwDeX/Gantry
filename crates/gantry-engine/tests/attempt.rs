@@ -297,7 +297,7 @@ impl H {
             oid(BASE),
             delivery,
         );
-        repo.set_ref(project, "main", oid(BASE));
+        repo.set_ref(project, "refs/mirror/heads/main", oid(BASE));
         let lock = repo
             .acquire_lock(
                 &ctx(),
@@ -1078,6 +1078,129 @@ async fn ensure_worktree_resolves_base_then_creates() {
             error: EffectErrorClass::Retryable
         })
     ));
+}
+
+#[tokio::test]
+async fn ensure_worktree_uses_only_valid_mirror_branch_refs() {
+    let h = H::new().await;
+    let (fx, _) = effects(&h, 3);
+    let local = oid("1111111111111111111111111111111111111111");
+    let mirror = oid("2222222222222222222222222222222222222222");
+    h.repo.set_ref(h.project, "refs/heads/local-only", local);
+    h.repo.set_ref(h.project, "refs/heads/main", local);
+    h.repo.set_ref(h.project, "refs/mirror/heads/main", mirror);
+    h.repo
+        .set_ref(h.project, "refs/mirror/heads/feature/x", mirror);
+    h.repo
+        .set_ref(h.project, "refs/mirror/heads/分支/-x", mirror);
+    h.repo
+        .set_ref(h.project, "refs/mirror/heads/topic/a\u{a0}b", mirror);
+    h.repo
+        .set_ref(h.project, "refs/mirror/heads/topic/a\u{85}b", mirror);
+    let run = |state: DeliveryState, base: &str| {
+        let fx = &fx;
+        let effect = Effect::EnsureWorktree {
+            branch: gantry_core::ports::repo::BranchName::new("gantry/test"),
+            base_ref: base.to_owned(),
+        };
+        async move { fx.run(&state, effect, &ctx()).await }
+    };
+    let mut state = h.state.clone();
+    state.delivery.id = id(201);
+    assert!(matches!(
+        run(state.clone(), "local-only").await,
+        Some(EffectReport::EffectFailed {
+            error: EffectErrorClass::Retryable,
+            ..
+        })
+    ));
+    for (i, base) in [
+        "main",
+        "feature/x",
+        "分支/-x",
+        "topic/a\u{a0}b",
+        "topic/a\u{85}b",
+    ]
+    .iter()
+    .enumerate()
+    {
+        state.delivery.id = id(202 + i as u128);
+        let Some(EffectReport::WorktreeReady { worktree_id }) = run(state.clone(), base).await
+        else {
+            panic!("expected worktree for {base}")
+        };
+        assert_eq!(h.repo.branch_head(&worktree_id).await.unwrap(), mirror);
+        assert_eq!(
+            h.repo
+                .get_worktree(&worktree_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .base_ref,
+            *base
+        );
+    }
+    for (i, base) in [
+        "",
+        "main~1",
+        "main^",
+        "refs/heads/main",
+        "refs/gantry/wt/x",
+        "..",
+        "a..b",
+        "a@{1}",
+        "a:b",
+        "a?b",
+        "a*b",
+        "a[b",
+        "a\\b",
+        "a b",
+        "a\0b",
+        "a\u{7f}b",
+        "-branch",
+        "/a",
+        "a/",
+        "a//b",
+        ".hidden",
+        "a/.hidden",
+        "a.lock/b",
+        "a.lock",
+        "a.",
+        "@",
+    ]
+    .iter()
+    .enumerate()
+    {
+        state.delivery.id = id(300 + i as u128);
+        h.repo
+            .set_ref(h.project, format!("refs/mirror/heads/{base}"), mirror);
+        assert!(
+            matches!(
+                run(state.clone(), base).await,
+                Some(EffectReport::EffectFailed {
+                    error: EffectErrorClass::Defect {
+                        what: "default_branch_invalid"
+                    },
+                    ..
+                })
+            ),
+            "{base:?}"
+        );
+        // 无效请求不得留下会被后续请求复用的工作树。
+        let Some(EffectReport::WorktreeReady { worktree_id }) = run(state.clone(), "main").await
+        else {
+            panic!("valid retry failed")
+        };
+        assert_eq!(
+            h.repo
+                .get_worktree(&worktree_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .base_ref,
+            "main"
+        );
+    }
 }
 
 #[tokio::test]
