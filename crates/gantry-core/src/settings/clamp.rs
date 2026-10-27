@@ -533,8 +533,8 @@ mod tests {
     fn project_budget_can_only_tighten() {
         let builtin = json!({"high": {"budget": {"nodes": 40}}});
         let global = json!({});
-        let project = Some(&json!({"high": {"budget": {"nodes": 20}}}));
-        let result = effective(SettingsResource::Levels, &builtin, &global, project);
+        let project = json!({"high": {"budget": {"nodes": 20}}});
+        let result = effective(SettingsResource::Levels, &builtin, &global, Some(&project));
         assert_eq!(result.value["high"]["budget"]["nodes"], 20);
         assert!(result.clamped.is_empty());
     }
@@ -543,8 +543,8 @@ mod tests {
     fn project_budget_loosening_is_clamped_and_reported() {
         let builtin = json!({"high": {"budget": {"nodes": 40}}});
         let global = json!({"high": {"budget": {"nodes": 30}}});
-        let project = Some(&json!({"high": {"budget": {"nodes": 50}}}));
-        let result = effective(SettingsResource::Levels, &builtin, &global, project);
+        let project = json!({"high": {"budget": {"nodes": 50}}});
+        let result = effective(SettingsResource::Levels, &builtin, &global, Some(&project));
         assert_eq!(result.value["high"]["budget"]["nodes"], 30);
         assert_eq!(result.clamped, vec!["levels.high.budget".to_owned()]);
     }
@@ -553,15 +553,15 @@ mod tests {
     fn global_only_subtree_and_resource_are_restored() {
         let builtin = json!({"providers": {}});
         let global = json!({"providers": {"anthropic": {"kind": "anthropic"}}});
-        let project = Some(&json!({"providers": {"evil": {"kind": "anthropic"}}}));
-        let result = effective(SettingsResource::Models, &builtin, &global, project);
+        let project = json!({"providers": {"evil": {"kind": "anthropic"}}});
+        let result = effective(SettingsResource::Models, &builtin, &global, Some(&project));
         assert_eq!(result.value, global);
         assert_eq!(result.clamped, vec!["models.providers".to_owned()]);
 
         let builtin = json!({"channels": {"desktop": {"enabled": true}}});
         let global = json!({});
-        let project = Some(&json!({"channels": {"desktop": {"enabled": false}}}));
-        let result = effective(SettingsResource::Notify, &builtin, &global, project);
+        let project = json!({"channels": {"desktop": {"enabled": false}}});
+        let result = effective(SettingsResource::Notify, &builtin, &global, Some(&project));
         assert_eq!(result.value["channels"]["desktop"]["enabled"], true);
         assert_eq!(result.clamped, vec!["notify".to_owned()]);
     }
@@ -570,16 +570,16 @@ mod tests {
     fn egress_profile_can_only_narrow() {
         let builtin = json!({"profiles": {"default": {"groups": ["model_api", "npm"]}}});
         let global = json!({});
-        let narrow = Some(&json!({"profiles": {"default": {"groups": ["model_api"]}}}));
-        let result = effective(SettingsResource::Egress, &builtin, &global, narrow);
+        let narrow = json!({"profiles": {"default": {"groups": ["model_api"]}}});
+        let result = effective(SettingsResource::Egress, &builtin, &global, Some(&narrow));
         assert_eq!(
             result.value["profiles"]["default"]["groups"],
             json!(["model_api"])
         );
         assert!(result.clamped.is_empty());
 
-        let wider = Some(&json!({"profiles": {"default": {"groups": ["model_api", "maven"]}}}));
-        let result = effective(SettingsResource::Egress, &builtin, &global, wider);
+        let wider = json!({"profiles": {"default": {"groups": ["model_api", "maven"]}}});
+        let result = effective(SettingsResource::Egress, &builtin, &global, Some(&wider));
         assert_eq!(
             result.value["profiles"]["default"]["groups"],
             json!(["model_api", "npm"])
