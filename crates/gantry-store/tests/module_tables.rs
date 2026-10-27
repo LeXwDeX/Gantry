@@ -28,7 +28,7 @@ fn deps() -> StoreDeps {
 }
 
 async fn store() -> Store {
-    Store::open_in_memory(deps(), &[POLICY, FORGE])
+    gantry_store::testing::open_for_tests(deps(), &[POLICY, FORGE])
         .await
         .unwrap()
 }
@@ -291,7 +291,7 @@ async fn invalid_specs_fail_open() {
         ModuleSpec::new("core", &["core_x"]),
     ] {
         assert!(matches!(
-            Store::open_in_memory(deps(), &[spec]).await,
+            gantry_store::testing::open_for_tests(deps(), &[spec]).await,
             Err(StoreError::InvalidModuleSpec(_))
         ));
     }
