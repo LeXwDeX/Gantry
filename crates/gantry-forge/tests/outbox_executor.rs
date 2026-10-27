@@ -507,6 +507,64 @@ async fn secondary_rate_limit_requeues_without_consuming_attempts() {
     );
 }
 
+/// §12 A：二级限流 → 该安装零请求直到到期（含同安装的其他动作），且重启后仍在惩罚期内。
+#[tokio::test]
+async fn rate_limit_penalty_covers_the_installation_and_survives_restart() {
+    let h = Harness::new();
+    let head = oid("head");
+    h.github.set_branch(REPO, HEAD, &head.to_string());
+    h.enqueue(create_pr(head), None).await;
+    h.github.push_failure(ScriptedFailure {
+        status: 403,
+        body: r#"{"message":"You have exceeded a secondary rate limit"}"#.into(),
+        retry_after_s: Some(60),
+    });
+    assert_eq!(
+        h.executor(None).run_once().await.unwrap().unwrap().outcome,
+        StepOutcome::Requeued
+    );
+    // 同一安装的另一个动作，立即可领取。
+    let issue = h.github.insert_issue(REPO, "bug");
+    let close = h
+        .enqueue(
+            ActionPayload::CloseIssue(CloseIssuePayload {
+                repo: slug(),
+                number: issue,
+                state_reason: IssueStateReason::Completed,
+                require_merged_pr: None,
+            }),
+            None,
+        )
+        .await;
+    // 新的执行器实例 = 重启；惩罚期从 store 读回。
+    let restarted = h.executor(None);
+    let calls = h.github.recorded_calls().len();
+    let step = restarted.run_once().await.unwrap().unwrap();
+    assert_eq!(step.action, close);
+    assert_eq!(step.outcome, StepOutcome::Requeued);
+    assert_eq!(
+        h.github.recorded_calls().len(),
+        calls,
+        "zero requests during penalty"
+    );
+    let action = h.action(&close);
+    assert_eq!(action.attempts, 0);
+    assert_eq!(action.not_before, Some(Timestamp::from_millis(MS + 60_000)));
+
+    h.advance(60_000);
+    let outcomes: Vec<_> = restarted
+        .drain()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|step| step.outcome)
+        .collect();
+    assert_eq!(
+        outcomes,
+        vec![StepOutcome::Succeeded, StepOutcome::Succeeded]
+    );
+}
+
 /// 第一次换令牌被限流、之后放行的令牌源。
 struct RateLimitedOnce {
     fired: AtomicBool,

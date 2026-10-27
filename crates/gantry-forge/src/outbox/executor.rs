@@ -28,7 +28,8 @@ use gantry_core::ports::{
 };
 use gantry_core::secret::SecretString;
 use gantry_core::time::Timestamp;
-use gantry_store::{AfterFailure, CancelReason, ClaimOpts, Store, StoreError};
+use gantry_store::{AfterFailure, CancelReason, ClaimOpts, Store, StoreError, WriteTx};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{marker, sanitize};
@@ -114,6 +115,15 @@ pub enum ExecError {
     Crashed(CrashPoint),
     #[error("store: {0}")]
     Store(#[from] StoreError),
+}
+
+/// `forge_rate_state`（forge.md §7.3），键为安装 ID。
+pub(crate) const RATE_TABLE: &str = "forge_rate_state";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RateState {
+    /// 二级限流惩罚期结束时间；之前该安装零请求。
+    penalty_until: Option<Timestamp>,
 }
 
 pub struct ExecutorDeps {
@@ -276,6 +286,18 @@ impl Executor {
             tx.rollback().await?;
             return Ok(None);
         };
+        // 惩罚期（FA §10.3）：该安装在到期前零请求；持久化，重启后仍遵守（forge.md §7.3）。
+        if let Some(until) = self.penalty_until(&mut tx, &claimed.action)? {
+            if until > tx.now() {
+                tx.outbox().requeue(&claimed.action.id, until, true).await?;
+                tx.commit().await?;
+                return Ok(Some(Step {
+                    action: claimed.action.id,
+                    replay: claimed.replay,
+                    outcome: StepOutcome::Requeued,
+                }));
+            }
+        }
         tx.commit().await?;
         let action = claimed.action;
         self.crash_point(&action.id, CrashPoint::AfterClaim)?;
@@ -296,6 +318,50 @@ impl Executor {
             steps.push(step);
         }
         Ok(steps)
+    }
+
+    fn installation_of(&self, action: &OutboxAction) -> Option<i64> {
+        self.config
+            .projects
+            .get(&action.project_id)
+            .map(|binding| binding.project.installation_id)
+    }
+
+    fn penalty_until(
+        &self,
+        tx: &mut WriteTx,
+        action: &OutboxAction,
+    ) -> Result<Option<Timestamp>, StoreError> {
+        let Some(installation) = self.installation_of(action) else {
+            return Ok(None);
+        };
+        let row: Option<RateState> = tx
+            .module_conn(crate::webhook::MODULE)
+            .get(RATE_TABLE, &installation.to_string())?;
+        Ok(row.and_then(|row| row.penalty_until))
+    }
+
+    fn extend_penalty(
+        &self,
+        tx: &mut WriteTx,
+        action: &OutboxAction,
+        until: Timestamp,
+    ) -> Result<(), StoreError> {
+        let Some(installation) = self.installation_of(action) else {
+            return Ok(());
+        };
+        let current = self.penalty_until(tx, action)?;
+        if current.is_some_and(|current| current >= until) {
+            return Ok(());
+        }
+        tx.module_conn(crate::webhook::MODULE).put(
+            RATE_TABLE,
+            &installation.to_string(),
+            &RateState {
+                penalty_until: Some(until),
+            },
+        )?;
+        Ok(())
     }
 
     fn crash_point(&self, action: &ActionId, point: CrashPoint) -> Result<(), ExecError> {
@@ -471,7 +537,8 @@ impl Executor {
                 }
             }
             Disposition::RateLimited { wait } => {
-                // 限流等待不消耗尝试次数（FA §2.6）。
+                // 限流等待不消耗尝试次数（FA §2.6）；惩罚期落盘，作用于整个安装。
+                self.extend_penalty(&mut tx, action, after(now, wait))?;
                 tx.outbox()
                     .requeue(&action.id, after(now, wait), true)
                     .await?;
