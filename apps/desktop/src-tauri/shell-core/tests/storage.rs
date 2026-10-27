@@ -210,6 +210,8 @@ fn identity() -> IdentityFile {
         api_base_url: "https://gantry.example.com:8443".into(),
         ca_fingerprint: format!("sha256:{}", "ab".repeat(32)),
         device_id: "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM".into(),
+        device_name: "Susan 的 MacBook".into(),
+        platform: "macos".into(),
         cert_chain_pem: vec!["leaf".into(), "intermediate".into(), "root".into()],
         tls_key_label: labels.tls,
         approval_key_label: labels.approval,
