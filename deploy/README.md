@@ -42,10 +42,20 @@ macOS 上没有 systemd 与 nftables，`systemd-analyze verify` 与 `nft -c` 会
 | `gantry secrets init --dir <dir>` | `secrets` | `install.sh` 第 7 步，分别以 `gantry`、`gantry-egress` 身份执行 | 幂等：已初始化则校验后返回 0 |
 | `gantry secrets export --dir <dir> --out -` | `secrets` | `gantry-backup`，以对应实例的用户执行 | stdout 输出加密包；收件人独立于主机主密钥（OPS-08） |
 | `gantry pki bootstrap-ca --workdir <tmpfs> --ca-dir /etc/gantry/ca --san <h>… --passphrase-fd 3 [--export-to <dir>] [--assume-exported]` | `pki` | `install.sh` 第 8 步 | 口令只从 fd 3 读；完成规格 §7.3 第 3–8 步（导出、验证导出、键入指纹前 8 位、清除、断言）；产出 `/etc/gantry/ca/{root,intermediate,server}.crt`、`FINGERPRINTS.txt`，中间 CA 与服务端私钥交给 `secrets` |
-| `gantry github setup --webhook-url <url> --app-owner user\|org:<名> [--name <名>] [--test-mode]` | `deploy`（CLI）+ `forge`（回调） | `install.sh` 第 14 步 | 经 `control.sock` 让 `forge` 登记 setup 会话，生成 Manifest 提交页，轮询结果；成功返回 0，否则非 0（install.sh 映射为退出码 40） |
-| `gantry doctor [webhook\|github\|egress\|…] [--json]` | `deploy`（Rust 子命令） | `install.sh` 第 13、14、16、17 步 | 退出码 `0` / `1`（有警告）/ `2`（有失败） |
+| `gantry github setup --webhook-url <url> [--app-owner user\|org:<名>] [--name <名>] [--page <文件>] [--test-mode [--github-web <url>]]` | `deploy`（`crates/gantry-deploy` 的 `github_setup`）+ `forge`（回调） | `install.sh` 第 14 步 | 先做入口外部检查（§7.6 ②），不过则不登记会话；经 `control.sock` 调 `github.setup.begin` / `github.setup.status`（见下）；生成 Manifest 提交页并轮询结果，核对获批权限与 Manifest 完全一致；成功返回 0，用法错误 2，其余 1（install.sh 映射为退出码 40） |
+| `gantry doctor [webhook\|github\|egress\|…] [--json]` | `deploy`（`crates/gantry-deploy` 的 `doctor`） | `install.sh` 第 13、14、16、17 步 | 退出码 `0` / `1`（有警告）/ `2`（有失败）。M1 已实现 `host` 的 `--test-mode` 标红、`webhook` 的外部检查；其余区域报 `warn`（M1.4 补齐，#106） |
+| `gantry settings bootstrap-set <resource> <键>=<值>…` | `deploy`（`crates/gantry-deploy` 的 `bootstrap_set`）+ 服务端设置模块 | 管理员（安装后、第一台设备配对前） | 经 `control.sock` 调 `settings.bootstrap_set {resource, values}`，值按字符串原样转发；白名单（`core::bootstrap_writable`）与引导期判定在服务端，配对后返回 `not_bootstrap_period`（§7.9，P-66） |
 | `gantry store info --db <快照> --json` | `store` | `gantry-backup` | 输出 `{"schema_version","log_id","log_epoch","seq_head"}`，只读打开快照文件，不碰运行中的库 |
 | `gantryd --config <file>`、`gantry-egress --config <file>` | `gantryd`、`egress` | systemd 单元 | `Type=notify`，就绪后发 `READY=1` |
+
+`gantry` 二进制在 `crates/gantryd`（#101），只解析参数并分派到 `gantry-deploy` 的库函数（OPS-07 的落地方案）。`github setup` 用到的两条控制命令（行 JSON 协议同 `gantryd` 的控制通道；对端 uid 不符时连接一建立就收到 `forbidden`）：
+
+| 命令 | 参数 | 结果 | 错误码 |
+| --- | --- | --- | --- |
+| `github.setup.begin` | `{webhook_url, redirect_url, ttl_secs}` | `{state, expires_at}`；`state` ≥ 128 位、URL 安全 | `not_bootstrap_period`（P-66）、`setup_in_progress` |
+| `github.setup.status` | `{state}` | `{status: pending\|completed\|expired\|failed, app?: {app_id, slug, html_url, permissions, events}, error?: {code, message}}`；落盘失败为 `failed` + `error.code = persist_failed` + `app.html_url` | — |
+
+应答里一律不得含 `pem`、`private_key`、`webhook_secret`、`client_secret`；`gantry-deploy` 发现这些字段时会拒绝显示，并报协议错误。
 
 ## 安装参数里尚未定的值
 
