@@ -24,8 +24,16 @@ pub trait Probe {
     fn which(&self, program: &str) -> Option<PathBuf>;
     /// 运行命令，成功时返回 stdout（失败或无输出时为空串）。
     fn output(&self, program: &str, args: &[&str]) -> Option<String>;
-    /// 根文件系统上带 setuid / setgid 位的普通文件。
-    fn setid_files(&self) -> Vec<PathBuf>;
+    /// 扫描根文件系统上带 setuid / setgid 位的普通文件。
+    fn setid_scan(&self) -> SetidScan;
+}
+
+/// setuid / setgid 扫描结果。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetidScan {
+    pub found: Vec<PathBuf>,
+    /// 当前用户能进入但无法列出或读取元数据的路径：里面可能有 setid 文件，按"无法核实"处理。
+    pub unverifiable: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,16 +50,23 @@ pub fn run_checks(probe: &dyn Probe) -> Vec<Check> {
     let uid = probe.uid();
     push("non_root", uid != 0, format!("uid={uid}"));
 
-    let setid = probe.setid_files();
-    push(
-        "no_setid_files",
-        setid.is_empty(),
-        setid
+    let scan = probe.setid_scan();
+    let list = |paths: &[PathBuf]| {
+        paths
             .iter()
             .take(5)
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
-            .join(", "),
+            .join(", ")
+    };
+    push(
+        "no_setid_files",
+        scan.found.is_empty() && scan.unverifiable.is_empty(),
+        format!(
+            "found: [{}]; unverifiable: [{}]",
+            list(&scan.found),
+            list(&scan.unverifiable)
+        ),
     );
 
     for tool in FORBIDDEN_TOOLS {
@@ -157,10 +172,8 @@ impl Probe for SystemProbe {
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    fn setid_files(&self) -> Vec<PathBuf> {
-        let mut found = Vec::new();
-        scan_setid(&self.root, &mut found);
-        found
+    fn setid_scan(&self) -> SetidScan {
+        scan_setid(&self.root)
     }
 }
 
@@ -180,31 +193,69 @@ fn is_executable(path: &Path) -> bool {
 
 /// 递归扫描 `root` 所在的文件系统（同 `find -xdev`：不跨挂载点、不跟随符号链接，
 /// 跳过伪文件系统）。挂载进来的工作区等目录不是镜像内容。
-pub fn scan_setid(root: &Path, found: &mut Vec<PathBuf>) {
-    let device = fs::symlink_metadata(root).ok().map(|m| device_of(&m));
-    scan_dir(root, device, found);
+///
+/// 列不出内容的目录：当前用户不能进入（无 `x`）时，里面的文件它执行不到，安全跳过；
+/// 能进入却列不出（如 `0711`）时记为无法核实，自检据此失败，而不是当成"没有"。
+pub fn scan_setid(root: &Path) -> SetidScan {
+    let mut scan = SetidScan::default();
+    match fs::symlink_metadata(root) {
+        Ok(meta) => scan_dir(root, device_of(&meta), &mut scan),
+        Err(_) => scan.unverifiable.push(root.to_path_buf()),
+    }
+    scan
 }
 
-fn scan_dir(dir: &Path, device: Option<u64>, found: &mut Vec<PathBuf>) {
+fn scan_dir(dir: &Path, device: u64, scan: &mut SetidScan) {
     if SKIP_DIRS.iter().any(|skip| dir == Path::new(skip)) {
         return;
     }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => {
+            if searchable(dir) {
+                scan.unverifiable.push(dir.to_path_buf());
+            }
+            return;
+        }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = fs::symlink_metadata(&path) else {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            scan.unverifiable.push(dir.to_path_buf());
             continue;
         };
-        if device.is_some_and(|d| device_of(&meta) != d) {
+        let path = entry.path();
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => {
+                scan.unverifiable.push(path);
+                continue;
+            }
+        };
+        if device_of(&meta) != device {
             continue;
         }
         if meta.is_dir() {
-            scan_dir(&path, device, found);
+            scan_dir(&path, device, scan);
         } else if meta.is_file() && has_setid(&meta) {
-            found.push(path);
+            scan.found.push(path);
         }
+    }
+}
+
+/// 当前用户能否进入目录（`access(X_OK)`）。
+fn searchable(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+            return true;
+        };
+        unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        true
     }
 }
 

@@ -9,7 +9,7 @@ use std::process::Command;
 
 use common::TempDir;
 use gantry_worker::claude_cli::PINNED_CLAUDE_VERSION;
-use gantry_worker::selftest::{run_checks, scan_setid, Check, Probe};
+use gantry_worker::selftest::{run_checks, scan_setid, Check, Probe, SetidScan};
 use serde_json::Value;
 
 const SUCCESS: &str = include_str!("../fixtures/claude-stream-json/success.jsonl");
@@ -22,7 +22,7 @@ struct FakeProbe {
     uid: u32,
     on_path: Vec<&'static str>,
     outputs: BTreeMap<String, Option<String>>,
-    setid: Vec<PathBuf>,
+    setid: SetidScan,
 }
 
 impl FakeProbe {
@@ -44,7 +44,7 @@ impl FakeProbe {
                     Some(format!("{PINNED_CLAUDE_VERSION} (Claude Code)\n")),
                 ),
             ]),
-            setid: Vec::new(),
+            setid: SetidScan::default(),
         }
     }
 }
@@ -68,7 +68,7 @@ impl Probe for FakeProbe {
         self.outputs.get(&key).cloned().flatten()
     }
 
-    fn setid_files(&self) -> Vec<PathBuf> {
+    fn setid_scan(&self) -> SetidScan {
         self.setid.clone()
     }
 }
@@ -101,7 +101,11 @@ fn selftest_flags_each_violation() {
     let cases: Vec<(Mutation, &str)> = vec![
         (Box::new(|p| p.uid = 0), "non_root"),
         (
-            Box::new(|p| p.setid.push("/usr/bin/su".into())),
+            Box::new(|p| p.setid.found.push("/usr/bin/su".into())),
+            "no_setid_files",
+        ),
+        (
+            Box::new(|p| p.setid.unverifiable.push("/opt/locked".into())),
             "no_setid_files",
         ),
         (Box::new(|p| p.on_path.push("gh")), "no_gh"),
@@ -155,10 +159,43 @@ fn setid_scan_finds_setuid_and_setgid_files_without_following_links() {
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
     }
     std::os::unix::fs::symlink(bin.join("suid"), root.path().join("link")).unwrap();
-    let mut found = Vec::new();
-    scan_setid(root.path(), &mut found);
-    found.sort();
-    assert_eq!(found, [bin.join("sgid"), bin.join("suid")]);
+    let mut scan = scan_setid(root.path());
+    scan.found.sort();
+    assert_eq!(scan.found, [bin.join("sgid"), bin.join("suid")]);
+    assert!(scan.unverifiable.is_empty());
+}
+
+/// 能进入但列不出的目录（`-wx--x--x`）里可能藏着 setuid 文件：记为无法核实，自检失败；
+/// 根本进不去的目录（`0000`）里的文件当前用户执行不到，安全跳过。
+#[cfg(unix)]
+#[test]
+fn unlistable_but_searchable_directories_are_unverifiable() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::getuid() } == 0 {
+        // root 不受目录权限约束，这个场景不成立。
+        return;
+    }
+    let root = TempDir::new("setid-locked");
+    let hidden = root.path().join("hidden");
+    let closed = root.path().join("closed");
+    for dir in [&hidden, &closed] {
+        fs::create_dir_all(dir).unwrap();
+        let file = dir.join("su");
+        fs::write(&file, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o4755)).unwrap();
+    }
+    fs::set_permissions(&hidden, fs::Permissions::from_mode(0o311)).unwrap();
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+    let scan = scan_setid(root.path());
+    // 先恢复权限，TempDir 才能清理。
+    for dir in [&hidden, &closed] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(scan.found.is_empty(), "{scan:?}");
+    assert_eq!(scan.unverifiable, [hidden]);
+    let mut probe = FakeProbe::good();
+    probe.setid = scan;
+    assert_eq!(failing(&run_checks(&probe)), ["no_setid_files"]);
 }
 
 /// 钉死的 CLI 版本 = 录制夹具的版本 = 镜像构建参数：升级时三者必须一起改。
