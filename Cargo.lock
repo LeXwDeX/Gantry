@@ -917,6 +917,7 @@ name = "gantry-engine"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-core",
  "gantry-core",
  "gantry-fakes",
  "gantry-store",

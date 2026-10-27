@@ -424,6 +424,7 @@ impl Harness {
                 outbox: self.forge.clone(),
                 effects: self.runner.clone(),
                 snapshots: self.snapshots.clone(),
+                cas: Arc::new(self.store.cas()),
             },
             config(),
         )
