@@ -37,8 +37,16 @@ use gantry_deploy::manifest::Stage as ManifestStage;
 use gantryd::assembly::{OsEntropy, SystemClock};
 
 use super::FakeHandles;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use gantry_core::entities::{DeviceRole, DeviceStatus};
+use gantry_core::ports::{ActorCtx, ClientProfile};
+use gantry_policy::{
+    service::{DeviceKey, GrantRequest},
+    ApprovalService,
+};
 use gantryd::assembly::Assembly;
 use gantryd::control::{CommandSet, Response};
+use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
 
 /// `fake.*` 命令的固定执行者；与真实设备 / 主机命令区分开。
 const FAKE_ACTOR: &str = "gantryd_fake";
@@ -199,6 +207,7 @@ impl CommandSet for FakeCommands {
                 Err(error) => Response::err("engine", error.to_string()),
             },
             "fake.drive" => self.drive(args).await,
+            "fake.real_grant" => self.real_grant(args).await,
             "fake.end_bootstrap" => {
                 self.setup().bootstrap_over = true;
                 Response::ok(json!({}))
@@ -325,12 +334,12 @@ impl FakeCommands {
             .find_map(|job| self.fakes.repo.commit_record(job))
             .map(|record| record.commit_oid);
         let granted = self.drive_state().granted;
-        if let Some(head) = head {
+        if let (Some(head), Some(policy)) = (head, &self.fakes.policy) {
             let tx = match store.begin_write().await {
                 Ok(tx) => tx,
                 Err(error) => return Response::err("store", error.to_string()),
             };
-            script_merge(&self.fakes.policy, delivery, head, granted);
+            script_merge(policy, delivery, head, granted);
             if let Err(error) = tx.rollback().await {
                 return Response::err("store", error.to_string());
             }
@@ -350,7 +359,7 @@ impl FakeCommands {
         if state.delivery.stage == Stage::Closed && state.worktree.is_none() {
             return Response::ok(json!({ "stage": state.delivery.stage, "done": true }));
         }
-        if granted.is_none() {
+        if granted.is_none() && self.fakes.policy.is_some() {
             let pending = state
                 .approvals
                 .iter()
@@ -366,6 +375,11 @@ impl FakeCommands {
         if let (Some(_), Some(head)) = (&state.pr, head) {
             let merged = self.drive_state().merged;
             let pr = engine_cfg::snapshot(if merged { "merged" } else { "open" }, head);
+            if self.fakes.approvals.is_some() {
+                if let Err(error) = upsert_pr(store, &self.fakes.forge, pr.clone()).await {
+                    return Response::err("store", error.to_string());
+                }
+            }
             *self
                 .fakes
                 .snapshots
@@ -388,6 +402,66 @@ impl FakeCommands {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    async fn real_grant(&self, args: Value) -> Response {
+        let Some(approvals) = &self.fakes.approvals else {
+            return Response::err("policy", "real policy is not enabled");
+        };
+        let Some(Ok(id)) = args
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::parse::<ApprovalId>)
+        else {
+            return Response::err("bad_request", "expected approval id");
+        };
+        // 固定公开测试密钥，只在测试进程的内存中使用。
+        let key = SigningKey::from_slice(&[7; 32]).expect("test key");
+        let device = DeviceKey {
+            device_id: "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().expect("fixture"),
+            role: DeviceRole::Approver,
+            profile: ClientProfile::Desktop,
+            status: DeviceStatus::Active,
+            approval_pubkey_fpr: sha256(key.verifying_key().to_encoded_point(false).as_bytes()),
+            verifying_key: *key.verifying_key(),
+        };
+        let challenge = match approvals.challenge(&id, &device).await {
+            Ok(challenge) => challenge,
+            Err(error) => return Response::err("challenge", error.to_string()),
+        };
+        let signer = if args.get("invalid").and_then(Value::as_bool) == Some(true) {
+            SigningKey::from_slice(&[8; 32]).expect("test key")
+        } else {
+            key
+        };
+        let signature: Signature =
+            signer.sign(&challenge.payload.signing_bytes().expect("payload"));
+        let ctx = ActorCtx {
+            actor: Actor::new(ActorKind::Device, device.device_id.to_string()),
+            device: Some(device.device_id),
+            role: Some(device.role),
+            client_profile: Some(device.profile),
+            request_id: "01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().expect("fixture"),
+            idempotency_key: None,
+            dedup_key: None,
+            causation_id: None,
+        };
+        match approvals
+            .grant(
+                GrantRequest {
+                    approval_id: id,
+                    device,
+                    nonce: challenge.payload.nonce.to_string(),
+                    signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+                    current_subject: None,
+                },
+                &ctx,
+            )
+            .await
+        {
+            Ok(approval) => Response::ok(json!({"id": approval.id, "status": approval.status})),
+            Err(error) => Response::err("policy", error.to_string()),
+        }
+    }
+
     /// 设备签名授予：policy 状态置 granted，并写 `approval.granted`（生产里由 policy 在同一事务写）。
     async fn grant(
         &self,
@@ -401,11 +475,9 @@ impl FakeCommands {
             .begin_write()
             .await
             .map_err(|error| error.to_string())?;
-        self.fakes
-            .policy
-            .grant(&id)
-            .map_err(|error| error.to_string())?;
-        script_merge(&self.fakes.policy, delivery, head, Some(id));
+        let policy = self.fakes.policy.as_ref().expect("fake policy");
+        policy.grant(&id).map_err(|error| error.to_string())?;
+        script_merge(policy, delivery, head, Some(id));
         gate.rollback().await.map_err(|error| error.to_string())?;
         let digest = sha256(b"approval");
         let data = ApprovalGrantedData {
@@ -434,6 +506,17 @@ impl FakeCommands {
         tx.commit().await.map_err(|error| error.to_string())?;
         Ok(())
     }
+}
+
+/// FakeForge 的直接写绕过 Store 写门；持租约期间不得开始另一个写事务。
+pub(crate) async fn upsert_pr(
+    store: &gantry_store::Store,
+    forge: &gantry_fakes::forge::FakeForge,
+    pr: gantry_core::entities::PullRequestRef,
+) -> Result<(), gantry_store::StoreError> {
+    let gate = store.begin_write().await?;
+    forge.upsert_pr(super::project_id(), "gantry/test", pr);
+    gate.rollback().await
 }
 
 /// merge_pr 需要审批（I8）：未授予时 `NeedsApproval`，授予后 `Allow` 带审批 ID。

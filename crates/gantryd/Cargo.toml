@@ -37,4 +37,6 @@ gantry-fakes = { path = "../gantry-fakes" }
 gantry-notify = { path = "../gantry-notify" }
 gantry-policy = { path = "../gantry-policy" }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
+base64 = "0.22"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
