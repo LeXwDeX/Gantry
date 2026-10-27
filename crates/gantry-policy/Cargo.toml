@@ -1,0 +1,11 @@
+[package]
+name = "gantry-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 策略与审计（M1：policy v0，内置规则、失败即关闭）"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+thiserror.workspace = true
