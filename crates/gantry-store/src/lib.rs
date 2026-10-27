@@ -3,7 +3,8 @@
 //! Gantry 事件存储的 M0 内存实现（store.md §1.1、§6 的 `open_in_memory`）。
 //!
 //! 只实现单进程、单写者的最小一致性行为：追加事件、`dedup_key` 去重、投影、
-//! Outbox 表、游标与 `log_epoch`。SQLite、模块投影器、CAS、备份与完整
+//! Outbox 表、游标与 `log_epoch`。内置 `inbox_items` 投影是收件箱状态的唯一
+//! 来源（store.md §7.2），`TxReader` / `ReadSnapshot` 的 `inbox_*` 方法按 §6.2 读取。SQLite、模块投影器、CAS、备份与完整
 //! `ProjectionRead` 留给 M1；未实现的入口在这里显式返回错误或记录到
 //! `unprojected`，不静默吞掉。缺口清单见 `docs/m0-contract-gaps.md`。
 //!
@@ -25,15 +26,17 @@ use std::time::Duration;
 
 use gantry_core::canon::IdempotencyKey;
 use gantry_core::entities::{
-    Actor, ActorKind, ForgeActionKind, GithubRef, OutboxAction, OutboxError, OutboxStatus,
-    Priority, Seq, SettingsResource, SettingsScope, Stage, StageStatus,
+    Actor, ActorKind, ForgeActionKind, GithubRef, InboxItem, InboxKind, InboxStatus, OutboxAction,
+    OutboxError, OutboxStatus, Priority, Seq, SettingsResource, SettingsScope, Severity, Stage,
+    StageStatus,
 };
 use gantry_core::events::{
-    Event, EventType, NewEvent, SchemaError, SchemaErrorCode, SettingsUpdatedData, Subject,
+    Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NewEvent,
+    SchemaError, SchemaErrorCode, SettingsUpdatedData, Subject,
 };
 use gantry_core::forge::ActionPayload;
 use gantry_core::ids::{
-    Act, ActionId, Clock, DeliveryId, Dlv, EventId, Evt, IdError, IdGen, ProjectId,
+    Act, ActionId, Clock, DeliveryId, Dlv, EventId, Evt, IdError, IdGen, Inb, InboxId, ProjectId,
 };
 use gantry_core::level::Level;
 use gantry_core::time::Timestamp;
@@ -336,6 +339,8 @@ struct Inner {
     secret_changes: BTreeMap<(String, u64), Seq>,
     next_enqueue_seq: u64,
     deliveries: BTreeMap<DeliveryId, DeliveryProjection>,
+    /// 内置 `inbox_items` 投影（store.md §7.2）；收件箱状态的唯一来源。
+    inbox: BTreeMap<InboxId, InboxItem>,
     unprojected: Vec<UnprojectedEvent>,
     /// testing 的 typed 模块快照；克隆时逐项深拷贝，避免浅共享可变状态。
     #[cfg(feature = "testing")]
@@ -359,6 +364,7 @@ impl Clone for Inner {
             secret_changes: self.secret_changes.clone(),
             next_enqueue_seq: self.next_enqueue_seq,
             deliveries: self.deliveries.clone(),
+            inbox: self.inbox.clone(),
             unprojected: self.unprojected.clone(),
             #[cfg(feature = "testing")]
             module_states: self
@@ -958,6 +964,21 @@ impl WriteTx {
                 row.action.lease_until = None;
                 row.action.updated_at = event.ts;
             }
+            EventType::InboxRaised => {
+                let data =
+                    decode_data::<InboxRaisedData>(event).map_err(StoreError::InvalidEvent)?;
+                self.project_inbox_raised(event, data)?;
+            }
+            EventType::InboxResolved => {
+                let data =
+                    decode_data::<InboxResolvedData>(event).map_err(StoreError::InvalidEvent)?;
+                self.project_inbox_transition(event, data.inbox_id, InboxStatus::Resolved)?;
+            }
+            EventType::InboxDismissed => {
+                let data =
+                    decode_data::<InboxDismissedData>(event).map_err(StoreError::InvalidEvent)?;
+                self.project_inbox_transition(event, data.inbox_id, InboxStatus::Dismissed)?;
+            }
             _ => {
                 self.snapshot.unprojected.push(UnprojectedEvent {
                     seq: event.seq,
@@ -966,6 +987,90 @@ impl WriteTx {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// `inbox.raised`：先把 `supersedes` 列出的 open 项置为 `resolved`，再插入新项；
+    /// open 项上 `dedup_key` 唯一（部分唯一索引，P-63）。
+    fn project_inbox_raised(
+        &mut self,
+        event: &Event<Value>,
+        data: InboxRaisedData,
+    ) -> Result<(), StoreError> {
+        let item = data.item;
+        let id = subject_id::<Inb>(&event.subject)?;
+        if item.id != id {
+            return Err(StoreError::InvalidEvent(SchemaError::consistency(
+                "/data/item/id",
+                "inbox.raised item.id must equal subject",
+            )));
+        }
+        if item.project_id != event.project_id {
+            return Err(StoreError::InvalidEvent(SchemaError::consistency(
+                "/project_id",
+                "inbox.raised project_id must equal item.project_id",
+            )));
+        }
+        if item.status != InboxStatus::Open {
+            return Err(StoreError::PreconditionFailed(format!(
+                "inbox {id} must be raised as open"
+            )));
+        }
+        if self.snapshot.inbox.contains_key(&id) {
+            return Err(StoreError::PreconditionFailed(format!(
+                "inbox {id} already raised"
+            )));
+        }
+        for target in &data.supersedes {
+            let row = self.snapshot.inbox.get_mut(target).ok_or_else(|| {
+                StoreError::PreconditionFailed(format!("superseded inbox {target} not found"))
+            })?;
+            gantry_core::machines::inbox::check(row.status, InboxStatus::Resolved)
+                .map_err(|error| StoreError::PreconditionFailed(error.to_string()))?;
+            row.status = InboxStatus::Resolved;
+            row.updated_at = event.ts;
+        }
+        if self
+            .snapshot
+            .inbox
+            .values()
+            .any(|row| row.status == InboxStatus::Open && row.dedup_key == item.dedup_key)
+        {
+            return Err(StoreError::PreconditionFailed(
+                "an open inbox item already uses this dedup_key".to_owned(),
+            ));
+        }
+        self.snapshot.inbox.insert(id, item);
+        Ok(())
+    }
+
+    fn project_inbox_transition(
+        &mut self,
+        event: &Event<Value>,
+        id: InboxId,
+        to: InboxStatus,
+    ) -> Result<(), StoreError> {
+        if subject_id::<Inb>(&event.subject)? != id {
+            return Err(StoreError::InvalidEvent(SchemaError::consistency(
+                "/data/inbox_id",
+                "inbox event inbox_id must equal subject",
+            )));
+        }
+        let row = self
+            .snapshot
+            .inbox
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::PreconditionFailed(format!("inbox {id} not found")))?;
+        if row.project_id != event.project_id {
+            return Err(StoreError::InvalidEvent(SchemaError::consistency(
+                "/project_id",
+                "inbox event project_id must equal item.project_id",
+            )));
+        }
+        gantry_core::machines::inbox::check(row.status, to)
+            .map_err(|error| StoreError::PreconditionFailed(error.to_string()))?;
+        row.status = to;
+        row.updated_at = event.ts;
         Ok(())
     }
 
@@ -1178,6 +1283,31 @@ impl TxReader<'_> {
         &self.inner.unprojected
     }
 
+    // 收件箱（store.md §6.2）。能读到本事务尚未提交的写入。
+
+    pub async fn inbox_item(&mut self, id: &InboxId) -> Result<Option<InboxItem>, StoreError> {
+        Ok(inbox_item_in(self.inner, id))
+    }
+
+    pub async fn inbox(
+        &mut self,
+        q: &InboxQuery,
+        p: &Page,
+    ) -> Result<Paged<InboxItem>, StoreError> {
+        inbox_in(self.inner, q, p)
+    }
+
+    pub async fn inbox_open_by_dedup_key(
+        &mut self,
+        key: &str,
+    ) -> Result<Option<InboxItem>, StoreError> {
+        Ok(inbox_open_by_dedup_key_in(self.inner, key))
+    }
+
+    pub async fn inbox_summary(&mut self) -> Result<Vec<InboxProjectCount>, StoreError> {
+        Ok(inbox_summary_in(self.inner))
+    }
+
     fn settings_at(
         &self,
         scope: &SettingsScope,
@@ -1292,6 +1422,207 @@ impl ReadSnapshot {
     pub fn unprojected(&self) -> &[UnprojectedEvent] {
         &self.inner.unprojected
     }
+
+    pub async fn inbox_item(&mut self, id: &InboxId) -> Result<Option<InboxItem>, StoreError> {
+        Ok(inbox_item_in(&self.inner, id))
+    }
+
+    pub async fn inbox(
+        &mut self,
+        q: &InboxQuery,
+        p: &Page,
+    ) -> Result<Paged<InboxItem>, StoreError> {
+        inbox_in(&self.inner, q, p)
+    }
+
+    pub async fn inbox_open_by_dedup_key(
+        &mut self,
+        key: &str,
+    ) -> Result<Option<InboxItem>, StoreError> {
+        Ok(inbox_open_by_dedup_key_in(&self.inner, key))
+    }
+
+    pub async fn inbox_summary(&mut self) -> Result<Vec<InboxProjectCount>, StoreError> {
+        Ok(inbox_summary_in(&self.inner))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 分页与收件箱读取（store.md §6.2）
+// ---------------------------------------------------------------------------
+
+/// 分页请求；`limit` 取 1..=200，默认 50。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Page {
+    pub limit: u32,
+    pub cursor: Option<PageCursor>,
+    pub order: Order,
+}
+
+impl Default for Page {
+    fn default() -> Self {
+        Self {
+            limit: 50,
+            cursor: None,
+            order: Order::Asc,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    #[default]
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Paged<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<PageCursor>,
+}
+
+/// 不透明游标：资源标签 + 方向 + 排序键。跨资源复用、方向不符或被篡改 →
+/// `StoreError::InvalidCursor`。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PageCursor(String);
+
+impl PageCursor {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PageCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// `inbox` 的过滤条件：`status` 缺省 = `open`。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InboxQuery {
+    pub project_id: Option<ProjectId>,
+    pub status: Option<InboxStatus>,
+    pub kind: Option<InboxKind>,
+}
+
+/// `GET /v1/inbox/summary` 的一行（P-63），形状与 api.md §4.8 相同。
+pub use gantry_core::ports::ProjectOpenCount as InboxProjectCount;
+
+const INBOX_CURSOR_TAG: &str = "inbox";
+
+fn order_tag(order: Order) -> &'static str {
+    match order {
+        Order::Asc => "asc",
+        Order::Desc => "desc",
+    }
+}
+
+fn inbox_item_in(inner: &Inner, id: &InboxId) -> Option<InboxItem> {
+    inner.inbox.get(id).cloned()
+}
+
+fn inbox_open_by_dedup_key_in(inner: &Inner, key: &str) -> Option<InboxItem> {
+    inner
+        .inbox
+        .values()
+        .find(|item| item.status == InboxStatus::Open && item.dedup_key == key)
+        .cloned()
+}
+
+fn inbox_in(inner: &Inner, q: &InboxQuery, p: &Page) -> Result<Paged<InboxItem>, StoreError> {
+    if !(1..=200).contains(&p.limit) {
+        return Err(StoreError::PreconditionFailed(
+            "page limit must be 1..=200".to_owned(),
+        ));
+    }
+    let after = match &p.cursor {
+        None => None,
+        Some(cursor) => {
+            let mut parts = cursor.as_str().splitn(3, ':');
+            let (Some(tag), Some(order), Some(key)) = (parts.next(), parts.next(), parts.next())
+            else {
+                return Err(StoreError::InvalidCursor);
+            };
+            if tag != INBOX_CURSOR_TAG || order != order_tag(p.order) {
+                return Err(StoreError::InvalidCursor);
+            }
+            Some(
+                key.parse::<InboxId>()
+                    .map_err(|_| StoreError::InvalidCursor)?,
+            )
+        }
+    };
+    let status = q.status.unwrap_or(InboxStatus::Open);
+    let matches = |item: &&InboxItem| {
+        item.status == status
+            && q.project_id.is_none_or(|id| item.project_id == Some(id))
+            && q.kind.as_ref().is_none_or(|kind| &item.kind == kind)
+    };
+    let limit = p.limit as usize;
+    let mut items: Vec<InboxItem> = match p.order {
+        Order::Asc => inner
+            .inbox
+            .values()
+            .filter(|item| after.is_none_or(|after| item.id > after))
+            .filter(matches)
+            .take(limit + 1)
+            .cloned()
+            .collect(),
+        Order::Desc => inner
+            .inbox
+            .values()
+            .rev()
+            .filter(|item| after.is_none_or(|after| item.id < after))
+            .filter(matches)
+            .take(limit + 1)
+            .cloned()
+            .collect(),
+    };
+    let next_cursor = if items.len() > limit {
+        items.truncate(limit);
+        items.last().map(|item| {
+            PageCursor(format!(
+                "{INBOX_CURSOR_TAG}:{}:{}",
+                order_tag(p.order),
+                item.id
+            ))
+        })
+    } else {
+        None
+    };
+    Ok(Paged { items, next_cursor })
+}
+
+/// 只含 open 数 > 0 的项目；全局项归入 `project_id = None` 的一行（排在最前）。
+fn inbox_summary_in(inner: &Inner) -> Vec<InboxProjectCount> {
+    let mut by_project: BTreeMap<Option<ProjectId>, (u32, Severity)> = BTreeMap::new();
+    for item in inner
+        .inbox
+        .values()
+        .filter(|item| item.status == InboxStatus::Open)
+    {
+        let entry = by_project
+            .entry(item.project_id)
+            .or_insert((0, Severity::Info));
+        entry.0 += 1;
+        if item.severity > entry.1 {
+            entry.1 = item.severity.clone();
+        }
+    }
+    by_project
+        .into_iter()
+        .map(|(project_id, (open, max_severity))| InboxProjectCount {
+            project_id,
+            open,
+            max_severity,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]

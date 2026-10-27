@@ -101,7 +101,8 @@
 #[async_trait]
 pub trait SandboxService: Send + Sync {
     /// 受理一个 job（JobSpec 的可信部分 + 待包装材料）。按 job_id 幂等：重复提交返回同一个 JobHandle。
-    /// 返回即"已受理（可能仍在排队）"，不表示容器已创建。
+    /// 返回即"已受理（可能仍在排队）"，不表示容器已创建。返回 Ok 之前受理记录（相位 Accepted 的 meta.json）已原子写盘，
+    /// 重启后 recover 不会把它判成 Unknown（E4）。
     async fn submit(&self, ctx: &Ctx, spec: SandboxSpec) -> Result<JobHandle, SandboxError>;
     /// 等待终态。可重复调用、可在 recover 之后调用；同一 job 恒返回同一结果。
     /// Err 仅出现在 worker 还没运行前（create / stage / egress / workspace 失败）。
@@ -113,7 +114,8 @@ pub trait SandboxService: Send + Sync {
     /// engine 在 attempt.finished 落库后调用：删除 meta.json，并让 egress 忘记该 job 的最终用量（forget_job）。
     async fn release(&self, ctx: &Ctx, job_id: &AttemptId) -> Result<(), SandboxError>;
     /// gantryd 重启：对每个没有 attempt.finished 的 Attempt 查运行时并接管（§7.10）。
-    async fn recover(&self, ctx: &Ctx, unfinished: &[UnfinishedAttempt]) -> Result<Vec<JobHandle>, SandboxError>;
+    /// 按输入顺序为每个 UnfinishedAttempt 恰好返回一项 RecoveredJob（E4）。
+    async fn recover(&self, ctx: &Ctx, unfinished: &[UnfinishedAttempt]) -> Result<Vec<RecoveredJob>, SandboxError>;
     /// 销毁没有对应未终结 Attempt 的沙盒与残留 staging。
     async fn sweep_orphans(&self, live: &BTreeSet<AttemptId>) -> Result<SweepReport, SandboxError>;
     async fn capacity(&self) -> CapacitySnapshot;  // 运行中 / 排队中 / 上限 / 预热池，供调度与展示
@@ -121,6 +123,14 @@ pub trait SandboxService: Send + Sync {
 
 /// 不含任何运行时类型（core 不依赖 tokio）；结果经 wait / progress 取得。
 pub struct JobHandle { pub job_id: AttemptId, pub sandbox_id: SandboxId }
+
+/// recover 对单个未终结尝试的判定（engine.md §7.14.6 E4），分类规则见 §7.10。
+pub enum RecoveredJob {
+    Running(JobHandle),            // 已受理且仍在推进（运行中，或尚未启动、由本模块重新走该阶段）→ engine 继续 wait
+    Exited(JobHandle),             // 已受理且已停止，产物可提取 → wait 直接返回 JobOutcome（容器已不在但 out/ 完整时 cause = Lost）
+    Lost(JobHandle),               // 受理后丢失：容器不在且产物不可提取 → wait 返回 Infra{Lost}，engine 终结为 infra.lost
+    Unknown { job_id: AttemptId }, // 未知 job（从未受理）→ engine 以同一 SandboxSpec 重新 submit，不计为失败、不消耗重试
+}
 
 pub struct SandboxSpec {
     pub job_id: AttemptId,                 // == Attempt.id == JobSpec.job_id
@@ -406,6 +416,9 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 | 容器已不存在但 staging 在 | 若 `out/` 完整可读则 `collect`（`cause = Lost`），否则 `Infra{Lost}`；Sandbox `lost` |
 | 容器与 staging 都不在 | `Infra{Lost}` |
 | 相位在 `Creating` / `Staging`（尚未启动） | 重新走该阶段（`create` 以 `--replace` / 先 `remove` 保证幂等）；或销毁后以新沙盒重试，由 `engine` 决定 |
+| 没有任何受理痕迹（无 `meta.json`、无带该 `gantry.job_id` 标签的容器、无 staging），且 `store` 中没有该沙盒的 `sandbox.created` | 未知 job（从未受理，例如 `attempt.started` 落库后、`submit` 返回前崩溃）；不建任何东西 |
+
+每行对应的 `RecoveredJob`（§6.1，E4）：仍在运行、`Accepted` / `Queued` / `Creating` / `Staging` 相位 → `Running`；已退出、容器不在但 `out/` 可提取 → `Exited`；`Infra{Lost}` 的两行 → `Lost`；没有任何受理痕迹 → `Unknown`。"容器与 staging 都不在"与"从未受理"靠 `sandbox.created` 区分：有该事件即为受理后丢失（`Lost`）。`Accepted` / `Queued` 阶段 staging 被整体删除而尚无 `sandbox.created` 时判为 `Unknown`，此时容器还没创建，重新 `submit` 不会重复执行。
 
 `sweep_orphans(live)`：列出带 `gantry.managed=1` 的容器与 `<workspaces_dir>/*`，对不在 `live` 且超过宽限（默认 5 min [建议值，待调优]）的，先 `revoke_job_token` 再 `remove` 与 `purge`。巡检周期默认 10 min [建议值，待调优]。`gantryd` 优雅退出时**不**杀运行中的容器，留给重启后的 `recover` 接管（deadline 已持久化）。
 
@@ -585,7 +598,7 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 
 ### H. 崩溃恢复（M1）
 
-- [ ] 在 `Creating` / `Created` / `Staging` / `Starting` / `Running` / `Stopped` / `Collected` / `Destroying` 每个相位后杀掉并重启 `gantryd`：`recover` 之后——运行中的继续监督且 deadline 不变；已退出的直接 `collect`；已不存在的得到 `Infra{Lost}`；没有重复沙盒；`collect` 的 CAS 对象哈希不变。
+- [ ] 在 `Creating` / `Created` / `Staging` / `Starting` / `Running` / `Stopped` / `Collected` / `Destroying` 每个相位后杀掉并重启 `gantryd`：`recover` 之后——运行中的继续监督且 deadline 不变（`Running`）；已退出的直接 `collect`（`Exited`）；已不存在的得到 `Infra{Lost}`（`Lost`）；从未受理的得到 `Unknown` 且不建任何东西；没有重复沙盒；`collect` 的 CAS 对象哈希不变。
 - [ ] 终止原因已写入 `meta.json` 但信号尚未发出时崩溃，重启后补发信号，不丢原因。
 - [ ] 孤儿：带标签但无对应未终结 Attempt 的容器、无容器的 staging 目录被 `sweep_orphans` 清除（先 `revoke_job_token`）；有对应未终结 Attempt 的不被误杀。
 - [ ] 日志重读不重复计数（`seq` 去重）。

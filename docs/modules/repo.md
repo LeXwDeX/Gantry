@@ -489,7 +489,7 @@ commit_patch(req):
 | `patch.validated` | `job_id`、`sha256`、`base_sha`、`result_tree`、`verdict`、`files[]`、`reasons[]`、`config_rev` |
 | `patch.rejected` | `job_id`、`sha256`、`reason`（机械码 `declared_mismatch` / `not_applicable` / `path_invalid` / `dotgit` / `binary` / `symlink` / `submodule`，或 `policy_denied`）、`detail`（git 原因或路径，不可信文本）、`reasons[]`（仅 `policy_denied` 时，来自 `policy`）、`config_rev`（仅 `policy_denied` 时） |
 
-`policy.denied` 只由 `policy` 在规则判定拒绝时追加（P-69）；`commit_oid` 写在哪个事件见 OQ-R2。
+`policy.denied` 只由 `policy` 在规则判定拒绝时追加（P-69）；`commit_oid` 写在 `attempt.finished.result_commit`（OQ-R2 已决）。
 
 日志（结构化，字段 `project_id`、`job_id`、`worktree_id`、`op`）：每次 git 调用的命令名、退出码、耗时、stderr 尾部（视为不可信文本，去控制符）；锁的获取 / 冲突 / 过期；校验各步的耗时与结论。不记录补丁正文与文件内容。
 
@@ -577,7 +577,7 @@ commit_patch(req):
 | # | 问题 | 影响 | 本文暂用 |
 | --- | --- | --- | --- |
 | OQ-R1 | 工作树是否需要物化出检出目录？骨架有 `Worktree.path`（api.md 示例是服务端路径，"仅作展示"），但补丁在一次性检出上应用、人看代码用 `git fetch`（P-01），似乎不需要常驻检出 | 磁盘、`remove_worktree` 语义、`path` 的含义 | 分支头只存在于 `refs/gantry/wt/<id>`；`path` 为可选的惰性物化检出，丢失可重建 |
-| OQ-R2 | 提交 OID 记录在哪个事件。`forge` 的 `push_branch` 需要 `local_head_oid`，但 data-model 的 `patch.validated` 只含 `result_tree`，`attempt.finished` 无此字段；而提交发生在校验之后（要等提交说明） | 事件 `data` 契约（需单独契约 PR） | `engine` 把 `CommitRecord.commit_oid` 放进 `attempt.finished`（或新增事件）；`repo` 不依赖它，靠 `refs/gantry/attempt/<id>` 幂等 |
+| OQ-R2 | **已决：见 engine.md §7.14.6 E1（#64），提交 OID 写在 `attempt.finished.result_commit`**。原问题：提交 OID 记录在哪个事件。`forge` 的 `push_branch` 需要 `local_head_oid`，但 data-model 的 `patch.validated` 只含 `result_tree`，`attempt.finished` 无此字段；而提交发生在校验之后（要等提交说明） | 事件 `data` 契约（需单独契约 PR） | `engine` 把 `CommitRecord.commit_oid` 放进 `attempt.finished`（或新增事件）；`repo` 不依赖它，靠 `refs/gantry/attempt/<id>` 幂等 |
 | OQ-R3 | （身份部分**已决：见裁决 C23 / P-69**——提交由 `repo` 创建，身份取 `github.commit_identity`；说明来源仍未决）提交作者 / 提交者身份与说明来源。forge-actions §8 给了 bot 名与 noreply 邮箱格式（"需核实"），而 `app_slug` 是 `forge` 内部状态；§2.4 的表格还写着"提交由 `engine` 在补丁校验后创建"，与 decisions P-25 / architecture §4（`repo` 生成提交）不一致；说明来源是 `classify.commit_message` 还是 `build` 建议（worker-protocol OQ-10） | 谁调用 `commit_patch`、身份从哪来 | 身份取配置；调用方（`engine`）传入 `CommitMessage`；`repo` 负责创建提交对象 |
 | OQ-R4 | 工作区的历史深度、子模块 / LFS 策略（worker-protocol OQ-13）；大仓库每次 Attempt 都复制全量对象的成本 | `prepare_workspace` 耗时与磁盘；review 需要的历史 | 不浅克隆，复制所需对象，不初始化子模块 |
 | OQ-R5 | 补丁闸门的几处解释需契约确认：① 契约写 `git apply --index`（物理检出），是否允许用 `--cached` + 临时 index 以缩小攻击面、省去检出；② P5 对"删除一个符号链接"的处置（本文：任一侧为 `120000` / `160000` 即拒，失败闭合）；③ 预解析（`git apply --numstat -z --summary`）是否稳定列出恶意路径（**需核实**）；④ **已决：见裁决 C22 / P-68**（撤销 `binary_allowlist`，二进制、符号链接一律拒绝）。原问题：decisions P-41 的 `binary_allowlist` 与 worker-protocol OQ-4、§5.3、config.md 互相不一致 | 闸门的判定与失败分类 | 严格按契约：物理检出 + `--index`；二进制、符号链接、子模块一律 Deny |

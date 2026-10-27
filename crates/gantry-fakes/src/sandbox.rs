@@ -1,7 +1,9 @@
 //! `FakeSandboxService`：不起容器，按脚本回放 `JobOutcome`。
 //!
 //! 只模拟引擎面语义：`submit` / `wait` / `cancel` / `release` 幂等，`wait`
-//! 对同一 job 恒返回同一结果，`progress` 流式回放脚本样本。不重现 sandbox
+//! 对同一 job 恒返回同一结果，`progress` 流式回放脚本样本。`recover` 按
+//! 受理集合（成功 `submit` 过的 job）分类：未受理 → `Unknown`；已受理的按
+//! 脚本给出的运行时状态返回 `Running` / `Exited` / `Lost`。不重现 sandbox
 //! 的生命周期、Egress 调用或 worker 校验。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,9 +19,9 @@ use gantry_core::entities::TokenUsage;
 use gantry_core::ids::{AttemptId, SandboxId};
 use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::sandbox::{
-    CapacitySnapshot, EgressFlags, JobHandle, JobOutcome, ProgressSample, ProgressStats,
-    SandboxError, SandboxService, SandboxSpec, SweepReport, TerminalCause, TerminalFacts, Timings,
-    UnfinishedAttempt,
+    CapacitySnapshot, EgressFlags, InfraDetail, JobHandle, JobOutcome, ProgressSample,
+    ProgressStats, RecoveredJob, SandboxError, SandboxService, SandboxSpec, SweepReport,
+    TerminalCause, TerminalFacts, Timings, UnfinishedAttempt,
 };
 use gantry_core::worker::FileArtifact;
 
@@ -73,8 +75,23 @@ impl SandboxCall {
     }
 }
 
+/// 替身里已受理 job 的运行时状态，只影响 `recover` 的分类与丢失后的 `wait`。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FakeRuntime {
+    /// 已停止，`wait` 返回脚本结果（默认）。
+    #[default]
+    Exited,
+    /// 仍在运行；替身不阻塞，`wait` 仍返回脚本结果。
+    Running,
+    /// 受理后丢失；`wait` 返回 `Infra { Lost }`。
+    Lost,
+}
+
 struct JobEntry {
     spec: Option<SandboxSpec>,
+    /// 成功 `submit` 过；`script` 预放 spec 不算受理。
+    accepted: bool,
+    runtime: FakeRuntime,
     outcome: JobOutcome,
     progress: Vec<ProgressSample>,
     canceled: bool,
@@ -128,6 +145,8 @@ impl FakeSandboxService {
             job_id,
             JobEntry {
                 spec: None,
+                accepted: false,
+                runtime: FakeRuntime::default(),
                 outcome: JobOutcome {
                     job_id,
                     sandbox_id,
@@ -151,6 +170,17 @@ impl FakeSandboxService {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = state.jobs.get_mut(&job_id) {
             entry.spec = Some(spec);
+        }
+    }
+
+    /// 设定已脚本化 job 的运行时状态（模拟重启时运行时里看到的情形）。
+    pub fn set_runtime(&self, job_id: AttemptId, runtime: FakeRuntime) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = state.jobs.get_mut(&job_id) {
+            entry.runtime = runtime;
         }
     }
 
@@ -232,9 +262,11 @@ impl SandboxService for FakeSandboxService {
                     "a different sandbox spec was already submitted for this job".into(),
                 ));
             }
+            entry.accepted = true;
             return Ok(JobHandle { job_id, sandbox_id });
         }
         entry.spec = Some(spec);
+        entry.accepted = true;
         Ok(JobHandle { job_id, sandbox_id })
     }
 
@@ -244,11 +276,14 @@ impl SandboxService for FakeSandboxService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.calls.push(SandboxCall::Wait { job_id: *job_id });
-        state
-            .jobs
-            .get(job_id)
-            .map(|entry| entry.outcome.clone())
-            .ok_or(SandboxError::NotFound)
+        let entry = state.jobs.get(job_id).ok_or(SandboxError::NotFound)?;
+        if entry.accepted && (entry.runtime == FakeRuntime::Lost || entry.swept) {
+            return Err(SandboxError::Infra {
+                detail: InfraDetail::Lost,
+                message: "fake sandbox job was lost".into(),
+            });
+        }
+        Ok(entry.outcome.clone())
     }
 
     fn progress(&self, job_id: &AttemptId) -> BoxStream<'static, ProgressSample> {
@@ -305,7 +340,7 @@ impl SandboxService for FakeSandboxService {
         &self,
         ctx: &ActorCtx,
         unfinished: &[UnfinishedAttempt],
-    ) -> Result<Vec<JobHandle>, SandboxError> {
+    ) -> Result<Vec<RecoveredJob>, SandboxError> {
         let mut state = self
             .state
             .lock()
@@ -314,16 +349,31 @@ impl SandboxService for FakeSandboxService {
             ctx: ctx.clone(),
             unfinished: unfinished.to_vec(),
         });
-        let mut handles = Vec::new();
-        for attempt in unfinished {
-            if state.jobs.contains_key(&attempt.job_id) {
-                handles.push(JobHandle {
+        let recovered = unfinished
+            .iter()
+            .map(|attempt| {
+                let handle = JobHandle {
                     job_id: attempt.job_id,
                     sandbox_id: attempt.sandbox_id,
-                });
-            }
-        }
-        Ok(handles)
+                };
+                match state.jobs.get(&attempt.job_id) {
+                    Some(entry) if entry.accepted => {
+                        if entry.swept {
+                            return RecoveredJob::Lost(handle);
+                        }
+                        match entry.runtime {
+                            FakeRuntime::Running => RecoveredJob::Running(handle),
+                            FakeRuntime::Exited => RecoveredJob::Exited(handle),
+                            FakeRuntime::Lost => RecoveredJob::Lost(handle),
+                        }
+                    }
+                    _ => RecoveredJob::Unknown {
+                        job_id: attempt.job_id,
+                    },
+                }
+            })
+            .collect();
+        Ok(recovered)
     }
 
     async fn sweep_orphans(

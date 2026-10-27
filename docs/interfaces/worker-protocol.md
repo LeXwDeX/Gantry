@@ -187,7 +187,7 @@ worker 不需要区分 SIGTERM 的原因：原因只由管理器记录。取消�
 
 | 场景 | 处理 |
 | --- | --- |
-| `gantryd` 重启 | 沙盒带标签 `gantry.job_id`、`gantry.sandbox_id`。对每个没有 `attempt.finished` 的 Attempt 查运行时：仍在运行 → 重新接管日志（用 `seq` 去重）；已退出 → 直接 `collect`；已不存在 → 终结为 `infra_error`（`infra.lost`），Sandbox `lost` |
+| `gantryd` 重启 | 沙盒带标签 `gantry.job_id`、`gantry.sandbox_id`。对每个没有 `attempt.finished` 的 Attempt 查运行时：仍在运行 → 重新接管日志（用 `seq` 去重）；已退出 → 直接 `collect`；受理后已不存在 → 终结为 `infra_error`（`infra.lost`），Sandbox `lost`；从未被受理（`submit` 返回前崩溃）→ 重新 `submit`，不计为失败（sandbox.md §6.1 `RecoveredJob`） |
 | 提取幂等 | `collect` 的结果只取决于已停止沙盒的 `out/`，重复执行得到相同的内容寻址对象 |
 | 补丁提交幂等 | 校验得到的 `result_tree`（git tree OID）写入 `attempt.finished`；重放时先查该事件，已存在则不重复提交 |
 | 孤儿沙盒 | 巡检按标签找出没有对应未终结 Attempt 的沙盒并销毁 |
