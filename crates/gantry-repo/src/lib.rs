@@ -10,6 +10,7 @@
 //! 本模块从不读取沙盒写入过的目录，也不联网（I1、I2、I8）。
 
 pub mod cas;
+pub mod commit;
 mod gate;
 pub mod git;
 pub mod mirror;
@@ -144,6 +145,8 @@ struct Inner {
     patches: tokio::sync::Mutex<BTreeMap<AttemptId, gate::PatchRecord>>,
     /// 同一 job_id 的校验串行化。
     job_locks: Mutex<BTreeMap<AttemptId, Arc<tokio::sync::Mutex<()>>>>,
+    /// 本进程生成的提交（provenance 的快速路径；重启后由 ref 推出）。
+    commits: Mutex<BTreeMap<(ProjectId, GitOid), CommitRecord>>,
 }
 
 impl std::fmt::Debug for GitRepo {
@@ -195,6 +198,7 @@ impl GitRepo {
                 git_slots: Mutex::new(BTreeMap::new()),
                 patches: tokio::sync::Mutex::new(BTreeMap::new()),
                 job_locks: Mutex::new(BTreeMap::new()),
+                commits: Mutex::new(BTreeMap::new()),
             }),
         };
         repo.rebuild_worktrees().await?;
@@ -238,6 +242,34 @@ impl GitRepo {
         )
         .await?;
         Ok(())
+    }
+
+    /// 重建损坏的镜像仓（repo.md §9）：独占锁下把旧目录改名保留，原地建一个空的新
+    /// 镜像仓，之后由 `forge` 重新拉取。`refs/gantry/*` 随旧目录一起留下：分支头在
+    /// 下次读取时于 `base_sha` 恢复，提交由 `engine` 以相同输入重放 `commit_patch`
+    /// 得到相同 OID（tree 由 CAS 里的补丁重放）。
+    pub async fn rebuild_mirror(&self, project: &ProjectId) -> Result<MirrorInfo, RepoError> {
+        let _serial = self.inner.mirror_create.lock().await;
+        let entry = self.mirror_entry(project)?;
+        let lock = mirror::lock(&entry.git_dir, true).await?;
+        let mut aside = entry.git_dir.clone().into_os_string();
+        aside.push(format!(
+            ".broken-{}",
+            self.inner.deps.clock.now().as_millis()
+        ));
+        std::fs::rename(&entry.git_dir, &aside).map_err(io)?;
+        drop(lock);
+        mirror::create(
+            &self.inner.env,
+            &self.inner.cfg.tmp_dir(),
+            &self.inner.cfg.template_dir(),
+            project,
+            &entry.slug,
+            &entry.git_dir,
+        )
+        .await?;
+        self.set_health(project, MirrorHealth::Healthy);
+        Ok(entry.info())
     }
 
     /// 结束所有已过期的锁：追加 `worktree.unlocked(reason=expired)`（repo.md §7.6）。
@@ -411,23 +443,6 @@ impl GitRepo {
             after = page.scanned_to;
         }
         Ok(())
-    }
-
-    async fn branch_ref_head(
-        &self,
-        project: &ProjectId,
-        id: &WorktreeId,
-    ) -> Result<GitOid, RepoError> {
-        let entry = self.mirror_entry(project)?;
-        let out = self
-            .git(
-                project,
-                GitCmd::new("rev-parse", &entry.git_dir)
-                    .args(["rev-parse", "--verify", "--end-of-options"])
-                    .arg(wt_ref(id)),
-            )
-            .await?;
-        GitOid::parse(out.stdout_str()?.trim()).map_err(|_| io_error("bad branch head oid"))
     }
 
     async fn check_branch(&self, project: &ProjectId, branch: &str) -> Result<(), RepoError> {
@@ -787,11 +802,13 @@ impl RepoService for GitRepo {
     }
 
     async fn branch_head(&self, id: &WorktreeId) -> Result<GitOid, RepoError> {
-        let project = {
+        let (project, base) = {
             let table = self.inner.worktrees.lock().await;
-            table.get(id)?.worktree.project_id
+            let state = table.get(id)?;
+            (state.worktree.project_id, state.base_sha)
         };
-        self.branch_ref_head(&project, id).await
+        let entry = self.mirror_entry(&project)?;
+        self.branch_head_in(&entry.git_dir, id, &base).await
     }
 
     async fn remove_worktree(
@@ -925,17 +942,17 @@ impl RepoService for GitRepo {
     async fn commit_patch(
         &self,
         _ctx: &ActorCtx,
-        _req: CommitPatch,
+        req: CommitPatch,
     ) -> Result<CommitRecord, RepoError> {
-        Err(io_error("commit_patch lands in a later #91 slice"))
+        self.commit_impl(req).await
     }
 
     async fn provenance(
         &self,
-        _project: &ProjectId,
-        _oid: &GitOid,
+        project: &ProjectId,
+        oid: &GitOid,
     ) -> Result<Option<CommitRecord>, RepoError> {
-        Ok(None)
+        self.provenance_impl(project, oid).await
     }
 }
 
@@ -993,7 +1010,7 @@ pub fn wt_ref(id: &WorktreeId) -> String {
     format!("refs/gantry/wt/{id}")
 }
 
-fn zero_oid() -> GitOid {
+pub(crate) fn zero_oid() -> GitOid {
     GitOid::parse("0000000000000000000000000000000000000000").expect("zero oid is valid")
 }
 

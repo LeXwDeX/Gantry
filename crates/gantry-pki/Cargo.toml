@@ -1,0 +1,27 @@
+[package]
+name = "gantry-pki"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 证书与配对（pki.md）：离线根 + 在线中间 CA、设备证书签发、握手校验、配对与吊销"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+thiserror.workspace = true
+sha2.workspace = true
+time.workspace = true
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
+x509-parser = { version = "0.16", features = ["verify"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+pkcs8 = { version = "0.10", features = ["encryption", "pem", "std"] }
+zeroize = "1"
+rand_core = "0.6"
+pem = "3"
+base64 = "0.22"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }

@@ -46,6 +46,15 @@ impl Drop for TempDir {
     }
 }
 
+/// 构造自定义 `PolicyPort` 时可用的部件（与 Fixture 共享 Store / 时钟 / ID）。
+pub struct PolicyParts {
+    pub fake: FakePolicy,
+    pub store: Store,
+    pub clock: Arc<FakeClock>,
+    pub ids: Arc<IdGen>,
+    pub project: ProjectId,
+}
+
 pub struct Fixture {
     pub tmp: TempDir,
     pub clock: Arc<FakeClock>,
@@ -65,6 +74,22 @@ impl Fixture {
     }
 
     pub async fn with_config(label: &str, tweak: impl FnOnce(&mut RepoConfig)) -> Self {
+        Self::build(label, tweak, |parts| Arc::new(parts.fake)).await
+    }
+
+    /// 用自定义的 `PolicyPort`（外面仍包一层计数）。
+    pub async fn with_policy(
+        label: &str,
+        policy: impl FnOnce(PolicyParts) -> Arc<dyn PolicyPort>,
+    ) -> Self {
+        Self::build(label, |_| {}, policy).await
+    }
+
+    async fn build(
+        label: &str,
+        tweak: impl FnOnce(&mut RepoConfig),
+        make_policy: impl FnOnce(PolicyParts) -> Arc<dyn PolicyPort>,
+    ) -> Self {
         let tmp = TempDir::new(label);
         let clock = Arc::new(FakeClock::new(T0));
         let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
@@ -80,7 +105,14 @@ impl Fixture {
         let mut cfg = RepoConfig::new(tmp.path().join("data"));
         tweak(&mut cfg);
         let policy = FakePolicy::new_in(store.clone());
-        let counting = Arc::new(CountingPolicy::new(policy.clone()));
+        let project: ProjectId = ids.next().unwrap();
+        let counting = Arc::new(CountingPolicy::new(make_policy(PolicyParts {
+            fake: policy.clone(),
+            store: store.clone(),
+            clock: clock.clone(),
+            ids: ids.clone(),
+            project,
+        })));
         let cas = Arc::new(MemoryCas::new());
         let repo = GitRepo::open(
             cfg,
@@ -94,7 +126,6 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let project = ids.next().unwrap();
         Self {
             tmp,
             clock,
@@ -283,13 +314,13 @@ use gantry_core::worker::{PatchFacts, PathConstraints, Proposal};
 use std::sync::Mutex;
 
 pub struct CountingPolicy {
-    inner: FakePolicy,
+    inner: Arc<dyn PolicyPort>,
     pub facts: Mutex<Vec<PatchFacts>>,
     pub added: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 impl CountingPolicy {
-    pub fn new(inner: FakePolicy) -> Self {
+    pub fn new(inner: Arc<dyn PolicyPort>) -> Self {
         Self {
             inner,
             facts: Mutex::new(Vec::new()),

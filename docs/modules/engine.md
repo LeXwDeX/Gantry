@@ -624,14 +624,14 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | 策略拒绝（含 M1 受保护路径） | 取 `ReportHint`（M1 依赖清单 / lockfile 为 `escalation`；workflow 为 `decision_needed` + `payload.kind = manual_action`，附补丁，P-48） | 取 `ReportHint` | `ReportHint.reason_code`（如 `policy.path_protected:workflows`）；`manual_action` 的选项 `done`（primary）/ `abandon` | `waiting_human` |
 | 重试耗尽 / 无进展 / 无补丁 | `escalation` | blocker | `attempt_failed` / `no_progress` / `no_change` | `waiting_human` |
 | 合并需要 Gantry 审批 | `approval_needed` | blocker | `{approval_id}` | `waiting_human`（GitHub 闸门未满足时同样，由用户在 GitHub 上完成） |
-| Outbox 终态失败 | `escalation` | warn / blocker | `outbox_failed:<code>`（映射见 §9） | 视码 |
+| Outbox 终态失败 | `escalation` | warn / blocker | `outbox_failed:<code>`（映射见 §9），`payload.action_id` = 失败动作；`retry`（primary）/ `abandon`（#67） | 视码 |
 | `propose` / `merge` 阶段 GitHub 状态外部改变 | `decision_needed`（`payload.kind = other`） | warn | `github_state_changed`；`continue` / `abandon` **[提议，P-79 未覆盖]** | `waiting_human` |
 
-**选项形状**（P-63、P-79）：`escalation`（仅 `level_cap_exceeded`）、`decision_needed`、`budget_exhausted` 的 `payload.options[]` 为 `{id, label, primary?}`；`spec_needed` 无选项（自由文本答复）；升档一律用 `escalation`（手机档案不可 `choose`）。`label` 由引擎模板生成（可信文本），选项 `id` 只取 data-model 词表。
+**选项形状**（P-63、P-79）：`escalation`（仅 `level_cap_exceeded` 与 `outbox_failed:<code>`）、`decision_needed`、`budget_exhausted` 的 `payload.options[]` 为 `{id, label, primary?}`；`spec_needed` 无选项（自由文本答复）；升档一律用 `escalation`（手机档案不可 `choose`）。`label` 由引擎模板生成（可信文本），选项 `id` 只取 data-model 词表。
 
 **关闭与执行**（notify.md §7.4–§7.5）：
 
-- `choose` 由 `notify` 校验并写 `inbox.resolved`（`resolution = chosen`、`option_id`），**不调用引擎**；引擎订阅该事件后执行：`abandon` → `abandon`；`replan` → T7；`upgrade` → `set_level_cap(target_level)`；`narrow` → 保持上限、`level_effective = level_cap` 继续；`done` → 解除阻塞并按 GitHub 快照重新求值当前阶段；`continue` → 解除阻塞并重新求值；`raise_cap` → 按 D-19 给耗尽维度追加一份该档模板原值后继续（记录追加的事件见 #129）；`fix`（守护的 `review_dispute`）→ T9；`keep` → 不动作。失败节点的重试走 `POST /v1/nodes/{id}/retry`，不是选项。执行失败是引擎的错误（再上报），不回滚选择。
+- `choose` 由 `notify` 校验并写 `inbox.resolved`（`resolution = chosen`、`option_id`），**不调用引擎**；引擎订阅该事件后执行：`abandon` → `abandon`；`replan` → T7；`upgrade` → `set_level_cap(target_level)`；`narrow` → 保持上限、`level_effective = level_cap` 继续；`done` → 解除阻塞并按 GitHub 快照重新求值当前阶段；`continue` → 解除阻塞并重新求值；`raise_cap` → 按 D-19 给耗尽维度追加一份该档模板原值后继续（记录追加的事件见 #129）；`fix`（守护的 `review_dispute`）→ T9；`keep` → 不动作；`retry`（`outbox_failed:<code>`）→ 对 `payload.action_id` 那个动作的意图以 `epoch + 1` 重新 `decide_action` 并入队，需要审批的动作重新请求审批（P-54，见 §7.14.4）。失败节点的重试走 `POST /v1/nodes/{id}/retry`，不是选项。执行失败是引擎的错误（再上报），不回滚选择。
 - 自动关闭：`notify` 内置 R1（审批 `granted` / `denied` / `invalidated` / `expired` / `consumed` 关闭对应 `approval_needed`）、R2（交付单元 `abandoned` / `closed` 关闭其全部 open 项）；其余由引擎显式 `InboxPort::resolve`（R4，如节点重试成功、GitHub 上已处理、`supersedes`）。自由文本答复 `spec_needed` 由 `conversation` 在 `supply_spec` 成功后 `resolve(Answered)`。
 - `dismiss` 只表示"不再提醒"：**不改变交付单元状态，引擎不得依赖收件箱状态推进**（notify.md I3）。引擎用自己事件日志里的"未决阻塞项"集合（`DeliveryState.open_inbox`，由引擎创建时加入；由 `inbox.resolved` 移出，或被新项 `inbox.raised.data.supersedes` 列出时移出（被取代的旧项不会另发 `inbox.resolved`，notify.md §7.2）；不看 `dismissed`）判断 `waiting_human`，所以 dismiss 一个阻塞项不会解除暂停（OQ-13）。
 - **`open_inbox` 与 store 的 `inbox_items` 投影是两回事，不要合并**：store 的 `inbox_items`（store.md §6.2）跟踪每一项的 `open` / `resolved` / `dismissed` 状态，供展示与计数，dismiss 后该项就不再是 open。引擎的 `open_inbox` 只由 `inbox.raised` 加入、由 `inbox.resolved`（及 `supersedes`）移出，dismiss 不影响它。两者对同一批 `inbox.*` 事件各自折叠，但语义不同，不属于 M1 收尾评审 A1 所说的重复投影。如果改为从 store 的 open 项读取，dismiss 就会解除阻塞，违反上一条（测试 `dismiss_does_not_unblock` 锁定这一点）。
@@ -920,6 +920,7 @@ pub struct OpenInbox {
     pub effect: Blocking,                           // WaitingHuman | Blocked | None（warn 级不阻塞）
     pub node_id: Option<NodeId>, pub attempt_id: Option<AttemptId>, pub approval_id: Option<ApprovalId>,
     pub target_level: Option<Level>,                // level_cap_exceeded 的 upgrade 目标
+    pub action_id: Option<ActionId>,                // outbox_failed:<code> 的失败动作（payload.action_id，#67）
     pub options: Vec<OptionId>,                     // inbox.resolved 的 option_id 必须在其中，否则忽略并记错误
     pub raised_seq: Seq,
 }
@@ -942,6 +943,7 @@ pub struct FindingFingerprint(Sha256Digest);
 | `abandon_cause` | `Option<AbandonCause>` | `delivery.abandoned.reason`：`pr_closed` → `PrClosedUnmerged`，`issue_not_planned` → `IssueNotPlanned`，其余 → `UserAbandoned`；T15 只认 `PrClosedUnmerged`（core `next_stage_with_abandon`） |
 | `stage_entered` | `(Seq, Timestamp, Option<String>)` | 最近一次 `delivery.stage_changed`（或 `delivery.created`）的 `seq`、`ts` 与 `reason`；"本阶段内"类前置条件都以它为界 |
 | `outbox` | `BTreeMap<ActionKey, OutboxState>` | `outbox.enqueued`（`action` 含 `kind`、`epoch`、幂等键）/ `succeeded` / `failed` / `cancelled`；`OutboxState = { action_id, kind, epoch, status, failure_code? }` |
+| `retried` | `BTreeSet<ActionId>` | `inbox.resolved(chosen, option_id = retry)`，取原上报项（`open_inbox` 中该项）的 `action_id`；只用于 `epoch` 推导（下文"`ActionKey` 与 `epoch`"，#67） |
 | `approvals` | `BTreeMap<ApprovalId, ApprovalLite>` | `approval.requested`（本交付单元）及后续状态事件；`ApprovalLite = { action, subject_digest, status }` |
 | `locks` | `BTreeMap<WorktreeId, LockLite>` | `worktree.locked` / `unlocked`；`LockLite = { holder, lease_until, fence }`。`LockToken` 可由 `{worktree_id, holder, delivery_id, fence, lease_until}` 重建（repo.md §7.6），重启后无需重新取锁即可续租或释放；租约已过期则重新 `AcquireLock` |
 | `lock_owner` | `BTreeMap<WorktreeId, NodeId>` | **内存**：执行体在 `Report::LockAcquired` 时记下锁是为哪个节点取的；重启后为空，由 `Tick(Recover)` 按"有未终结 sandbox 尝试的节点"重新认领 |
@@ -950,7 +952,7 @@ pub struct FindingFingerprint(Sha256Digest);
 
 `Evidence` 补 `candidate_tree: Option<GitOid>`（`push_branch.expected_tree_oid`）与 `stage_verdicts: BTreeMap<WorkflowId, Verdict>`（按 `VerdictRule` 折叠后的阶段结论）。
 
-**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，M1 内不自增：Outbox 终态失败后的上报 `escalation(outbox_failed:*)` 在 P-79 词表里没有选项，用户"决定重试"（§9）目前没有入口，见 7.14.6 E6；在此之前终态失败的动作只能以放弃收场。`create_pr` 的 `open_pr` 提议标题 / 正文经 E5 落盘为 `attempt.finished.accepted_open_pr`（`proposal_id`）+ `result_ref`。`expected_actions` 签名相应为 `expected_actions(state, env.proposals)`，仍是纯函数（#125）：对产出补丁那次尝试（`result_commit = Evidence.candidate_head`）取键 `ProposalRef { result_ref, proposal_id: accepted_open_pr }`，按 7.14.3 末的表填写 `create_pr` 的 `title` / `body` / `draft`——`Found` 取原文，`Missing` 或该尝试没有 `accepted_open_pr` 时用交付单元标题与模板正文，表中尚无该键时本轮不期望 `create_pr`。其余字段（`head`、`base`、`closes`、`expected_head_oid`）照旧取自状态。CAS 按内容寻址，崩溃恢复后预取到的原文相同，`ActionKey` 一致；forge-actions §2.2 不变。
+**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，只在用户对 `escalation(outbox_failed:<code>)` 选 `retry` 时自增（#67，7.14.6 E6）：折叠 `inbox.resolved(chosen, retry)` 时，按原上报项的 `action_id` 把失败动作记入 `DeliveryState.retried: BTreeSet<ActionId>`；`expected_actions` 为某意图取 `epoch` 时，看 `outbox` 里同一意图（幂等键除 `epoch` 外的部分相同）`epoch` 最大的那一行：它终态失败且在 `retried` 中 → `epoch + 1`，否则沿用它的 `epoch`；没有行 → 1。两者都从事件重建，重放得到相同的 `ActionKey`。需要审批的动作换了 `epoch` 也换了动作 ID，旧审批已被消费，`decide_action` 会给出 `NeedsApproval`（P-54）。`create_pr` 的 `open_pr` 提议标题 / 正文经 E5 落盘为 `attempt.finished.accepted_open_pr`（`proposal_id`）+ `result_ref`。`expected_actions` 签名相应为 `expected_actions(state, env.proposals)`，仍是纯函数（#125）：对产出补丁那次尝试（`result_commit = Evidence.candidate_head`）取键 `ProposalRef { result_ref, proposal_id: accepted_open_pr }`，按 7.14.3 末的表填写 `create_pr` 的 `title` / `body` / `draft`——`Found` 取原文，`Missing` 或该尝试没有 `accepted_open_pr` 时用交付单元标题与模板正文，表中尚无该键时本轮不期望 `create_pr`。其余字段（`head`、`base`、`closes`、`expected_head_oid`）照旧取自状态。CAS 按内容寻址，崩溃恢复后预取到的原文相同，`ActionKey` 一致；forge-actions §2.2 不变。
 
 #### 7.14.5 `Decision`
 
@@ -1047,7 +1049,7 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E2 | 无进展检测的 finding 指纹没有落盘处 | 判定节点的 `node.finished` 增加可选 `fingerprints[]`（`FindingFingerprint` 十六进制，≤ 64 条，只在 `REVISE` / `REJECT` 时出现） | M2 / M3（M1 无轮次，`round_history` 恒空） |
 | E3 | **已落地（#66）**：policy.md §6.1 规定引擎发起的动作 `Deny` 必带 `ReportHint`，`reason_code` 只取 data-model 上报词表已列的码，不新增词表项；`FakePolicy` 对违约脚本直接 panic。原缺口：`PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报。**待决**：`merge_pr` 的 `ActionDenied` 与 `ApprovalShapeUndefined` 以外的 `DenyReason` 在词表里没有对应码（policy.md OQ-P15，#133） | 引擎按 `ReportHint` 上报 | M1（`merge_pr` 以外的动作） |
 | E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**`ActionKey` 衔接已定（#125，方案 1）**：执行体开事务前按 `(result_ref, proposal_id)` 从 CAS 预取原文进只读的 `DecideEnv.proposals`（7.14.2、7.14.3），`expected_actions` 用它算 `create_pr` 的完整意图与 `ActionKey`，`decide` 仍纯、不读 CAS；forge-actions §2.2 不改 | 引擎投影读入 `AttemptState.accepted_open_pr`；`DecideEnv` 增加 `proposals`（#69），`create_pr` 路径使用它（#70） | M1（体验；不阻塞） |
-| E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
+| E6 | **已落地（#67）**：data-model 上报词表给 `escalation(outbox_failed:<code>)` 增加选项 `retry`（primary）/ `abandon`，`payload` 增加 `action_id`（`core` 校验：`outbox_failed:<code>` 时必填、其余不得出现）；`notify` 按词表校验选项。原缺口：Outbox 终态失败后用户重做（`epoch + 1`）没有入口，§9 却写"由用户决定是否重试" | 引擎投影读入 `OpenInbox.action_id` 与 `retried`，`epoch` 规则见 7.14.4 | M1（失败路径；成功路径不受影响） |
 | E4 | **已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`），区分"job 从未被受理"与"受理后丢失"；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`，不把未起沙盒的尝试判成 `infra.lost` | 见 sandbox.md §6.1、§7.10；`FakeSandboxService` 按受理集合分类 | M1（"重启一致"） |
 
 E1、E4 都已落地：本地提交 OID 落盘到 `attempt.finished.result_commit`，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果。§12.2"重启一致"在引擎投影读入 `result_commit` 前不能宣布通过。
@@ -1119,11 +1121,11 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 | 引擎在 `collect` 之后 / 提交之前崩溃 | 重启后重走终结管线；提交幂等（§7.13） |
 | 引擎在入队之后崩溃 | 入队与决定入队的那次决策同事务，要么都在要么都不在；阶段事件已提交而入队未发生时，`Tick(Recover)` 按期望动作集合重新判定并入队，幂等键相同（§7.14.1） |
 | `outbox.failed`（终态）`precondition_failed(head_changed)` 于 `merge_pr` | 不盲重试；回 `review`（T11），head 变了就是新证据 |
-| `outbox.failed` `existing_pr` | 人手开了同名分支的 PR：上报 `escalation`，不覆盖 |
-| `outbox.failed` `not_mergeable` | 留在 `merge`，上报 `escalation`（`outbox_failed:not_mergeable`，GitHub 返回的原因是不可信文本，放进 evidence） |
+| `outbox.failed` `existing_pr` | 人手开了同名分支的 PR：上报 `escalation`（`outbox_failed:existing_pr`），不覆盖；`retry` 只在用户处理掉那个 PR 后才有意义 |
+| `outbox.failed` `not_mergeable` | 留在 `merge`，上报 `escalation`（`outbox_failed:not_mergeable`，GitHub 返回的原因是不可信文本，放进 evidence）；`retry` 需要新审批（P-54） |
 | `outbox.failed` `permission_denied` | 上报"App 缺权限"，不重试（`escalation`，`app_permission_missing`） |
-| `outbox.failed` `rate_limited`（等待次数耗尽） | 上报；由用户决定是否重试（新动作 `epoch + 1`，P-53） |
-| `outbox.failed` `validation_failed` / `target_missing` / `approval_invalid` | 上报；`approval_invalid` 先重新请求审批；已消费审批的动作终态失败后重做需要新审批（P-54） |
+| `outbox.failed` `rate_limited`（等待次数耗尽） | 上报 `escalation(outbox_failed:rate_limited)`；用户选 `retry` → 新动作 `epoch + 1`（P-53，§7.14.4），选 `abandon` → 放弃 |
+| `outbox.failed` `validation_failed` / `target_missing` / `approval_invalid` | 上报 `escalation(outbox_failed:<code>)`，选项 `retry` / `abandon`；`approval_invalid` 先重新请求审批；已消费审批的动作终态失败后重做（`retry`，`epoch + 1`）需要新审批（P-54） |
 | `outbox.cancelled` 因前置动作失败 | 沿依赖链向上找到根因动作，按该动作的失败码处理 |
 | `OutboxPort::enqueue_in` 返回 `PermissionMissing` | App 缺权限：上报 `escalation`（`app_permission_missing`），不重试 |
 | `OutboxPort::enqueue_in` 返回 `ApprovalRequired` | 引擎缺陷（漏了 `decide_action`）：记错误日志并上报，不绕过 |
