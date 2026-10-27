@@ -231,3 +231,35 @@ fn id_mint_is_deterministic() {
     assert_ne!(seed, other_input);
     assert_ne!(first, run(other_seq));
 }
+
+/// #125：提议原文表区分"尚未预取"（`None`）与"确定缺失"（`Some(Missing)`）；键取自尝试状态。
+#[test]
+fn proposal_texts_distinguish_unfetched_from_missing() {
+    use gantry_engine::decide::{ProposalMissing, ProposalRef, ProposalText, ProposalTexts};
+    let mut path = low_path();
+    path.truncate(11);
+    let mut finished = attempt_finished();
+    finished.data["accepted_open_pr"] = json!("proposal-1");
+    path.push(finished);
+    let state = DeliveryState::fold(&events(&path)).unwrap().unwrap();
+    let attempt = &state.node(&NODE.parse().unwrap()).unwrap().attempts[0];
+    let key = ProposalRef::of(attempt).unwrap();
+    assert_eq!(key.proposal_id, "proposal-1");
+
+    let mut texts = ProposalTexts::default();
+    assert_eq!(texts.get(&key), None);
+    texts.insert(
+        key.clone(),
+        ProposalText::Missing(ProposalMissing::NotInResult),
+    );
+    assert_eq!(
+        texts.get(&key),
+        Some(&ProposalText::Missing(ProposalMissing::NotInResult))
+    );
+
+    // 没有被接受的提议：无键。
+    let plain = DeliveryState::fold(&events(&low_path()[..12]))
+        .unwrap()
+        .unwrap();
+    assert!(ProposalRef::of(&plain.node(&NODE.parse().unwrap()).unwrap().attempts[0]).is_none());
+}
