@@ -771,3 +771,28 @@ async fn concurrent_validations_do_not_interfere() {
     assert_eq!(fx.events(EventType::PatchValidated).await.len(), 20);
     scratch_is_clean(&fx);
 }
+
+#[tokio::test]
+async fn restart_clears_scratch_and_prunes_leftover_worktrees() {
+    let mut fx = Fixture::new("gate-recovery").await;
+    let base = fx.seed().await;
+    // 模拟校验中途崩溃：scratch 里留着检出，镜像仓里留着 worktree 元数据。
+    let leftover = fx.data_dir().join("scratch/att_crashed");
+    git(
+        &fx.mirror_dir(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            leftover.to_str().unwrap(),
+            &base.to_string(),
+        ],
+    );
+    std::fs::write(fx.data_dir().join("scratch/stray.txt"), "x").unwrap();
+    assert!(git(&fx.mirror_dir(), &["worktree", "list"]).contains("att_crashed"));
+
+    fx.reopen().await;
+    scratch_is_clean(&fx);
+    assert!(!git(&fx.mirror_dir(), &["worktree", "list"]).contains("att_crashed"));
+}
