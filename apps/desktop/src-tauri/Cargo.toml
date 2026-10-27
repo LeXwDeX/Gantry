@@ -1,0 +1,30 @@
+[package]
+name = "gantry-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Gantry 桌面外壳（Tauri 2）：只把 gantry-desktop-shell 的能力注册成白名单 IPC 命令"
+publish = false
+
+# 不在根 workspace 里（根 Cargo.toml 的 exclude = ["apps"]）：Tauri 在 Linux 上需要系统 WebView
+# 开发包，CI 的 Rust 任务不装。可信逻辑全在 shell-core，由 CI 覆盖。
+[workspace]
+# shell-core 是根 workspace 的成员，这里不能再把它收为成员。
+exclude = ["shell-core"]
+
+[lib]
+name = "gantry_desktop_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+gantry-desktop-shell = { path = "shell-core" }
+
+[dependencies]
+# 不启用 test-software-keys：正式外壳只有硬件密钥（OQ-S2）。
+gantry-desktop-shell = { path = "shell-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
