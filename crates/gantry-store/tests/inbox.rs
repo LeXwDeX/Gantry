@@ -473,3 +473,55 @@ async fn inbox_paging_filters_and_cursor_rules() {
         .unwrap();
     assert!(other_kind.items.is_empty());
 }
+
+#[tokio::test]
+async fn failed_raise_leaves_no_partial_fold_in_the_transaction() {
+    let store = store().await;
+    let old = item(1, None, "spec:1", Severity::Info);
+    let taken = item(2, None, "taken", Severity::Info);
+    commit(&store, vec![raised(&old, vec![]), raised(&taken, vec![])])
+        .await
+        .unwrap();
+
+    // supersedes 合法，但新项的 dedup_key 与另一 open 项冲突：整次折叠都不生效。
+    let clash = item(3, None, "taken", Severity::Info);
+    let mut tx = store.begin_write().await.unwrap();
+    let head = tx.read().head_seq();
+    assert!(tx.append(raised(&clash, vec![old.id])).await.is_err());
+    {
+        let mut reader = tx.read();
+        assert_eq!(reader.head_seq(), head);
+        assert_eq!(
+            reader.inbox_item(&old.id).await.unwrap().map(|i| i.status),
+            Some(InboxStatus::Open)
+        );
+        assert_eq!(reader.inbox_item(&clash.id).await.unwrap(), None);
+    }
+    // 同一事务里后续写入照常可用。
+    tx.append(resolved(&old)).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        status_of(&store, &old.id).await,
+        Some(InboxStatus::Resolved)
+    );
+}
+
+#[tokio::test]
+async fn superseding_an_open_item_with_the_same_dedup_key_is_allowed() {
+    let store = store().await;
+    let old = item(1, None, "same", Severity::Info);
+    let new = item(2, None, "same", Severity::Warn);
+    commit(&store, vec![raised(&old, vec![])]).await.unwrap();
+    commit(&store, vec![raised(&new, vec![old.id])])
+        .await
+        .unwrap();
+    let mut snapshot = store.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot
+            .inbox_open_by_dedup_key("same")
+            .await
+            .unwrap()
+            .map(|i| i.id),
+        Some(new.id)
+    );
+}
