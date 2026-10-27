@@ -145,3 +145,134 @@ pub fn route(cx: &RouteCx<'_>) -> RouteDecision {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gantry_core::entities::Stage;
+    use gantry_core::ids::{Id, ProjectId};
+
+    use super::*;
+
+    fn handle(n: u128, cap: Level, spec: Option<u128>) -> DeliveryHandle {
+        let project: ProjectId = Id::from_parts(1, 1).unwrap_or_else(|_| unreachable!());
+        DeliveryHandle {
+            id: Id::from_parts(1, n).unwrap_or_else(|_| unreachable!()),
+            project_id: project,
+            level_cap: cap,
+            stage: Stage::Spec,
+            open_spec_needed: spec.map(|n| Id::from_parts(1, n).unwrap_or_else(|_| unreachable!())),
+        }
+    }
+
+    fn cx<'a>(
+        located: &'a [DeliveryHandle],
+        cap: Cap,
+        intent: IntentKind,
+        profile: Option<ClientProfile>,
+    ) -> RouteCx<'a> {
+        RouteCx {
+            models_configured: true,
+            cap,
+            located,
+            intent,
+            needs_code: false,
+            profile,
+        }
+    }
+
+    #[test]
+    fn mobile_always_uses_the_project_default() {
+        let one = [handle(1, Level::High, None)];
+        let cap = resolve_cap(
+            Some(ClientProfile::Mobile),
+            Some(Level::Max),
+            &one,
+            Level::Medium,
+        );
+        assert_eq!(cap.level, Level::Medium);
+        assert_eq!(cap.source, CapSource::MobileDefault);
+    }
+
+    #[test]
+    fn control_wins_over_none_level_and_unconfigured_wins_over_all() {
+        let none = Cap {
+            level: Level::None,
+            source: CapSource::Message,
+        };
+        assert_eq!(
+            route(&cx(&[], none, IntentKind::Control, None)),
+            RouteDecision::ControlGuidance
+        );
+        assert_eq!(
+            route(&cx(&[], none, IntentKind::Task, None)),
+            RouteDecision::PureChat
+        );
+        let mut unconfigured = cx(&[], none, IntentKind::Task, None);
+        unconfigured.models_configured = false;
+        assert_eq!(route(&unconfigured), RouteDecision::NotConfigured);
+    }
+
+    #[test]
+    fn single_located_delivery_routes_by_open_question_and_explicit_cap() {
+        let open = [handle(1, Level::Low, Some(9))];
+        let cap = Cap {
+            level: Level::Low,
+            source: CapSource::Delivery,
+        };
+        assert!(matches!(
+            route(&cx(&open, cap, IntentKind::Task, None)),
+            RouteDecision::SupplySpec { .. }
+        ));
+
+        let idle = [handle(1, Level::Low, None)];
+        let explicit = Cap {
+            level: Level::High,
+            source: CapSource::Message,
+        };
+        assert!(matches!(
+            route(&cx(
+                &idle,
+                explicit,
+                IntentKind::Task,
+                Some(ClientProfile::Desktop)
+            )),
+            RouteDecision::SetCapThenContinue {
+                cap: Level::High,
+                ..
+            }
+        ));
+        assert_eq!(
+            route(&cx(
+                &idle,
+                explicit,
+                IntentKind::Task,
+                Some(ClientProfile::Mobile)
+            )),
+            RouteDecision::Unsupported {
+                reason: UnsupportedReason::NoOpenQuestion
+            }
+        );
+        let same = Cap {
+            level: Level::Low,
+            source: CapSource::Message,
+        };
+        assert_eq!(
+            route(&cx(&idle, same, IntentKind::Task, None)),
+            RouteDecision::Unsupported {
+                reason: UnsupportedReason::NoOpenQuestion
+            }
+        );
+    }
+
+    #[test]
+    fn queries_split_on_needs_code() {
+        let cap = Cap {
+            level: Level::Medium,
+            source: CapSource::Default,
+        };
+        let mut query = cx(&[], cap, IntentKind::Query, None);
+        assert_eq!(route(&query), RouteDecision::StatusAnswer);
+        query.needs_code = true;
+        assert_eq!(route(&query), RouteDecision::CodeAnswer);
+    }
+}

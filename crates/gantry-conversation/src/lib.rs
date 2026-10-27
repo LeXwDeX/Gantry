@@ -6,6 +6,7 @@
 //! - [`service`]：`ConversationService`（对话创建、发消息、读取）与消息流水线；
 //! - [`intent`]：经 `models` 的意图解析（外部文本只进 materials，I5）；
 //! - [`route`]：档位上限解析与路由，纯函数；
+//! - [`rows`]：事件行的确定性模板（带 `tone`，不嵌入不可信文本）；
 //! - [`ports`]：消费的引擎与模型端口（`EngineApi`、`ModelsPort`）。
 //!
 //! 硬约束：没有任何写设置的路径（I7）；模型输出不是权限，`control` 意图只回引导，
@@ -18,12 +19,13 @@ pub mod ports;
 mod projection;
 pub mod reply;
 pub mod route;
+pub mod rows;
 pub mod service;
 
 pub use intent::{IntentInput, IntentParser, IntentResult, ModelsIntentParser};
 pub use ports::{DeliveryHandle, EngineApi, ModelsPort};
 pub use route::{resolve_cap, route, Cap, CapSource, RouteCx, RouteDecision, UnsupportedReason};
 pub use service::{
-    Conversation, ConversationDeps, CrashPoint, Limits, ProcessError, CURSOR_PROJECTS,
-    CURSOR_USER_MESSAGES,
+    Conversation, ConversationDeps, CrashPoint, Limits, ProcessError, CURSOR_EVENTS,
+    CURSOR_PROJECTS, CURSOR_USER_MESSAGES,
 };
