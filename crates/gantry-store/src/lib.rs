@@ -1021,24 +1021,28 @@ impl WriteTx {
                 "inbox {id} already raised"
             )));
         }
+        // 先全部校验、后统一修改：失败时事务快照里不留下半折叠的状态。
         for target in &data.supersedes {
-            let row = self.snapshot.inbox.get_mut(target).ok_or_else(|| {
+            let row = self.snapshot.inbox.get(target).ok_or_else(|| {
                 StoreError::PreconditionFailed(format!("superseded inbox {target} not found"))
             })?;
             gantry_core::machines::inbox::check(row.status, InboxStatus::Resolved)
                 .map_err(|error| StoreError::PreconditionFailed(error.to_string()))?;
-            row.status = InboxStatus::Resolved;
-            row.updated_at = event.ts;
         }
-        if self
-            .snapshot
-            .inbox
-            .values()
-            .any(|row| row.status == InboxStatus::Open && row.dedup_key == item.dedup_key)
-        {
+        if self.snapshot.inbox.values().any(|row| {
+            row.status == InboxStatus::Open
+                && row.dedup_key == item.dedup_key
+                && !data.supersedes.contains(&row.id)
+        }) {
             return Err(StoreError::PreconditionFailed(
                 "an open inbox item already uses this dedup_key".to_owned(),
             ));
+        }
+        for target in &data.supersedes {
+            if let Some(row) = self.snapshot.inbox.get_mut(target) {
+                row.status = InboxStatus::Resolved;
+                row.updated_at = event.ts;
+            }
         }
         self.snapshot.inbox.insert(id, item);
         Ok(())
