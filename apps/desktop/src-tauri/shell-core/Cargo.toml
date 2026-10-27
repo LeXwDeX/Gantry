@@ -11,6 +11,8 @@ description = "Gantry 桌面外壳（desktop-shell.md）中与 Tauri 无关的�
 test-software-keys = ["dep:p256", "dep:rand_core"]
 
 [dependencies]
+gantry-core = { path = "../../../../crates/gantry-core" }
+serde_json.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 sha2.workspace = true
@@ -28,5 +30,4 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext"] }
 
 [dev-dependencies]
-serde_json.workspace = true
 p256 = { version = "0.13", features = ["ecdsa"] }

@@ -6,12 +6,15 @@
 //!
 //! 命令参数一律 `snake_case`（`rename_all`），与 `apps/desktop/src/ipc/tauri.ts` 一致。
 
+use std::collections::BTreeMap;
+
 use gantry_desktop_shell::ipc::ShellError;
+use gantry_desktop_shell::storage::{AppStore, Prefs};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::ipc::Channel;
 use tauri::webview::NewWindowResponse;
-use tauri::{Manager, Url, WebviewWindowBuilder};
+use tauri::{Manager, State, Url, WebviewWindowBuilder};
 
 type CmdResult<T> = Result<T, ShellError>;
 
@@ -166,34 +169,31 @@ fn guarded_write_discard(pending_id: String) -> CmdResult<()> {
     Ok(())
 }
 
-// ---- 本机存储 ----
+// ---- 本机存储（§7.5）----
 
 #[tauri::command(rename_all = "snake_case")]
-fn prefs_get() -> CmdResult<Value> {
-    Err(ShellError::unavailable("prefs_get"))
+fn prefs_get(store: State<'_, AppStore>) -> CmdResult<Prefs> {
+    Ok(store.prefs())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn prefs_set(patch: Value) -> CmdResult<Value> {
-    let _ = patch;
-    Err(ShellError::unavailable("prefs_set"))
+fn prefs_set(store: State<'_, AppStore>, patch: Value) -> CmdResult<Prefs> {
+    store.set_prefs(&patch)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_get(project_id: String) -> CmdResult<Value> {
-    let _ = project_id;
-    Err(ShellError::unavailable("ui_state_get"))
+fn ui_state_get(store: State<'_, AppStore>, project_id: String) -> CmdResult<Option<Value>> {
+    store.ui_state_get(&project_id)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_set(project_id: String, state: Value) -> CmdResult<()> {
-    let _ = (project_id, state);
-    Err(ShellError::unavailable("ui_state_set"))
+fn ui_state_set(store: State<'_, AppStore>, project_id: String, state: Value) -> CmdResult<()> {
+    store.ui_state_set(&project_id, &state)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_list() -> CmdResult<Value> {
-    Err(ShellError::unavailable("ui_state_list"))
+fn ui_state_list(store: State<'_, AppStore>) -> CmdResult<BTreeMap<String, Value>> {
+    store.ui_state_list()
 }
 
 // ---- 外链与诊断 ----
@@ -264,6 +264,9 @@ pub fn run() {
         ])
         // main 窗口在 tauri.conf.json 里 `create: false`，这里带上导航限制再创建。
         .setup(|app| {
+            // 应用数据目录：identity.json、prefs.json、ui-state/（§7.5），仅当前用户可访问。
+            let data_dir = app.path().app_data_dir()?;
+            app.manage(AppStore::open(&data_dir)?);
             let config = app
                 .config()
                 .app
