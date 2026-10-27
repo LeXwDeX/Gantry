@@ -436,6 +436,12 @@ impl ApprovalService for PolicyApprovals {
     }
 
     async fn list(&self, q: ApprovalQuery, page: PageQuery) -> Result<Page<Approval>, PolicyError> {
+        if page.order.is_some() {
+            return Err(PolicyError::InvalidRequest {
+                pointer: "/order".into(),
+                message: "approval ordering is not supported".into(),
+            });
+        }
         let limit = match page.limit {
             0 => LIST_DEFAULT_LIMIT,
             n => n.min(MODULE_SCAN_MAX),

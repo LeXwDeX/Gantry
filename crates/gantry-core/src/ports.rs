@@ -36,8 +36,8 @@ pub const PORT_TRAIT_COUNT: usize = 17;
 pub const PORT_METHOD_COUNT: usize = 115;
 
 pub use context::{
-    ActorCtx, CasRef, ClientProfile, Health, ModuleError, Page, PageQuery, PageWithSeq, RequestId,
-    StoreError, TxHandle, ACTOR_CTX_FIELDS,
+    ActorCtx, CasRef, ClientProfile, Health, ModuleError, Page, PageOrder, PageQuery, PageWithSeq,
+    RequestId, StoreError, TxHandle, ACTOR_CTX_FIELDS,
 };
 
 pub use conversation::{ConvError, ConversationService, NewUserMessage};

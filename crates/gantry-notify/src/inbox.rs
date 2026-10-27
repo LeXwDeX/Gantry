@@ -422,6 +422,11 @@ impl InboxPort for Notify {
 
     /// 游标是上一页最后一项的 `inb_` ID（与 `FakeInbox` 相同）；默认 `status = open`。
     async fn list(&self, q: InboxQuery) -> Result<PortPage<InboxItem>, InboxError> {
+        if q.page.order.is_some() {
+            return Err(InboxError::InvalidRequest {
+                message: "inbox ordering is not supported".into(),
+            });
+        }
         let after = match q.page.cursor.as_deref() {
             Some(cursor) => {
                 Some(

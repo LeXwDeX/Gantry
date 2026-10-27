@@ -663,6 +663,11 @@ impl InboxPort for FakeInbox {
     }
 
     async fn list(&self, q: InboxQuery) -> Result<Page<InboxItem>, InboxError> {
+        if q.page.order.is_some() {
+            return Err(InboxError::InvalidRequest {
+                message: "inbox ordering is not supported".into(),
+            });
+        }
         let state = self.state();
         let status = q.status.unwrap_or(InboxStatus::Open);
         let cursor = match q.page.cursor.as_ref() {

@@ -323,6 +323,7 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 ### 7.7 分页、ETag、读一致性
 
 - **游标**：不透明字符串 `base64url(v ‖ resource_tag ‖ order ‖ last_id)`，keyset 基于 ULID `id`；解析失败、资源标签不符、`order` 不符 → `400 invalid_cursor`。默认 `limit = 50`（1–200）、`order = desc`（attempts 默认 `asc` 按 `n`）；`messages` 默认 `desc`。响应 `{items, next_cursor}`，`next_cursor = null` 表示末页。
+- **端口过渡**：`PageQuery.order = None` 保留各端口现有顺序，不等于 HTTP 默认值。真实消息列表默认降序，真实审批和收件箱列表目前按 ID 升序；不能处理的显式方向必须返回错误。HTTP 路由接线和契约一致性仍由 #280 跟踪。
 - **读一致性**：每个读响应在同一读事务内取投影与最大 `seq`，写入 `X-Event-Seq`；写响应的 `X-Event-Seq` 等于本次写入产生的最后一个事件的 `seq`（`dedup` 重放时取已存在事件的 `seq`）。
 - **ETag**（仅 settings）：`ETag: "<rev>"`，`rev` = 该 `(scope, resource)` 最近一次 `settings.updated` 的 `seq`，从未写过为 `0`；`GET` 支持 `If-None-Match` → `304`；`PUT` / `DELETE` 缺 `If-Match` → `428 precondition_required`，不符 → `412 precondition_failed` 且响应头带当前 `ETag`。`?view=effective` 的 ETag 不可用于 `If-Match`。其他资源不用 ETag。
 

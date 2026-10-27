@@ -23,7 +23,7 @@ use gantry_core::events::{
 use gantry_core::ids::{Cnv, ConversationId, IdGen, MessageId, Msg, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::ports::context::{
-    ActorCtx, ClientProfile, Page, PageQuery, PageWithSeq, StoreError as PortStoreError,
+    ActorCtx, ClientProfile, PageOrder, PageQuery, PageWithSeq, StoreError as PortStoreError,
 };
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
 use gantry_core::ports::engine::CreateDelivery;
@@ -837,17 +837,24 @@ impl ConversationService for Conversation {
     async fn list_conversations(
         &self,
         project: &ProjectId,
-        _page: PageQuery,
-    ) -> Result<Page<ConversationRow>, ConvError> {
+        page: PageQuery,
+    ) -> Result<PageWithSeq<ConversationRow>, ConvError> {
+        if page.order.is_some() {
+            return Err(ConvError::InvalidRequest {
+                pointer: "/order".into(),
+                message: "conversation ordering is not supported".into(),
+            });
+        }
         let head = self.store.events().head().await.map_err(port_error)?;
         let items = projection::conversation_of_project(&self.store, project, head)
             .await
             .map_err(port_error)?
             .into_iter()
             .collect();
-        Ok(Page {
+        Ok(PageWithSeq {
             items,
             next_cursor: None,
+            last_seq: head,
         })
     }
 
@@ -857,6 +864,12 @@ impl ConversationService for Conversation {
         cnv: &ConversationId,
         page: PageQuery,
     ) -> Result<PageWithSeq<Message>, ConvError> {
+        if page.order == Some(PageOrder::Asc) {
+            return Err(ConvError::InvalidRequest {
+                pointer: "/order".into(),
+                message: "ascending message ordering is not supported".into(),
+            });
+        }
         let before = match page.cursor.as_deref() {
             None => None,
             Some(cursor) => Some(parse_cursor(cursor)?),

@@ -11,8 +11,8 @@ use common::*;
 use gantry_core::entities::InboxStatus;
 use gantry_core::events::EventType;
 use gantry_core::ports::{
-    ChooseError, ClientProfile, DedupKey, InboxError, InboxPort, InboxQuery, OptionId, PageQuery,
-    RaiseOutcome, Resolution, ResolveTarget,
+    ChooseError, ClientProfile, DedupKey, InboxError, InboxPort, InboxQuery, OptionId, PageOrder,
+    PageQuery, RaiseOutcome, Resolution, ResolveTarget,
 };
 use gantry_fakes::inbox::{dedup_conformance, FakeInbox};
 use gantry_store::Store;
@@ -338,6 +338,7 @@ async fn summary_matches_open_list() {
                 page: PageQuery {
                     cursor: None,
                     limit: 200,
+                    order: None,
                 },
                 ..InboxQuery::default()
             })
@@ -364,6 +365,21 @@ async fn summary_matches_open_list() {
 #[tokio::test]
 async fn list_pages_without_gaps_and_filters() {
     for (name, _, port) in ports() {
+        for order in [PageOrder::Asc, PageOrder::Desc] {
+            let result = port
+                .list(InboxQuery {
+                    page: PageQuery {
+                        order: Some(order),
+                        ..PageQuery::default()
+                    },
+                    ..InboxQuery::default()
+                })
+                .await;
+            assert!(
+                matches!(result, Err(InboxError::InvalidRequest { .. })),
+                "{name}"
+            );
+        }
         for n in 0..7 {
             let mut req = gate_reject(&format!("k{n}"));
             if n % 2 == 0 {
@@ -376,7 +392,11 @@ async fn list_pages_without_gaps_and_filters() {
         loop {
             let page = port
                 .list(InboxQuery {
-                    page: PageQuery { cursor, limit: 3 },
+                    page: PageQuery {
+                        cursor,
+                        limit: 3,
+                        order: None,
+                    },
                     ..InboxQuery::default()
                 })
                 .await
@@ -411,6 +431,7 @@ async fn list_pages_without_gaps_and_filters() {
                 page: PageQuery {
                     cursor: Some("garbage".into()),
                     limit: 3,
+                    order: None,
                 },
                 ..InboxQuery::default()
             })

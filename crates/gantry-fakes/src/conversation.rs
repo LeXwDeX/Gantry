@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use gantry_core::entities::Seq;
 use gantry_core::entities::{Conversation, Message, MessageRole};
 use gantry_core::ids::{ConversationId, Id, IdKind, ProjectId};
-use gantry_core::ports::context::{ActorCtx, Page, PageQuery, PageWithSeq};
+use gantry_core::ports::context::{ActorCtx, PageOrder, PageQuery, PageWithSeq};
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
 use gantry_core::time::Timestamp;
 
@@ -209,7 +209,13 @@ impl ConversationService for FakeConversation {
         &self,
         project: &ProjectId,
         page: PageQuery,
-    ) -> Result<Page<Conversation>, ConvError> {
+    ) -> Result<PageWithSeq<Conversation>, ConvError> {
+        if page.order.is_some() {
+            return Err(ConvError::InvalidRequest {
+                pointer: "/order".into(),
+                message: "conversation ordering is not supported by this fake".into(),
+            });
+        }
         let mut state = self
             .state
             .lock()
@@ -226,9 +232,11 @@ impl ConversationService for FakeConversation {
             .collect();
         let (start, end) = page_bounds(&page, all.len());
         let next_cursor = (end < all.len()).then(|| end.to_string());
-        Ok(Page {
+        Ok(PageWithSeq {
             items: all[start..end].to_vec(),
             next_cursor,
+            // 该替身没有全局事件日志，零仅为测试序号。
+            last_seq: Seq::ZERO,
         })
     }
 
@@ -237,6 +245,12 @@ impl ConversationService for FakeConversation {
         cnv: &ConversationId,
         page: PageQuery,
     ) -> Result<PageWithSeq<Message>, ConvError> {
+        if page.order == Some(PageOrder::Asc) {
+            return Err(ConvError::InvalidRequest {
+                pointer: "/order".into(),
+                message: "ascending message ordering is not supported by this fake".into(),
+            });
+        }
         let mut state = self
             .state
             .lock()
@@ -245,7 +259,8 @@ impl ConversationService for FakeConversation {
             conversation_id: *cnv,
             page: page.clone(),
         });
-        let messages = state.messages.get(cnv).ok_or(ConvError::NotFound)?.clone();
+        let mut messages = state.messages.get(cnv).ok_or(ConvError::NotFound)?.clone();
+        messages.reverse();
         let (start, end) = page_bounds(&page, messages.len());
         let next_cursor = (end < messages.len()).then(|| end.to_string());
         let last_seq = if messages.is_empty() {
