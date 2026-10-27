@@ -1767,6 +1767,10 @@ pub struct AttemptFinishedData {
     pub usage: Option<TokenUsage>,
     #[serde(default)]
     pub result_tree: Option<GitOid>,
+    /// 本地提交的 OID（engine.md §7.14.6 E1）：`push_branch.local_head_oid` 由它从日志重建。
+    /// 与 `result_tree` 同时出现；`status = succeeded` 且有 `result_tree` 时必填。
+    #[serde(default)]
+    pub result_commit: Option<GitOid>,
     #[serde(default)]
     pub served_by: Option<ServedBy>,
 }
@@ -1782,6 +1786,12 @@ impl EventData for AttemptFinishedData {
                     return Err(SchemaError::consistency(
                         "/failure_class",
                         "succeeded attempts must not carry failure_class",
+                    ));
+                }
+                if self.result_tree.is_some() && self.result_commit.is_none() {
+                    return Err(SchemaError::consistency(
+                        "/result_commit",
+                        "succeeded attempts with result_tree require result_commit",
                     ));
                 }
             }
@@ -1807,6 +1817,12 @@ impl EventData for AttemptFinishedData {
                     "attempt.finished requires a terminal status",
                 ))
             }
+        }
+        if self.result_commit.is_some() && self.result_tree.is_none() {
+            return Err(SchemaError::consistency(
+                "/result_tree",
+                "result_commit requires result_tree",
+            ));
         }
         Ok(())
     }

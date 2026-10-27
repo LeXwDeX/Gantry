@@ -183,6 +183,7 @@
         "requests": 1
       },
       "result_tree": "1405df66cbe219b0bf6355bc3d60361a8376b6b4",
+      "result_commit": "8d3f1b2a4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f13",
       "served_by": {
         "provider": "anthropic",
         "model": "claude",
@@ -1542,6 +1543,24 @@
         "ok": true
       },
       "pointer_contains": "/ok"
+    },
+    {
+      "type": "attempt.finished",
+      "data": {
+        "status": "succeeded",
+        "result_ref": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+        "result_tree": "1405df66cbe219b0bf6355bc3d60361a8376b6b4"
+      },
+      "pointer_contains": "/result_commit"
+    },
+    {
+      "type": "attempt.finished",
+      "data": {
+        "status": "succeeded",
+        "result_ref": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+        "result_commit": "8d3f1b2a4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f13"
+      },
+      "pointer_contains": "/result_tree"
     },
     {
       "type": "guardian.triaged",

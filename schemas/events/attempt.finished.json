@@ -56,6 +56,18 @@
       ],
       "default": null
     },
+    "result_commit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GitOid"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "本地提交的 OID（engine.md §7.14.6 E1）：`push_branch.local_head_oid` 由它从日志重建。\n与 `result_tree` 同时出现；`status = succeeded` 且有 `result_tree` 时必填。",
+      "default": null
+    },
     "served_by": {
       "anyOf": [
         {
