@@ -61,6 +61,7 @@ pub fn module_spec() -> gantry_store::ModuleSpec {
             webhook::INBOX_TABLE,
             effects::EFFECT_TABLE,
             normalize::snapshot::SNAPSHOT_TABLE,
+            outbox::executor::RATE_TABLE,
         ],
     )
 }

@@ -12,10 +12,14 @@ gantry-core = { path = "../gantry-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# A6：用挂载的 output.schema.json 校验结构化输出（与 xtask 同版本）。
+jsonschema = { version = "0.59", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+# 进程组信号与信号处理（A7）。
+libc = "0.2"
 
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 # 只用于核对挂载约定与 sandbox 的常量一致。
 gantry-sandbox = { path = "../gantry-sandbox" }
-# 用 schemas/worker/ 校验 worker 写出的产物（与 xtask 同版本）。
-jsonschema = { version = "0.59", default-features = false }

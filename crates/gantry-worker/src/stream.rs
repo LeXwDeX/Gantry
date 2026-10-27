@@ -17,6 +17,8 @@ use crate::events::{Event, UsageTotals};
 pub struct CliInit {
     pub agent_version: String,
     pub model: String,
+    /// 修复轮用 `--resume` 续接同一会话（A6）。
+    pub session_id: Option<String>,
 }
 
 /// `result` 行。
@@ -99,6 +101,7 @@ impl StreamMapper {
                     .unwrap_or("unknown")
                     .to_owned(),
                 model: str_at(&value, "/model").unwrap_or("unknown").to_owned(),
+                session_id: str_at(&value, "/session_id").map(str::to_owned),
             })],
             // 重试等系统消息只说明 agent 仍在活动。
             (Some("system"), _) => vec![self.heartbeat()],

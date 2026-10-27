@@ -11,6 +11,8 @@ pub mod layout;
 pub mod patch;
 pub mod prompt;
 pub mod proposals;
+#[cfg(unix)]
+pub mod runner;
 pub mod startup;
 pub mod stream;
 
