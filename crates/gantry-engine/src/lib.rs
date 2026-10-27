@@ -5,6 +5,7 @@
 
 pub mod actor;
 pub mod budget;
+pub mod classify;
 pub mod create;
 pub mod decide;
 pub mod decider;

@@ -781,11 +781,37 @@ impl DeliveryState {
     /// 派发总闸：阶段非终态 ∧ `stage_status = running` ∧ 无未关闭的 `budget_exhausted` 上报。
     pub fn may_dispatch(&self) -> bool {
         !self.delivery.stage.is_terminal()
-            && self.delivery.stage_status == StageStatus::Running
+            && self.stage_status() == StageStatus::Running
             && !self
                 .open_inbox
                 .values()
                 .any(|item| item.kind == InboxKind::BudgetExhausted)
+    }
+
+    /// 有效的 `stage_status`（§7.6）：暂停优先；否则引擎创建的未决阻塞项决定 `blocked` /
+    /// `waiting_human`；都没有时取 `delivery.*` 折叠出的值。`dismiss` 不解除阻塞（§7.11）。
+    pub fn stage_status(&self) -> StageStatus {
+        let row = self.delivery.stage_status;
+        if matches!(row, StageStatus::Paused | StageStatus::Done) {
+            return row;
+        }
+        let engine_items = self
+            .open_inbox
+            .values()
+            .filter(|item| item.raised_by == RaisedBy::Engine);
+        let mut waiting = false;
+        for item in engine_items {
+            match item.effect {
+                Blocking::Blocked => return StageStatus::Blocked,
+                Blocking::WaitingHuman => waiting = true,
+                Blocking::None => {}
+            }
+        }
+        if waiting {
+            StageStatus::WaitingHuman
+        } else {
+            row
+        }
     }
 
     /// 有 `attempt.started` 而无 `attempt.finished` 的尝试（`RunAttempt { resume: true }` 的对象）。

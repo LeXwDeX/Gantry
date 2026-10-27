@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { Delivery } from "@/api/types";
 import type { MockIpcAdapter } from "@/ipc/mock/adapter";
 import { mountMode, type Mounted } from "./modes";
+import { events } from "./mockEvents";
 
 const DELIVERY = "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB";
 const WEB = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA";
@@ -39,7 +40,12 @@ async function satisfyGates(m: Mounted, bumpSyncedAt: boolean): Promise<void> {
       synced_at: synced,
     },
   });
-  await m.mock?.inject("forge.synced", DELIVERY, { delivery_id: DELIVERY }, WEB);
+  await m.mock?.emit(
+    events.forgeSynced([
+      { field: "mergeable_state", from: delivery.pr.mergeable_state, to: "clean" },
+      { field: "review_state", from: delivery.pr.review_state, to: "approved" },
+    ]),
+  );
 }
 
 describe("审批单随 GitHub 同步与连接恢复更新可签状态", () => {

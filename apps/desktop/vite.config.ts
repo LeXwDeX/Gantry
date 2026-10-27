@@ -28,6 +28,8 @@ export default defineConfig(({ mode }) => ({
     globalSetup: ["./tests/unit/globalSetup.ts"],
     // 整页 jsdom 渲染（设置页、工作区）在多会话并行编译的高负载机器上会超过默认 5 秒。
     testTimeout: 20_000,
+    // beforeEach 里会新建 Mock 实例并水合整页；同样受负载影响。
+    hookTimeout: 30_000,
     include: ["tests/unit/**/*.test.{ts,tsx}"],
     css: false,
   },

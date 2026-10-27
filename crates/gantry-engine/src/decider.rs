@@ -9,7 +9,6 @@
 //! - `Tick(Recover)` 另外为未终结尝试重发 `RunAttempt { resume: true }`（§7.13 第 2 步）。
 //!
 //! 本切片不覆盖、留给后续切片的（每项在 #70 记录）：
-//! - `ReleaseSandbox` / `ReleaseLock`、自动重试、尝试失败的处理：切片 4（#72）；
 //! - 命令（`SetLevelCap` 等）与异常路径（放弃收尾、T11、T14）：切片 5（#73）；
 //! - 预算不足时的 `budget.exhausted` 与上报、`models_not_configured` 上报：本切片只"不产出"，上报归切片 5；
 //! - token 维度的 `budget.charged`：需要 `weight_audit`（权重与 `config_rev`），`DecideEnv` 还没有。
@@ -41,6 +40,7 @@ use gantry_core::ports::policy::{ActionDecision, ActionFacts, ActionRequest, Rep
 use gantry_core::worker::ProposalParams;
 use serde::Serialize;
 
+use crate::classify::{retry_rule, RetryRule};
 use crate::decide::{
     AttemptPlan, Command, CommandRejection, DecideEnv, Decision, Effect, EffectKey, EffectReport,
     Finalized, IdMint, Input, ModelKey, PatchResult, ProposalRef, ProposalText, ResolvedModel,
@@ -64,6 +64,7 @@ pub fn decide(state: &DeliveryState, input: &Input, env: &DecideEnv) -> Vec<Deci
         Input::Tick(TickReason::Recover) => {
             let mut out = derive(state, env, &mut mint);
             resume_unfinished(state, env, &mut out);
+            release_finished(state, env, &mut out);
             out
         }
         Input::Tick(_) | Input::Event(_) => derive(state, env, &mut mint),
@@ -99,6 +100,7 @@ pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<
     ensure_worktree(state, env, &mut out);
     acquire_locks(state, env, &mut out);
     dispatch(state, env, mint, &mut out);
+    schedule_retries(state, env, &mut out);
     finish_workflows(state, &mut out);
     judge_actions(state, env, &mut out);
     raise_approval_needed(state, &mut out);
@@ -731,7 +733,7 @@ fn release_worktree(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decisi
 fn on_report(state: &DeliveryState, report: &EffectReport, env: &DecideEnv) -> Vec<Decision> {
     match report {
         EffectReport::ActionJudged { key, decision } => on_judged(state, key, decision, env),
-        EffectReport::AttemptFinalized(finalized) => on_finalized(state, finalized),
+        EffectReport::AttemptFinalized(finalized) => on_finalized(state, finalized, env),
         // 其余回报只把键移出在途集合（执行体负责），由随后的 Tick(Settle) 求值。
         _ => Vec::new(),
     }
@@ -855,7 +857,7 @@ fn raise_from_hint(state: &DeliveryState, key: &ActionKey, hint: &ReportHint) ->
 
 /// `Append(attempt.finished)` + `budget.charged(wall_time)` + `node.finished`（节点因此进入终态时）：
 /// 该尝试无 `attempt.finished`，且 `Finalized` 的尝试与节点匹配。
-fn on_finalized(state: &DeliveryState, finalized: &Finalized) -> Vec<Decision> {
+fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -> Vec<Decision> {
     let Some(node) = state.node(&finalized.node_id) else {
         return Vec::new();
     };
@@ -921,18 +923,197 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized) -> Vec<Decision> {
             },
         ));
     }
-    // 成功或取消即终态；失败的重试与耗尽判断归切片 4（#72）。
     let node_status = match finalized.status {
         AttemptStatus::Succeeded => Some(NodeStatus::Succeeded),
         AttemptStatus::Cancelled => Some(NodeStatus::Cancelled),
-        _ => None,
+        _ => {
+            // 失败：§7.8 允许时保持 running，由派发在退避后新建 Attempt；否则节点失败并上报。
+            let detail = finalized
+                .failure_detail
+                .as_ref()
+                .map(|d| d.as_str().to_owned())
+                .unwrap_or_default();
+            let mut since: Vec<AttemptState> =
+                node.attempts[node.attempts_at_retry as usize..].to_vec();
+            if let Some(this) = since.iter_mut().find(|a| a.id == attempt.id) {
+                this.failure_detail = finalized.failure_detail.clone();
+            }
+            if will_retry(&detail, since.len() as u32, &since, env) {
+                None
+            } else {
+                out.extend(failure_reports(state, node, attempt, finalized, &detail));
+                Some(NodeStatus::Failed)
+            }
+        }
     };
     if let Some(status) = node_status {
         if node.status == NodeStatus::Running {
             out.push(node_event(state, EventType::NodeFinished, node, status));
         }
     }
+    // attempt.finished 落库后释放沙盒与写权锁（§7.8 第 5 步；§7.14.5）：进程内恰一次。
+    if node.exec != gantry_core::entities::Exec::Direct {
+        out.push(Decision::Effect(Effect::ReleaseSandbox {
+            attempt_id: attempt.id,
+        }));
+    }
+    if node.exec == gantry_core::entities::Exec::Sandbox {
+        if let Some(worktree) = &state.worktree {
+            if state.lock_owner.get(&worktree.id) == Some(&node.id) {
+                if let Some(token) = state
+                    .lock_token(&worktree.id)
+                    .filter(|t| t.holder == gantry_core::entities::LockHolder::Engine)
+                {
+                    out.push(Decision::Effect(Effect::ReleaseLock { token }));
+                }
+            }
+        }
+    }
     out
+}
+
+/// 节点因失败进入终态时的上报（§7.8"失败处理"表、§7.11）。
+fn failure_reports(
+    state: &DeliveryState,
+    node: &NodeState,
+    attempt: &AttemptState,
+    finalized: &Finalized,
+    detail: &str,
+) -> Vec<Decision> {
+    use gantry_core::entities::{
+        BudgetDimension, DecisionKind, EvidenceKind, EvidenceRef, InboxOption, ReasonCode,
+    };
+    let delivery = state.delivery.id;
+    let raise = |kind: InboxKind, summary: String, payload: InboxPayload, dedup: String| {
+        Decision::Raise(RaiseRequest {
+            project_id: Some(state.delivery.project_id),
+            delivery_id: Some(delivery),
+            kind,
+            severity: Severity::Blocker,
+            summary: SafeSummary::new(summary),
+            payload,
+            dedup_key: DedupKey::new(dedup),
+            supersedes: Vec::new(),
+            actor: engine_actor(),
+            causation_id: None,
+        })
+    };
+    let reason =
+        |code: &str| ReasonCode::parse(code).expect("reason codes come from the vocabulary");
+    // 预算封顶：不重试；写 budget.exhausted 并上报 budget_exhausted（§7.9）。
+    if detail == "budget.tokens" {
+        let dimension = BudgetDimension::TokensByTier(node.tier);
+        let limit = state
+            .delivery
+            .budget
+            .limits
+            .tokens_by_tier
+            .get(&node.tier)
+            .copied()
+            .unwrap_or(0);
+        let used = state
+            .ledger
+            .used
+            .tokens_by_tier
+            .get(&node.tier)
+            .copied()
+            .unwrap_or(0)
+            .max(limit);
+        return vec![
+            delivery_event(
+                state,
+                EventType::BudgetExhausted,
+                &delivery.to_string(),
+                &gantry_core::events::BudgetExhaustedData {
+                    dimension,
+                    limit,
+                    used,
+                },
+            ),
+            raise(
+                InboxKind::BudgetExhausted,
+                "预算耗尽".to_owned(),
+                InboxPayload::BudgetExhausted {
+                    dimension,
+                    limit,
+                    used,
+                    options: vec![
+                        InboxOption::new("raise_cap", "追加额度", true),
+                        InboxOption::new("abandon", "放弃", false),
+                    ],
+                },
+                format!("budget:{delivery}:{dimension}"),
+            ),
+        ];
+    }
+    // workflow 受保护路径：任何里程碑都 deny，上报 manual_action 并附补丁（P-48）。
+    if detail == "policy.path_protected:workflows" {
+        let patch = match &finalized.patch {
+            PatchResult::Denied { patch, .. } => Some(patch.clone()),
+            _ => None,
+        };
+        let dedup = format!(
+            "decision:{delivery}:manual_action:{}",
+            patch
+                .as_ref()
+                .map(|p| p.reference.to_string())
+                .unwrap_or_else(|| attempt.id.to_string())
+        );
+        return vec![raise(
+            InboxKind::DecisionNeeded,
+            "补丁改动了 workflow 文件，需要手动应用".to_owned(),
+            InboxPayload::DecisionNeeded {
+                kind: DecisionKind::ManualAction,
+                reason_code: reason(detail),
+                options: vec![
+                    InboxOption::new("done", "已手动处理", true),
+                    InboxOption::new("abandon", "放弃", false),
+                ],
+                node_id: Some(node.id),
+                patch,
+            },
+            dedup,
+        )];
+    }
+    // M1 的其他受保护路径：escalation，证据为被拒补丁的摘要（patch.rejected.sha256）。
+    if detail.starts_with("policy.path_protected:") {
+        let evidence = match &finalized.patch {
+            PatchResult::Denied { patch, .. } => vec![EvidenceRef::Result {
+                kind: EvidenceKind::Result,
+                reference: patch.reference,
+            }],
+            _ => Vec::new(),
+        };
+        return vec![raise(
+            InboxKind::Escalation,
+            format!("补丁命中受保护路径：{detail}"),
+            InboxPayload::Escalation {
+                reason_code: reason(detail),
+                node_id: Some(node.id),
+                attempt_id: Some(attempt.id),
+                target_level: None,
+                action_id: None,
+                evidence,
+                options: None,
+            },
+            format!("esc:{delivery}:{detail}:{}", node.id),
+        )];
+    }
+    // 重试耗尽或不可重试：escalation(attempt_failed)。
+    vec![raise(
+        InboxKind::Escalation,
+        format!("节点 {} 失败：{detail}", node.key),
+        InboxPayload::Escalation {
+            reason_code: reason("attempt_failed"),
+            node_id: Some(node.id),
+            attempt_id: Some(attempt.id),
+            target_level: None,
+            action_id: None,
+            evidence: Vec::new(),
+            options: None,
+        },
+        format!("esc:{delivery}:attempt_failed:{}", node.id),
+    )]
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,9 +1209,86 @@ fn lease_seconds(env: &DecideEnv, wall_time_s: u64) -> u64 {
 
 /// 节点处于可派发状态：`queued`（本切片不含自动重试，失败重试归切片 4）。
 fn dispatchable(node: &NodeState, env: &DecideEnv) -> bool {
-    node.status == NodeStatus::Queued
-        && node.attempts.iter().all(|a| a.finished_at.is_some())
-        && (node.attempts.len() as u32 - node.attempts_at_retry) < env.consts.max_attempts_per_node
+    if node.attempts.iter().any(|a| a.finished_at.is_none()) {
+        return false;
+    }
+    let since_retry = node.attempts.len() as u32 - node.attempts_at_retry;
+    match node.status {
+        NodeStatus::Queued => since_retry < env.consts.max_attempts_per_node,
+        // 自动重试：同一节点下新建 Attempt，节点保持 running（§7.7）。
+        NodeStatus::Running => retry_due(node, env).is_some_and(|due| due <= env.now),
+        _ => false,
+    }
+}
+
+/// 节点最近一次尝试失败且 §7.8 允许自动重试时，返回最早可重试的时间。
+fn retry_due(node: &NodeState, env: &DecideEnv) -> Option<gantry_core::time::Timestamp> {
+    let last = node.attempts.last()?;
+    if last.status != AttemptStatus::Failed {
+        return None;
+    }
+    let detail = last.failure_detail.as_ref()?.as_str();
+    let since = &node.attempts[node.attempts_at_retry as usize..];
+    let allowed = will_retry(detail, since.len() as u32, since, env);
+    allowed.then(|| crate::state::retry_not_before(last, &env.consts))?
+}
+
+/// §7.8：`attempts` 是自最近一次人工重试以来的尝试（含刚终结的那次），`n` 为其个数。
+fn will_retry(detail: &str, n: u32, attempts: &[AttemptState], env: &DecideEnv) -> bool {
+    if n >= env.consts.max_attempts_per_node {
+        return false;
+    }
+    let same = attempts
+        .iter()
+        .filter(|a| a.failure_detail.as_ref().map(|d| d.as_str()) == Some(detail))
+        .count();
+    match retry_rule(detail) {
+        RetryRule::UpToMax => true,
+        RetryRule::Once => same < 2,
+        RetryRule::Never | RetryRule::NotAFailure => false,
+    }
+}
+
+/// 自动重试尚未到期：安排 `Timer(RetryBackoff)`，到期后由 `Tick(Timer)` 重新求值。
+fn schedule_retries(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>) {
+    if !state.may_dispatch() {
+        return;
+    }
+    let Some(workflow) = current_workflow(state) else {
+        return;
+    };
+    for node in workflow.nodes.values() {
+        if node.status != NodeStatus::Running
+            || node.attempts.iter().any(|a| a.finished_at.is_none())
+        {
+            continue;
+        }
+        let Some(at) = retry_due(node, env) else {
+            continue;
+        };
+        let kind = crate::decide::TimerKind::RetryBackoff { node_id: node.id };
+        if at > env.now && !env.inflight.contains(&EffectKey::Timer(kind.clone())) {
+            out.push(Decision::Effect(Effect::ScheduleTimer { at, kind }));
+        }
+    }
+}
+
+/// 释放已终结尝试的沙盒（`Tick(Recover)`：跨重启至少一次；`release` 幂等，sandbox.md §6.1）。
+fn release_finished(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>) {
+    for workflow in state.workflows.values() {
+        for node in workflow.nodes.values() {
+            if node.exec == gantry_core::entities::Exec::Direct {
+                continue;
+            }
+            for attempt in node.attempts.iter().filter(|a| a.finished_at.is_some()) {
+                if !env.inflight.contains(&EffectKey::Release(attempt.id)) {
+                    out.push(Decision::Effect(Effect::ReleaseSandbox {
+                        attempt_id: attempt.id,
+                    }));
+                }
+            }
+        }
+    }
 }
 
 /// 本节点持有有效锁：`lock_owner` 指向本节点，`locks` 中该工作树的持有者为 engine 且未过期。

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useSyncExternalStore } from "react";
 import type { Prefs } from "@/api/shell";
 import type { DesktopController } from "@/store/controller";
@@ -206,6 +206,38 @@ describe("工作区 输入区", () => {
     );
     fireEvent.keyDown(group, { key: "ArrowRight" });
     expect(controller.getSnapshot().ui.prj_gantry.levelOverride).toBe("Max");
+  });
+
+  it("ctx 有交付时显示其上限；改成不同档位提示“已触发的闸门不撤销”，请求体才带 level_cap", async () => {
+    const { controller } = await mount();
+    const post = vi.spyOn(controller.ipc, "api");
+    fireEvent.click(within(mainPane()).getAllByRole("button", { name: "回复" })[0]);
+    const ctx = controller.getSnapshot().ui.prj_gantry.ctx;
+    const delivery = controller
+      .getSnapshot()
+      .projectData.prj_gantry?.deliveries.find((d) => ctx?.kind === "delivery" && d.id === ctx.id);
+    if (!delivery) throw new Error("reply ctx should point at a delivery");
+    expect(screen.getByRole("radio", { name: delivery.level_cap })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByText(/已触发的闸门不撤销/)).toBeNull();
+
+    const other = delivery.level_cap === "Low" ? "High" : "Low";
+    fireEvent.click(screen.getByRole("radio", { name: other }));
+    expect(
+      screen.getByText(new RegExp(`上限\\s*${delivery.level_cap} → ${other}；已触发的闸门不撤销`)),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("给 agent 发消息"), { target: { value: "改上限" } });
+    fireEvent.click(screen.getByRole("button", { name: /^发送$|^稍后发送$/ }));
+    await waitFor(() =>
+      expect(post.mock.calls.some(([route]) => route === "messages.post")).toBe(true),
+    );
+    const call = post.mock.calls.find(([route]) => route === "messages.post");
+    const body = (call?.[1] as { body: { level_cap?: string; refs: unknown[] } }).body;
+    expect(body.level_cap).toBe(other);
+    expect(body.refs).toEqual([ctx]);
+    // 发送后 ctx 与 levelOverride 复位。
+    expect(controller.getSnapshot().ui.prj_gantry.ctx).toBeNull();
+    expect(controller.getSnapshot().ui.prj_gantry.levelOverride).toBeNull();
   });
 
   it("上下文选择器打开后聚焦当前项，方向键移动，Esc 回到触发按钮", async () => {

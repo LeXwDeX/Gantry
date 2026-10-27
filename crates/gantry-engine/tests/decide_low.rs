@@ -442,7 +442,17 @@ fn finish(sim: &mut Sim, proposals: Vec<ProposalOutcome>) {
                "verdict": "allow", "files": [], "reasons": [], "config_rev": 1}),
     );
     let rest = sim.report(EffectReport::AttemptFinalized(f), EffectKey::Run(attempt));
-    assert!(rest.is_empty());
+    // attempt.finished 落库后恰好释放一次沙盒与写权锁（§7.8 第 5 步）。
+    assert!(
+        matches!(
+            rest.as_slice(),
+            [
+                Decision::Effect(Effect::ReleaseSandbox { attempt_id }),
+                Decision::Effect(Effect::ReleaseLock { .. }),
+            ] if *attempt_id == attempt
+        ),
+        "unexpected decisions after finalize: {rest:?}"
+    );
 }
 
 fn open_pr(id: &str, title: &str) -> ProposalOutcome {
@@ -1365,4 +1375,251 @@ fn head_mismatch_reconciles_instead_of_raising() {
             InputIdentity::Report(EffectKey::Judge(key)),
         )
         .is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// §12.2"重试策略"与"受保护路径"的决策部分（#72）
+// ---------------------------------------------------------------------------
+
+/// 当前在跑的尝试以 `detail` 失败（`patch` 为补丁结论）。
+fn fail_running(
+    sim: &mut Sim,
+    class: gantry_core::entities::FailureClass,
+    detail: &str,
+    patch: PatchResult,
+) -> Vec<Decision> {
+    let node = sim
+        .state
+        .workflows
+        .values()
+        .next()
+        .unwrap()
+        .nodes
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let attempt = node
+        .attempts
+        .iter()
+        .find(|a| a.finished_at.is_none())
+        .unwrap()
+        .id;
+    let mut f = finalized(sim, vec![]);
+    f.attempt_id = attempt;
+    f.status = if class == gantry_core::entities::FailureClass::Cancelled {
+        AttemptStatus::Cancelled
+    } else {
+        AttemptStatus::Failed
+    };
+    f.failure_class = Some(class);
+    f.failure_detail = Some(gantry_core::entities::FailureDetail::parse(detail).unwrap());
+    f.result_ref = None;
+    f.patch = patch;
+    sim.report(EffectReport::AttemptFinalized(f), EffectKey::Run(attempt))
+}
+
+fn node_status(sim: &Sim) -> NodeStatus {
+    sim.state
+        .workflows
+        .values()
+        .next()
+        .unwrap()
+        .nodes
+        .values()
+        .next()
+        .unwrap()
+        .status
+}
+
+fn attempts(sim: &Sim) -> usize {
+    sim.state
+        .workflows
+        .values()
+        .next()
+        .unwrap()
+        .nodes
+        .values()
+        .next()
+        .unwrap()
+        .attempts
+        .len()
+}
+
+fn open_kinds(sim: &Sim) -> Vec<InboxKind> {
+    sim.state
+        .open_inbox
+        .values()
+        .map(|i| i.kind.clone())
+        .collect()
+}
+
+/// timeout.wall：重试 1 次；仍超时 → 节点失败并上报 escalation(attempt_failed)。
+#[test]
+fn timeout_wall_retries_once_then_escalates() {
+    use gantry_core::entities::FailureClass;
+    let mut sim = dispatched();
+    fail_running(
+        &mut sim,
+        FailureClass::Timeout,
+        "timeout.wall",
+        PatchResult::None,
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Running);
+    assert!(open_kinds(&sim).is_empty());
+    // 退避已到期（env.now 远晚于 finished_at）：同一节点下新建 Attempt。
+    let _ = sim.settle();
+    assert_eq!(attempts(&sim), 2);
+    fail_running(
+        &mut sim,
+        FailureClass::Timeout,
+        "timeout.wall",
+        PatchResult::None,
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    assert_eq!(open_kinds(&sim), vec![InboxKind::Escalation]);
+    let item = sim.state.open_inbox.values().next().unwrap();
+    assert_eq!(
+        item.reason_code.as_ref().unwrap().as_str(),
+        "attempt_failed"
+    );
+    // 阻塞上报：stage_status 为 waiting_human，派发总闸关闭。
+    assert_eq!(sim.state.stage_status(), StageStatus::WaitingHuman);
+    let _ = sim.settle();
+    assert_eq!(attempts(&sim), 2);
+}
+
+/// exec.bad_job：不重试，直接上报。
+#[test]
+fn bad_job_is_never_retried() {
+    use gantry_core::entities::FailureClass;
+    let mut sim = dispatched();
+    fail_running(
+        &mut sim,
+        FailureClass::ExecFailed,
+        "exec.bad_job",
+        PatchResult::None,
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    assert_eq!(open_kinds(&sim), vec![InboxKind::Escalation]);
+}
+
+/// exec.output_invalid：受 MAX_ATTEMPTS_PER_NODE 约束地重试，耗尽后上报。
+#[test]
+fn output_invalid_retries_up_to_max() {
+    use gantry_core::entities::FailureClass;
+    let mut sim = dispatched();
+    for n in 1..=3 {
+        assert_eq!(attempts(&sim), n);
+        fail_running(
+            &mut sim,
+            FailureClass::ExecFailed,
+            "exec.output_invalid",
+            PatchResult::None,
+        );
+        if n < 3 {
+            assert_eq!(node_status(&sim), NodeStatus::Running);
+            let _ = sim.settle();
+        }
+    }
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    assert_eq!(open_kinds(&sim), vec![InboxKind::Escalation]);
+}
+
+/// cancelled：不是失败，节点 cancelled，不重试不上报。
+#[test]
+fn cancelled_is_not_reported() {
+    use gantry_core::entities::FailureClass;
+    let mut sim = dispatched();
+    fail_running(
+        &mut sim,
+        FailureClass::Cancelled,
+        "cancel.requested",
+        PatchResult::None,
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Cancelled);
+    assert!(open_kinds(&sim).is_empty());
+}
+
+fn denied_patch() -> PatchResult {
+    PatchResult::Denied {
+        report: None,
+        patch: serde_json::from_value(
+            json!({"ref": PATCH_SHA, "paths": [".github/workflows/x.yml"]}),
+        )
+        .unwrap(),
+    }
+}
+
+/// workflows 受保护路径：不重试；decision_needed(manual_action) 附补丁引用；无 Outbox；waiting_human。
+#[test]
+fn protected_workflows_raise_manual_action_with_patch() {
+    use gantry_core::entities::FailureClass;
+    let mut sim = dispatched();
+    fail_running(
+        &mut sim,
+        FailureClass::PolicyDenied,
+        "policy.path_protected:workflows",
+        denied_patch(),
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    let item = sim.state.open_inbox.values().next().unwrap().clone();
+    assert_eq!(item.kind, InboxKind::DecisionNeeded);
+    assert_eq!(
+        item.reason_code.unwrap().as_str(),
+        "policy.path_protected:workflows"
+    );
+    assert_eq!(
+        item.options.iter().map(|o| o.as_str()).collect::<Vec<_>>(),
+        vec!["done", "abandon"]
+    );
+    assert_eq!(sim.state.stage_status(), StageStatus::WaitingHuman);
+    let effects = sim.settle();
+    assert!(judge(&effects).is_empty());
+    assert!(sim.state.outbox.is_empty());
+    assert_eq!(attempts(&sim), 1);
+}
+
+/// 其他受保护路径（M1）：不重试；escalation，证据为被拒补丁的摘要。
+#[test]
+fn protected_lockfile_raises_escalation_with_patch_evidence() {
+    use gantry_core::entities::FailureClass;
+    let mut sim = dispatched();
+    let mut patch = denied_patch();
+    if let PatchResult::Denied { patch, .. } = &mut patch {
+        patch.paths = vec!["Cargo.lock".to_owned()];
+    }
+    let out = fail_running(
+        &mut sim,
+        FailureClass::PolicyDenied,
+        "policy.path_protected:lockfiles",
+        patch,
+    );
+    assert!(out.iter().all(|d| matches!(d, Decision::Effect(_))));
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    let item = sim.state.open_inbox.values().next().unwrap().clone();
+    assert_eq!(item.kind, InboxKind::Escalation);
+    assert_eq!(
+        item.reason_code.unwrap().as_str(),
+        "policy.path_protected:lockfiles"
+    );
+    assert!(sim.state.outbox.is_empty());
+    assert_eq!(sim.state.stage_status(), StageStatus::WaitingHuman);
+}
+
+/// budget.tokens：不重试；写 budget.exhausted 并上报 budget_exhausted。
+#[test]
+fn budget_cap_raises_budget_exhausted() {
+    use gantry_core::entities::FailureClass;
+    let mut sim = dispatched();
+    fail_running(
+        &mut sim,
+        FailureClass::BudgetExhausted,
+        "budget.tokens",
+        PatchResult::None,
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    assert_eq!(open_kinds(&sim), vec![InboxKind::BudgetExhausted]);
+    assert_eq!(sim.state.ledger.exhausted.len(), 1);
+    assert!(!sim.state.may_dispatch());
 }
