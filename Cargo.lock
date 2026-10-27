@@ -378,6 +378,7 @@ dependencies = [
  "async-trait",
  "gantry-core",
  "gantry-fakes",
+ "gantry-policy",
  "gantry-store",
  "libc",
  "serde",
