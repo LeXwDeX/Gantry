@@ -392,6 +392,7 @@ async fn m1_ignores_policies_settings_in_the_log() {
             },
         },
         requested_by: ctx().actor,
+        epoch: 1,
     };
     let decision = h.engine.decide_action(req, &ctx()).await.expect("decide");
     assert_eq!(

@@ -660,6 +660,7 @@ fn judge_actions(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>
                 kind: intent.kind(),
                 facts: intent.facts.clone(),
                 requested_by: engine_actor(),
+                epoch: INITIAL_EPOCH,
             },
             key,
         }));
