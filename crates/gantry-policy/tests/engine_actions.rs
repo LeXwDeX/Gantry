@@ -30,6 +30,7 @@ fn request(kind: ForgeActionKind, facts: ActionFacts) -> ActionRequest {
         kind,
         facts,
         requested_by: ctx().actor,
+        epoch: 1,
     }
 }
 
