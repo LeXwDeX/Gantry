@@ -1294,3 +1294,20 @@ async fn sweep_orphans_spares_live_and_recent_then_revokes_and_removes() {
     let revoke = log.iter().position(|l| *l == format!("revoke {}", att(48)));
     assert!(revoke.is_some(), "{log:?}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn finished_but_unrecorded_job_replays_the_same_outcome() {
+    let mut h = harness(1);
+    h.driver.script(sbx(50), golden_script());
+    h.service.submit(&ctx(), spec(50)).await.unwrap();
+    let before = h.service.wait(&att(50)).await.unwrap();
+    // engine 写 attempt.finished 之前崩溃：沙盒已销毁，out/ 仍在（release 尚未调用）。
+    h.restart();
+    let recovered = h.service.recover(&ctx(), &[unfinished(50)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Exited(handle(50))]);
+    let after = h.service.wait(&att(50)).await.unwrap();
+    assert_eq!(after.terminal, before.terminal);
+    assert_eq!(after.files, before.files);
+    assert!(!after.partial);
+    assert_eq!(creates(&h), 1);
+}

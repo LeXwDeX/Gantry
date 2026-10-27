@@ -411,7 +411,9 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 .unwrap_or_else(|| ContainerId::new(layout.container_name()));
             let plan = meta.resume.as_ref().expect("filtered above").intake;
             if let Ok(intake) = driver.read_out(&id, &layout, &plan).await {
-                meta.lost = true;
+                // 已过 Destroying：容器是本服务删的，终止事实以 meta.json 为准。
+                let lost = meta.lost || !matches!(meta.phase, Phase::Destroying | Phase::Destroyed);
+                meta.lost = lost;
                 let handle = self.spawn_recovered(
                     ctx,
                     unfinished.project_id,
@@ -419,7 +421,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     meta,
                     Some(id.clone()),
                     created,
-                    job::RecoverMode::Collect { id, intake },
+                    job::RecoverMode::Collect { id, intake, lost },
                 );
                 return Ok(RecoveredJob::Exited(handle));
             }

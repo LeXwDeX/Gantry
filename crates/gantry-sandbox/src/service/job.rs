@@ -139,10 +139,12 @@ enum LogSignal {
 pub(super) enum RecoverMode {
     /// 容器还在（运行中或已退出）：继续监督，从头重读日志按 seq 去重，然后 collect。
     Supervise(ContainerId),
-    /// 容器已不在、`out/` 已读出：直接 collect（`cause = Lost`）。
+    /// 容器已不在、`out/` 已读出：直接 collect。`lost` 为假表示容器是本服务在
+    /// `Destroying` 相位自己删的（终止事实取 `meta.json`），否则 `cause = Lost`。
     Collect {
         id: ContainerId,
         intake: IntakeResult,
+        lost: bool,
     },
     /// 启动前已请求取消：重出取消结果。
     CancelledBeforeStart,
@@ -320,13 +322,13 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 drop(permit);
                 outcome
             }
-            RecoverMode::Collect { id, intake } => {
+            RecoverMode::Collect { id, intake, lost } => {
                 let reason = self.meta.record_reason(TerminalReason::RuntimeExit);
                 let collector = self.resumed_collector();
                 let run = Run {
                     reason,
                     exit: self.meta.exit,
-                    lost: true,
+                    lost,
                     collector,
                 };
                 self.collect_and_destroy(&id, run, Some(intake)).await
