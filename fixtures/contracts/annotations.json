@@ -478,11 +478,10 @@
       "note": "GitHub App manifest；GitHub 的外部格式，不属 Gantry 协议类型（理由见 unverified.json）"
     },
     {
-      "sha256": "f3a4a967c6f5acecc4391d94e6e79e06b0bed68bbafce345bc29dff2a5bc9429",
-      "schema": "schemas/worker/result.schema.json",
-      "rust": "none",
-      "mode": "skip",
-      "note": "ResultBundle 仍为 [提议]；core 无对应类型，不猜形状"
+      "sha256": "35541422987dbe365443c33265fa66db6bb1ff7edf3798193d72ba58efc67b8f",
+      "schema": "schemas/worker/result-bundle.schema.json",
+      "rust": "worker::ResultBundle",
+      "note": "worker-protocol §5.2 ResultBundle 清单；#84 拍板形状，schema + Rust round-trip + validate"
     },
     {
       "sha256": "32a37a78e3033a458ac22cdc0c47c3d0820442bd2c7be1a6f66794b65d1338d4",

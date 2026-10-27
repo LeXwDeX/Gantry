@@ -25,7 +25,7 @@ use gantry_core::ids::{AttemptId, Ulid};
 use gantry_core::secret::SecretName;
 use gantry_core::worker::{
     FileMode, FileStatus, JobSpec, PatchFacts, PatchFile, PatchMode, PatchRejectReason,
-    PatchVerdict, ProgressEvent, ProposalKind, Proposals, RepoPath, ResultJson, ResultManifest,
+    PatchVerdict, ProgressEvent, ProposalKind, Proposals, RepoPath, ResultBundle, ResultJson,
     ResultStatus, StructuredOutput, StructuredOutputKind, ValidatedPatch, WorkerError,
 };
 use serde_json::{json, Value};
@@ -35,7 +35,7 @@ const CREATE_PR_OUTBOX: &str = include_str!("../fixtures/protocol/forge/create_p
 const FORGE_EVENTS: &str = include_str!("../fixtures/protocol/forge/events.json");
 const JOB_SPEC: &str = include_str!("../fixtures/protocol/worker/job_spec.json");
 const RESULT: &str = include_str!("../fixtures/protocol/worker/result.json");
-const MANIFEST: &str = include_str!("../fixtures/protocol/worker/manifest.json");
+const RESULT_BUNDLE: &str = include_str!("../fixtures/protocol/worker/result_bundle.json");
 const PROPOSALS: &str = include_str!("../fixtures/protocol/worker/proposals.json");
 const PROGRESS: &str = include_str!("../fixtures/protocol/worker/progress.jsonl");
 const OUTPUTS: &str = include_str!("../fixtures/protocol/worker/outputs.json");
@@ -439,12 +439,107 @@ fn worker_result_requires_matching_error_or_output() {
 }
 
 #[test]
-fn worker_manifest_fixture_decodes() {
-    let manifest: ResultManifest = serde_json::from_str(MANIFEST).unwrap();
-    assert_eq!(manifest.files.len(), 5);
-    assert_eq!(manifest.validation.patch.verdict, PatchVerdict::Allow);
-    assert!(manifest.classification.failure_class.is_none());
-    assert_eq!(manifest.usage_metered.requests, 26);
+fn worker_result_bundle_fixture_roundtrips() {
+    let value = parse(RESULT_BUNDLE);
+    let bundle: ResultBundle = serde_json::from_value(value.clone()).unwrap();
+    bundle.validate().unwrap();
+    assert_eq!(bundle.files.len(), 5);
+    let validation = bundle.validation.as_ref().unwrap();
+    assert_eq!(
+        validation.patch.as_ref().unwrap().verdict,
+        PatchVerdict::Allow
+    );
+    assert_eq!(validation.proposals[0].kind, ProposalKind::OpenPr);
+    assert!(bundle.classification.failure_class.is_none());
+    assert_eq!(bundle.usage_metered.unwrap().requests, 26);
+    assert_eq!(serde_json::to_value(&bundle).unwrap(), value);
+}
+
+#[test]
+fn worker_result_bundle_minimal_failed_bundle_is_valid() {
+    let bundle: ResultBundle = serde_json::from_value(json!({
+        "bundle_version": 1,
+        "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+        "job_sha256": "sha256:5e8c9902207afaeb7120430c585a445f21e92932081d64bc99f80e4925bcb002",
+        "collected_at": "2026-10-24T12:58:48.000Z",
+        "terminal": { "cause": "lost", "oom": false, "cancel_requested": false },
+        "classification": { "failure_class": "infra_error", "failure_detail": "infra.lost" }
+    }))
+    .unwrap();
+    bundle.validate().unwrap();
+    assert!(bundle.files.is_empty());
+    assert!(bundle.validation.is_none());
+}
+
+#[test]
+fn worker_result_bundle_rejects_bad_shapes() {
+    for (pointer, replacement) in [
+        ("/bundle_version", json!(2)),
+        (
+            "/files",
+            json!({ "evil.sh": { "sha256": "sha256:a4895eb44afc336fecbba6e520cd67e178dace0276655d102fceffa8e5f70570", "bytes": 1 } }),
+        ),
+        ("/terminal/timer", json!("forever")),
+        ("/validation/proposals/0/kind", json!("merge_pr")),
+    ] {
+        let mut value = parse(RESULT_BUNDLE);
+        *value.pointer_mut(pointer).unwrap() = replacement;
+        assert!(
+            serde_json::from_value::<ResultBundle>(value).is_err(),
+            "{pointer} should be rejected"
+        );
+    }
+}
+
+type BundleCase = (&'static str, Value, fn(&WorkerError) -> bool);
+
+#[test]
+fn worker_result_bundle_validate_enforces_invariants() {
+    let cases: [BundleCase; 7] = [
+        ("/collected_at", json!("2026-10-24T12:58:48.123Z"), |e| {
+            matches!(e, WorkerError::BundleCollectedAtNotSeconds)
+        }),
+        ("/terminal/exit_code", Value::Null, |e| {
+            matches!(e, WorkerError::BundleExitCodeMissing)
+        }),
+        (
+            "/validation/patch/sha256",
+            json!("sha256:845e91831319e89c4d656bdb80c278ac09a7230d61e5dfd2e1b1fbb436ac8917"),
+            |e| matches!(e, WorkerError::BundlePatchMismatch),
+        ),
+        ("/validation/patch/verdict", json!("deny"), |e| {
+            matches!(e, WorkerError::BundleDeniedPatchHasTree)
+        }),
+        ("/validation/proposals/1/id", json!("p1"), |e| {
+            matches!(e, WorkerError::BundleDuplicateProposal)
+        }),
+        (
+            "/validation/proposals/1/disposition",
+            json!("denied"),
+            |e| matches!(e, WorkerError::BundleTextRefNotAccepted),
+        ),
+        ("/validation/proposals/0/text_ref", Value::Null, |e| {
+            matches!(e, WorkerError::BundleOpenPrTextMissing)
+        }),
+    ];
+    for (pointer, replacement, expected) in cases {
+        let mut value = parse(RESULT_BUNDLE);
+        *value.pointer_mut(pointer).unwrap() = replacement;
+        let bundle: ResultBundle = serde_json::from_value(value).unwrap();
+        let error = bundle.validate().unwrap_err();
+        assert!(expected(&error), "{pointer}: unexpected {error:?}");
+    }
+
+    let mut value = parse(RESULT_BUNDLE);
+    value["files"]
+        .as_object_mut()
+        .unwrap()
+        .remove("changes.patch");
+    let bundle: ResultBundle = serde_json::from_value(value).unwrap();
+    assert!(matches!(
+        bundle.validate().unwrap_err(),
+        WorkerError::BundlePatchMismatch
+    ));
 }
 
 #[test]

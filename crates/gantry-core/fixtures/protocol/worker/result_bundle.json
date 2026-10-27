@@ -1,6 +1,8 @@
 {
+  "bundle_version": 1,
   "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
   "job_sha256": "sha256:5e8c9902207afaeb7120430c585a445f21e92932081d64bc99f80e4925bcb002",
+  "collected_at": "2026-10-24T12:58:48.000Z",
   "terminal": { "cause": "exited", "exit_code": 0, "signal": null, "oom": false, "timer": null, "cancel_requested": false },
   "files": {
     "result.json": { "sha256": "sha256:b4d78c6828c77821e5673bb398468fb13dd99b7a44bc3a228f4429bcaea3dbc8", "bytes": 3120 },
@@ -9,14 +11,19 @@
     "proposals.json": { "sha256": "sha256:c0cbf0fbcaf64c0b201506063e2b6b12b9999482a61de6d6078321000fafdf76", "bytes": 640 },
     "progress.jsonl": { "sha256": "sha256:7c9e0d75ba6d887d43620bee283b0a39704a4a7ef82b39364a46c97cdc207d73", "bytes": 48211 }
   },
-  "usage_metered": { "input_tokens": 415200, "output_tokens": 18100, "cache_read_tokens": 351000, "cache_write_tokens": 21000, "requests": 26 },
+  "logs": {
+    "stdout_tail": { "sha256": "sha256:3f1a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a", "bytes": 4096 },
+    "stderr_tail": { "sha256": "sha256:9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d", "bytes": 512 }
+  },
+  "usage_metered": { "input_tokens": 415200, "output_tokens": 18100, "cache_read_tokens": 351000, "cache_write_tokens": 21000, "requests": 26, "weighted_tokens": null },
   "usage_reported": { "input_tokens": 412000, "output_tokens": 18300, "cache_read_tokens": 350000, "cache_write_tokens": 21000, "turns": 24, "tool_calls": 61 },
+  "egress": { "capped": false, "incomplete": false },
   "classification": { "failure_class": null, "failure_detail": null },
   "validation": {
-    "patch": { "verdict": "allow", "result_tree": "f2c03d84a858156b0121130fd1ec2f391aa90865", "files": 2 },
+    "patch": { "verdict": "allow", "sha256": "sha256:a4895eb44afc336fecbba6e520cd67e178dace0276655d102fceffa8e5f70570", "result_tree": "f2c03d84a858156b0121130fd1ec2f391aa90865", "files": 2 },
     "proposals": [
-      { "id": "p1", "disposition": "accepted" },
-      { "id": "p2", "disposition": "accepted" }
+      { "id": "p1", "kind": "open_pr", "disposition": "accepted", "reasons": null, "text_ref": { "sha256": "sha256:d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26", "bytes": 812 } },
+      { "id": "p2", "kind": "reply_review_thread", "disposition": "accepted", "reasons": null, "text_ref": { "sha256": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b", "bytes": 214 } }
     ],
     "unexpected_artifacts": []
   }
