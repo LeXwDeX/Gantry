@@ -1,4 +1,6 @@
 //! worker.md §12.C：补丁生成（A5，M1）。用真实 `git` 在临时仓库上运行。
+//! 沙盒是 Linux；用到文件模式与符号链接，只在 unix 上编译。
+#![cfg(unix)]
 
 mod common;
 
@@ -266,7 +268,10 @@ fn hostile_dot_git_is_never_executed() {
 
     // 反向对照：直接在工作区上跑 git（读取它自己的 .git/config），驱动确实会被执行。
     git(&repo.work, &["add", "-A"]);
-    assert!(marker.exists(), "control: plain git should run the hostile filter");
+    assert!(
+        marker.exists(),
+        "control: plain git should run the hostile filter"
+    );
 }
 
 #[test]
