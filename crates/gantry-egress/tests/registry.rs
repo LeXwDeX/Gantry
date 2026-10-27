@@ -1005,7 +1005,12 @@ fn secrets_are_staged_then_activated_or_discarded() {
         .registry
         .stage_secret(request, name.clone(), value(), &ctx())
         .unwrap();
-    assert!(!harness.registry.secrets_present(std::slice::from_ref(&name)).unwrap()[&name]);
+    assert!(
+        !harness
+            .registry
+            .secrets_present(std::slice::from_ref(&name))
+            .unwrap()[&name]
+    );
     assert_eq!(harness.registry.staged_secrets(&ctx()).unwrap().len(), 1);
     // 同一 request_id 同值重放 → 同一 staged_id；不同值 → conflict。
     assert_eq!(
@@ -1029,7 +1034,12 @@ fn secrets_are_staged_then_activated_or_discarded() {
         .registry
         .activate_secret(&staged.staged_id, &ctx())
         .unwrap();
-    assert!(harness.registry.secrets_present(std::slice::from_ref(&name)).unwrap()[&name]);
+    assert!(
+        harness
+            .registry
+            .secrets_present(std::slice::from_ref(&name))
+            .unwrap()[&name]
+    );
     assert!(harness.registry.staged_secrets(&ctx()).unwrap().is_empty());
     // 已激活的再激活原样成功。
     assert!(harness
@@ -1063,7 +1073,12 @@ fn secrets_are_staged_then_activated_or_discarded() {
         .registry
         .discard_secret(&discarded.staged_id, &ctx())
         .unwrap();
-    assert!(!harness.registry.secrets_present(std::slice::from_ref(&unused)).unwrap()[&unused]);
+    assert!(
+        !harness
+            .registry
+            .secrets_present(std::slice::from_ref(&unused))
+            .unwrap()[&unused]
+    );
     assert!(harness.secrets.staged().unwrap().is_empty());
 }
 
@@ -1090,7 +1105,12 @@ fn staged_secrets_expire() {
         Err(ControlError::StagedExpired)
     );
     assert!(harness.registry.staged_secrets(&ctx()).unwrap().is_empty());
-    assert!(!harness.registry.secrets_present(std::slice::from_ref(&name)).unwrap()[&name]);
+    assert!(
+        !harness
+            .registry
+            .secrets_present(std::slice::from_ref(&name))
+            .unwrap()[&name]
+    );
 
     let empty = harness.registry.stage_secret(
         Ulid::from_parts(T0 as u64, 2).unwrap(),

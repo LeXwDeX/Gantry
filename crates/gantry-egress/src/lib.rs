@@ -3,10 +3,11 @@
 //! 出网代理 `gantry-egress`（`docs/modules/egress.md`；控制面契约
 //! `docs/interfaces/egress-control.md`、`docs/interfaces/egress-call-terminal.md`）。
 //!
-//! 本切片落地纯规则层，不做任何 IO：主机规范化与硬性拒绝表（`host`）、拒绝网段
-//! （`netdeny`）、配置视图的防御性复核（`review`）、能力令牌的铸造与哈希（`token`）。
-//! 登记表与控制面、模型反向代理、`CONNECT` 隧道、审计与进程入口在后续切片落地（#94）。
+//! 已落地：纯规则层（`host` 主机规范化与硬性拒绝表、`netdeny` 拒绝网段、`review` 配置视图
+//! 防御性复核、`token` 能力令牌铸造与哈希）、登记表（`registry`，持久化在 `db`）、出网审计
+//! （`audit`）。控制面服务与客户端、模型反向代理、`CONNECT` 隧道、进程入口在后续切片落地（#94）。
 
+pub mod audit;
 pub mod db;
 pub mod host;
 pub mod netdeny;
