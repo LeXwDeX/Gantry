@@ -20,3 +20,16 @@ sha2 = "0.10"
 serde_jcs = "0.2"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
 time = "0.3"
+
+# pki 引导用 scrypt 加密根私钥（pki.md §6.6）；未优化时单次要数十秒，测试与开发构建也开优化。
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.pbkdf2]
+opt-level = 3
