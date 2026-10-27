@@ -28,11 +28,17 @@
 
 以上 PR 均已合入；`decide` 的类型契约（engine.md §7.14）由 #63 合入，M1 验收证据分级（`docs/m1-acceptance.md`，提议）由 #62 合入。
 
-**本机检查（2026-10-27 实测）**：`cargo fmt`、`cargo clippy` 通过；工作区测试 463 passed / 0 failed / 2 ignored（两个 ignored 是由父测试启动的看门狗子进程入口）；`cargo --locked xtask schemas --check` 0 failure，保留 3 个显式未验证块。前端这次没有重跑，上次（2026-10-26）为 287 项单元测试与 66 项端到端测试通过，此后前端代码未改动。结果只覆盖内存存储与测试替身。
+**本机检查（2026-10-27 实测）**：`cargo fmt`、`cargo clippy` 通过；工作区测试 463 passed / 0 failed / 2 ignored（两个 ignored 是由父测试启动的看门狗子进程入口）；MSRV `cargo +1.85 check` 通过；`cargo --locked xtask schemas --check` 0 failure、0 warning，保留 3 个显式未验证块，`schemas/`、`fixtures/` 无漂移；模拟接口测试 29 passed。前端在当前 `main` 上重跑（含 vitest 4.1.12 等依赖升级之后）：`npm ci`、边界检查、类型检查通过；单元测试 24 个文件、287 passed；正式与场景资源构建通过，仍有超过 500 kB 的构建块警告；浏览器端到端测试 66 passed。环境为 macOS arm64、Rust 1.97.0 / 1.85.1、Node 26.12.0、npm 11.20.0；未验证 Node 22、Linux / Windows。结果只覆盖内存存储、测试替身与浏览器模拟场景。
 
-**远端 CI**：GitHub Actions 因账户计费问题全部在 3 秒内失败，#77、#78、#79 是在没有 CI 的情况下按本机检查合入的。最近一次可追溯的全绿远端结果是 M0 时期 PR #17 的 run 40334369717。
+**远端 CI**：GitHub Actions 因账户计费问题全部在数秒内失败，#77、#78、#79 是在没有 CI 的情况下按本机检查合入的。最近一次可追溯的全绿远端结果是 M0 时期 PR #17 的 run 40334369717。
 
 **未实现或未验证**：Outbox 执行与审批消费（`PolicyPort` 尚未接入引擎）；终结管线与 `waiting_human` / `blocked` 自动切换；`attempt.*`、`budget.charged` 的事件写入；真实 GitHub App、模型、Podman、目标主机与代码签名。M1 端到端退出标准全部未验证，取证分级见 [M1 验收证据分级（提议）](docs/m1-acceptance.md)。
+
+**M0 遗留**（见 M0 遗留收口里程碑，issue 待开）：
+
+- B-01 Egress 调用级终结：`core::ports::egress::EgressControl` 只有 `call_usage` 等用量查询和整令牌吊销，还没有调用级关闭屏障；候选方案见 [调用级终结（送审草案）](docs/interfaces/egress-call-terminal.md)。在它批准并实现之前，直接调用的最终结算、释放和零判定都没有可信证据。
+- `xtask schemas --check` 报告的 OpenAPI / core 人工核对差异尚未逐项判定是允许的视图差异还是漂移。
+- 3 个显式未验证文档块（`github_ref` 组合、App Manifest、`ResultBundle`）仍按 `example` / `contract-undefined` 登记。
 
 ## 待拍板
 
