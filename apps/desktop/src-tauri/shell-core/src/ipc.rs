@@ -61,6 +61,13 @@ pub enum ShellErrorCode {
     SelfCheckFailed,
     #[serde(rename = "shell.key_unavailable")]
     KeyUnavailable,
+    /// 配对过程中本地校验失败（证书链、指纹、响应形状、网络）；`reason` 给出哪一项。
+    /// 规格 §6.1 未列出，沿用前端已有的错误码（#102 评论）。
+    #[serde(rename = "shell.pairing_failed")]
+    PairingFailed,
+    /// 服务端 `401 pair_token_invalid` 原样透出：无效、已用、过期不区分（api.md §1.3）。
+    #[serde(rename = "pair_token_invalid")]
+    PairTokenInvalid,
     /// 外壳尚未实现该能力（与前端 `shell.unavailable` 对齐），不是规格里的永久错误。
     #[serde(rename = "shell.unavailable")]
     Unavailable,

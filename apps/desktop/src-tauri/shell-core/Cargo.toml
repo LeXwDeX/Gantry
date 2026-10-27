@@ -20,6 +20,10 @@ base64 = "0.22"
 getrandom = "0.2"
 url = "2"
 idna = "1"
+pem = "3"
+# 与 gantry-pki 相同的特性组合，避免同一 lock 里出现两套编译。
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
+x509-parser = { version = "0.16", features = ["verify"] }
 p256 = { version = "0.13", features = ["ecdsa"], optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 
@@ -32,4 +36,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext"] }
 
 [dev-dependencies]
+# 配对测试用的替身服务端：TestCA 与 pki 的签发 / CSR 校验（只作测试，外壳代码不依赖 pki）。
+gantry-fakes = { path = "../../../../crates/gantry-fakes" }
+gantry-pki = { path = "../../../../crates/gantry-pki" }
+gantry-core = { path = "../../../../crates/gantry-core", features = ["testing"] }
+serde_json.workspace = true
 p256 = { version = "0.13", features = ["ecdsa"] }
