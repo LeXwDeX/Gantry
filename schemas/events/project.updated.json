@@ -23,7 +23,9 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/MergeMethod"
-      }
+      },
+      "description": "至少一项：引擎 M1 取第一项作为 `merge_pr.merge_method`（engine.md §7.14.3 `ProjectFacts`，#70）。",
+      "minItems": 1
     },
     "merge_queue_enabled": {
       "type": "boolean"

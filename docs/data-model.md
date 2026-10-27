@@ -82,7 +82,7 @@ erDiagram
 | installation_id | int | GitHub App 安装 ID |
 | bot_user_id | int | App 机器人账号的 GitHub 用户 ID，用于识别自身事件 |
 | default_branch | string | 默认分支（仓库设置快照） |
-| allowed_merge_methods | (`merge` / `squash` / `rebase`)[] | 仓库允许的合并方法（仓库设置快照） |
+| allowed_merge_methods | (`merge` / `squash` / `rebase`)[] | 仓库允许的合并方法（仓库设置快照）；至少一项，引擎 M1 取第一项作为合并方式（engine.md §7.14.3，#70） |
 | merge_queue_enabled | bool | 默认分支是否启用 merge queue（仓库设置快照） |
 | settings_override | object? | 项目级配置覆盖（见 [interfaces/config.md](interfaces/config.md)）；只经 settings 路由读写 |
 
