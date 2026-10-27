@@ -24,6 +24,7 @@ pem = "3"
 # 与 gantry-pki 相同的特性组合，避免同一 lock 里出现两套编译。
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
 x509-parser = { version = "0.16", features = ["verify"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 p256 = { version = "0.13", features = ["ecdsa"], optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 
@@ -41,4 +42,6 @@ gantry-fakes = { path = "../../../../crates/gantry-fakes" }
 gantry-pki = { path = "../../../../crates/gantry-pki" }
 gantry-core = { path = "../../../../crates/gantry-core", features = ["testing"] }
 serde_json.workspace = true
+# 测试服务端要能只开 TLS 1.2，验证客户端拒绝降级。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 p256 = { version = "0.13", features = ["ecdsa"] }

@@ -850,6 +850,7 @@ dependencies = [
  "pem",
  "rand_core",
  "rcgen",
+ "rustls",
  "security-framework-sys",
  "serde",
  "serde_json",
