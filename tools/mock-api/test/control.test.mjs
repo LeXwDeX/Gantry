@@ -275,7 +275,11 @@ test("a granted settings approval is consumed once and cannot be replayed", asyn
   const types = mock.state.events.slice(-3).map((event) => event.type);
   assert.deepEqual(types.slice(0, 3), ["approval.granted", "approval.consumed", "settings.updated"]);
   const updated = mock.state.events.at(-1);
-  assert.deepEqual(updated.data.secret_changes, [{ ref: "model.anthropic.main", op: "set", version: 18201 }]);
+  assert.deepEqual(updated.data.secret_changes, [{ ref: "model.anthropic.main", op: "set", version: updated.seq }]);
+  // rev = 该次 settings.updated 的 seq；ETag 与 X-Event-Seq 都等于它。
+  assert.equal(ok.headers.get("x-event-seq"), String(updated.seq));
+  assert.equal(next, `"${updated.seq}"`);
+  assert.equal((await (await request(path)).json()).rev, updated.seq);
   assert.equal(JSON.stringify(mock.state.events).includes("sk-test-0000"), false);
 });
 
