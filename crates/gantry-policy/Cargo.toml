@@ -8,7 +8,14 @@ description = "Gantry 策略与审计（M1：policy v0，内置规则、失败�
 
 [dependencies]
 gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+async-trait.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+async-trait.workspace = true
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-fakes = { path = "../gantry-fakes" }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
+tokio.workspace = true
