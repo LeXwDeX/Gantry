@@ -29,7 +29,7 @@ pub struct DriverCaps {
 }
 
 /// 运行时观察到的退出事实（W3）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExitFacts {
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
