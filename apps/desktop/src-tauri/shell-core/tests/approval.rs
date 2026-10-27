@@ -366,3 +366,21 @@ fn sheet_model_comes_from_the_same_payload() {
         "cdcdcdcdcdcd"
     );
 }
+
+#[test]
+fn cross_device_digests_for_device_actions_only() {
+    use gantry_core::canon::jcs_digest;
+    let revoke = jcs_digest(&json!({})).unwrap().to_string();
+    let a = json!({"action": "device_revoke", "subject_digest": revoke});
+    assert_eq!(approval::cross_device_internal_digest(&a), Some(revoke));
+    let role = jcs_digest(&json!({"role": "operator"}))
+        .unwrap()
+        .to_string();
+    let a = json!({"action": "device_role_change", "subject_digest": role});
+    assert_eq!(approval::cross_device_internal_digest(&a), Some(role));
+    let a = json!({"action": "device_role_change", "subject_digest": "sha256:00"});
+    assert_eq!(approval::cross_device_internal_digest(&a), None);
+    // settings_update 跨设备无法核对内容：拒签（OQ-S7）。
+    let a = json!({"action": "settings_update", "subject_digest": "sha256:00"});
+    assert_eq!(approval::cross_device_internal_digest(&a), None);
+}

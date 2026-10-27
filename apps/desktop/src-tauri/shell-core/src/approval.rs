@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use gantry_core::canon::{jcs, ApprovalPayload, APPROVAL_SIGNING_PREFIX};
+use gantry_core::canon::{jcs, jcs_digest, ApprovalPayload, APPROVAL_SIGNING_PREFIX};
 use serde_json::{json, Value};
 
 use crate::ipc::{ShellError, ShellErrorCode};
@@ -40,6 +40,20 @@ fn self_check_failed(reason: &str) -> ShellError {
             "服务端数据不一致，无法签名",
         )
     }
+}
+
+/// IPC 参数必须恰好是这些键（Tauri 默认忽略多余参数；`approval_sign` 等命令要拒绝夹带的
+/// `payload` / `signature` / `nonce` / `subject_digest`，§12）。
+pub fn exact_args(args: &Value, allowed: &[&str]) -> Result<(), ShellError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| ShellError::bad_argument("args"))?;
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(ShellError::bad_argument(key.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// 自检通过的结果：签名字节与已解析的 payload。
@@ -247,6 +261,56 @@ pub fn sheet_model(
         "challenge_expires_at": raw["expires_at"],
         "server_time_offset_ms": server_time_offset_ms,
     })
+}
+
+/// 不能签名时的只读展示（非 `pending`、非 approver）：只用 `Approval` 本身的字段，不取 challenge。
+pub fn readonly_model(
+    approval: &Value,
+    device_id: &str,
+    device_name: &str,
+    reason: &str,
+    server_time_offset_ms: i64,
+    unsigned: Value,
+) -> Value {
+    let action = approval["action"].as_str().unwrap_or_default();
+    let digest = approval["subject_digest"].as_str().unwrap_or_default();
+    let (target_label, _) = target_labels(&approval["target"]);
+    json!({
+        "prepared_id": "",
+        "signed": {
+            "action": action,
+            "action_label": action_label(action).0,
+            "target": approval["target"],
+            "target_label": target_label,
+            "subject_digest": digest,
+            "digest_head12": digest_head12(digest),
+            "expires_at": approval["expires_at"],
+            "device_id": device_id,
+            "device_name": device_name,
+            "delivery_id": approval.get("delivery_id").cloned().unwrap_or(Value::Null),
+            "tech": { "approval_id": approval["id"], "nonce": "", "v": 1 },
+        },
+        "unsigned": unsigned,
+        "links": {},
+        "can_sign": { "ok": false, "reason": reason },
+        "challenge_expires_at": approval["expires_at"],
+        "server_time_offset_ms": server_time_offset_ms,
+    })
+}
+
+/// 跨设备签内部动作（OQ-S7）：本机没有待发请求体时，外壳能自行核对的摘要。
+/// `device_revoke` 的请求体是常量 `{}`；`device_role_change` 对三个候选角色各算一次；
+/// `settings_update` 无法核对内容，返回 `None`（自检随之以 `internal_digest_mismatch` 拒签）。
+pub fn cross_device_internal_digest(approval: &Value) -> Option<String> {
+    let digest = |v: Value| jcs_digest(&v).ok().map(|d| d.to_string());
+    match approval["action"].as_str()? {
+        "device_revoke" => digest(json!({})),
+        "device_role_change" => ["viewer", "operator", "approver"]
+            .into_iter()
+            .filter_map(|role| digest(json!({ "role": role })))
+            .find(|d| approval["subject_digest"].as_str() == Some(d.as_str())),
+        _ => None,
+    }
 }
 
 // ---- 签名 ----

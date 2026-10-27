@@ -93,6 +93,28 @@ impl StoreConfig {
 
 pub(crate) struct Durable {
     conn: Mutex<Connection>,
+    /// 数据目录锁（`gantry.lock`），持有到 `Durable` 释放；字段顺序保证主库先关。
+    _lock: Mutex<Connection>,
+}
+
+const LOCK_FILE: &str = "gantry.lock";
+
+/// 取数据目录的排他锁（store.md §7.1 的 `gantry.lock`）。锁文件是一个只用来持锁的小
+/// SQLite 库：`locking_mode = EXCLUSIVE` 下第一次写事务取得的锁保持到连接关闭，跨进程、
+/// 同进程都互斥，也不依赖主库能否读出。`Store::open` 与 `restore_from` 共用它，并都持有
+/// 到操作结束；被占用即 `AlreadyRunning`。
+fn lock_data_dir(dir: &Path) -> Result<Connection, StoreError> {
+    let lock = Connection::open(dir.join(LOCK_FILE)).map_err(sqlite)?;
+    lock.busy_timeout(std::time::Duration::ZERO)
+        .map_err(sqlite)?;
+    lock.execute_batch(
+        "PRAGMA locking_mode = EXCLUSIVE;
+         BEGIN EXCLUSIVE;
+         CREATE TABLE IF NOT EXISTS lock (id INTEGER PRIMARY KEY);
+         COMMIT;",
+    )
+    .map_err(open_error)?;
+    Ok(lock)
 }
 
 impl Durable {
@@ -103,6 +125,7 @@ impl Durable {
         new_log_id: impl FnOnce() -> Result<String, StoreError>,
     ) -> Result<(Durable, Inner), StoreError> {
         create_dir(&cfg.dir)?;
+        let lock = lock_data_dir(&cfg.dir)?;
         let mut conn = Connection::open(cfg.dir.join(DB_FILE)).map_err(sqlite)?;
         conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(sqlite)?;
@@ -132,6 +155,7 @@ impl Durable {
         Ok((
             Durable {
                 conn: Mutex::new(conn),
+                _lock: Mutex::new(lock),
             },
             inner,
         ))
@@ -276,6 +300,35 @@ impl Durable {
     pub(crate) fn persist_log_epoch(&self, epoch: u64) -> Result<(), StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
         set_meta(&conn, "log_epoch", &epoch.to_string())
+    }
+
+    /// `VACUUM INTO`：写者可继续写的一致性快照（store.md §7.8）。与 `persist` 共用连接锁，
+    /// 因此副本恰好是某次提交之后的状态。
+    pub(crate) fn vacuum_into(&self, path: &Path) -> Result<(), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        let target = path.to_str().ok_or_else(|| {
+            StoreError::Io(format!("backup path is not UTF-8: {}", path.display()))
+        })?;
+        conn.execute("VACUUM INTO ?1", params![target])
+            .map_err(sqlite)?;
+        Ok(())
+    }
+
+    /// `PRAGMA quick_check` / `integrity_check` 中不是 `ok` 的行。
+    pub(crate) fn check(&self, full: bool) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        pragma_check(&conn, full)
+    }
+
+    pub(crate) fn projected_seq(&self) -> Result<u64, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        parse_u64(&required_meta(&conn, "projected_seq")?, "projected_seq")
+    }
+
+    /// 从磁盘重新载入并重放（`verify(Full)` 用来与内存状态逐项比较）。
+    pub(crate) fn reload(&self, modules: &ModuleRegistry) -> Result<Inner, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        load(&conn, modules)
     }
 
     /// 测试用：直接执行 SQL（验证触发器等数据库层约束）。
@@ -598,4 +651,122 @@ fn encode(error: serde_json::Error) -> StoreError {
 
 fn corrupt(error: impl std::fmt::Display) -> StoreError {
     StoreError::Corrupt(error.to_string())
+}
+
+fn pragma_check(conn: &Connection, full: bool) -> Result<Vec<String>, StoreError> {
+    let pragma = if full {
+        "PRAGMA integrity_check"
+    } else {
+        "PRAGMA quick_check"
+    };
+    let mut stmt = conn.prepare(pragma).map_err(sqlite)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(sqlite)?;
+    let mut problems = Vec::new();
+    for row in rows {
+        let row = row.map_err(sqlite)?;
+        if row != "ok" {
+            problems.push(row);
+        }
+    }
+    Ok(problems)
+}
+
+/// 备份副本的摘要（清单与恢复前校验共用）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BackupFacts {
+    pub(crate) schema_version: u32,
+    pub(crate) log_id: String,
+    pub(crate) log_epoch: u64,
+    pub(crate) head_seq: u64,
+    pub(crate) events: u64,
+    pub(crate) outbox_rows: u64,
+    pub(crate) cas_objects: u64,
+}
+
+/// 只读打开一个副本：`integrity_check` 必须通过，版本不得高于本二进制，日志必须是
+/// 从 1 开始无空洞的已提交前缀。
+pub(crate) fn inspect_backup(path: &Path) -> Result<BackupFacts, StoreError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(sqlite)?;
+    let problems = pragma_check(&conn, true)?;
+    if !problems.is_empty() {
+        return Err(corrupt(format!(
+            "backup integrity_check: {}",
+            problems.join("; ")
+        )));
+    }
+    let schema_version =
+        parse_u64(&required_meta(&conn, "schema_version")?, "schema_version")? as u32;
+    if schema_version > SCHEMA_VERSION {
+        return Err(StoreError::SchemaTooNew {
+            found: schema_version,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    let count = |sql: &str| -> Result<u64, StoreError> {
+        conn.query_row(sql, [], |row| row.get::<_, i64>(0))
+            .map(|n| n as u64)
+            .map_err(sqlite)
+    };
+    let events = count("SELECT count(*) FROM events")?;
+    let head_seq = count("SELECT coalesce(max(seq), 0) FROM events")?;
+    if head_seq != events {
+        return Err(corrupt(format!(
+            "backup event log has gaps: {events} events, head {head_seq}"
+        )));
+    }
+    let cas_objects = if schema_version >= 2 {
+        count("SELECT count(*) FROM cas_objects")?
+    } else {
+        0
+    };
+    Ok(BackupFacts {
+        schema_version,
+        log_id: required_meta(&conn, "log_id")?,
+        log_epoch: parse_u64(&required_meta(&conn, "log_epoch")?, "log_epoch")?,
+        head_seq,
+        events,
+        outbox_rows: count("SELECT count(*) FROM outbox")?,
+        cas_objects,
+    })
+}
+
+/// 离线恢复（store.md §7.8）：校验副本 → 确认数据目录没有实例在跑 → 复制到临时名 →
+/// `log_epoch` 取"副本与现有库中较大者 + 1"（P-67）→ 删除旧 WAL → 原子替换。
+/// `log_id` 保持副本里的值。返回恢复后的 `(log_id, log_epoch)`。
+pub(crate) fn restore(backup: &Path, data_dir: &Path) -> Result<(String, u64), StoreError> {
+    let facts = inspect_backup(backup)?;
+    create_dir(data_dir)?;
+    let db = data_dir.join(DB_FILE);
+    // 目录锁持有到替换完成：恢复期间任何 `Store::open` 都得到 AlreadyRunning。
+    let _lock = lock_data_dir(data_dir)?;
+    // 现有库可能正是因为损坏才要恢复：读不出 epoch 就当 0，不阻止恢复。
+    let current_epoch = if db.exists() {
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()
+            .and_then(|conn| get_meta(&conn, "log_epoch").ok().flatten())
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let epoch = facts.log_epoch.max(current_epoch) + 1;
+
+    let staging = data_dir.join(format!("{DB_FILE}.restoring"));
+    let _ = std::fs::remove_file(&staging);
+    std::fs::copy(backup, &staging).map_err(|error| StoreError::Io(error.to_string()))?;
+    {
+        let conn = Connection::open(&staging).map_err(sqlite)?;
+        set_meta(&conn, "log_epoch", &epoch.to_string())?;
+    }
+    for suffix in ["-wal", "-shm"] {
+        let path = data_dir.join(format!("{DB_FILE}{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| StoreError::Io(error.to_string()))?;
+        }
+    }
+    std::fs::rename(&staging, &db).map_err(|error| StoreError::Io(error.to_string()))?;
+    Ok((facts.log_id, epoch))
 }

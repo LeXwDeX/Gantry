@@ -794,6 +794,7 @@ pub struct Finalized {
     pub result_ref: Option<Sha256Digest>,
     pub usage_metered: TokenUsage,                   // Egress 计量，不是自报（W3）
     pub weighted_tokens: u64,
+    pub weight_audit: WeightAudit,                   // JobToken { config_rev, weights }：组装 SandboxSpec 时所用的修订与 levels.token_weights（#220）；decide 据此写 tokens_by_tier 的 budget.charged
     pub wall_time_s: u64,                            // JobOutcome.timings
     pub verdict: Option<Verdict>,                    // 只有判定节点（§7.3）
     pub patch: PatchResult,
@@ -819,7 +820,7 @@ pub struct OutputSignals {
 }
 ```
 
-`Finalized` 由 `decide` 写成 `attempt.finished`、`budget.charged`、`node.finished`（§7.8"终结"行）。字段来源都已在 worker-protocol §5–§9 与 `core::ports` 定义；`decide` 不读 CAS 原文。
+`Finalized` 由 `decide` 写成 `attempt.finished`、`budget.charged`、`node.finished`（§7.8"终结"行）。`budget.charged` 写两维：`wall_time`（`wall_time_s`）与 `tokens_by_tier`（节点的 tier，`delta = weighted_tokens`，`usage = usage_metered`，`weight_audit` 原样取自 `Finalized`）。权重与修订必须是这次尝试实际使用的那份（与 `SandboxSpec.config_rev`、`egress.weights` 一致），不能取决策时的当前设置，所以由 AttemptRunner 随 `Finalized` 带回（#72）。字段来源都已在 worker-protocol §5–§9 与 `core::ports` 定义；`decide` 不读 CAS 原文。
 
 **提议原文预取**（#125）：`create_pr` 的 `title` / `body` / `draft` 来自 `open_pr` 提议原文，而 `ActionKey` 要对它们做摘要（forge-actions §2.2，7.14.4）。`decide` 仍然不读 CAS，原文由执行体预取进只读的 `env.proposals`（7.14.3）：
 

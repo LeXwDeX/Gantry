@@ -198,3 +198,89 @@ pub fn origin(addr: SocketAddr) -> Origin {
         port: addr.port(),
     }
 }
+
+/// 通用替身服务端的回复：普通响应或流式 SSE（写完后保持连接）。
+pub enum Reply {
+    Full(u16, Vec<(String, String)>, Vec<u8>),
+    Stream(Vec<String>),
+}
+
+pub type AnyHandler = Arc<dyn Fn(Seen) -> Reply + Send + Sync>;
+
+/// 起一个既能回普通 JSON、也能推 SSE 的 HTTPS 服务端。
+pub async fn serve_any(config: Arc<ServerConfig>, handler: AnyHandler) -> SocketAddr {
+    use http_body_util::{combinators::BoxBody, StreamBody};
+    use hyper::body::Frame;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(config);
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let (acceptor, handler) = (acceptor.clone(), handler.clone());
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let service = hyper::service::service_fn(move |req: Request<Incoming>| {
+                    let handler = handler.clone();
+                    async move {
+                        let seen = Seen {
+                            method: req.method().to_string(),
+                            path: req.uri().to_string(),
+                            headers: req
+                                .headers()
+                                .iter()
+                                .map(|(k, v)| {
+                                    (k.to_string(), v.to_str().unwrap_or_default().to_string())
+                                })
+                                .collect(),
+                            body: req.into_body().collect().await.unwrap().to_bytes().to_vec(),
+                        };
+                        let resp: Response<BoxBody<Bytes, Infallible>> = match handler(seen) {
+                            Reply::Full(status, headers, body) => {
+                                let mut b = Response::builder().status(status);
+                                for (k, v) in headers {
+                                    b = b.header(k, v);
+                                }
+                                b.body(BoxBody::new(Full::new(Bytes::from(body)))).unwrap()
+                            }
+                            Reply::Stream(chunks) => {
+                                let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+                                tokio::spawn(async move {
+                                    for c in chunks {
+                                        if tx.send(Bytes::from(c)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    tokio::time::sleep(Duration::from_secs(30)).await;
+                                });
+                                let body = StreamBody::new(futures_util::stream::unfold(
+                                    rx,
+                                    |mut rx| async {
+                                        rx.recv()
+                                            .await
+                                            .map(|b| (Ok::<_, Infallible>(Frame::data(b)), rx))
+                                    },
+                                ));
+                                Response::builder()
+                                    .status(200)
+                                    .header("content-type", "text/event-stream")
+                                    .header("x-log-epoch", "1")
+                                    .body(BoxBody::new(body))
+                                    .unwrap()
+                            }
+                        };
+                        Ok::<_, Infallible>(resp)
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(tls), service)
+                    .await;
+            });
+        }
+    });
+    addr
+}
