@@ -91,6 +91,8 @@ pub struct Services {
     pub forge: Arc<dyn PrRefresher>,
     /// settings 的校验上下文、catalog 与 status 聚合（本文 §6.3）。
     pub settings_ctx: Arc<dyn SettingsContext>,
+    /// Forge 使用方的密钥存储（只读 `present`，供 settings 读回）。
+    pub forge_secrets: Arc<dyn gantry_core::ports::secrets::SecretSource>,
     /// 模型凭据的转交通道（Egress 控制面，只写不读，P-50）。
     pub egress: Arc<dyn EgressControl>,
     /// 交付单元控制 #8 #43–#45（P-56）。

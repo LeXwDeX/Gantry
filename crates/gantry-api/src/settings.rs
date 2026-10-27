@@ -54,6 +54,11 @@ pub trait SettingsContext: Send + Sync {
     async fn status_modules(&self) -> Result<Map<String, Value>, ModuleError>;
 }
 
+/// settings 的消费方模块（config.md §2.8 `status.modules`）。
+const STATUS_MODULES: [&str; 7] = [
+    "models", "engine", "policy", "guardian", "sandbox", "egress", "notify",
+];
+
 /// M1 开放写入的 resource（本文 §1.1、OQ-A14）。
 const WRITABLE_M1: [SettingsResource; 1] = [SettingsResource::Models];
 
@@ -97,12 +102,13 @@ async fn with_presence(
     if refs.is_empty() {
         return Ok(doc);
     }
+    // 按使用方分别查询：Egress 经控制面，Forge 经 secrets 存储（config.md §2.4）
     let egress_names: Vec<SecretName> = refs
         .iter()
         .filter(|(_, _, c)| *c == Consumer::Egress)
         .map(|(_, n, _)| n.clone())
         .collect();
-    let present = if egress_names.is_empty() {
+    let egress_present = if egress_names.is_empty() {
         BTreeMap::new()
     } else {
         core.services()
@@ -111,13 +117,19 @@ async fn with_presence(
             .await
             .map_err(|_| unavailable())?
     };
-    for (pointer, name, _) in refs {
+    for (pointer, name, consumer) in refs {
+        let present = match consumer {
+            Consumer::Egress => egress_present.get(&name).copied().unwrap_or(false),
+            Consumer::Forge => core
+                .services()
+                .forge_secrets
+                .present(&name)
+                .map_err(|_| unavailable())?,
+            _ => false,
+        };
         if let Some(Value::Object(slot)) = doc.pointer_mut(&pointer) {
             slot.remove("value");
-            slot.insert(
-                "present".into(),
-                Value::Bool(present.get(&name).copied().unwrap_or(false)),
-            );
+            slot.insert("present".into(), Value::Bool(present));
         }
     }
     Ok(doc)
@@ -197,7 +209,24 @@ pub async fn status(core: &ApiCore, _req: &HandlerRequest<'_>) -> Result<Reply, 
     let snapshot = svc.store.snapshot().await.map_err(|_| unavailable())?;
     let seq = snapshot.head_seq();
     let latest = snapshot.config_rev(None);
-    let modules = svc.settings_ctx.status_modules().await.unwrap_or_default();
+    // 聚合不到的模块报 unhealthy，不报错、也不隐藏成"未上报"（本文 §7.8）
+    let modules = match svc.settings_ctx.status_modules().await {
+        Ok(modules) => modules,
+        Err(_) => STATUS_MODULES
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    json!({
+                        "applied_rev": 0,
+                        "health": "unhealthy",
+                        "detail": "status aggregation failed",
+                        "unresolved_secret_refs": [],
+                    }),
+                )
+            })
+            .collect(),
+    };
     Ok(Reply::json(
         StatusCode::OK,
         json!({ "latest_rev": latest.as_u64(), "modules": modules }),
@@ -285,17 +314,20 @@ pub async fn put(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Prob
     // 4. core 校验（含 value 的原始文档：带值的 secret 不要求已存在）与 secret 拆分
     let ctx = svc.settings_ctx.validation_ctx();
     let report = validate(resource, &scope, &request_value, ctx.as_ref());
-    let (sparse, writes) = match split_secret_values(resource, request_value.clone()) {
-        Ok(split) => split,
-        Err(split_report) => {
-            return Err(Problem::validation(
-                issues(&split_report.errors)
-                    .into_iter()
-                    .map(pointer_prefix)
-                    .collect(),
-            ))
-        }
+    let (sparse, writes, mut errors) = match split_secret_values(resource, request_value.clone()) {
+        Ok((sparse, writes)) => (sparse, writes, Vec::new()),
+        // 拆分失败（null / 非字符串值 / 非法 secret_ref）与其他校验错误一样进入结果，
+        // dry_run 仍按约定返回 {valid:false, errors, …}（api.md §4.9）
+        Err(split_report) => (request_value.clone(), Vec::new(), split_report.errors),
     };
+    for issue in &report.errors {
+        if !errors
+            .iter()
+            .any(|e| e.pointer == issue.pointer && e.code == issue.code)
+        {
+            errors.push(issue.clone());
+        }
+    }
     let old = current.value.clone().unwrap_or_else(|| json!({}));
     let relaxes = diff_relaxes(resource, &scope, &old, &sparse);
     let intents: Vec<SecretWriteIntent> = writes
@@ -326,8 +358,8 @@ pub async fn put(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Prob
     // 5. dry_run：不落库、不发事件、不消费审批，缺签名头也照常返回
     if req.query.bool("dry_run") == Some(true) {
         let mut body = json!({
-            "valid": report.is_ok(),
-            "errors": issues_json(&report.errors),
+            "valid": errors.is_empty(),
+            "errors": issues_json(&errors),
             "warnings": issues_json(&report.warnings),
             "relaxes": relaxes_json,
             "required_role": crate::problem::role_str(authority.required_role),
@@ -341,8 +373,10 @@ pub async fn put(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Prob
         reply.headers.push((ETAG, etag(current.rev)));
         return Ok(reply);
     }
-    if !report.is_ok() {
-        return Err(Problem::validation(issues(&report.errors)));
+    if !errors.is_empty() {
+        return Err(Problem::validation(
+            issues(&errors).into_iter().map(pointer_prefix).collect(),
+        ));
     }
     // 6. 角色
     if !role_satisfies(req.auth.device.role, authority.required_role) {
@@ -387,6 +421,8 @@ pub async fn put(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Prob
         if consumer != Consumer::Egress || staged.iter().any(|s| s.secret_ref == name) {
             continue;
         }
+        let mut stage_ctx = actor_ctx.clone();
+        stage_ctx.request_id = svc.ids.next_ulid().map_err(|_| Problem::internal())?;
         match svc
             .egress
             .stage_secret(
@@ -394,7 +430,7 @@ pub async fn put(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Prob
                     secret_ref: name,
                     value,
                 },
-                &actor_ctx,
+                &stage_ctx,
             )
             .await
         {
@@ -430,6 +466,16 @@ pub async fn put(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Prob
     };
     let committed = async {
         let mut tx = svc.store.begin_write().await.map_err(|_| unavailable())?;
+        // 事务外读到的版本可能已被并发写入超过：取得写事务后重新核对，
+        // 412 先于审批消费（api.md §6.6 第 4 步 #5）
+        let live = tx.read().settings_current(&scope, resource).rev;
+        if live != wanted {
+            let _ = tx.rollback().await;
+            return Err(
+                Problem::new(ProblemCode::PreconditionFailed, "If-Match does not match")
+                    .with_header(ETAG, etag(live)),
+            );
+        }
         if let Some(approval_id) = approval_id.filter(|_| authority.requires_signature) {
             let consumed = svc
                 .approvals

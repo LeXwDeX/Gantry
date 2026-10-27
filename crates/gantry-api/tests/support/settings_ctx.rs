@@ -19,6 +19,7 @@ const STATUS: &str = include_str!("../../../../fixtures/api/settings-status.json
 #[derive(Default)]
 pub struct FakeSettingsContext {
     pub existing: Mutex<BTreeSet<String>>,
+    pub status_fails: Mutex<bool>,
 }
 
 struct Ctx {
@@ -90,6 +91,11 @@ impl SettingsContext for FakeSettingsContext {
     }
 
     async fn status_modules(&self) -> Result<Map<String, Value>, ModuleError> {
+        if *self.status_fails.lock().unwrap() {
+            return Err(ModuleError::Unavailable {
+                message: "aggregation failed".into(),
+            });
+        }
         let status: Value = serde_json::from_str(STATUS).unwrap();
         Ok(status["modules"].as_object().unwrap().clone())
     }

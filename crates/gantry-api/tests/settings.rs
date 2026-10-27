@@ -364,3 +364,76 @@ async fn signed_credential_write_is_two_phase_and_never_echoes_the_value() {
     .await;
     assert_problem(&resp, 412, "precondition_failed");
 }
+
+#[tokio::test]
+async fn review_fixes_dry_run_status_and_multi_secret_stage() {
+    let env = PkiEnv::new().await;
+    let approver = env.pair(DevicePlatform::Macos, "approver").await;
+    let op = env.pair(DevicePlatform::Macos, "operator").await;
+    // dry_run：secret 拆分错误也按试运行契约返回 valid:false
+    let mut cleared = models_without_secret();
+    cleared["providers"]["anthropic"]["credential"]["value"] = Value::Null;
+    let resp = send(
+        &env,
+        put(&op, "/v1/settings/models?dry_run=true", Some("\"0\"")),
+        &json!({"value": cleared}).to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "{:?}", body(&resp));
+    let dry = body(&resp);
+    validate("DryRunResponse", &dry);
+    assert_eq!(dry["valid"], false);
+    assert!(dry["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["code"] == "secret_clear_in_use"));
+
+    // 状态聚合失败：显式 unhealthy，不是空对象
+    *env.settings_ctx.status_fails.lock().unwrap() = true;
+    let resp = send(&env, op.req(Method::GET, "/v1/settings/status"), "").await;
+    let status = body(&resp);
+    validate("SettingsStatus", &status);
+    assert_eq!(status["modules"]["models"]["health"], "unhealthy");
+
+    // 一次写两个 provider 的凭据：每个暂存用独立 request_id，都能生效
+    let mut doc = models_with_secret();
+    let mut second = doc["providers"]["anthropic"].clone();
+    second["credential"]["secret_ref"] = json!("model.anthropic.backup");
+    second["credential"]["value"] = json!("probe-second-secret-value");
+    doc["providers"]["anthropic-backup"] = second;
+    let body_two = json!({ "value": doc }).to_string();
+    let resp = send(
+        &env,
+        put(&approver, "/v1/settings/models", Some("\"0\"")),
+        &body_two,
+    )
+    .await;
+    let signing = assert_problem(&resp, 403, "signature_required")["signing"].clone();
+    let approval = sign_approval(&env, &approver, &op, &signing, "settings-two-secret").await;
+    let resp = send(
+        &env,
+        put(&approver, "/v1/settings/models", Some("\"0\"")).header("gantry-approval", &approval),
+        &body_two,
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "{:?}", body(&resp));
+    let events = env
+        .store
+        .events()
+        .by_subject(&Subject::settings())
+        .await
+        .unwrap();
+    assert_eq!(
+        events.last().unwrap().data["secret_changes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let b = body(&resp);
+    assert_eq!(
+        b["value"]["providers"]["anthropic-backup"]["credential"]["present"],
+        true
+    );
+}

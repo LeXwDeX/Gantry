@@ -190,6 +190,7 @@ impl PkiEnv {
             approvals: approvals.clone(),
             forge: forge.clone(),
             settings_ctx: settings_ctx.clone(),
+            forge_secrets: super::forge_secrets(clock.as_ref()),
             egress: egress.clone(),
             engine: Arc::new(gantry_fakes::engine::FakeEngine::new()),
             conversation: Arc::new(gantry_fakes::conversation::FakeConversation::new()),
