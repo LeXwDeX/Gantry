@@ -1,0 +1,33 @@
+[package]
+name = "gantryd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 服务端单进程：配置加载、模块装配与本机控制通道"
+
+[[bin]]
+name = "gantryd"
+path = "src/main.rs"
+
+[features]
+# 替身装配（`--profile fakes`）：内存 Store 与 gantry-fakes 的端口替身，只用于
+# 进程级测试与本机演示。默认构建不含替身，真实装配在各模块就绪前拒绝启动。
+fakes = ["dep:gantry-fakes", "gantry-store/testing"]
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+gantry-engine = { path = "../gantry-engine" }
+gantry-notify = { path = "../gantry-notify" }
+gantry-policy = { path = "../gantry-policy" }
+gantry-fakes = { path = "../gantry-fakes", optional = true }
+getrandom = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
+toml = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "process"] }
