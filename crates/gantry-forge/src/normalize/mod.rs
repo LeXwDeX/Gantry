@@ -11,14 +11,21 @@
 //! 绑定（§7.5 第 5 点）：经 `forge_effect_index` 的 PR 绑定行或预期效果行解析 `delivery_id`；
 //! 解析不到 → 停放至多 `self_event_grace`，仍未绑定则丢弃（`pass_unbound = false`）。
 //!
-//! shortcut（后续切片）：
-//! - 回读用 REST，没有 GraphQL 的 reviews / threads / checks 汇总；快照里 `checks`、
-//!   `review_state`、`in_merge_queue` 先取保守值。
-//! - 只处理 `pull_request`、`pull_request_review`（触发回读）、`check_suite.completed`、
-//!   `issues.closed` / `reopened`、默认分支 `push`；评审 / 评论 / `check_run` /
-//!   `installation*` / `repository` 的事件在后续切片补，现在落 `done` 不产事件。
+//! 已覆盖：PR 生命周期、`review_submitted` / `review_dismissed`（快照 `review_state` 按 REST
+//! reviews 推出）、`check_suite` / `check_run`（非当前 head 标 `stale`）、Issue 关闭 / 重开 /
+//! 编辑、默认分支 `push` → `base_advanced`、`installation_changed`、`repo_changed`；对账路径另报
+//! `pr_state_diverged` / `head_diverged`。
+//!
+//! shortcut（M1 之后，或等别的泳道）：
+//! - 回读用 REST，没有 GraphQL 的 threads / checks 汇总 / `reviewDecision` / closingIssues；
+//!   快照里 `checks`、`in_merge_queue` 取保守值（FA OQ-9）。
+//! - 评论类事件（`review_comment` / `issue_comment`）、`review_thread_changed`、merge queue 事件
+//!   是 M2（forge.md §1.1）。
 //! - Issue 只能经 `close_issue` 的预期效果绑定；`Delivery.issues` 的反查要等 store 索引。
-//! - `check_suite` 的 `pull_requests` 为空时（fork 推送）不按 `head_sha` 反查 PR。
+//! - `check_*` 的 `pull_requests` 为空时（fork 推送）不按 `head_sha` 反查 PR。
+//! - 其余 drift 类别（`effect_missing`、issue / review / merge 状态、`default_branch_changed`、
+//!   `installation_unreachable`）与投递恢复（`GET /app/hook/deliveries`）留给 M1.4 的真实环境
+//!   取证前补。
 
 pub mod snapshot;
 
@@ -40,6 +47,12 @@ use gantry_core::forge::{
     OrphanEffectActual, OrphanEffectDrift, OrphanEffectExpected, OrphanObject, PrBase,
     PrChangedField, PrClosedData, PrHead, PrMergedData, PrOpenedData, PrReopenedData,
     PrSynchronizedData, PrUpdatedData, RequiredNullable,
+};
+use gantry_core::forge::{
+    CheckRunCompletedData, CheckRunOutput, InstallationAction, InstallationChangedData,
+    IssueChangedField, IssueUpdatedData, PrExpectedState, PrStateActual, PrStateDivergedDrift,
+    PrStateExpected, RepoAction, RepoChangedData, ReviewDismissedData,
+    ReviewState as ForgeReviewState, ReviewSubmittedData,
 };
 use gantry_core::ids::{ActionId, Clock, DeliveryId, EventId, ProjectId};
 use gantry_core::ports::{DriftKind, ReconcileReport, ReconcileTarget};
@@ -157,9 +170,15 @@ struct Committed {
 
 /// 回读结果。
 enum Readback {
+    /// PR 本体；`_reviews` 键里附带 reviews 列表（只在内存里，不落盘）。
     Pr(Value),
     Issue(Value),
-    Branch { branch: String, sha: GitOid },
+    /// 安装 / 仓库类事件：不回读，直接按载荷产生系统事件（§7.5 差异表末行）。
+    System,
+    Branch {
+        branch: String,
+        sha: GitOid,
+    },
     Nothing,
 }
 
@@ -200,13 +219,18 @@ impl Dispatcher {
             let Ok(token) = self.tokens.token(&project, TokenPurpose::Read).await else {
                 continue;
             };
-            let readback = match self
-                .github
-                .issue_or_pull(&token, &binding.project.repo, number, pull)
-                .await
-            {
-                Ok(value) if pull => Readback::Pr(value),
-                Ok(value) => Readback::Issue(value),
+            let fetched = if pull {
+                self.fetch_pr(&token, &binding.project.repo, number)
+                    .await
+                    .map(Readback::Pr)
+            } else {
+                self.github
+                    .issue_or_pull(&token, &binding.project.repo, number, false)
+                    .await
+                    .map(Readback::Issue)
+            };
+            let readback = match fetched {
+                Ok(readback) => readback,
                 // 回读失败留给下一轮；不可访问的安装由 installation_unreachable 路径处理（后续）。
                 Err(_) => continue,
             };
@@ -447,6 +471,13 @@ impl Dispatcher {
                 .pointer("/check_suite/pull_requests/0/number")
                 .and_then(Value::as_u64)
                 .map(|n| (n, true)),
+            "check_run" if row.action.as_deref() == Some("completed") => payload
+                .pointer("/check_run/pull_requests/0/number")
+                .and_then(Value::as_u64)
+                .map(|n| (n, true)),
+            "installation" | "installation_repositories" | "repository" => {
+                return Ok(Readback::System);
+            }
             "issues" if payload.pointer("/issue/pull_request").is_none() => payload
                 .pointer("/issue/number")
                 .and_then(Value::as_u64)
@@ -466,12 +497,64 @@ impl Dispatcher {
         let Some((number, pull)) = target else {
             return Ok(Readback::Nothing);
         };
-        match self.github.issue_or_pull(&token, repo, number, pull).await {
-            Ok(value) if pull => Ok(Readback::Pr(value)),
-            Ok(value) => Ok(Readback::Issue(value)),
+        let fetched = if pull {
+            self.fetch_pr(&token, repo, number).await.map(Readback::Pr)
+        } else {
+            self.github
+                .issue_or_pull(&token, repo, number, false)
+                .await
+                .map(Readback::Issue)
+        };
+        match fetched {
+            Ok(readback) => Ok(readback),
             Err(crate::github::ApiError::Status { status: 404, .. }) => Ok(Readback::Nothing),
             Err(_) => Err(()),
         }
+    }
+
+    /// PR 本体 + reviews（REST；GraphQL 的一次回读随后续切片）。
+    async fn fetch_pr(
+        &self,
+        token: &gantry_core::secret::SecretString,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Value, crate::github::ApiError> {
+        let mut pr = self.github.issue_or_pull(token, repo, number, true).await?;
+        let reviews = self.github.list_reviews(token, repo, number).await?;
+        pr["_reviews"] = Value::Array(reviews);
+        Ok(pr)
+    }
+
+    /// 启动时调用（forge.md §7.4 末段）：上次崩溃时停在 `processing` 的行重新入队。
+    pub async fn recover(&self) -> Result<usize, StoreError> {
+        let snapshot = self.store.snapshot().await?;
+        let reader = snapshot.module_conn(MODULE);
+        let mut stuck = Vec::new();
+        let mut after_key: Option<String> = None;
+        loop {
+            let page = reader.scan::<InboxRow>(
+                INBOX_TABLE,
+                "",
+                after_key.as_deref(),
+                gantry_store::MODULE_SCAN_MAX,
+            )?;
+            let full = page.len() == gantry_store::MODULE_SCAN_MAX as usize;
+            for (key, row) in page {
+                after_key = Some(key);
+                if row.status == InboxStatus::Processing {
+                    stuck.push(row);
+                }
+            }
+            if !full {
+                break;
+            }
+        }
+        let count = stuck.len();
+        for mut row in stuck {
+            row.status = InboxStatus::Received;
+            self.save_row(&row).await?;
+        }
+        Ok(count)
     }
 
     /// `by = None`：webhook 路径（落盘收件箱行状态）；`Some`：对账路径（行是合成的，不落盘）。
@@ -503,6 +586,7 @@ impl Dispatcher {
             Readback::Branch { branch, sha } => {
                 self.plan_push(&mut tx, &payload, binding, &branch, sha)?
             }
+            Readback::System => self.plan_system(&row, &payload, binding),
             Readback::Nothing => Plan::Commit {
                 events: Vec::new(),
                 synced: None,
@@ -554,11 +638,24 @@ impl Dispatcher {
         let mut appended = 0;
         let mut needs_drift = false;
         let mut head_drift = None;
+        let mut state_drift: Option<PrStateActual> = None;
         for candidate in events {
             let (origin, caused_by) = self.attribute(&mut tx, &candidate, &payload, binding)?;
             needs_drift |= origin == ForgeOrigin::OwnUnattributed;
             if candidate.kind == ForgeEventKind::PrSynchronized && origin == ForgeOrigin::External {
                 head_drift = head_basis.clone();
+            }
+            // 对账发现 PR 已关闭 / 合并而本地没处理过对应事件 → pr_state_diverged（§7.7）。
+            if by.is_some() {
+                match &candidate.data {
+                    ForgeEventData::PrClosed(_) => state_drift = Some(PrStateActual::Closed {}),
+                    ForgeEventData::PrMerged(data) => {
+                        state_drift = Some(PrStateActual::Merged {
+                            merge_commit_sha: Some(data.merge_commit_sha),
+                        })
+                    }
+                    _ => {}
+                }
             }
             let envelope = ForgeEventEnvelope {
                 schema: ForgeEventSchema,
@@ -599,6 +696,44 @@ impl Dispatcher {
             if let gantry_store::Appended::New(event) = appended_event {
                 appended += 1;
                 committed.emitted.push(event.id);
+            }
+        }
+        if let (Some(actual), Some(delivery), Some(target), Some(by)) =
+            (state_drift, delivery, drift_target.clone(), by)
+        {
+            let synthesized = match actual {
+                PrStateActual::Closed {} => DriftSynthesizedEvent::PrClosed,
+                PrStateActual::Merged { .. } => DriftSynthesizedEvent::PrMerged,
+            };
+            let dedup = format!("drift:pr_state:{}:{:?}", row.delivery_id, synthesized);
+            let drift = DriftPayload::PrStateDiverged(PrStateDivergedDrift {
+                delivery_id: delivery,
+                target,
+                expected: PrStateExpected {
+                    state: PrExpectedState::Open,
+                },
+                actual,
+                resolution: DriftResolution::GithubWins,
+                synthesized_events: vec![synthesized],
+                detected_by: by,
+            });
+            if let gantry_store::Appended::New(event) = tx
+                .append(NewEvent {
+                    ty: EventType::ForgeDriftDetected,
+                    subject: project_subject(&project)?,
+                    project_id: Some(project),
+                    actor: forge_actor(),
+                    causation_id: None,
+                    correlation_id: Some(delivery.to_string()),
+                    data: serde_json::to_value(&drift)
+                        .map_err(|error| StoreError::ModuleValue(error.to_string()))?,
+                    dedup_key: Some(dedup),
+                })
+                .await?
+            {
+                appended += 1;
+                committed.emitted.push(event.id);
+                committed.drifts.push(DriftKind::PrStateDiverged);
             }
         }
         // 人推了提交（head 与最近一次成功的 push_branch 不同，且非自身事件）→ head_diverged（§7.7）。
@@ -1017,6 +1152,18 @@ impl Dispatcher {
                 events.push(event);
             }
         }
+        if row.event == "check_run" {
+            if let Some(event) = check_run(payload, &target, &next, row, self.opts.max_text_bytes) {
+                events.push(event);
+            }
+        }
+        if row.event == "pull_request_review" {
+            if let Some(event) =
+                review_event(repo, payload, &target, &next, row, self.opts.max_text_bytes)
+            {
+                events.push(event);
+            }
+        }
         if self.should_park_for_attribution(tx, &events, payload, binding, row, now)? {
             return Ok(Plan::Park);
         }
@@ -1072,6 +1219,110 @@ impl Dispatcher {
             }),
             head_basis,
         })
+    }
+
+    /// `installation*` / `repository`：按载荷产生系统事件，`dedup_key` 含投递 GUID（系统类事件
+    /// 不经对账合成，§7.5 差异表末行）。不绑定交付单元，恒为 external。
+    fn plan_system(&self, row: &InboxRow, payload: &Value, binding: &ProjectBinding) -> Plan {
+        let repo = &binding.project.repo;
+        let guid = &row.delivery_id;
+        let action = row.action.as_deref().unwrap_or_default();
+        let sender = actor_of(payload.get("sender"));
+        let repos = |key: &str| -> Vec<RepoSlug> {
+            names(payload.get(key), "full_name")
+                .iter()
+                .filter_map(|name| RepoSlug::parse(name).ok())
+                .collect()
+        };
+        let event = match row.event.as_str() {
+            "installation" | "installation_repositories" => {
+                let (kind, repos) = match (row.event.as_str(), action) {
+                    ("installation", "suspend") => (InstallationAction::Suspend, Vec::new()),
+                    ("installation", "unsuspend") => (InstallationAction::Unsuspend, Vec::new()),
+                    ("installation", "deleted") => (InstallationAction::Deleted, Vec::new()),
+                    ("installation", "new_permissions_accepted") => {
+                        (InstallationAction::NewPermissionsAccepted, Vec::new())
+                    }
+                    ("installation_repositories", "added") => {
+                        (InstallationAction::ReposAdded, repos("repositories_added"))
+                    }
+                    ("installation_repositories", "removed") => (
+                        InstallationAction::ReposRemoved,
+                        repos("repositories_removed"),
+                    ),
+                    _ => return Plan::Drop,
+                };
+                let installation = binding.project.installation_id;
+                Candidate {
+                    kind: ForgeEventKind::InstallationChanged,
+                    dedup_key: format!("inst:{installation}:{action}:{guid}"),
+                    target: ForgeEventTarget {
+                        kind: ForgeTargetType::Installation,
+                        number: None,
+                        node_id: None,
+                    },
+                    actor: sender,
+                    occurred_at: row.received_at,
+                    stale: false,
+                    data: ForgeEventData::InstallationChanged(InstallationChangedData {
+                        action: kind,
+                        repos,
+                    }),
+                    effect: None,
+                    always_external: true,
+                }
+            }
+            "repository" => {
+                let kind = match action {
+                    "renamed" => RepoAction::Renamed,
+                    "archived" => RepoAction::Archived,
+                    "transferred" => RepoAction::Transferred,
+                    "edited" => RepoAction::Edited,
+                    _ => return Plan::Drop,
+                };
+                let default_branch = payload
+                    .pointer("/changes/default_branch")
+                    .and(payload.pointer("/repository/default_branch"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let renamed_from = payload
+                    .pointer("/changes/repository/name/from")
+                    .and_then(Value::as_str)
+                    .and_then(|from| {
+                        let owner = repo.as_str().split('/').next()?;
+                        RepoSlug::parse(&format!("{owner}/{from}")).ok()
+                    });
+                Candidate {
+                    kind: ForgeEventKind::RepoChanged,
+                    dedup_key: format!("repo:{repo}:{action}:{guid}"),
+                    target: ForgeEventTarget {
+                        kind: ForgeTargetType::Branch,
+                        number: None,
+                        node_id: None,
+                    },
+                    actor: sender,
+                    occurred_at: row.received_at,
+                    stale: false,
+                    data: ForgeEventData::RepoChanged(RepoChangedData {
+                        action: kind,
+                        default_branch,
+                        renamed_from,
+                    }),
+                    effect: None,
+                    always_external: true,
+                }
+            }
+            _ => return Plan::Drop,
+        };
+        Plan::Commit {
+            events: vec![event],
+            synced: None,
+            delivery: None,
+            snapshot: None,
+            orphan: None,
+            drift_target: None,
+            head_basis: None,
+        }
     }
 
     fn plan_issue(
@@ -1154,6 +1405,34 @@ impl Dispatcher {
                 effect: None,
                 always_external: false,
             });
+        }
+        if let Some(prev) = &previous {
+            let mut changed = Vec::new();
+            if prev.title != next.title {
+                changed.push(IssueChangedField::Title);
+            }
+            if prev.body != next.body {
+                changed.push(IssueChangedField::Body);
+            }
+            if prev.labels != next.labels {
+                changed.push(IssueChangedField::Labels);
+            }
+            if prev.assignees != next.assignees {
+                changed.push(IssueChangedField::Assignees);
+            }
+            if !changed.is_empty() {
+                events.push(Candidate {
+                    kind: ForgeEventKind::IssueUpdated,
+                    dedup_key: format!("issue_upd:{repo}:{n}:{}", raw("updated_at")),
+                    target: target.clone(),
+                    actor: sender.clone(),
+                    occurred_at: when("updated_at"),
+                    stale: false,
+                    data: ForgeEventData::IssueUpdated(IssueUpdatedData { number: n, changed }),
+                    effect: None,
+                    always_external: false,
+                });
+            }
         }
         if self.should_park_for_attribution(tx, &events, payload, binding, row, now)? {
             return Ok(Plan::Park);
@@ -1387,6 +1666,158 @@ fn check_suite(
     })
 }
 
+fn check_run(
+    payload: &Value,
+    target: &ForgeEventTarget,
+    current: &PrSnap,
+    row: &InboxRow,
+    max_text: usize,
+) -> Option<Candidate> {
+    let run = payload.get("check_run")?;
+    let id = run.get("id")?.as_u64()?;
+    let head_sha = GitOid::parse(run.get("head_sha")?.as_str()?).ok()?;
+    let conclusion: CheckConclusion =
+        serde_json::from_value(run.get("conclusion")?.clone()).ok()?;
+    let completed_at = run
+        .get("completed_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let repo = row.repo.clone().unwrap_or_default();
+    let app = run.get("app");
+    let text = |pointer: &str, source: &str| {
+        limited(
+            run.pointer(pointer)
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            source,
+            max_text,
+        )
+    };
+    let is_current_head = head_sha == current.head_sha;
+    Some(Candidate {
+        kind: ForgeEventKind::CheckRunCompleted,
+        dedup_key: format!("check_run:{repo}:{id}:{completed_at}"),
+        target: target.clone(),
+        actor: actor_of(app.and_then(|app| app.get("owner"))),
+        occurred_at: Timestamp::parse_rfc3339(completed_at).unwrap_or(row.received_at),
+        stale: !is_current_head,
+        data: ForgeEventData::CheckRunCompleted(CheckRunCompletedData {
+            check_run_id: id,
+            check_suite_id: run
+                .pointer("/check_suite/id")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            name: run
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            head_sha,
+            conclusion,
+            app: ForgeApp {
+                id: app
+                    .and_then(|app| app.get("id"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                slug: app
+                    .and_then(|app| app.get("slug"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            },
+            details_url: run
+                .get("details_url")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            output: CheckRunOutput {
+                title: text("/output/title", "github:check_run.output.title"),
+                summary: text("/output/summary", "github:check_run.output.summary"),
+            },
+            annotations_count: run
+                .pointer("/output/annotations_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            // `required` 在 installation token 下是否可用需核实（FA OQ-9）。
+            required: None,
+            is_current_head,
+        }),
+        effect: None,
+        always_external: true,
+    })
+}
+
+fn review_event(
+    repo: &RepoSlug,
+    payload: &Value,
+    target: &ForgeEventTarget,
+    current: &PrSnap,
+    row: &InboxRow,
+    max_text: usize,
+) -> Option<Candidate> {
+    let review = payload.get("review")?;
+    let id = review.get("id")?.as_u64()?;
+    let occurred_at = review
+        .get("submitted_at")
+        .and_then(Value::as_str)
+        .and_then(|raw| Timestamp::parse_rfc3339(raw).ok())
+        .unwrap_or(row.received_at);
+    match row.action.as_deref()? {
+        "submitted" => {
+            let state = match review.get("state")?.as_str()?.to_ascii_lowercase().as_str() {
+                "approved" => ForgeReviewState::Approved,
+                "changes_requested" => ForgeReviewState::ChangesRequested,
+                "commented" => ForgeReviewState::Commented,
+                _ => return None,
+            };
+            let commit_id = GitOid::parse(review.get("commit_id")?.as_str()?).ok()?;
+            let reviewer = actor_of(review.get("user"));
+            let is_current_head = commit_id == current.head_sha;
+            Some(Candidate {
+                kind: ForgeEventKind::ReviewSubmitted,
+                dedup_key: format!("review:{repo}:{id}"),
+                target: target.clone(),
+                actor: reviewer.clone(),
+                occurred_at,
+                // G4：针对旧 head 的 review 标 stale。
+                stale: !is_current_head,
+                data: ForgeEventData::ReviewSubmitted(ReviewSubmittedData {
+                    review_id: id,
+                    state,
+                    commit_id,
+                    is_bot: reviewer.kind == ForgeActorKind::Bot,
+                    reviewer,
+                    body: limited(
+                        review
+                            .get("body")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        "github:review.body",
+                        max_text,
+                    ),
+                    is_current_head,
+                }),
+                effect: None,
+                always_external: false,
+            })
+        }
+        "dismissed" => Some(Candidate {
+            kind: ForgeEventKind::ReviewDismissed,
+            dedup_key: format!("review_dismissed:{repo}:{id}"),
+            target: target.clone(),
+            actor: actor_of(payload.get("sender")),
+            occurred_at,
+            stale: false,
+            data: ForgeEventData::ReviewDismissed(ReviewDismissedData {
+                review_id: id,
+                dismissed_by: actor_of(payload.get("sender")),
+            }),
+            effect: None,
+            always_external: false,
+        }),
+        _ => None,
+    }
+}
+
 fn pr_snap(pr: &Value) -> Option<PrSnap> {
     let str_at = |pointer: &str| pr.pointer(pointer).and_then(Value::as_str);
     let state = if pr.get("merged").and_then(Value::as_bool) == Some(true) {
@@ -1427,7 +1858,55 @@ fn pr_snap(pr: &Value) -> Option<PrSnap> {
             .unwrap_or("unknown")
             .to_owned(),
         head_epoch: 0,
+        review_state: review_state(pr.get("_reviews")),
     })
+}
+
+/// §7.5 第 7 点：各 reviewer 最新一条非 `COMMENTED`、未被撤销的 review：存在
+/// `CHANGES_REQUESTED` → `changes_requested`；否则存在 `APPROVED` → `approved`；否则 `none`。
+/// 优先的 GraphQL `reviewDecision` 随 GraphQL 回读切片。
+fn review_state(reviews: Option<&Value>) -> gantry_core::entities::ReviewState {
+    use gantry_core::entities::ReviewState as State;
+    let mut latest: std::collections::BTreeMap<i64, String> = std::collections::BTreeMap::new();
+    for review in reviews.and_then(Value::as_array).into_iter().flatten() {
+        let state = review
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let Some(user) = review.pointer("/user/id").and_then(Value::as_i64) else {
+            continue;
+        };
+        match state.as_str() {
+            "APPROVED" | "CHANGES_REQUESTED" => {
+                latest.insert(user, state);
+            }
+            "DISMISSED" => {
+                latest.remove(&user);
+            }
+            _ => {}
+        }
+    }
+    if latest.values().any(|state| state == "CHANGES_REQUESTED") {
+        State::ChangesRequested
+    } else if latest.values().any(|state| state == "APPROVED") {
+        State::Approved
+    } else {
+        State::None
+    }
+}
+
+fn names(value: Option<&Value>, key: &str) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get(key).and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn issue_snap(issue: &Value) -> Option<IssueSnap> {
@@ -1451,6 +1930,13 @@ fn issue_snap(issue: &Value) -> Option<IssueSnap> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned(),
+        body: issue
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        labels: names(issue.get("labels"), "name"),
+        assignees: names(issue.get("assignees"), "login"),
     })
 }
 

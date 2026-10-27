@@ -6,8 +6,10 @@
 //! 晚于；评论按时间序累加，第一条会让累计字节超过 `max_bytes` 的评论及其后全部丢弃；
 //! 标题与正文不计入评论预算，正文单独按 `max_bytes` 截断。
 //!
-//! shortcut: 快照类读取（`pull_request` / `issue` / `project_snapshot`、`reconcile_now`）在
-//! 对账切片实现；`ci_log` / `changed_files` / `review_thread` / `check_annotations` 是 M2
+//! `reconcile_now` 交给装配时注入的 [`crate::Dispatcher::reconcile`]。
+//!
+//! shortcut: 快照类读取（`pull_request` / `issue` / `project_snapshot`）由 store 的
+//! `pr_snapshot` / `issue_snapshot` 提供（#210），本读取器不重复；`ci_log` / `changed_files` / `review_thread` / `check_annotations` 是 M2
 //! （forge.md §1.1）；`sync_mirror` 见 [`crate::Executor::sync_mirror`]。它们目前返回
 //! `Unavailable`，不静默返回空结果。
 
@@ -40,6 +42,8 @@ pub struct ReaderDeps {
     pub api_base: String,
     pub clock: Arc<dyn Clock>,
     pub http_timeout: Duration,
+    /// `reconcile_now` 的执行方（forge.md §7.7）；`None` 时返回 `Unavailable`。
+    pub reconciler: Option<Arc<crate::normalize::Dispatcher>>,
 }
 
 pub struct Reader {
@@ -47,6 +51,7 @@ pub struct Reader {
     tokens: Arc<dyn TokenProvider>,
     github: GithubClient,
     clock: Arc<dyn Clock>,
+    reconciler: Option<Arc<crate::normalize::Dispatcher>>,
 }
 
 impl Reader {
@@ -56,6 +61,7 @@ impl Reader {
             tokens: deps.tokens,
             github: GithubClient::new(deps.api_base, deps.http_timeout),
             clock: deps.clock,
+            reconciler: deps.reconciler,
         }
     }
 
@@ -223,10 +229,16 @@ impl ForgeReader for Reader {
 
     async fn reconcile_now(
         &self,
-        _target: ReconcileTarget,
+        target: ReconcileTarget,
         _ctx: &ActorCtx,
     ) -> Result<ReconcileReport, ForgeError> {
-        Err(not_yet("reconcile_now"))
+        let Some(reconciler) = &self.reconciler else {
+            return Err(not_yet("reconcile_now"));
+        };
+        reconciler
+            .reconcile(target, gantry_core::forge::DriftDetectedBy::OnDemand)
+            .await
+            .map_err(|error| unavailable(format!("reconcile: {error}")))
     }
 
     async fn sync_mirror(

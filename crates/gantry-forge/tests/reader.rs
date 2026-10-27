@@ -75,6 +75,7 @@ fn harness() -> Harness {
         api_base: github.base_url(),
         clock,
         http_timeout: Duration::from_secs(5),
+        reconciler: None,
     });
     Harness {
         github,
