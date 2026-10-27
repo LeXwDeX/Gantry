@@ -147,3 +147,25 @@ pub async fn serve_api(
         });
     }
 }
+
+/// 仅测试：明文 HTTP 监听器，每个连接都视为出示了 `peer` 证书（本文 §6.1
+/// `router_for_test` 的网络版）。用于让同一套 HTTP 行为用例同时跑 Mock API 与真实
+/// `api`；生产装配不得使用。
+#[cfg(feature = "testing")]
+pub async fn serve_plain_for_tests(
+    core: Arc<ApiCore>,
+    listener: TcpListener,
+    peer: PeerCert,
+) -> std::io::Result<()> {
+    loop {
+        let (tcp, _addr) = listener.accept().await?;
+        let core = core.clone();
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            let service = service_fn(move |req| handle(core.clone(), Some(peer.clone()), req));
+            let _ = Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tcp), service)
+                .await;
+        });
+    }
+}

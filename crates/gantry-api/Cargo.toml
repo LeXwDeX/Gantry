@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "Gantry API 网关（api.md）：设备鉴权、路由注册表、统一错误、事件流与签名审批的 HTTP 外壳"
 
+[features]
+default = []
+# 仅测试：明文监听器（listener::serve_plain_for_tests）
+testing = []
+
 [dependencies]
 gantry-core = { path = "../gantry-core" }
 gantry-pki = { path = "../gantry-pki" }
@@ -39,3 +44,7 @@ gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util", "net", "io-util", "rt-multi-thread"] }
+
+[[test]]
+name = "conformance"
+required-features = ["testing"]
