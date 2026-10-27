@@ -1,0 +1,55 @@
+# gantryd：单进程服务端（api、forge、engine、repo、pki、store…，architecture §3）。
+# 加固项见 deploy.md §7.7；`systemd-analyze security gantryd.service` 的评分是回归指标（§12）。
+[Unit]
+Description=Gantry server
+Documentation=https://github.com/LeXwDeX/gantry/blob/main/docs/modules/deploy.md
+# 不用 Requires=：Egress 不可用时 gantryd 仍应能只读运行，沙盒失败闭合（config §2.6）。
+After=network-online.target gantry-firewall.service gantry-egress.service
+Wants=network-online.target gantry-egress.service
+PartOf=gantry.target
+
+[Service]
+Type=notify
+User=gantry
+Group=gantry
+ExecStart=/opt/gantry/current/bin/gantryd --config /etc/gantry/gantry.toml
+Restart=on-failure
+RestartSec=2s
+TimeoutStartSec=120s
+TimeoutStopSec=60s
+StateDirectory=gantry
+StateDirectoryMode=0750
+# /run/gantry 由 systemd-tmpfiles 创建（gantry:gantry-link 0770），与 Egress 共用，不用 RuntimeDirectory=。
+SupplementaryGroups=gantry-link
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# 所有监听端口 ≥ 1024，不持有任何能力（含 CAP_NET_BIND_SERVICE）。
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/gantry /run/gantry
+ReadOnlyPaths=/etc/gantry
+InaccessiblePaths=-/var/lib/gantry-egress -/etc/gantry-egress -/var/lib/gantry-sbx -/var/backups/gantry
+SyslogIdentifier=gantryd
+
+[Install]
+WantedBy=gantry.target
