@@ -503,10 +503,11 @@ describe("SettingsOverlay", () => {
       const nav = screen.getByRole("navigation", { name: "设置分类" });
       fireEvent.click(within(nav).getByRole("button", { name: "外观" }));
       await screen.findByRole("heading", { name: "外观" });
-      expect(screen.getByLabelText("密度")).toBeInTheDocument();
+      // 标题先于本机偏好渲染；字段等 prefsGet 返回后才出现，高负载下不能同步查询。
+      expect(await screen.findByLabelText("密度")).toBeInTheDocument();
       expect(screen.getByLabelText("左栏宽度")).toBeInTheDocument();
       expect(screen.getByLabelText("检视器宽度")).toBeInTheDocument();
-      expect(screen.getAllByText(/13\.2/).length).toBeGreaterThan(0);
+      expect((await screen.findAllByText(/13\.2/)).length).toBeGreaterThan(0);
       expect(screen.queryByText(/尚未提供/)).toBeNull();
     } finally {
       await controller.stop();
