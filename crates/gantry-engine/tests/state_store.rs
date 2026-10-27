@@ -44,10 +44,6 @@ async fn all_events(engine: &Engine) -> Vec<gantry_core::events::Event<serde_jso
         .events
 }
 
-fn device() -> gantry_core::entities::Actor {
-    gantry_core::entities::Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM")
-}
-
 /// 每写一条 `delivery.*`，store 的行、引擎从全量事件折叠的行、引擎按路由加载的行三者相同。
 /// 覆盖 #48：压低上限时 effective 收紧到上限（只写 `kind = cap`）。
 #[tokio::test]
@@ -86,10 +82,17 @@ async fn store_row_and_engine_state_agree_after_every_delivery_event() {
     .await;
     check(&engine, &id).await;
     // 压低上限：effective 派生为 min(Medium, Low) = Low。
-    let row = engine
-        .set_level_cap(id, Level::Low, device())
-        .await
-        .unwrap();
+    append(
+        &engine,
+        &spec(
+            "delivery.level_changed",
+            DELIVERY,
+            json!({"from": "Medium", "to": "Low", "kind": "cap", "reason": "user"}),
+        )
+        .actor(ActorKind::Device),
+    )
+    .await;
+    let row = engine.load_delivery(&id).await.unwrap().unwrap();
     assert_eq!(row.level_effective, Level::Low);
     check(&engine, &id).await;
     append(
@@ -98,15 +101,26 @@ async fn store_row_and_engine_state_agree_after_every_delivery_event() {
     )
     .await;
     check(&engine, &id).await;
-    engine.pause(id, device()).await.unwrap();
-    check(&engine, &id).await;
-    engine.resume(id, device()).await.unwrap();
-    check(&engine, &id).await;
-    engine
-        .abandon(id, Some("issue_not_planned".to_owned()), device())
-        .await
-        .unwrap();
-    check(&engine, &id).await;
+    for spec_ in [
+        spec(
+            "delivery.paused",
+            DELIVERY,
+            json!({"by": "dev", "status_before": "running"}),
+        ),
+        spec(
+            "delivery.resumed",
+            DELIVERY,
+            json!({"by": "dev", "status_after": "running"}),
+        ),
+        spec(
+            "delivery.abandoned",
+            DELIVERY,
+            json!({"reason": "issue_not_planned", "by": "dev"}),
+        ),
+    ] {
+        append(&engine, &spec_.actor(ActorKind::Device)).await;
+        check(&engine, &id).await;
+    }
 }
 
 /// 不带 `correlation_id` 的节点 / 尝试事件仍按路由表归属；同项目的其他交付单元与
