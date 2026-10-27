@@ -1,7 +1,7 @@
 //! `FakeGitHub`：进程内 HTTP 级 GitHub 替身。
 //!
 //! 只覆盖被测路径需要的最小子集：REST（仓库 / PR / Issue / 分支 ref / 合并）、
-//! GraphQL、webhook 投递与 `429` / `5xx` 脚本。状态保存在内存；webhook 目标由测试
+//! GraphQL、App 安装令牌与安装权限、webhook 投递与 `429` / `5xx` 脚本。状态保存在内存；webhook 目标由测试
 //! 注册。所有请求（含被脚本拦截的请求）都可从 `recorded_calls()` 读取。
 //!
 //! 创建类调用以 App 机器人身份（`bot()`）落对象；`lose_next_response()` 注入
@@ -87,6 +87,11 @@ struct GithubState {
     bot_id: i64,
     /// 还要丢弃多少条变更类请求的响应（请求照常处理，连接直接关闭）。
     lose_responses: u32,
+    /// App 安装：`installation id -> permissions`。
+    installations: HashMap<i64, Value>,
+    /// 安装令牌响应里的 `expires_at`。
+    token_expires_at: String,
+    issued_tokens: u64,
 }
 
 /// M0 的 GitHub 替身。
@@ -116,6 +121,9 @@ impl FakeGitHub {
             bot_login: DEFAULT_BOT_LOGIN.to_owned(),
             bot_id: DEFAULT_BOT_ID,
             lose_responses: 0,
+            installations: HashMap::new(),
+            token_expires_at: DEFAULT_TOKEN_EXPIRES_AT.to_owned(),
+            issued_tokens: 0,
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -165,6 +173,25 @@ impl FakeGitHub {
     pub fn bot(&self) -> (String, i64) {
         let state = self.lock();
         (state.bot_login.clone(), state.bot_id)
+    }
+
+    /// 登记（或替换）一个 App 安装及其获批权限（`{"contents":"write",…}`）。
+    pub fn set_installation(&self, id: i64, permissions: Value) {
+        self.lock().installations.insert(id, permissions);
+    }
+
+    pub fn remove_installation(&self, id: i64) {
+        self.lock().installations.remove(&id);
+    }
+
+    /// 之后签发的安装令牌的 `expires_at`（RFC 3339）。
+    pub fn set_token_expires_at(&self, expires_at: &str) {
+        self.lock().token_expires_at = expires_at.to_owned();
+    }
+
+    /// 已签发的安装令牌数。
+    pub fn issued_tokens(&self) -> u64 {
+        self.lock().issued_tokens
     }
 
     /// 设置远端分支 head（模拟推送）。
@@ -269,12 +296,12 @@ impl FakeGitHub {
         }
     }
 
-    /// 变更类调用（POST / PATCH / PUT / DELETE）的次数。
+    /// 仓库变更类调用（POST / PATCH / PUT / DELETE）的次数；`/app/*`（换令牌）不算。
     pub fn write_count(&self) -> usize {
         self.lock()
             .calls
             .iter()
-            .filter(|call| call.method != "GET" && call.path != "/graphql")
+            .filter(|call| is_repo_write(&call.method, &call.path))
             .count()
     }
 
@@ -619,7 +646,7 @@ fn route(request: &HttpRequest, shared: &Arc<Mutex<GithubState>>) -> (Response, 
         body: String::from_utf8_lossy(&request.body).to_string(),
         status: response.status,
     });
-    let lose = state.lose_responses > 0 && request.method != "GET" && path != "/graphql";
+    let lose = state.lose_responses > 0 && is_repo_write(&request.method, &path);
     if lose {
         state.lose_responses -= 1;
     }
@@ -861,6 +888,48 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 None => not_found(),
             }
         }
+        ("POST", ["app", "installations", id, "access_tokens"]) => {
+            if !has_app_jwt(request) {
+                return unauthorized();
+            }
+            let Some(granted) = id
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| state.installations.get(&id).cloned())
+            else {
+                return not_found();
+            };
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+            state.issued_tokens += 1;
+            Response {
+                status: 201,
+                body: json!({
+                    "token": format!("ghs_fake{:06}", state.issued_tokens),
+                    "expires_at": state.token_expires_at,
+                    "permissions": body.get("permissions").cloned().unwrap_or(granted),
+                    "repository_selection": "selected",
+                })
+                .to_string(),
+                retry_after_s: None,
+            }
+        }
+        ("GET", ["app", "installations", id]) => {
+            if !has_app_jwt(request) {
+                return unauthorized();
+            }
+            match id
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| state.installations.get(&id).map(|p| (id, p.clone())))
+            {
+                Some((id, permissions)) => Response {
+                    status: 200,
+                    body: json!({"id": id, "permissions": permissions}).to_string(),
+                    retry_after_s: None,
+                },
+                None => not_found(),
+            }
+        }
         ("POST", ["graphql"]) => {
             let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
             let query = body
@@ -894,6 +963,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
 
 const DEFAULT_BOT_LOGIN: &str = "gantry-test-bot[bot]";
 const DEFAULT_BOT_ID: i64 = 9;
+const DEFAULT_TOKEN_EXPIRES_AT: &str = "2099-01-01T00:00:00Z";
 
 #[allow(clippy::too_many_arguments)]
 fn pull_json(
@@ -982,6 +1052,28 @@ fn repo_json(full_name: &str) -> Value {
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn is_repo_write(method: &str, path: &str) -> bool {
+    method != "GET" && path != "/graphql" && !path.starts_with("/app/")
+}
+
+/// App JWT 的形状检查：`Bearer <header>.<claims>.<signature>`。验签由调用方测试自己做
+/// （替身不依赖 JWT 库）。
+fn has_app_jwt(request: &HttpRequest) -> bool {
+    request
+        .headers
+        .get("authorization")
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|jwt| jwt.split('.').count() == 3 && !jwt.starts_with("ghs_"))
+}
+
+fn unauthorized() -> Response {
+    Response {
+        status: 401,
+        body: json!({"message":"A JSON web token could not be decoded"}).to_string(),
+        retry_after_s: None,
+    }
 }
 
 fn not_found() -> Response {

@@ -898,6 +898,7 @@ dependencies = [
  "gantry-core",
  "gantry-fakes",
  "gantry-store",
+ "jsonwebtoken",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -935,9 +936,11 @@ dependencies = [
 name = "gantry-pki"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "gantry-core",
  "gantry-fakes",
+ "gantry-store",
  "libc",
  "p256",
  "pem",
@@ -951,6 +954,8 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "time",
+ "tokio",
+ "tracing",
  "x509-parser",
  "zeroize",
 ]
@@ -1063,6 +1068,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gantryd"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gantry-core",
+ "gantry-engine",
+ "gantry-fakes",
+ "gantry-notify",
+ "gantry-policy",
+ "gantry-store",
+ "getrandom 0.3.4",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1080,8 +1105,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1402,6 +1429,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
 dependencies = [
  "cfg-if",
+ "futures-util",
  "wasm-bindgen",
 ]
 
@@ -1456,6 +1484,21 @@ dependencies = [
  "num-traits",
  "serde_json",
  "zmij",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
 ]
 
 [[package]]
@@ -2451,6 +2494,18 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest",
  "rand_core",
+]
+
+[[package]]
+name = "simple_asn1"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "297f631f50729c8c99b84667867963997ec0b50f32b2a7dbcab828ef0541e8bb"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror 2.0.21",
+ "time",
 ]
 
 [[package]]

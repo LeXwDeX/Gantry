@@ -10,7 +10,10 @@
 //!   （P-53）。GitHub 客户端是 crate 私有的（I2）。
 //! - 镜像仓拉取：[`Executor::sync_mirror`]（forge.md §7.10）。
 //!
-//! App 鉴权、webhook、归一化、对账在后续切片。
+//! - App 鉴权：[`AppTokenProvider`]（App JWT、安装令牌缓存与 single-flight 刷新、权限自检，
+//!   forge.md §7.12）。
+//!
+//! webhook、归一化、对账在后续切片。
 //!
 //! 已知限制（M1 切片内）：
 //! - 只接受 M1 的 5 个动作（forge.md §1.1）；其余 9 个动作在 M2 起开放，入队时拒绝。
@@ -23,6 +26,7 @@ mod git;
 mod github;
 mod outbox;
 
+pub use auth::app::{AppAuthDeps, AppAuthOptions, AppTokenProvider, PermissionReport};
 pub use auth::{AuthError, StaticTokenProvider, TokenProvider, TokenPurpose};
 pub use config::{ForgeConfig, Permission, ProjectBinding, DEFAULT_BRANCH_PREFIX};
 pub use outbox::executor::{
