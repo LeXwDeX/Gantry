@@ -242,6 +242,8 @@ export class ScenarioIpcAdapter implements IpcAdapter {
     const code = "492 713";
     const device: Device = {
       id: "dev_scenario_pending",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       name,
       platform: "macos",
       cert_serial: "test-cert-0000000000000",
@@ -822,7 +824,7 @@ export class ScenarioIpcAdapter implements IpcAdapter {
     const module = moduleForResource(resource);
     const entry = this.data.status.modules[module];
     if (entry) entry.applied_rev = rev;
-    else this.data.status.modules[module] = { applied_rev: rev, health: "ok" };
+    else this.data.status.modules[module] = { applied_rev: rev, health: "ok", unresolved_secret_refs: [] };
   }
 
   private async handle(route: RouteId, raw: unknown): Promise<ApiResult<unknown>> {
@@ -1028,6 +1030,7 @@ export class ScenarioIpcAdapter implements IpcAdapter {
           cards: [],
           delivery_id: null,
           created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
         };
         this.data.messages[project.project_id] = [
           ...(this.data.messages[project.project_id] ?? []),
@@ -1143,6 +1146,8 @@ export class ScenarioIpcAdapter implements IpcAdapter {
         const n = Math.max(0, ...previous.map((entry) => entry.n)) + 1;
         const attempt: Attempt = {
           id: `att_scenario_${++this.seq}`,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
           node_id: node.node.id,
           n,
           sandbox_id: `sbx_retry_${this.seq}`,
@@ -1948,6 +1953,8 @@ export class ScenarioIpcAdapter implements IpcAdapter {
       );
       const approvalInbox: InboxItem = {
         id: `inb_sim_approval_${this.simulationState.run_id}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
         project_id: item.project_id,
         delivery_id: approval.delivery_id,
         kind: "approval_needed",
@@ -2598,6 +2605,8 @@ export class ScenarioIpcAdapter implements IpcAdapter {
           ]);
           const choice: InboxItem = {
             id: choiceId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
             project_id: projectId,
             delivery_id: deliveryId,
             kind: "decision_needed",
@@ -2618,12 +2627,15 @@ export class ScenarioIpcAdapter implements IpcAdapter {
           this.simCreated.inbox.add(choice.id);
           const approval: ApprovalEntity = {
             id: approvalId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
             delivery_id: deliveryId,
             action: "merge_pr",
             target: { kind: "pr", repo: "LeXwDeX/gantry", number: 900 + run },
             subject_digest: SCENARIO_PR9_SHA,
             device_id: null,
             signature: null,
+            consumed_by: null,
             status: "pending",
             expires_at: new Date(Date.now() + 86_400_000).toISOString(),
           };
@@ -2790,8 +2802,13 @@ export class ScenarioIpcAdapter implements IpcAdapter {
     const budget = SCENARIO_LEVEL_BUDGETS[level] ?? SCENARIO_LEVEL_BUDGETS.medium;
     this.data.budgets[delivery.id] = {
       id: `bdg_${delivery.id}`,
-      delivery_id: delivery.id,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       subject: "delivery",
+      delivery_id: delivery.id,
+      conversation_id: null,
+      project_id: delivery.project_id,
+      day: null,
       template: budget.template,
       limits: {
         tokens_by_tier: {
@@ -2827,6 +2844,8 @@ export class ScenarioIpcAdapter implements IpcAdapter {
   ): Workflow {
     const workflow: Workflow = {
       id: workflowId,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       delivery_id: delivery.id,
       conversation_id: null,
       stage: delivery.stage,
@@ -2861,6 +2880,8 @@ export class ScenarioIpcAdapter implements IpcAdapter {
   ): WorkflowNode {
     return {
       id,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       workflow_id: workflowId,
       role,
       tier: role === "plan" || role === "arbiter" ? "planner" : "worker",
@@ -2917,6 +2938,8 @@ export class ScenarioIpcAdapter implements IpcAdapter {
     const n = this.data.attempts.filter((entry) => entry.node_id === node.id).length + 1;
     const attempt: Attempt = {
       id: `att_sim_${this.simRun}_${node.id.split("_").pop()}_${n}`,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       node_id: node.id,
       n,
       sandbox_id: `sbx_sim_${this.simRun}_${n}`,
@@ -3041,6 +3064,7 @@ export class ScenarioIpcAdapter implements IpcAdapter {
       cards: options.cards ?? [],
       delivery_id: options.deliveryId,
       created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
     const existing = this.data.messages[projectId] ?? [];
     if (!existing.some((entry) => entry.id === message.id)) {
@@ -4090,7 +4114,7 @@ function validateGithub(raw: Record<string, unknown>, errors: SettingsIssue[]): 
   }
 }
 
-function buildCatalogForValidation(): SettingsCatalog {
+function buildCatalogForValidation(): Pick<SettingsCatalog, "schema_version" | "models"> {
   // 只用能力表与适配器；其余字段由场景 catalog 提供。
   return {
     schema_version: 1,

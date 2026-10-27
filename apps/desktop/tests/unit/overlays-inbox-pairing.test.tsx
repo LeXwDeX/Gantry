@@ -115,6 +115,8 @@ describe("InboxOverlay", () => {
     const dismiss = vi.spyOn(controller, "dismiss").mockResolvedValue(undefined);
     const finding: InboxItem = {
       id: "inb_security",
+      created_at: "2026-10-24T12:00:00.000Z",
+      updated_at: "2026-10-24T12:00:00.000Z",
       project_id: "prj_gantry",
       delivery_id: "dlv_gantry_9",
       kind: "security_finding",
@@ -271,6 +273,8 @@ describe("PairingView", () => {
       confirmationCode: "482913",
       device: {
         id: "dev_new",
+        created_at: "2026-10-24T12:00:00.000Z",
+        updated_at: "2026-10-24T12:00:00.000Z",
         name: "测试 Mac",
         platform: "macos",
         cert_serial: "serial",

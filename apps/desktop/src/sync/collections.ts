@@ -3,6 +3,7 @@ import type {
   InboxItem,
   Message,
   Workflow,
+  WorkflowSummary,
   Worktree,
 } from "@/api/types";
 
@@ -55,7 +56,7 @@ export function mergeWorkflow(
   return { ...existing, [workflow.id]: workflow };
 }
 
-export function latestWorkflow(workflows: Workflow[]): Workflow | null {
+export function latestWorkflow<T extends WorkflowSummary>(workflows: T[]): T | null {
   if (workflows.length === 0) return null;
   return workflows.reduce((latest, item) =>
     item.graph_rev > latest.graph_rev ? item : latest,
