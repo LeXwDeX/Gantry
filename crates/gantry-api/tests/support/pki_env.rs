@@ -102,6 +102,8 @@ pub struct PkiEnv {
     pub root_pem: String,
     pub forge: Arc<gantry_fakes::forge::FakeForge>,
     pub policy: Arc<gantry_policy::PolicyEngine>,
+    pub settings_ctx: Arc<super::settings_ctx::FakeSettingsContext>,
+    pub egress: Arc<gantry_fakes::egress::EgressStub>,
 }
 
 /// 由 PEM 叶子证书得到握手层交给 api 的字段。
@@ -177,6 +179,8 @@ impl PkiEnv {
         let forge = Arc::new(gantry_fakes::forge::FakeForge::new_in(store.clone()));
         let (policy, approvals) =
             super::policy_approvals(&store, clock.clone(), ids.clone(), forge.clone());
+        let settings_ctx = Arc::new(super::settings_ctx::FakeSettingsContext::default());
+        let egress = Arc::new(gantry_fakes::egress::EgressStub::new());
         let svc = Services {
             clock: clock.clone(),
             ids: ids.clone(),
@@ -185,6 +189,8 @@ impl PkiEnv {
             admin: admin.clone(),
             approvals: approvals.clone(),
             forge: forge.clone(),
+            settings_ctx: settings_ctx.clone(),
+            egress: egress.clone(),
             engine: Arc::new(gantry_fakes::engine::FakeEngine::new()),
             conversation: Arc::new(gantry_fakes::conversation::FakeConversation::new()),
             idempotency: Arc::new(MemoryIdempotency::new(clock.clone())),
@@ -198,6 +204,8 @@ impl PkiEnv {
             root_pem,
             forge,
             policy,
+            settings_ctx,
+            egress,
         }
     }
 

@@ -3,6 +3,7 @@
 
 pub mod doubles;
 pub mod pki_env;
+pub mod settings_ctx;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -214,6 +215,8 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
             policy_approvals(&store, clock.clone(), ids_for_policy.clone(), forge).1
         },
         forge: Arc::new(gantry_fakes::forge::FakeForge::new_in(store.clone())),
+        settings_ctx: Arc::new(settings_ctx::FakeSettingsContext::default()),
+        egress: Arc::new(gantry_fakes::egress::EgressStub::new()),
         engine: engine.clone(),
         conversation: conversation.clone(),
         idempotency: idempotency.clone(),

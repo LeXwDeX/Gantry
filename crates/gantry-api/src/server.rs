@@ -11,11 +11,13 @@
 
 use std::sync::Arc;
 
+use crate::settings::SettingsContext;
 use async_trait::async_trait;
 use bytes::Bytes;
 use gantry_core::entities::Seq;
 use gantry_core::ids::{Clock, IdGen};
 use gantry_core::ports::conversation::ConversationService;
+use gantry_core::ports::egress::EgressControl;
 use gantry_core::ports::engine::DeliveryControl;
 use gantry_core::ports::forge::PrRefresher;
 use gantry_policy::ApprovalService;
@@ -87,6 +89,10 @@ pub struct Services {
     pub approvals: Arc<dyn ApprovalService>,
     /// grant 前对 PR 强制对账一次（forge）。
     pub forge: Arc<dyn PrRefresher>,
+    /// settings 的校验上下文、catalog 与 status 聚合（本文 §6.3）。
+    pub settings_ctx: Arc<dyn SettingsContext>,
+    /// 模型凭据的转交通道（Egress 控制面，只写不读，P-50）。
+    pub egress: Arc<dyn EgressControl>,
     /// 交付单元控制 #8 #43–#45（P-56）。
     pub engine: Arc<dyn DeliveryControl>,
     /// 发消息 #12。

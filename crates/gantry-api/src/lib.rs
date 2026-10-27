@@ -29,6 +29,7 @@ pub mod rate;
 pub mod reads;
 pub mod registry;
 pub mod server;
+pub mod settings;
 pub mod sse;
 pub mod validate;
 

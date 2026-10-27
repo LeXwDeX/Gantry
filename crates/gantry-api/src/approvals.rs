@@ -166,6 +166,10 @@ fn grant_error(error: GrantError) -> Problem {
     }
 }
 
+pub(crate) fn consume_problem(error: ConsumeError) -> Problem {
+    consume_error(error)
+}
+
 fn consume_error(error: ConsumeError) -> Problem {
     match error {
         ConsumeError::NotFound => mismatch(MismatchReason::NotGranted),

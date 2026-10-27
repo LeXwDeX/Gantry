@@ -15,6 +15,7 @@ use crate::devices;
 use crate::problem::Problem;
 use crate::reads;
 use crate::server::{ApiCore, HandlerRequest, Reply, RouteHandler};
+use crate::settings;
 use crate::sse;
 
 pub struct Builtin;
@@ -34,6 +35,10 @@ impl RouteHandler for Builtin {
             "getInboxSummary" => reads::inbox_summary(core, &req).await,
             "streamEvents" => sse::stream_events(core, &req).await,
             "listDevices" => devices::list(core, &req).await,
+            "getSettings" => settings::get(core, &req).await,
+            "putSettings" => settings::put(core, &req).await,
+            "getSettingsCatalog" => settings::catalog(core, &req).await,
+            "getSettingsStatus" => settings::status(core, &req).await,
             "listApprovals" => approvals::list(core, &req).await,
             "getApproval" => approvals::get(core, &req).await,
             "createApproval" => approvals::create(core, &req).await,
