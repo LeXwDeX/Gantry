@@ -27,7 +27,6 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use crate::accounting::{self, Settlement};
-use crate::anthropic::{EGRESS_TOKEN_INVALID, MODEL_NOT_FOUND};
 use crate::error::ModelsError;
 use crate::output::DirectRole;
 use crate::prompt::{build_prompt, TrustedText};
@@ -452,9 +451,7 @@ impl ModelRouter {
                         }
                     }
                 }
-                Err(ProviderError::InvalidRequest { message })
-                    if message == EGRESS_TOKEN_INVALID =>
-                {
+                Err(ProviderError::EgressTokenInvalid) => {
                     // 令牌被吊销或过期：换新令牌重试一次，不计入 max_attempts。
                     if rotated {
                         sent.outcome = Err(ModelsError::Unavailable {
@@ -492,10 +489,10 @@ impl ModelRouter {
                     });
                     return sent;
                 }
-                Err(ProviderError::Unavailable { message }) if message == MODEL_NOT_FOUND => {
+                Err(ProviderError::ModelNotFound) => {
                     // 模型不可用：不在当前候选上重试（M2 起换下一个降级候选）。
                     sent.outcome = Err(ModelsError::Unavailable {
-                        reason: MODEL_NOT_FOUND.into(),
+                        reason: "model_not_found".into(),
                     });
                     return sent;
                 }

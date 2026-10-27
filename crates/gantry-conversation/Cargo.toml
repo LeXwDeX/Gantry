@@ -1,0 +1,23 @@
+[package]
+name = "gantry-conversation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 会话服务（M1：主对话、意图解析、创建交付单元与事件行，conversation.md）"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+gantry-models = { path = "../gantry-models" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-fakes = { path = "../gantry-fakes" }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

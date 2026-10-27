@@ -1475,6 +1475,11 @@ pub struct DeliveryCreatedData {
     pub origin: DeliveryOrigin,
     #[serde(default)]
     pub source_message_id: Option<MessageId>,
+    /// `CreateDelivery.user_text`：用户亲手输入的原文，可信，`task.instructions` 唯一的文字来源
+    /// （engine.md §6、§7.8；worker-protocol W5）。落盘是为了重放时重建同一份 `instructions`（#70 B）。
+    /// 长度上限沿用 api 消息正文（≤ 16384 字符，api.md §5）。
+    #[schemars(length(max = 16384))]
+    pub user_text: String,
     pub issues: Vec<IssueRef>,
     pub budget: DeliveryBudget,
     pub config_rev: Seq,
@@ -1494,6 +1499,12 @@ impl EventData for DeliveryCreatedData {
             return Err(SchemaError::consistency(
                 "/level_effective",
                 "level_effective must not exceed level_cap",
+            ));
+        }
+        if self.user_text.chars().count() > 16384 {
+            return Err(SchemaError::shape(
+                "/user_text",
+                "user_text must not exceed 16384 characters",
             ));
         }
         Ok(())
@@ -2007,12 +2018,19 @@ impl EventData for WorktreeCreatedData {
 pub struct WorktreeLockedData {
     pub worktree_id: WorktreeId,
     pub holder: crate::entities::LockHolder,
-    pub delivery_id: DeliveryId,
+    /// 与 `WorktreeLock.delivery_id` 同一规则：engine / guardian 必填，human 为 `null`（#122）。
+    #[serde(default)]
+    pub delivery_id: Option<DeliveryId>,
     pub lease_until: Timestamp,
 }
 
 impl EventData for WorktreeLockedData {
     const TYPES: &'static [EventType] = &[EventType::WorktreeLocked];
+    fn validate(&self) -> Result<(), SchemaError> {
+        self.holder
+            .check_delivery(self.delivery_id.as_ref())
+            .map_err(|error| SchemaError::consistency("/delivery_id", error.to_string()))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
