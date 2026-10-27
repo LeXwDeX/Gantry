@@ -134,11 +134,21 @@ pub fn escalation(code: &str, ids: Option<&[&str]>, key: &str) -> RaiseRequest {
             node_id: None,
             attempt_id: None,
             target_level: None,
+            action_id: None,
             evidence: Vec::new(),
             options: ids.map(|ids| ids.iter().map(|id| opt(id)).collect()),
         },
         key,
     )
+}
+
+/// `escalation(outbox_failed:not_mergeable)`，带失败动作的 `action_id`（#67）。
+pub fn outbox_failed(ids: Option<&[&str]>, key: &str) -> RaiseRequest {
+    let mut req = escalation("outbox_failed:not_mergeable", ids, key);
+    if let InboxPayload::Escalation { action_id, .. } = &mut req.payload {
+        *action_id = Some(Id::from_parts(NOW_MS as u64, 0xac7).unwrap());
+    }
+    req
 }
 
 pub fn level_cap(key: &str) -> RaiseRequest {
