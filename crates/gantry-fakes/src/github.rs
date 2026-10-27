@@ -97,6 +97,8 @@ struct GithubState {
     next_comment: u64,
     /// 设置后，投递带 `X-GitHub-Hook-Installation-Target-ID`（= App ID）。
     app_id: Option<u64>,
+    /// 替身时钟：每次 PR 变化前进一秒，产生 `created_at` / `updated_at` / `closed_at`。
+    tick: i64,
 }
 
 /// M0 的 GitHub 替身。
@@ -132,6 +134,7 @@ impl FakeGitHub {
             comments: HashMap::new(),
             next_comment: 1,
             app_id: None,
+            tick: 0,
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -233,7 +236,10 @@ impl FakeGitHub {
             .get(&(repo.to_owned(), head.to_owned()))
             .cloned()
             .unwrap_or_else(|| format!("{number:040x}"));
-        let pull = pull_json(number, "", body, false, head, &sha, base, author);
+        let mut pull = pull_json(number, "", body, false, head, &sha, base, author);
+        let base_sha = base_sha(&state, repo, base);
+        let at = stamp(&mut state);
+        created(&mut pull, &at, &base_sha);
         state.pulls.insert((repo.to_owned(), number), pull);
         number
     }
@@ -321,10 +327,12 @@ impl FakeGitHub {
     /// 改 PR 的 head（模拟有人推送了新提交）。分支 ref 同步移动。
     pub fn set_pull_head(&self, repo: &str, number: u64, sha: &str) {
         let mut state = self.lock();
+        let at = stamp(&mut state);
         let Some(pull) = state.pulls.get_mut(&(repo.to_owned(), number)) else {
             return;
         };
         pull["head"]["sha"] = json!(sha);
+        touch(pull, &at);
         let head_ref = pull["head"]["ref"].as_str().unwrap_or_default().to_owned();
         state
             .refs
@@ -333,16 +341,21 @@ impl FakeGitHub {
 
     /// 改 PR 的 `state`（`open` / `closed`），不动合并标记。
     pub fn set_pull_state(&self, repo: &str, number: u64, pr_state: &str) {
-        if let Some(pull) = self.lock().pulls.get_mut(&(repo.to_owned(), number)) {
+        let mut state = self.lock();
+        let at = stamp(&mut state);
+        if let Some(pull) = state.pulls.get_mut(&(repo.to_owned(), number)) {
             pull["state"] = json!(pr_state);
+            touch(pull, &at);
         }
     }
 
     /// 把 PR 置为已合并（模拟在 GitHub 上手动合并）。
     pub fn set_pull_merged(&self, repo: &str, number: u64) {
         let mut state = self.lock();
+        let at = stamp(&mut state);
         if let Some(pull) = state.pulls.get_mut(&(repo.to_owned(), number)) {
-            merge_in_place(pull);
+            let human = json!({"login": "octocat", "id": 1, "type": "User"});
+            merge_in_place(pull, &at, human);
         }
     }
 
@@ -820,7 +833,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
             let body_text = string_field(&body, "body").unwrap_or_default();
             let draft = body.get("draft").and_then(Value::as_bool).unwrap_or(false);
             let author = (state.bot_login.clone(), state.bot_id);
-            let pull = pull_json(
+            let mut pull = pull_json(
                 number,
                 &title,
                 &body_text,
@@ -830,6 +843,9 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 &base_ref,
                 (&author.0, author.1),
             );
+            let base_sha = base_sha(state, &full, &base_ref);
+            let at = stamp(state);
+            created(&mut pull, &at, &base_sha);
             state.pulls.insert((full, number), pull.clone());
             Response {
                 status: 201,
@@ -843,9 +859,11 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 return not_found();
             };
             let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+            let at = stamp(state);
             let Some(pull) = state.pulls.get_mut(&(full, number)) else {
                 return not_found();
             };
+            touch(pull, &at);
             for field in ["title", "body", "state"] {
                 if let Some(value) = body.get(field) {
                     pull[field] = value.clone();
@@ -885,7 +903,12 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     };
                 }
             }
-            merge_in_place(pull);
+            let bot = json!({"login": state.bot_login, "id": state.bot_id, "type": "Bot"});
+            let at = stamp(state);
+            let Some(pull) = state.pulls.get_mut(&(format!("{owner}/{repo}"), number)) else {
+                return not_found();
+            };
+            merge_in_place(pull, &at, bot);
             Response {
                 status: 200,
                 body: json!({
@@ -1105,6 +1128,8 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
 const DEFAULT_BOT_LOGIN: &str = "gantry-test-bot[bot]";
 const DEFAULT_BOT_ID: i64 = 9;
 const DEFAULT_TOKEN_EXPIRES_AT: &str = "2099-01-01T00:00:00Z";
+/// 替身时钟起点：2023-11-14T22:13:20Z。
+const FAKE_EPOCH_MS: i64 = 1_700_000_000_000;
 
 #[allow(clippy::too_many_arguments)]
 fn pull_json(
@@ -1134,11 +1159,52 @@ fn pull_json(
     })
 }
 
-fn merge_in_place(pull: &mut Value) {
+fn merge_in_place(pull: &mut Value, at: &str, merged_by: Value) {
     let number = pull["number"].as_u64().unwrap_or_default();
     pull["merged"] = json!(true);
     pull["state"] = json!("closed");
     pull["merge_commit_sha"] = json!(format!("{:040x}", 0xfeed_0000_u64 + number));
+    pull["merged_by"] = merged_by;
+    pull["merged_at"] = json!(at);
+    touch(pull, at);
+}
+
+/// 替身时钟的下一刻（RFC 3339，秒级，同 GitHub）。
+fn stamp(state: &mut GithubState) -> String {
+    state.tick += 1;
+    let millis = FAKE_EPOCH_MS + state.tick * 1000;
+    let text = gantry_core::time::Timestamp::from_millis(millis).to_string();
+    // `….000Z` → `…Z`：GitHub 给秒级时间。
+    text.replace(".000Z", "Z")
+}
+
+fn base_sha(state: &GithubState, repo: &str, base: &str) -> String {
+    state
+        .refs
+        .get(&(repo.to_owned(), base.to_owned()))
+        .cloned()
+        .unwrap_or_else(|| format!("{:040x}", 0xba5e_u64))
+}
+
+fn created(pull: &mut Value, at: &str, base_sha: &str) {
+    pull["created_at"] = json!(at);
+    pull["base"]["sha"] = json!(base_sha);
+    let bot = pull["user"]["login"]
+        .as_str()
+        .is_some_and(|login| login.ends_with("[bot]"));
+    pull["user"]["type"] = json!(if bot { "Bot" } else { "User" });
+    touch(pull, at);
+}
+
+/// 更新 `updated_at`；已关闭且尚无 `closed_at` 时补上。
+fn touch(pull: &mut Value, at: &str) {
+    pull["updated_at"] = json!(at);
+    if pull["state"] == json!("closed") && pull["closed_at"].is_null() {
+        pull["closed_at"] = json!(at);
+    }
+    if pull["state"] == json!("open") {
+        pull["closed_at"] = Value::Null;
+    }
 }
 
 fn unprocessable(message: &str) -> Response {

@@ -18,7 +18,10 @@
 //! - webhook 接收：[`WebhookReceiver`]（回环监听、HMAC 双 secret、`delivery_id` 去重、先落盘再 2xx，
 //!   forge.md §7.4）。
 //!
-//! 归一化、自身事件归因、对账在后续切片。
+//! - 归一化与自身事件归因：[`Dispatcher`]（回读 → 快照差异 → `forge.<kind>` + `forge.synced`，
+//!   `forge_effect_index` 归因与绑定，forge.md §7.5–§7.6）。
+//!
+//! 对账 / drift、`/setup/github/callback`、惩罚期持久化在后续切片。
 //!
 //! 已知限制（M1 切片内）：
 //! - 只接受 M1 的 5 个动作（forge.md §1.1）；其余 9 个动作在 M2 起开放，入队时拒绝。
@@ -27,8 +30,10 @@
 
 mod auth;
 mod config;
+mod effects;
 mod git;
 mod github;
+pub mod normalize;
 mod outbox;
 mod reader;
 pub mod webhook;
@@ -36,6 +41,7 @@ pub mod webhook;
 pub use auth::app::{AppAuthDeps, AppAuthOptions, AppTokenProvider, PermissionReport};
 pub use auth::{AuthError, StaticTokenProvider, TokenProvider, TokenPurpose};
 pub use config::{ForgeConfig, Permission, ProjectBinding, DEFAULT_BRANCH_PREFIX};
+pub use normalize::{DispatchOutcome, Dispatcher, DispatcherDeps, DispatcherOptions};
 pub use outbox::executor::{
     CrashPoint, ExecError, Executor, ExecutorDeps, ExecutorOptions, FaultInjector, Step,
     StepOutcome,
@@ -49,5 +55,12 @@ pub use webhook::{
 
 /// `forge` 的模块私有表（store.md §7.10）；装配方交给 `Store::open*`。
 pub fn module_spec() -> gantry_store::ModuleSpec {
-    gantry_store::ModuleSpec::new(webhook::MODULE, &[webhook::INBOX_TABLE])
+    gantry_store::ModuleSpec::new(
+        webhook::MODULE,
+        &[
+            webhook::INBOX_TABLE,
+            effects::EFFECT_TABLE,
+            normalize::snapshot::SNAPSHOT_TABLE,
+        ],
+    )
 }

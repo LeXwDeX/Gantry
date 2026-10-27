@@ -91,8 +91,9 @@ impl Store {
         Self::open_in_memory_sync_with(deps, &[])
     }
 
+    /// 同步版本，带模块私有表（fake 端口与同步测试装配用）。
     #[cfg(feature = "testing")]
-    fn open_in_memory_sync_with(
+    pub fn open_in_memory_sync_with(
         deps: StoreDeps,
         modules: &[ModuleSpec],
     ) -> Result<Store, StoreError> {
