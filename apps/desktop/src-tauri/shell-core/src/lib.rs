@@ -11,5 +11,6 @@ pub mod links;
 pub mod pairing;
 pub mod routes;
 pub mod session;
+pub mod sse;
 pub mod storage;
 pub mod tls;
