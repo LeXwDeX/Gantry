@@ -4078,7 +4078,7 @@
               },
               "repo": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
               },
               "number": {
                 "type": "integer",
@@ -4100,7 +4100,7 @@
               },
               "repo": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
               },
               "number": {
                 "type": "integer",
@@ -4273,7 +4273,14 @@
                       "$ref": "#/components/schemas/UntrustedText"
                     },
                     "ref": {
-                      "$ref": "#/components/schemas/Ref"
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Ref"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   }
                 }
@@ -4317,7 +4324,14 @@
             "type": "string"
           },
           "primary": {
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -4464,7 +4478,7 @@
           },
           "repo": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
           },
           "installation_id": {
             "type": "integer"
@@ -4517,7 +4531,7 @@
         "properties": {
           "repo": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
           },
           "number": {
             "type": "integer",
@@ -4575,7 +4589,7 @@
         "properties": {
           "repo": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
           },
           "number": {
             "type": "integer",
@@ -4789,17 +4803,13 @@
           "rounds",
           "wall_time",
           "forge_writes",
-          "concurrency"
+          "concurrency",
+          "tokens"
         ],
         "properties": {
           "tokens_by_tier": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "utility",
-              "planner",
-              "worker"
-            ],
             "properties": {
               "utility": {
                 "type": "integer",
@@ -4834,6 +4844,10 @@
           "concurrency": {
             "type": "integer",
             "minimum": 1
+          },
+          "tokens": {
+            "type": "null",
+            "description": "会话台账的每日上限；交付台账恒为 null（会话台账见 ConversationBudgetLimits）"
           }
         }
       },
@@ -4854,17 +4868,17 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "tokens_by_tier"
+          "tokens_by_tier",
+          "nodes",
+          "attempts",
+          "rounds",
+          "wall_time",
+          "forge_writes"
         ],
         "properties": {
           "tokens_by_tier": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "utility",
-              "planner",
-              "worker"
-            ],
             "properties": {
               "utility": {
                 "type": "integer",
@@ -4964,7 +4978,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "format": "date"
+                "format": "date",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
               },
               {
                 "type": "null"
@@ -5001,7 +5016,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 9007199254740991
               },
               {
                 "type": "null"
@@ -5314,7 +5330,7 @@
               },
               {
                 "type": "string",
-                "pattern": "^review:[a-z0-9_-]+$"
+                "pattern": "^review:[a-z][a-z0-9_-]*$"
               }
             ]
           },
@@ -5737,7 +5753,8 @@
           "failure_detail": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[a-z0-9_.:-]{1,200}$"
               },
               {
                 "type": "null"
@@ -5794,7 +5811,8 @@
                 ]
               },
               "reason_code": {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[a-z0-9_.:-]{1,200}$"
               },
               "options": {
                 "type": "array",
@@ -5815,24 +5833,31 @@
                 ]
               },
               "patch": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "ref",
-                  "paths"
-                ],
-                "properties": {
-                  "ref": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$"
-                  },
-                  "paths": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "ref",
+                      "paths"
+                    ],
+                    "properties": {
+                      "ref": {
+                        "type": "string",
+                        "pattern": "^sha256:[0-9a-f]{64}$"
+                      },
+                      "paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
                     }
+                  },
+                  {
+                    "type": "null"
                   }
-                }
+                ]
               }
             }
           },
@@ -5875,7 +5900,17 @@
             ],
             "properties": {
               "dimension": {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "tokens_by_tier.utility",
+                  "tokens_by_tier.planner",
+                  "tokens_by_tier.worker",
+                  "nodes",
+                  "rounds",
+                  "wall_time",
+                  "concurrency",
+                  "forge_writes"
+                ]
               },
               "limit": {
                 "type": "integer",
@@ -5902,7 +5937,8 @@
             ],
             "properties": {
               "reason_code": {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[a-z0-9_.:-]{1,200}$"
               },
               "node_id": {
                 "anyOf": [
@@ -5929,14 +5965,21 @@
                 ]
               },
               "target_level": {
-                "type": "string",
-                "enum": [
-                  "None",
-                  "Low",
-                  "Medium",
-                  "High",
-                  "Max",
-                  "Ultimate"
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "None",
+                      "Low",
+                      "Medium",
+                      "High",
+                      "Max",
+                      "Ultimate"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "evidence": {
@@ -5967,10 +6010,17 @@
                 }
               },
               "options": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/Option"
-                }
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Option"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           },
@@ -6182,7 +6232,7 @@
               },
               "repo": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
               },
               "number": {
                 "type": "integer",
@@ -6204,7 +6254,7 @@
               },
               "repo": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
               },
               "branch": {
                 "type": "string"
@@ -6237,7 +6287,7 @@
               },
               "repo": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
               },
               "number": {
                 "type": "integer",
@@ -6264,7 +6314,7 @@
               },
               "repo": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+                "pattern": "^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$"
               },
               "attempt_id": {
                 "type": "string",
@@ -6322,7 +6372,8 @@
               },
               "base_rev": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 9007199254740991
               }
             },
             "allOf": [
@@ -6432,7 +6483,8 @@
             "$ref": "#/components/schemas/ApprovalTarget"
           },
           "subject_digest": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^(sha256:[0-9a-f]{64}|[0-9a-f]{40})$"
           },
           "device_id": {
             "anyOf": [
@@ -8817,7 +8869,8 @@
             "type": "string"
           },
           "subject": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^(settings|(prj|dlv|wfl|nod|att|wtr|sbx|cnv|msg|inb|apr|act|dev|evt|bdg)_[0-7][0-9A-HJKMNP-TV-Z]{25})$"
           },
           "project_id": {
             "anyOf": [
@@ -8947,7 +9000,8 @@
           },
           "base_rev": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 9007199254740991
           },
           "value": {},
           "relaxes": {
@@ -8968,7 +9022,8 @@
               ],
               "properties": {
                 "ref": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
                 },
                 "op": {
                   "type": "string",

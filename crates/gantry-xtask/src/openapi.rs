@@ -12,6 +12,7 @@ use crate::catalog::Artifact;
 use crate::docs;
 use crate::schema::DIALECT;
 use crate::util::{canonical, enum_sets, pointer, Defs, Report};
+use crate::viewdiff::{self, ViewDiffs};
 
 pub fn check(root: &Path, artifacts: &[Artifact], report: &mut Report) {
     let path = root.join("schemas/openapi.yaml");
@@ -31,8 +32,10 @@ pub fn check(root: &Path, artifacts: &[Artifact], report: &mut Report) {
     check_refs(&document, report);
     check_fixtures(root, &document, report);
     check_examples(&document, report);
-    check_entities(artifacts, &document, report);
-    check_gantry_events(artifacts, &document, report);
+    let mut diffs = ViewDiffs::default();
+    check_entities(artifacts, &document, &mut diffs, report);
+    check_gantry_events(artifacts, &document, &mut diffs, report);
+    diffs.finish(report);
     check_approval_shapes(artifacts, &document, report);
     check_settings_updated_shape(artifacts, &document, report);
     check_settings_refs(&document, report);
@@ -205,9 +208,7 @@ fn check_fixtures(root: &Path, document: &Value, report: &mut Report) {
                     continue;
                 }
                 if fixture == "settings" {
-                    report.note(format!(
-                        "{method} {path}: settings 夹具是多资源场景集合，不是单个响应实例；跳过逐值校验"
-                    ));
+                    check_settings_fixture(&method, &path, &data, &validator, report);
                     continue;
                 }
                 if let Some(item_schema) = list_item_schema(schema, document) {
@@ -395,6 +396,84 @@ fn candidate_keys(component: &str) -> Vec<&'static str> {
     keys
 }
 
+/// settings 夹具是 Mock 的配置存储（`global.<resource>` / `project.<prj>.<resource>` → `{rev, value}`），
+/// 不是单个响应。按路由的 scope 把每个条目展开成响应实例（与 Mock 的 `settingsResponse` 同形），
+/// 逐个校验；`?view=effective` 是两层合并的派生值，不在夹具里，不展开。
+fn check_settings_fixture(
+    method: &str,
+    path: &str,
+    data: &Value,
+    validator: &jsonschema::Validator,
+    report: &mut Report,
+) {
+    let instances = settings_fixture_instances(path, data);
+    if instances.is_empty() {
+        report.fail(format!(
+            "{method} {path}: settings 夹具里没有该 scope 的条目"
+        ));
+        return;
+    }
+    let mut passed = 0;
+    for (label, instance) in &instances {
+        match validator.validate(instance) {
+            Ok(()) => passed += 1,
+            Err(error) => report.fail(format!(
+                "{method} {path}: settings 夹具 {label} 展开的响应未通过 schema：{error}"
+            )),
+        }
+    }
+    report.note(format!(
+        "{method} {path}: settings 夹具按 scope 展开 {} 个响应实例，{passed} 个通过",
+        instances.len()
+    ));
+}
+
+fn settings_fixture_instances(path: &str, data: &Value) -> Vec<(String, Value)> {
+    let entry = |resource: &str, entry: &Value| {
+        (
+            entry.get("rev").cloned().unwrap_or(Value::Null),
+            entry.get("value").cloned().unwrap_or(Value::Null),
+            resource.to_owned(),
+        )
+    };
+    let mut instances = Vec::new();
+    if path.starts_with("/v1/projects/") {
+        let projects = data.get("project").and_then(Value::as_object);
+        for (project_id, resources) in projects.into_iter().flatten() {
+            for (resource, item) in resources.as_object().into_iter().flatten() {
+                let (rev, value, resource) = entry(resource, item);
+                instances.push((
+                    format!("project.{project_id}.{resource}"),
+                    json!({
+                        "resource": resource,
+                        "scope": "project",
+                        "project_id": project_id,
+                        "rev": rev,
+                        "value": value,
+                        "warnings": [],
+                    }),
+                ));
+            }
+        }
+    } else {
+        let resources = data.get("global").and_then(Value::as_object);
+        for (resource, item) in resources.into_iter().flatten() {
+            let (rev, value, resource) = entry(resource, item);
+            instances.push((
+                format!("global.{resource}"),
+                json!({
+                    "resource": resource,
+                    "scope": "global",
+                    "rev": rev,
+                    "value": value,
+                    "warnings": [],
+                }),
+            ));
+        }
+    }
+    instances
+}
+
 /// 把片段放进带 `components` 的根，使 `#/components/...` 引用可解析。
 fn compile(document: &Value, schema: &Value) -> Result<jsonschema::Validator, String> {
     let mut root = serde_json::Map::new();
@@ -488,7 +567,12 @@ fn validate_media_examples(
     checked
 }
 
-fn check_entities(artifacts: &[Artifact], document: &Value, report: &mut Report) {
+fn check_entities(
+    artifacts: &[Artifact],
+    document: &Value,
+    diffs: &mut ViewDiffs,
+    report: &mut Report,
+) {
     let Some(components) = document
         .get("components")
         .and_then(|components| components.get("schemas"))
@@ -503,6 +587,8 @@ fn check_entities(artifacts: &[Artifact], document: &Value, report: &mut Report)
     }
     let allowed_hidden: BTreeMap<&str, &[&str]> =
         BTreeMap::from([("Device", &["approval_pubkey"][..])]);
+    // API 视图额外聚合的字段（不在 core 实体里，响应中必出）。
+    let api_aggregates: BTreeMap<&str, &[&str]> = BTreeMap::from([("Workflow", &["nodes"][..])]);
     for artifact in artifacts {
         let Some(name) = artifact.openapi else {
             continue;
@@ -524,21 +610,34 @@ fn check_entities(artifacts: &[Artifact], document: &Value, report: &mut Report)
             &artifact.path,
             &artifact.value,
             api_schema,
-            &core_defs,
-            &api_defs,
-            allowed_hidden.get(name).copied().unwrap_or(&[]),
+            (&core_defs, &api_defs),
+            FieldExceptions {
+                core_only: allowed_hidden.get(name).copied().unwrap_or(&[]),
+                api_only: api_aggregates.get(name).copied().unwrap_or(&[]),
+            },
+            diffs,
             report,
         );
     }
 }
 
+/// 只在一侧出现、已登记的字段名。
+#[derive(Clone, Copy, Default)]
+struct FieldExceptions<'a> {
+    /// core 持有、不进 API 的字段。
+    core_only: &'a [&'a str],
+    /// API 视图额外聚合、core 实体不含的字段。
+    api_only: &'a [&'a str],
+}
+
+/// `defs` 是 `(core 的 $defs, openapi 的 components.schemas)`。
 fn compare_object(
     label: &str,
     core: &Value,
     api: &Value,
-    core_defs: &Defs<'_>,
-    api_defs: &Defs<'_>,
-    allowed_hidden: &[&str],
+    (core_defs, api_defs): (&Defs<'_>, &Defs<'_>),
+    fields: FieldExceptions<'_>,
+    diffs: &mut ViewDiffs,
     report: &mut Report,
 ) {
     let Some(core_props) = core.get("properties").and_then(Value::as_object) else {
@@ -553,7 +652,7 @@ fn compare_object(
             continue;
         }
         if !api_props.contains_key(name) {
-            if allowed_hidden.contains(&name.as_str()) {
+            if fields.core_only.contains(&name.as_str()) {
                 report.note(format!(
                     "{label}: `{name}` 由 core 持有、不进 API（已登记）"
                 ));
@@ -567,8 +666,10 @@ fn compare_object(
             continue;
         }
         if !core_props.contains_key(name) {
-            if name == "nodes" && label.ends_with("workflow.json") {
-                report.note(format!("{label}: `nodes` 是 API 聚合字段，core 实体不含"));
+            if fields.api_only.contains(&name.as_str()) {
+                report.note(format!(
+                    "{label}: `{name}` 是 API 聚合字段，core 实体不含（已登记）"
+                ));
             } else {
                 report.fail(format!(
                     "{label}: openapi 字段 `{name}` 在 core 实体中不存在"
@@ -576,7 +677,6 @@ fn compare_object(
             }
         }
     }
-    let mut soft = Vec::new();
     for (name, core_property) in core_props {
         if name == "data" {
             // 事件信封的 data 是多态槽位：逐事件约束在 schemas/events/<type>.json。
@@ -587,84 +687,66 @@ fn compare_object(
         };
         let core_enums = enum_sets(core_property, core_defs);
         let api_enums = enum_sets(api_property, api_defs);
-        if core_enums != api_enums {
-            let api_union: BTreeSet<String> = api_enums.iter().flatten().cloned().collect();
-            let core_union: BTreeSet<String> = core_enums.iter().flatten().cloned().collect();
-            let single_core = core_enums.len() == 1;
-            let single_api = api_enums.len() == 1;
-            if api_enums.is_empty() {
-                report.note(format!(
-                    "{label}.{name}: core 有枚举、openapi 更宽（无 enum）；由 GantryEvent / 具体分支约束"
-                ));
-            } else if core_union == api_union {
-                report.note(format!(
-                    "{label}.{name}: 枚举以 {} / {} 个分支表示，并集相等",
-                    core_enums.len(),
-                    api_enums.len()
-                ));
-            } else if single_core && single_api {
-                report.fail(format!(
-                    "{label}.{name}: 枚举不一致 core={:?} openapi={:?}",
-                    core_enums, api_enums
-                ));
-                continue;
-            } else {
-                report.note(format!(
-                    "{label}.{name}: 枚举以不同复合结构表示，需人工核对 core={:?} openapi={:?}",
-                    core_enums, api_enums
-                ));
-            }
+        if core_enums != api_enums && core_enums.len() == 1 && api_enums.len() == 1 {
+            report.fail(format!(
+                "{label}.{name}: 枚举不一致 core={:?} openapi={:?}",
+                core_enums, api_enums
+            ));
+            continue;
         }
         let core_type = type_signature(core_property, core_defs);
         let api_type = type_signature(api_property, api_defs);
-        if core_type != api_type {
-            if core_type == "object" && api_type.starts_with("oneOf(object") {
-                report.note(format!(
-                    "{label}.{name}: core 单一对象，openapi 按分支拆分（{api_type}）"
-                ));
-            } else if api_type == "any" {
-                report.note(format!(
-                    "{label}.{name}: openapi 更宽（any），core={core_type}"
-                ));
-            } else if (core_type.starts_with("anyOf(") || core_type.starts_with("oneOf("))
-                && (api_type.starts_with("anyOf(") || api_type.starts_with("oneOf("))
-            {
-                report.note(format!(
-                    "{label}.{name}: 联合类型表示不同（core={core_type} openapi={api_type}），需人工核对"
-                ));
-            } else if core_type == "string"
-                && (api_type.starts_with("oneOf(string") || api_type.starts_with("anyOf(string"))
-            {
-                report.note(format!(
-                    "{label}.{name}: core 用字符串模式表达封闭取值，openapi 用枚举联合；需人工核对"
-                ));
-            } else if core_type == "any" || api_type == "any" {
-                report.note(format!(
-                    "{label}.{name}: 一侧为任意类型（core={core_type} openapi={api_type}）"
-                ));
-            } else {
-                report.fail(format!(
-                    "{label}.{name}: 类型不一致 core={} openapi={}",
-                    core_type, api_type
-                ));
-                continue;
-            }
+        if core_type != api_type && !representable_type_change(&core_type, &api_type) {
+            report.fail(format!(
+                "{label}.{name}: 类型不一致 core={} openapi={}",
+                core_type, api_type
+            ));
+            continue;
         }
-        let core_canonical = canonical(core_property, core_defs, 0);
-        let api_canonical = canonical(api_property, api_defs, 0);
-        if core_canonical != api_canonical {
-            soft.push(format!("{label}.{name}: 约束/required 等非类型差异"));
+        // 枚举、联合与约束的其余差异逐关键字判定：通用视图规则、已登记白名单，否则 fail。
+        diffs.judge(
+            &format!("{label}.{name}"),
+            &viewdiff::normalize(&canonical(core_property, core_defs, 0)),
+            &viewdiff::normalize(&canonical(api_property, api_defs, 0)),
+            report,
+        );
+    }
+    // 顶层只比 required / additionalProperties；两侧都带上 core 的 properties，
+    // 只用来判断 API 多要求的字段在 core 里是否可空，不重复比对属性本身。
+    let properties =
+        viewdiff::normalize(&canonical(&Value::Object(core_props.clone()), core_defs, 0));
+    let shell = |schema: &Value, skip: &[&str]| {
+        let mut shell = serde_json::Map::new();
+        if let Some(Value::Array(required)) = schema.get("required") {
+            let required: Vec<Value> = required
+                .iter()
+                .filter(|name| !name.as_str().is_some_and(|name| skip.contains(&name)))
+                .cloned()
+                .collect();
+            shell.insert("required".to_owned(), Value::Array(required));
         }
-    }
-    if core.get("required") != api.get("required") {
-        soft.push(format!("{label}: required 集合不同"));
-    }
-    if core.get("additionalProperties") != api.get("additionalProperties") {
-        soft.push(format!("{label}: additionalProperties 不同"));
-    }
-    for note in soft.into_iter().take(30) {
-        report.note(note);
-    }
+        if let Some(value) = schema.get("additionalProperties") {
+            shell.insert("additionalProperties".to_owned(), value.clone());
+        }
+        shell.insert("properties".to_owned(), properties.clone());
+        viewdiff::normalize(&Value::Object(shell))
+    };
+    diffs.judge(
+        label,
+        &shell(core, &[]),
+        &shell(api, fields.api_only),
+        report,
+    );
+}
+
+/// 两侧类型签名不同、但仍可能接受同一集合的组合；具体差异交给逐关键字判定。
+fn representable_type_change(core_type: &str, api_type: &str) -> bool {
+    let union =
+        |signature: &str| signature.starts_with("anyOf(") || signature.starts_with("oneOf(");
+    (core_type == "object" && api_type.starts_with("oneOf(object"))
+        || (union(core_type) && union(api_type))
+        || (core_type == "string"
+            && (api_type.starts_with("oneOf(string") || api_type.starts_with("anyOf(string")))
 }
 
 fn type_signature(value: &Value, defs: &Defs<'_>) -> String {
@@ -1038,7 +1120,12 @@ fn check_approval_target(document: &Value, report: &mut Report) {
     }
 }
 
-fn check_gantry_events(artifacts: &[Artifact], document: &Value, report: &mut Report) {
+fn check_gantry_events(
+    artifacts: &[Artifact],
+    document: &Value,
+    diffs: &mut ViewDiffs,
+    report: &mut Report,
+) {
     let Some(branches) = document
         .get("components")
         .and_then(|components| components.get("schemas"))
@@ -1109,9 +1196,9 @@ fn check_gantry_events(artifacts: &[Artifact], document: &Value, report: &mut Re
                         &format!("GantryEvent[{ty}]"),
                         &artifact.value,
                         api_schema,
-                        &core_defs,
-                        &api_defs,
-                        &[],
+                        (&core_defs, &api_defs),
+                        FieldExceptions::default(),
+                        diffs,
                         report,
                     );
                 }
@@ -1319,5 +1406,221 @@ fn check_settings_refs(document: &Value, report: &mut Report) {
             "settings resource schema 有 {} 个，config.md 定义 8 个",
             resources.len()
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gantry_core::testing::builders as b;
+    use gantry_core::*;
+    use serde::Serialize;
+
+    use super::*;
+
+    fn document() -> Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/openapi.yaml");
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn assert_valid(document: &Value, component: &str, label: &str, value: impl Serialize) {
+        let validator = compile(
+            document,
+            &json!({ "$ref": format!("#/components/schemas/{component}") }),
+        )
+        .unwrap();
+        let instance = serde_json::to_value(value).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&instance)
+            .map(|error| format!("{} @ {}", error, error.instance_path()))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "{label} 未通过 {component}：{errors:?}\n{instance}"
+        );
+    }
+
+    fn option(primary: Option<bool>) -> InboxOption {
+        InboxOption {
+            id: "abandon".into(),
+            label: "放弃".into(),
+            primary,
+        }
+    }
+
+    /// #83 回归：core 实际序列化出的实例必须通过 OpenAPI 组件（服务端直接输出 core 类型）。
+    /// 每个 `Option` 字段都覆盖 `None`，它们在线上是 `null` 而不是缺省。
+    #[test]
+    fn core_samples_validate_against_openapi() {
+        let document = document();
+        assert_valid(&document, "Project", "builder", b::project());
+        assert_valid(&document, "Delivery", "builder", b::delivery());
+        assert_valid(&document, "Node", "builder", b::node());
+        assert_valid(&document, "Attempt", "builder", b::attempt());
+        assert_valid(&document, "Worktree", "builder", b::worktree());
+        assert_valid(&document, "Conversation", "builder", b::conversation());
+        assert_valid(&document, "Approval", "builder", b::approval());
+        let mut workflow = serde_json::to_value(b::workflow()).unwrap();
+        workflow["nodes"] = json!([]); // API 聚合字段
+        assert_valid(&document, "Workflow", "builder + nodes", workflow);
+        let mut device = serde_json::to_value(b::device()).unwrap();
+        device.as_object_mut().unwrap().remove("approval_pubkey"); // core 持有、不进 API
+        assert_valid(&document, "Device", "builder 去掉 approval_pubkey", device);
+
+        // 交付台账：used 初始为空映射，limits.tokens 恒为 null。
+        assert_valid(&document, "BudgetLedger", "builder", b::budget_ledger());
+
+        let delivery_id = b::delivery().id;
+        let mut message = b::message();
+        message.cards = vec![
+            Card::Choice {
+                inbox_id: b::inbox_item().id,
+                options: vec![option(None), option(Some(true))],
+            },
+            Card::Summary {
+                delivery_id: None,
+                items: vec![SummaryItem {
+                    text: b::untrusted("已合并"),
+                    reference: None,
+                }],
+            },
+            Card::Summary {
+                delivery_id: Some(delivery_id),
+                items: vec![SummaryItem {
+                    text: b::untrusted("PR"),
+                    reference: Some(Ref::Delivery { id: delivery_id }),
+                }],
+            },
+        ];
+        assert_valid(&document, "Message", "choice / summary 卡片", message);
+
+        let payloads = [
+            (
+                "decision_needed 全空",
+                InboxPayload::DecisionNeeded {
+                    kind: DecisionKind::GateReject,
+                    reason_code: ReasonCode::parse("gate_reject").unwrap(),
+                    options: vec![option(None)],
+                    node_id: None,
+                    patch: None,
+                },
+            ),
+            (
+                "decision_needed 带补丁",
+                InboxPayload::DecisionNeeded {
+                    kind: DecisionKind::ManualAction,
+                    reason_code: ReasonCode::parse("policy.path_protected:deps").unwrap(),
+                    options: vec![option(Some(false))],
+                    node_id: Some(b::node().id),
+                    patch: Some(PatchRef {
+                        reference: b::sha(),
+                        paths: vec!["Cargo.lock".into()],
+                    }),
+                },
+            ),
+            (
+                "budget_exhausted",
+                InboxPayload::BudgetExhausted {
+                    dimension: BudgetDimension::TokensByTier(Tier::Worker),
+                    limit: 10,
+                    used: 10,
+                    options: vec![option(None)],
+                },
+            ),
+            (
+                "escalation 全空",
+                InboxPayload::Escalation {
+                    reason_code: ReasonCode::parse("attempt_failed").unwrap(),
+                    node_id: None,
+                    attempt_id: None,
+                    target_level: None,
+                    evidence: vec![EvidenceRef::Result {
+                        kind: EvidenceKind::Result,
+                        reference: b::sha(),
+                    }],
+                    options: None,
+                },
+            ),
+            (
+                "escalation 全填",
+                InboxPayload::Escalation {
+                    reason_code: ReasonCode::parse("no_progress").unwrap(),
+                    node_id: Some(b::node().id),
+                    attempt_id: Some(b::attempt().id),
+                    target_level: Some(Level::High),
+                    evidence: vec![EvidenceRef::Ref(Ref::Pr {
+                        repo: b::repo(),
+                        number: 7,
+                    })],
+                    options: Some(vec![option(Some(true))]),
+                },
+            ),
+        ];
+        for (label, payload) in payloads {
+            let mut item = b::inbox_item();
+            item.payload = payload;
+            assert_valid(&document, "InboxItem", label, item);
+        }
+    }
+
+    /// #83：settings 夹具不再跳过，展开后的每个响应实例都要过 schema，坏值会被拦住。
+    #[test]
+    fn settings_fixture_expands_and_rejects_bad_values() {
+        let document = document();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/api/settings.json");
+        let mut data: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let validator = compile(
+            &document,
+            &json!({ "$ref": "#/components/schemas/SettingsResponse" }),
+        )
+        .unwrap();
+        let global = settings_fixture_instances("/v1/settings/{resource}", &data);
+        let project =
+            settings_fixture_instances("/v1/projects/{project_id}/settings/{resource}", &data);
+        assert_eq!(global.len(), 8);
+        assert_eq!(project.len(), 2);
+        for (label, instance) in global.iter().chain(&project) {
+            assert!(validator.is_valid(instance), "{label}");
+        }
+        data["global"]["levels"]["value"]["default_level"] = json!("Bogus");
+        let bad = settings_fixture_instances("/v1/settings/{resource}", &data);
+        let mut report = Report::default();
+        check_settings_fixture(
+            "GET",
+            "/v1/settings/{resource}",
+            &data,
+            &validator,
+            &mut report,
+        );
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(bad
+            .iter()
+            .any(|(_, instance)| !validator.is_valid(instance)));
+    }
+
+    /// `node.json.role` 白名单的依据：core 的单个 pattern 与 API 的 enum ∪ pattern 取值一致。
+    #[test]
+    fn node_role_accepts_same_values() {
+        let document = document();
+        let api = compile(
+            &document,
+            &json!({ "$ref": "#/components/schemas/Node/properties/role" }),
+        )
+        .unwrap();
+        for value in [
+            "plan",
+            "build",
+            "classify",
+            "review:security",
+            "review:a1-b_c",
+            "review:",
+            "review:1abc",
+            "review:Sec",
+            "review:-x",
+            "planner",
+            "",
+        ] {
+            let core_ok = serde_json::from_value::<Role>(json!(value)).is_ok();
+            assert_eq!(api.is_valid(&json!(value)), core_ok, "role `{value}`");
+        }
     }
 }

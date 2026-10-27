@@ -10,6 +10,7 @@
       "template": "high.multi_review",
       "limits": {
         "tokens_by_tier": { "utility": 400000, "planner": 300000, "worker": 8000000 },
+        "tokens": null,
         "nodes": 40,
         "rounds": 4,
         "wall_time": 10800,
