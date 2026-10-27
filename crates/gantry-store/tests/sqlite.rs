@@ -429,6 +429,11 @@ async fn cas_verify_adds_rows_for_orphans_and_reports_corruption() {
         store.cas().get_bytes(&damaged, 64).await.unwrap_err(),
         StoreError::Corrupt(_)
     ));
+    // `open` 对小对象做同样的校验，不能绕过 verify_on_read。
+    assert!(matches!(
+        store.cas().open(&damaged).await.err().unwrap(),
+        StoreError::Corrupt(_)
+    ));
     // 再跑一次是幂等的。
     assert_eq!(store.cas().verify().await.unwrap().rows_added, 0);
 }
@@ -486,4 +491,22 @@ async fn older_schema_is_migrated_forward() {
     // 版本若没前进，再次打开会重跑迁移并因 `cas_objects` 已存在而失败。
     let store = open(&dir, 1_700_000_200_000).await.unwrap();
     assert!(store.cas().stat(&digest).await.unwrap().is_some());
+}
+
+/// 崩溃留下的 `cas/tmp` 半成品在下次打开时清掉，不会与新临时文件撞名（§9）。
+#[tokio::test]
+async fn cas_tmp_leftovers_are_cleared_on_open() {
+    let dir = Dir::new("cas-tmp");
+    drop(open(&dir, 1_700_000_000_000).await.unwrap());
+    let tmp = dir.0.join("cas/tmp");
+    std::fs::write(tmp.join(format!("{}-0", std::process::id())), b"half").unwrap();
+    std::fs::write(tmp.join("stray"), b"half").unwrap();
+
+    let store = open(&dir, 1_700_000_100_000).await.unwrap();
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+    store
+        .cas()
+        .put(b"fresh", gantry_store::CasKind::Artifact)
+        .await
+        .unwrap();
 }

@@ -158,6 +158,10 @@ impl Cas {
     ) -> Result<Self, StoreError> {
         create_dir(&root.join("sha256"))?;
         create_dir(&root.join("tmp"))?;
+        // 调用方已持有数据目录的排他锁：`tmp/` 里的都是上次崩溃留下的半成品（§9），清掉。
+        for leftover in read_dir_sorted(&root.join("tmp"))? {
+            std::fs::remove_file(&leftover).map_err(io_error)?;
+        }
         Ok(Self {
             backend: Backend::Disk { root, durable },
             clock,
@@ -254,13 +258,31 @@ impl Cas {
                     inner: ReaderInner::Memory(std::io::Cursor::new(object.bytes.clone())),
                 }))
             }
-            Backend::Disk { root, .. } => match File::open(object_path(root, digest)) {
-                Ok(file) => Ok(Some(CasReader {
-                    inner: ReaderInner::File(file),
-                })),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(io_error(error)),
-            },
+            Backend::Disk { root, .. } => {
+                let file = match File::open(object_path(root, digest)) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(io_error(error)),
+                };
+                let len = file.metadata().map_err(io_error)?.len();
+                if len >= self.verify_below {
+                    return Ok(Some(CasReader {
+                        inner: ReaderInner::File(file),
+                    }));
+                }
+                // 小对象与 `get_bytes` 一样先校验摘要，读取接口不能绕过 verify_on_read。
+                let mut bytes = Vec::with_capacity(len as usize);
+                (&file).read_to_end(&mut bytes).map_err(io_error)?;
+                if sha256(&bytes) != *digest {
+                    return Err(StoreError::Corrupt(format!(
+                        "cas object {} does not match its digest",
+                        digest.to_hex()
+                    )));
+                }
+                Ok(Some(CasReader {
+                    inner: ReaderInner::Memory(std::io::Cursor::new(Arc::from(bytes))),
+                }))
+            }
         }
     }
 
@@ -429,23 +451,39 @@ fn object_path(root: &Path, digest: &Sha256Digest) -> PathBuf {
 
 fn temp_file(root: &Path) -> Result<(PathBuf, File), StoreError> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = root.join("tmp").join(format!(
-        "{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(io_error)?;
-    Ok((path, file))
+    loop {
+        let path = root.join("tmp").join(format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            // 名字被占用（例如同进程号的残留）就换下一个计数。
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(io_error(error)),
+        }
+    }
 }
 
 /// 把已 fsync 的临时文件改名到目标位置；目标已存在（并发写入同内容）时丢弃临时文件。
+///
+/// 返回前同步目标所在目录（新建分片目录时连同其上级），让 rename 产生的目录项在
+/// 插入 `cas_objects` 行之前就已持久化：掉电后不会出现"有行无文件"（§7.7）。
 fn publish(tmp: &Path, target: &Path) -> Result<(), StoreError> {
-    if let Some(parent) = target.parent() {
-        create_dir(parent)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| StoreError::Io("cas object path has no parent".to_owned()))?;
+    let new_shard = !parent.exists();
+    create_dir(parent)?;
+    if new_shard {
+        if let Some(shards) = parent.parent() {
+            sync_dir(shards)?;
+        }
     }
     #[cfg(unix)]
     {
@@ -456,7 +494,19 @@ fn publish(tmp: &Path, target: &Path) -> Result<(), StoreError> {
         let _ = std::fs::remove_file(tmp);
         return Ok(());
     }
-    std::fs::rename(tmp, target).map_err(io_error)
+    std::fs::rename(tmp, target).map_err(io_error)?;
+    sync_dir(parent)
+}
+
+/// 目录 fsync。只在 unix 上有意义；其他平台的文件系统不支持对目录句柄 fsync。
+fn sync_dir(dir: &Path) -> Result<(), StoreError> {
+    #[cfg(unix)]
+    File::open(dir)
+        .and_then(|handle| handle.sync_all())
+        .map_err(io_error)?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 /// 边读边算摘要并写入 `sink`；超过 `max` 字节时返回 `CasTooLarge`。
