@@ -19,7 +19,7 @@ use gantry_core::ports::{
 use gantry_core::secret::{Consumer, SecretName};
 use gantry_core::testing::{FakeClock, SeqEntropy};
 use gantry_core::time::Timestamp;
-use gantry_fakes::github::FakeGitHub;
+use gantry_fakes::github::{FakeGitHub, ScriptedFailure};
 use gantry_fakes::secrets::MemorySecretStore;
 use gantry_forge::{
     AppAuthDeps, AppAuthOptions, AppTokenProvider, AuthError, Forge, ForgeConfig, Permission,
@@ -433,4 +433,80 @@ async fn self_check_reports_missing_permissions_and_gates_those_actions() {
             ..
         })
     ));
+}
+
+/// #213 评审：缺一项写权限时，写令牌只请求已获批的写权限，其余动作照常可换到令牌。
+#[tokio::test]
+async fn write_token_requests_only_granted_write_permissions() {
+    let granted: BTreeSet<Permission> = [Permission::ContentsWrite, Permission::PullRequestsWrite]
+        .into_iter()
+        .collect();
+    let h = harness(granted);
+    h.github.set_installation(
+        INSTALLATION,
+        json!({"metadata":"read","contents":"write","pull_requests":"write","issues":"read","checks":"read"}),
+    );
+    h.provider
+        .token(&id(1), TokenPurpose::Write)
+        .await
+        .expect("write token without issues:write");
+    let body: Value = serde_json::from_str(&token_calls(&h.github)[0].body).unwrap();
+    let scope = body["permissions"].as_object().unwrap();
+    assert_eq!(scope.get("contents").and_then(Value::as_str), Some("write"));
+    assert_eq!(
+        scope.get("pull_requests").and_then(Value::as_str),
+        Some("write")
+    );
+    assert!(!scope.contains_key("issues"));
+
+    // 替身同 GitHub：请求超出获批范围整次被拒，所以上面的收窄是必要的。
+    let over = harness(all());
+    over.github.set_installation(
+        INSTALLATION,
+        json!({"metadata":"read","contents":"write","pull_requests":"write","issues":"read","checks":"read"}),
+    );
+    assert!(over
+        .provider
+        .token(&id(1), TokenPurpose::Write)
+        .await
+        .is_err());
+}
+
+/// #213 评审：组织级权限（FA §9.2「等」）同样触发写路径拒绝。
+#[tokio::test]
+async fn organization_level_permissions_are_high_risk() {
+    let h = harness(all());
+    h.github.set_installation(
+        INSTALLATION,
+        json!({"metadata":"read","contents":"write","pull_requests":"write","issues":"write",
+               "organization_administration":"write","members":"read"}),
+    );
+    let report = h.provider.self_check(&id(1), true).await.unwrap();
+    assert!(report.write_denied);
+    assert!(report
+        .high_risk
+        .contains(&"organization_administration".to_owned()));
+    assert!(report.high_risk.contains(&"members".to_owned()));
+}
+
+/// #213 评审：换令牌被限流时保留 retry-after，交给调用方等待。
+#[tokio::test]
+async fn rate_limited_token_exchange_keeps_retry_after() {
+    let h = harness(all());
+    h.github.push_failure(ScriptedFailure {
+        status: 403,
+        body: r#"{"message":"You have exceeded a secondary rate limit"}"#.into(),
+        retry_after_s: Some(120),
+    });
+    let error = h
+        .provider
+        .token(&id(1), TokenPurpose::Write)
+        .await
+        .expect_err("rate limited");
+    assert_eq!(
+        error,
+        AuthError::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(120))
+        }
+    );
 }

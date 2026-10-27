@@ -27,7 +27,7 @@ use gantry_core::text::UntrustedText;
 use gantry_core::time::Timestamp;
 use serde_json::Value;
 
-use crate::auth::{TokenProvider, TokenPurpose};
+use crate::auth::{AuthError, TokenProvider, TokenPurpose};
 use crate::config::ForgeConfig;
 use crate::github::{ApiError, GithubClient};
 
@@ -66,11 +66,13 @@ impl Reader {
         Fut: std::future::Future<Output = Result<T, ApiError>>,
     {
         for attempt in 0..2 {
-            let token = self
-                .tokens
-                .token(project, TokenPurpose::Read)
-                .await
-                .map_err(|error| unavailable(format!("token: {error}")))?;
+            let token = match self.tokens.token(project, TokenPurpose::Read).await {
+                Ok(token) => token,
+                Err(AuthError::RateLimited { retry_after }) => {
+                    return Err(ForgeError::RateLimited { retry_after })
+                }
+                Err(error) => return Err(unavailable(format!("token: {error}"))),
+            };
             match call(token).await {
                 Err(ApiError::Status { status: 401, .. }) if attempt == 0 => {
                     self.tokens.invalidate(project);
