@@ -4,6 +4,7 @@
 //! 本 crate 只依赖 `gantry-core` 与少量通用库（worker.md §3）。
 
 pub mod artifacts;
+pub mod claude_cli;
 pub mod claude_code;
 pub mod layout;
 pub mod startup;
