@@ -33,21 +33,23 @@ use gantry_core::events::{
 };
 use gantry_core::forge::{
     BaseAdvancedData, CheckConclusion, CheckSuiteCompletedData, DriftDetectedBy, DriftPayload,
-    DriftResolution, DriftTarget, ForgeActor, ForgeActorKind, ForgeApp, ForgeEventData,
-    ForgeEventEnvelope, ForgeEventSchema, ForgeEventSource, ForgeEventTarget, ForgeTargetType,
-    ForgeText, IssueClosedData, IssueReopenedData, IssueStateReason, MaybeDeliveryId, NullOnly,
+    DriftResolution, DriftSynthesizedEvent, DriftTarget, ForgeActor, ForgeActorKind, ForgeApp,
+    ForgeEventData, ForgeEventEnvelope, ForgeEventSchema, ForgeEventSource, ForgeEventTarget,
+    ForgeTargetType, ForgeText, HeadDivergedActual, HeadDivergedDrift, HeadDivergedExpected,
+    IssueClosedData, IssueReopenedData, IssueStateReason, MaybeDeliveryId, NullOnly,
     OrphanEffectActual, OrphanEffectDrift, OrphanEffectExpected, OrphanObject, PrBase,
     PrChangedField, PrClosedData, PrHead, PrMergedData, PrOpenedData, PrReopenedData,
-    PrSynchronizedData, PrUpdatedData,
+    PrSynchronizedData, PrUpdatedData, RequiredNullable,
 };
-use gantry_core::ids::{ActionId, Clock, DeliveryId, ProjectId};
+use gantry_core::ids::{ActionId, Clock, DeliveryId, EventId, ProjectId};
+use gantry_core::ports::{DriftKind, ReconcileReport, ReconcileTarget};
 use gantry_core::time::Timestamp;
 use gantry_store::{Store, StoreError, WriteTx};
 use serde_json::{json, Value};
 
 use crate::auth::{TokenProvider, TokenPurpose};
 use crate::config::{ForgeConfig, ProjectBinding};
-use crate::effects::{effect_key, pr_key, EffectRow, EFFECT_TABLE};
+use crate::effects::{effect_key, pr_key, push_key, EffectRow, LastPush, EFFECT_TABLE};
 use crate::github::GithubClient;
 use crate::webhook::{InboxRow, InboxStatus, INBOX_TABLE, MODULE};
 use snapshot::{branch_key, issue_key, BranchSnap, IssueSnap, PrSnap, SNAPSHOT_TABLE};
@@ -103,6 +105,8 @@ pub struct Dispatcher {
     clock: Arc<dyn Clock>,
     github: GithubClient,
     opts: DispatcherOptions,
+    /// 对账串行化：同一时刻只有一轮在跑（`reconcile_now` 的 single-flight 近似）。
+    reconcile_lock: tokio::sync::Mutex<()>,
 }
 
 /// 一条待追加的 `forge.<kind>`。
@@ -130,9 +134,25 @@ enum Plan {
         snapshot: Option<(String, Value)>,
         orphan: Option<OrphanEffectActual>,
         drift_target: Option<DriftTarget>,
+        /// head 变化且该分支有成功的 push_branch 记录（head_diverged 的依据）。
+        head_basis: Option<HeadBasis>,
     },
     Park,
     Drop,
+}
+
+#[derive(Clone)]
+struct HeadBasis {
+    action_id: ActionId,
+    pushed: GitOid,
+    observed: GitOid,
+}
+
+/// 一次提交的结果：webhook 路径的处置，以及对账报告需要的事件 ID 与 drift。
+struct Committed {
+    outcome: Option<DispatchOutcome>,
+    emitted: Vec<EventId>,
+    drifts: Vec<DriftKind>,
 }
 
 /// 回读结果。
@@ -152,7 +172,132 @@ impl Dispatcher {
             clock: deps.clock,
             github: GithubClient::new(deps.api_base, deps.options.http_timeout),
             opts: deps.options,
+            reconcile_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// 对账（forge.md §7.7）：对目标 PR / Issue 回读，与快照做差，按 `source = reconcile`
+    /// 追加事件与 `forge.synced`；外部推送导致的 head 变化追加 `drift(head_diverged)`。
+    /// 同一事实与 webhook 路径的 `dedup_key` 相同，所以先对账、后到的原 webhook 不再产事件。
+    ///
+    /// shortcut: 巡检周期、启动全量与投递恢复（`GET /app/hook/deliveries`）的调度由装配方
+    /// 按 `guardian.patrol_interval_s` 调本方法；批量与低配额降级随感知限流的 Outbox（M2）。
+    pub async fn reconcile(
+        &self,
+        target: ReconcileTarget,
+        by: DriftDetectedBy,
+    ) -> Result<ReconcileReport, StoreError> {
+        let _flight = self.reconcile_lock.lock().await;
+        let mut report = ReconcileReport {
+            emitted: Vec::new(),
+            drifts: Vec::new(),
+            synced_at: self.clock.now(),
+        };
+        for (project, number, pull) in self.reconcile_targets(&target).await? {
+            let Some(binding) = self.config.projects.get(&project) else {
+                continue;
+            };
+            let Ok(token) = self.tokens.token(&project, TokenPurpose::Read).await else {
+                continue;
+            };
+            let readback = match self
+                .github
+                .issue_or_pull(&token, &binding.project.repo, number, pull)
+                .await
+            {
+                Ok(value) if pull => Readback::Pr(value),
+                Ok(value) => Readback::Issue(value),
+                // 回读失败留给下一轮；不可访问的安装由 installation_unreachable 路径处理（后续）。
+                Err(_) => continue,
+            };
+            let now = self.clock.now();
+            let row = InboxRow {
+                delivery_id: format!("reconcile:{project}:{number}:{}", now.as_millis()),
+                event: if pull { "pull_request" } else { "issues" }.into(),
+                action: None,
+                installation_id: Some(binding.project.installation_id),
+                repo: Some(binding.project.repo.to_string()),
+                // 合成行不停放：视为宽限期已过。
+                received_at: Timestamp::from_millis(
+                    now.as_millis().saturating_sub(
+                        i64::try_from(self.opts.self_event_grace.as_millis())
+                            .unwrap_or(i64::MAX)
+                            .saturating_add(1),
+                    ),
+                ),
+                body: None,
+                status: InboxStatus::Processing,
+                attempts: 0,
+                retry_at: None,
+                last_error: None,
+            };
+            let committed = self
+                .commit(row, Value::Null, binding, readback, Some(by))
+                .await?;
+            report.emitted.extend(committed.emitted);
+            report.drifts.extend(committed.drifts);
+        }
+        report.synced_at = self.clock.now();
+        Ok(report)
+    }
+
+    async fn reconcile_targets(
+        &self,
+        target: &ReconcileTarget,
+    ) -> Result<Vec<(ProjectId, u64, bool)>, StoreError> {
+        Ok(match target {
+            ReconcileTarget::Pr { project, number } => vec![(*project, *number, true)],
+            ReconcileTarget::Issue { project, number } => vec![(*project, *number, false)],
+            ReconcileTarget::Project(project) => {
+                let snapshot = self.store.snapshot().await?;
+                let reader = snapshot.module_conn(MODULE);
+                let mut out = Vec::new();
+                for pr in scan_all::<PrSnap>(&reader, &snapshot::pr_prefix(project))? {
+                    if pr.state == ForgeSyncedState::Open {
+                        out.push((*project, pr.number, true));
+                    }
+                }
+                for issue in scan_all::<IssueSnap>(&reader, &format!("issue|{project}|"))? {
+                    if issue.state == ForgeSyncedState::Open {
+                        out.push((*project, issue.number, false));
+                    }
+                }
+                out
+            }
+            ReconcileTarget::Delivery(delivery) => {
+                // 交付单元绑定的 PR：经 PR 绑定行反查（Issue 绑定要等 store 的 Delivery.issues 索引）。
+                let snapshot = self.store.snapshot().await?;
+                let reader = snapshot.module_conn(MODULE);
+                let mut out = Vec::new();
+                for binding in self.config.projects.values() {
+                    let prefix = format!("pr|{}#", binding.project.repo);
+                    let mut after: Option<String> = None;
+                    loop {
+                        let page = reader.scan::<EffectRow>(
+                            EFFECT_TABLE,
+                            &prefix,
+                            after.as_deref(),
+                            gantry_store::MODULE_SCAN_MAX,
+                        )?;
+                        let full = page.len() == gantry_store::MODULE_SCAN_MAX as usize;
+                        for (key, row) in page {
+                            if row.delivery_id == *delivery {
+                                if let Some(number) =
+                                    key.rsplit('#').next().and_then(|n| n.parse::<u64>().ok())
+                                {
+                                    out.push((binding.project.id, number, true));
+                                }
+                            }
+                            after = Some(key);
+                        }
+                        if !full {
+                            break;
+                        }
+                    }
+                }
+                out
+            }
+        })
     }
 
     /// 处理到没有可处理的行为止。
@@ -186,7 +331,10 @@ impl Dispatcher {
             Ok(readback) => readback,
             Err(()) => return self.retry(row).await,
         };
-        self.commit(row, payload, binding, readback).await
+        Ok(self
+            .commit(row, payload, binding, readback, None)
+            .await?
+            .outcome)
     }
 
     async fn next_row(&self) -> Result<Option<InboxRow>, StoreError> {
@@ -326,15 +474,27 @@ impl Dispatcher {
         }
     }
 
+    /// `by = None`：webhook 路径（落盘收件箱行状态）；`Some`：对账路径（行是合成的，不落盘）。
     async fn commit(
         &self,
         row: InboxRow,
         payload: Value,
         binding: &ProjectBinding,
         readback: Readback,
-    ) -> Result<Option<DispatchOutcome>, StoreError> {
+        by: Option<DriftDetectedBy>,
+    ) -> Result<Committed, StoreError> {
         let mut tx = self.store.begin_write().await?;
         let now = tx.now();
+        let source = if by.is_some() {
+            ForgeEventSource::Reconcile
+        } else {
+            ForgeEventSource::Webhook
+        };
+        let mut committed = Committed {
+            outcome: None,
+            emitted: Vec::new(),
+            drifts: Vec::new(),
+        };
         let plan = match readback {
             Readback::Pr(pr) => self.plan_pr(&mut tx, &row, &payload, binding, &pr, now)?,
             Readback::Issue(issue) => {
@@ -350,9 +510,10 @@ impl Dispatcher {
                 snapshot: None,
                 orphan: None,
                 drift_target: None,
+                head_basis: None,
             },
         };
-        let (events, synced, delivery, snapshot, orphan, drift_target) = match plan {
+        let (events, synced, delivery, snapshot, orphan, drift_target, head_basis) = match plan {
             Plan::Commit {
                 events,
                 synced,
@@ -360,30 +521,55 @@ impl Dispatcher {
                 snapshot,
                 orphan,
                 drift_target,
-            } => (events, synced, delivery, snapshot, orphan, drift_target),
-            Plan::Park => {
+                head_basis,
+            } => (
+                events,
+                synced,
+                delivery,
+                snapshot,
+                orphan,
+                drift_target,
+                head_basis,
+            ),
+            Plan::Park if by.is_none() => {
                 tx.rollback().await?;
                 let retry_at = after(row.received_at, self.opts.self_event_grace);
-                return self.finish(row, InboxStatus::Parked, Some(retry_at)).await;
+                committed.outcome = self
+                    .finish(row, InboxStatus::Parked, Some(retry_at))
+                    .await?;
+                return Ok(committed);
             }
-            Plan::Drop => {
+            Plan::Park | Plan::Drop if by.is_some() => {
                 tx.rollback().await?;
-                return self.finish(row, InboxStatus::Dropped, None).await;
+                return Ok(committed);
+            }
+            Plan::Park | Plan::Drop => {
+                tx.rollback().await?;
+                committed.outcome = self.finish(row, InboxStatus::Dropped, None).await?;
+                return Ok(committed);
             }
         };
 
         let project = binding.project.id;
         let mut appended = 0;
         let mut needs_drift = false;
+        let mut head_drift = None;
         for candidate in events {
             let (origin, caused_by) = self.attribute(&mut tx, &candidate, &payload, binding)?;
             needs_drift |= origin == ForgeOrigin::OwnUnattributed;
+            if candidate.kind == ForgeEventKind::PrSynchronized && origin == ForgeOrigin::External {
+                head_drift = head_basis.clone();
+            }
             let envelope = ForgeEventEnvelope {
                 schema: ForgeEventSchema,
                 kind: candidate.kind,
                 dedup_key: candidate.dedup_key.clone(),
-                source: ForgeEventSource::Webhook,
-                delivery_ids: vec![row.delivery_id.clone()],
+                source,
+                delivery_ids: if by.is_some() {
+                    Vec::new()
+                } else {
+                    vec![row.delivery_id.clone()]
+                },
                 project_id: project,
                 repo: binding.project.repo.clone(),
                 installation_id: u64::try_from(binding.project.installation_id).unwrap_or(0),
@@ -410,8 +596,55 @@ impl Dispatcher {
                     dedup_key: Some(candidate.dedup_key),
                 })
                 .await?;
-            if matches!(appended_event, gantry_store::Appended::New(_)) {
+            if let gantry_store::Appended::New(event) = appended_event {
                 appended += 1;
+                committed.emitted.push(event.id);
+            }
+        }
+        // 人推了提交（head 与最近一次成功的 push_branch 不同，且非自身事件）→ head_diverged（§7.7）。
+        if let (Some(basis), Some(delivery), Some(target)) =
+            (head_drift, delivery, drift_target.clone())
+        {
+            let drift = DriftPayload::HeadDiverged(HeadDivergedDrift {
+                delivery_id: delivery,
+                target,
+                expected: HeadDivergedExpected {
+                    head_sha: basis.pushed,
+                    basis_action: basis.action_id,
+                },
+                actual: HeadDivergedActual {
+                    head_sha: basis.observed,
+                    // webhook 路径取 sender；对账回读拿不到推送者，记为 unknown（不编造身份）。
+                    pushed_by: RequiredNullable::Value(actor_of(payload.get("sender"))),
+                },
+                resolution: DriftResolution::GithubWins,
+                synthesized_events: if by.is_some() {
+                    vec![DriftSynthesizedEvent::PrSynchronized]
+                } else {
+                    Vec::new()
+                },
+                detected_by: by.unwrap_or(DriftDetectedBy::Webhook),
+            });
+            if let gantry_store::Appended::New(event) = tx
+                .append(NewEvent {
+                    ty: EventType::ForgeDriftDetected,
+                    subject: project_subject(&project)?,
+                    project_id: Some(project),
+                    actor: forge_actor(),
+                    causation_id: None,
+                    correlation_id: Some(delivery.to_string()),
+                    data: serde_json::to_value(&drift)
+                        .map_err(|error| StoreError::ModuleValue(error.to_string()))?,
+                    dedup_key: Some(format!(
+                        "drift:head:{}:{}",
+                        binding.project.repo, basis.observed
+                    )),
+                })
+                .await?
+            {
+                appended += 1;
+                committed.emitted.push(event.id);
+                committed.drifts.push(DriftKind::HeadDiverged);
             }
         }
         if needs_drift {
@@ -425,7 +658,7 @@ impl Dispatcher {
                     actual,
                     resolution: DriftResolution::GithubWins,
                     synthesized_events: Vec::new(),
-                    detected_by: DriftDetectedBy::Webhook,
+                    detected_by: by.unwrap_or(DriftDetectedBy::Webhook),
                 });
                 tx.append(NewEvent {
                     ty: EventType::ForgeDriftDetected,
@@ -440,36 +673,45 @@ impl Dispatcher {
                 })
                 .await?;
                 appended += 1;
+                committed.drifts.push(DriftKind::OrphanEffect);
             }
         }
-        if let Some(synced) = synced {
-            tx.append(NewEvent {
-                ty: EventType::ForgeSynced,
-                subject: project_subject(&project)?,
-                project_id: Some(project),
-                actor: forge_actor(),
-                causation_id: None,
-                correlation_id: delivery.map(|id| id.to_string()),
-                data: serde_json::to_value(&synced)
-                    .map_err(|error| StoreError::ModuleValue(error.to_string()))?,
-                dedup_key: None,
-            })
-            .await?;
+        if let Some(mut synced) = synced {
+            synced.source = source;
+            let appended_event = tx
+                .append(NewEvent {
+                    ty: EventType::ForgeSynced,
+                    subject: project_subject(&project)?,
+                    project_id: Some(project),
+                    actor: forge_actor(),
+                    causation_id: None,
+                    correlation_id: delivery.map(|id| id.to_string()),
+                    data: serde_json::to_value(&synced)
+                        .map_err(|error| StoreError::ModuleValue(error.to_string()))?,
+                    dedup_key: None,
+                })
+                .await?;
+            if let gantry_store::Appended::New(event) = appended_event {
+                committed.emitted.push(event.id);
+            }
             appended += 1;
         }
         if let Some((key, value)) = snapshot {
             tx.module_conn(MODULE).put(SNAPSHOT_TABLE, &key, &value)?;
         }
         let mut row = row;
-        row.status = InboxStatus::Done;
-        row.retry_at = None;
-        tx.module_conn(MODULE)
-            .put(INBOX_TABLE, &row.delivery_id, &row)?;
+        if by.is_none() {
+            row.status = InboxStatus::Done;
+            row.retry_at = None;
+            tx.module_conn(MODULE)
+                .put(INBOX_TABLE, &row.delivery_id, &row)?;
+        }
         tx.commit().await?;
-        Ok(Some(DispatchOutcome::Done {
+        committed.outcome = Some(DispatchOutcome::Done {
             delivery: row.delivery_id,
             events: appended,
-        }))
+        });
+        Ok(committed)
     }
 
     /// 绑定：PR 绑定行 → 预期效果行。都没有 → 停放 / 丢弃。
@@ -789,6 +1031,18 @@ impl Dispatcher {
             }
         }
 
+        let head_basis = match &previous {
+            Some(prev) if prev.head_sha != next.head_sha => tx
+                .module_conn(MODULE)
+                .get::<LastPush>(EFFECT_TABLE, &push_key(repo, &next.head_ref))?
+                .filter(|push| push.head_sha != next.head_sha)
+                .map(|push| HeadBasis {
+                    action_id: push.action_id,
+                    pushed: push.head_sha,
+                    observed: next.head_sha,
+                }),
+            _ => None,
+        };
         let synced = synced_for(
             ForgeSyncedTargetKind::Pr,
             n,
@@ -816,6 +1070,7 @@ impl Dispatcher {
                 repo: repo.clone(),
                 number: n,
             }),
+            head_basis,
         })
     }
 
@@ -929,6 +1184,7 @@ impl Dispatcher {
                 repo: repo.clone(),
                 number: n,
             }),
+            head_basis: None,
         })
     }
 
@@ -1010,8 +1266,34 @@ impl Dispatcher {
             snapshot,
             orphan: None,
             drift_target: None,
+            head_basis: None,
         })
     }
+}
+
+fn scan_all<T: serde::de::DeserializeOwned>(
+    reader: &gantry_store::ModuleReader<'_>,
+    prefix: &str,
+) -> Result<Vec<T>, StoreError> {
+    let mut out = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = reader.scan::<T>(
+            SNAPSHOT_TABLE,
+            prefix,
+            after.as_deref(),
+            gantry_store::MODULE_SCAN_MAX,
+        )?;
+        let full = page.len() == gantry_store::MODULE_SCAN_MAX as usize;
+        for (key, value) in page {
+            after = Some(key);
+            out.push(value);
+        }
+        if !full {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 enum SyncedDelta {

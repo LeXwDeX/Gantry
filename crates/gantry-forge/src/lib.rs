@@ -13,7 +13,7 @@
 //! - App 鉴权：[`AppTokenProvider`]（App JWT、安装令牌缓存与 single-flight 刷新、权限自检，
 //!   forge.md §7.12）。
 //!
-//! - 读取：[`Reader`] 实现 `ForgeReader::discussion`（P-59）；快照类读取随对账切片补齐。
+//! - 读取：[`Reader`] 实现 `ForgeReader::discussion`（P-59）；快照类读取见 store 的 `pr_snapshot`。
 //!
 //! - webhook 接收：[`WebhookReceiver`]（回环监听、HMAC 双 secret、`delivery_id` 去重、先落盘再 2xx，
 //!   forge.md §7.4）。
@@ -21,9 +21,10 @@
 //! - 归一化与自身事件归因：[`Dispatcher`]（回读 → 快照差异 → `forge.<kind>` + `forge.synced`，
 //!   `forge_effect_index` 归因与绑定，forge.md §7.5–§7.6）。
 //!
+//! - 对账：[`Dispatcher::reconcile`]（`source = reconcile` 的同一套差异与归因，`drift(head_diverged)`，
+//!   forge.md §7.7）。
 //! - App 创建回调：[`setup::SetupService`]（`/setup/github/callback`，forge.md §7.14）。
-//!
-//! 对账 / drift 在后续切片。
+//! - 二级限流惩罚期按安装持久化在 `forge_rate_state`（执行器领取时检查）。
 //!
 //! 已知限制（M1 切片内）：
 //! - 只接受 M1 的 5 个动作（forge.md §1.1）；其余 9 个动作在 M2 起开放，入队时拒绝。

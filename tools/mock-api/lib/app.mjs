@@ -1358,23 +1358,29 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     if (signing) {
       requireSettingsApproval(context, signing);
     }
-    const entry = { rev: previousRev + 1, value: stripSecretValues(context.body.value), warnings: [] };
+    const value = stripSecretValues(context.body.value);
+    const rev = emitSettingsUpdated(scope, projectId, resource, previousRev, value, secrets);
+    const entry = { rev, value, warnings: [] };
     if (scope === "global") {
       state.globalSettings[resource] = entry;
     } else {
       state.projectSettings[projectId] ??= {};
       state.projectSettings[projectId][resource] = entry;
     }
-    emitSettingsUpdated(scope, projectId, resource, previousRev, entry.value, secrets, previousRev + 1);
     return {
       status: 200,
       body: settingsResponse(state, resource, scope, projectId ?? undefined),
-      headers: { ETag: etagFor(previousRev + 1) },
+      headers: { ETag: etagFor(rev) },
     };
   }
 
-  function emitSettingsUpdated(scope, projectId, resource, baseRev, value, secrets, version) {
-    emitEvent(
+  /**
+   * 发出 settings.updated 并返回新 rev：(scope, resource) 的 rev = 其最近一次 settings.updated 的 seq，
+   * 写响应的 X-Event-Seq 等于新 rev（config.md §2.7）。
+   */
+  function emitSettingsUpdated(scope, projectId, resource, baseRev, value, secrets) {
+    const version = state.head + 1;
+    const envelope = emitEvent(
       "settings.updated",
       "settings",
       {
@@ -1388,6 +1394,7 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       },
       { projectId: scope === "project" ? projectId : null, correlationId: null },
     );
+    return envelope.seq;
   }
 
   function handlePutSettings(context) {
@@ -1457,21 +1464,20 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       context.params.project_id,
       context.params.resource,
     );
-    state.projectSettings[context.params.project_id] ??= {};
-    state.projectSettings[context.params.project_id][context.params.resource] = {
-      rev: previousRev + 1,
-      value: null,
-      warnings: [],
-    };
-    emitSettingsUpdated(
+    const rev = emitSettingsUpdated(
       "project",
       context.params.project_id,
       context.params.resource,
       previousRev,
       null,
       [],
-      previousRev + 1,
     );
+    state.projectSettings[context.params.project_id] ??= {};
+    state.projectSettings[context.params.project_id][context.params.resource] = {
+      rev,
+      value: null,
+      warnings: [],
+    };
     return {
       status: 200,
       body: settingsResponse(
@@ -1480,7 +1486,7 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
         "project",
         context.params.project_id,
       ),
-      headers: { ETag: etagFor(previousRev + 1) },
+      headers: { ETag: etagFor(rev) },
     };
   }
 

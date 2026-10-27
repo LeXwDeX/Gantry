@@ -497,6 +497,17 @@ impl Executor {
                         },
                     )?;
                 }
+                if let ActionPayload::PushBranch(push) = &action.payload {
+                    tx.module_conn(crate::webhook::MODULE).put(
+                        crate::effects::EFFECT_TABLE,
+                        &crate::effects::push_key(&push.repo, &push.branch),
+                        &crate::effects::LastPush {
+                            action_id: action.id,
+                            delivery_id: action.delivery_id,
+                            head_sha: push.local_head_oid,
+                        },
+                    )?;
+                }
                 tx.outbox().complete(&action.id, github_ref).await?;
                 StepOutcome::Succeeded
             }
