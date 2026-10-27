@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures_core::stream::BoxStream;
 
 use crate::canon::{GitOid, RepoSlug, Sha256Digest};
-use crate::entities::{Role, SandboxLimits, SandboxTrust, TokenUsage, TokenWeights};
+use crate::entities::{Role, SandboxLimits, SandboxTrust, Seq, TokenUsage, TokenWeights};
 use crate::ids::{AttemptId, ConversationId, DeliveryId, NodeId, ProjectId, SandboxId};
 use crate::settings::resource::{SandboxDriver, SandboxIo};
 use crate::text::UntrustedText;
@@ -72,6 +72,9 @@ pub struct SandboxSpec {
     pub io: IoLimits,
     pub egress: EgressRequest,
     pub workspace: WorkspaceRequest,
+    /// 引擎组装本 spec 时所用 `ConfigView` 的修订（`egress.weights` 等配置快照所属）。
+    /// sandbox 原样填入 `IssueJobToken.config_rev`，不读签发时刻的「当前生效修订」（#220）。
+    pub config_rev: Seq,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

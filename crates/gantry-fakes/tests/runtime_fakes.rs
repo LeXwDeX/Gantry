@@ -184,6 +184,7 @@ fn sandbox_spec(job_id: AttemptId, sandbox_id: SandboxId) -> SandboxSpec {
             pr_base_sha: None,
             mode: WorkspaceMode::Rw,
         },
+        config_rev: gantry_core::entities::Seq::from_wire(3).expect("rev"),
     }
 }
 
