@@ -130,7 +130,8 @@ pub async fn rename(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, P
         .rename(&id, &name, &actor(req))
         .await
         .map_err(device_error)?;
-    let seq = head(core).await?;
+    // device.updated 由 pki 在自己的事务里追加：取该设备最后一条事件，不取全局 head
+    let seq = crate::approvals::subject_seq(core, &id.to_string()).await?;
     Ok(Reply::json(StatusCode::OK, device_view(&device), seq))
 }
 

@@ -447,3 +447,97 @@ async fn new_push_after_signing_makes_the_approval_stale() {
     .await;
     assert_eq!(body(&resp)["status"], "invalidated");
 }
+
+#[tokio::test]
+async fn review_fixes_deny_text_seq_and_create_recovery() {
+    let env = PkiEnv::new().await;
+    let approver = env.pair(DevicePlatform::Macos, "approver").await;
+    let op = env.pair(DevicePlatform::Macos, "operator").await;
+    let victim = env.pair(DevicePlatform::Windows, "victim").await;
+
+    // 拒绝备注含回车：边界 422 /reason，而不是存储层的 503
+    let approval = create_revoke(&env, &op, &victim, KEY).await;
+    let id = approval["id"].as_str().unwrap().to_owned();
+    let deny = format!("/v1/approvals/{id}/deny");
+    let payload = json!({"reason": "暂不批准\r\n需要补充测试"}).to_string();
+    let resp = send(
+        &env,
+        post(&approver, &deny, Some("deny-cr-key-0000001")),
+        &payload,
+    )
+    .await;
+    let b = assert_problem(&resp, 422, "validation_failed");
+    assert_eq!(b["errors"][0]["pointer"], "/reason");
+
+    // 改角色响应的 X-Event-Seq 是本事务最后一个事件，不是提交后的全局 head
+    let path = format!("/v1/devices/{}/role", op.response.device.id);
+    let put = |d: &Paired| {
+        d.req(Method::PUT, &path)
+            .header("content-type", "application/json")
+    };
+    let signing = assert_problem(
+        &send(&env, put(&approver), r#"{"role":"viewer"}"#).await,
+        403,
+        "signature_required",
+    )["signing"]
+        .clone();
+    let created = send(
+        &env,
+        post(&op, "/v1/approvals", Some("role-approval-key-01")),
+        &signing.to_string(),
+    )
+    .await;
+    let role_id = body(&created)["id"].as_str().unwrap().to_owned();
+    approve(&env, &approver, &role_id, "role-grant-key-00002").await;
+    let resp = send(
+        &env,
+        put(&approver).header("gantry-approval", &role_id),
+        r#"{"role":"viewer"}"#,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let subject = gantry_core::events::Subject::parse(&op.response.device.id.to_string()).unwrap();
+    let last = env
+        .store
+        .events()
+        .by_subject(&subject)
+        .await
+        .unwrap()
+        .last()
+        .unwrap()
+        .seq;
+    assert_eq!(
+        header(&resp, "x-event-seq").unwrap(),
+        last.as_u64().to_string()
+    );
+
+    // 发起审批：业务已提交但幂等完成记录丢失 → 同键重试按 dedup_key 找回首次的审批
+    let apr = gantry_core::ids::ApprovalId::from_parts(1, 77).unwrap();
+    let dedup = format!("api:{}:recover-key-00000001", approver.response.device.id);
+    let cases: Value =
+        serde_json::from_str(include_str!("../../gantry-core/fixtures/events/cases.json")).unwrap();
+    let mut tx = env.store.begin_write().await.unwrap();
+    tx.append(gantry_core::events::NewEvent {
+        ty: gantry_core::events::EventType::ApprovalRequested,
+        subject: gantry_core::events::Subject::parse(&apr.to_string()).unwrap(),
+        project_id: None,
+        actor: Actor::new(ActorKind::Device, approver.response.device.id.to_string()),
+        causation_id: None,
+        correlation_id: None,
+        data: cases["valid"]["approval.requested"].clone(),
+        dedup_key: Some(dedup),
+    })
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let digest = gantry_policy::signing::request_digest(&json!({})).unwrap();
+    let payload = json!({"action": "device_revoke", "target": {"kind": "device", "id": victim.response.device.id}, "subject_digest": digest});
+    let resp = send(
+        &env,
+        post(&approver, "/v1/approvals", Some("recover-key-00000001")),
+        &payload.to_string(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201, "{:?}", body(&resp));
+    assert_eq!(body(&resp)["id"], apr.to_string());
+}
