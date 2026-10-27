@@ -1,7 +1,7 @@
 //! 对话与消息的读投影（§7.8）：本模块没有自己的表，全部由事件日志折叠。
 //!
 //! `store` 的模块投影器从 M1 后续才开放（store.md §7.10），这里按需扫描日志；
-//! 结果只依赖 `seq ≤ upto` 的事件，所以与同一读点的 `seq` 一致（§7.11）。
+//! 消息读取使用同一内存快照；其他处理路径按 `seq ≤ upto` 折叠（§7.11）。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,8 +10,8 @@ use gantry_core::entities::{Conversation, Message, Seq};
 use gantry_core::events::{
     ConversationEventData, DeliveryCreatedData, Event, EventType, ProjectEventData, Subject,
 };
-use gantry_core::ids::{ConversationId, DeliveryId, MessageId, ProjectId};
-use gantry_store::{EventFilter, Store, StoreError, TypePattern};
+use gantry_core::ids::{ConversationId, DeliveryId, ProjectId};
+use gantry_store::{EventFilter, ReadSnapshot, Store, StoreError, TypePattern};
 use serde_json::Value;
 
 const SCAN_LIMIT: u32 = 200;
@@ -88,8 +88,8 @@ pub(crate) struct ConversationLog {
     pub messages: Vec<(Seq, Message)>,
 }
 
-pub(crate) async fn conversation_log(
-    store: &Store,
+pub(crate) fn conversation_log(
+    snapshot: &ReadSnapshot,
     id: &ConversationId,
     upto: Seq,
 ) -> Result<Option<ConversationLog>, StoreError> {
@@ -97,7 +97,7 @@ pub(crate) async fn conversation_log(
         .map_err(|error| StoreError::PreconditionFailed(error.to_string()))?;
     let mut conversation_row = None;
     let mut messages = Vec::new();
-    for event in store.events().by_subject(&subject).await? {
+    for event in snapshot.by_subject(&subject) {
         if event.seq > upto {
             continue;
         }
@@ -119,7 +119,30 @@ pub(crate) async fn conversation_log(
         return Ok(None);
     };
     // OQ-8：用户消息的 delivery_id 由 delivery.created.source_message_id 回填。
-    let created = delivery_sources(store, &conversation.project_id, upto).await?;
+    let filter = EventFilter {
+        project_ids: Some(BTreeSet::from([conversation.project_id])),
+        include: vec![TypePattern::Exact(EventType::DeliveryCreated)],
+        exclude: Vec::new(),
+    };
+    let mut created = BTreeMap::new();
+    let mut after = Seq::ZERO;
+    loop {
+        let page = snapshot.scan(after, &filter, SCAN_LIMIT)?;
+        for event in page.events.into_iter().filter(|event| event.seq <= upto) {
+            if let (Ok(id), Ok(data)) = (
+                event.subject.as_str().parse::<DeliveryId>(),
+                serde_json::from_value::<DeliveryCreatedData>(event.data),
+            ) {
+                if let Some(source) = data.source_message_id {
+                    created.insert(source, id);
+                }
+            }
+        }
+        if page.scanned_to >= upto || page.scanned_to >= page.head || page.scanned_to == after {
+            break;
+        }
+        after = page.scanned_to;
+    }
     for (_, message) in &mut messages {
         if message.delivery_id.is_none() {
             message.delivery_id = created.get(&message.id).copied();
@@ -129,21 +152,6 @@ pub(crate) async fn conversation_log(
         conversation,
         messages,
     }))
-}
-
-/// 项目内 `source_message_id → delivery_id`。
-pub(crate) async fn delivery_sources(
-    store: &Store,
-    project: &ProjectId,
-    upto: Seq,
-) -> Result<BTreeMap<MessageId, DeliveryId>, StoreError> {
-    let mut out = BTreeMap::new();
-    for event in deliveries_created(store, project, upto).await? {
-        if let Some(source) = event.1.source_message_id {
-            out.insert(source, event.0);
-        }
-    }
-    Ok(out)
 }
 
 pub(crate) async fn deliveries_created(

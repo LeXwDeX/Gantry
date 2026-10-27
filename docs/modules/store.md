@@ -466,6 +466,8 @@ CREATE TABLE settings_docs (                                -- 投影：settings
 
 ### 7.4 读路径与快照
 
+**当前实现**：`Store::snapshot()` 在内存读锁下克隆已提交的完整状态；`head_seq()`、`scan()` 和 `by_subject()` 都读取该克隆。后续写入不会改变已有快照。`scan()` 的过滤、分页、`scanned_to` 和错误语义与 `EventLog::scan()` 相同；`by_subject()` 按事件序号升序返回全部匹配事件。SQLite 持久层也使用此内存快照，并非 SQLite WAL 读事务。以下 WAL 连接池、过期和键集分页为目标设计，尚未由此切片实现。
+
 `snapshot()` 从读池取一个连接，`BEGIN` 后第一条语句读取 `head`（`SELECT seq FROM events ORDER BY seq DESC LIMIT 1`，空表为 0），这一步固定了 WAL 快照，之后该快照上的所有读取都与 `head_seq` 一致。因为投影与事件在同一个写事务里提交，**任何快照里的投影恰好反映到 `head_seq`**。快照最长存活 `snapshot_max_age_s`（避免拖住 WAL 检查点），超时后续调用返回 `SnapshotExpired`，调用方重新取快照。
 
 键集分页：`ORDER BY id`（ULID 与文本序、时间序一致）；`PageCursor` 编码 `(资源标签, 排序键, 方向)`，`next_cursor` 在多取一行时生成；`attempts` 以 `(node_id, n)` 为键。游标解码失败、资源标签不符、方向不符一律 `InvalidCursor`。

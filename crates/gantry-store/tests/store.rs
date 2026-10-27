@@ -201,6 +201,92 @@ async fn dedup_retry_has_no_side_effects() {
 }
 
 #[tokio::test]
+async fn snapshot_event_reads_match_event_log_and_remain_frozen() {
+    let store = store().await;
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(message_posted()).await.unwrap();
+    tx.append(settings_global()).await.unwrap();
+    tx.append(message_posted()).await.unwrap();
+    tx.commit().await.unwrap();
+    let snapshot = store.snapshot().await.unwrap();
+    let log = store.events();
+    let subject = message_posted().subject;
+    assert_eq!(
+        snapshot.by_subject(&subject),
+        log.by_subject(&subject).await.unwrap()
+    );
+    let filters = [
+        EventFilter::default(),
+        EventFilter {
+            project_ids: Some(BTreeSet::new()),
+            ..Default::default()
+        },
+        EventFilter {
+            include: vec![TypePattern::Prefix("message.".into())],
+            ..Default::default()
+        },
+        EventFilter {
+            include: vec![TypePattern::Prefix("message.".into())],
+            exclude: vec![TypePattern::Exact(EventType::MessagePosted)],
+            ..Default::default()
+        },
+    ];
+    for filter in &filters {
+        for after in [Seq::ZERO, Seq::new(1).unwrap(), snapshot.head_seq()] {
+            for limit in [1, 2, 200] {
+                let expected = log.scan(after, filter, limit).await.unwrap();
+                let actual = snapshot.scan(after, filter, limit).unwrap();
+                assert_eq!(
+                    (actual.events, actual.scanned_to, actual.head),
+                    (expected.events, expected.scanned_to, expected.head)
+                );
+            }
+        }
+    }
+    for limit in [0, 201] {
+        assert_eq!(
+            snapshot
+                .scan(Seq::ZERO, &filters[0], limit)
+                .unwrap_err()
+                .to_string(),
+            log.scan(Seq::ZERO, &filters[0], limit)
+                .await
+                .unwrap_err()
+                .to_string()
+        );
+    }
+    let ahead = Seq::new(4).unwrap();
+    assert!(
+        matches!(snapshot.scan(ahead, &filters[0], 1), Err(StoreError::CursorAhead { head }) if head == snapshot.head_seq())
+    );
+    assert!(
+        matches!(log.scan(ahead, &filters[0], 1).await, Err(StoreError::CursorAhead { head }) if head == snapshot.head_seq())
+    );
+
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(message_posted()).await.unwrap();
+    tx.append(delivery_created()).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(snapshot.head_seq().as_u64(), 3);
+    let old = snapshot.scan(Seq::ZERO, &filters[0], 200).unwrap();
+    assert_eq!(old.head, snapshot.head_seq());
+    assert_eq!(old.scanned_to, snapshot.head_seq());
+    assert_eq!(old.events.len(), 3);
+    assert_eq!(snapshot.by_subject(&subject).len(), 2);
+    let fresh = store.snapshot().await.unwrap();
+    assert_eq!(fresh.head_seq().as_u64(), 5);
+    assert_eq!(fresh.by_subject(&subject).len(), 3);
+    assert_eq!(
+        fresh
+            .scan(Seq::ZERO, &filters[0], 200)
+            .unwrap()
+            .events
+            .len(),
+        5
+    );
+}
+
+#[tokio::test]
 async fn scan_pages_with_scanned_to_and_filters() {
     let store = store().await;
     let mut tx = store.begin_write().await.unwrap();

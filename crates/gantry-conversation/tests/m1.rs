@@ -534,6 +534,213 @@ async fn restart_continues_after_the_cursor_without_duplicates() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn old_snapshot_excludes_later_messages_and_delivery_backfill() {
+    use gantry_core::entities::Seq;
+    use gantry_core::events::{DeliveryCreatedData, Subject};
+    use gantry_store::{EventFilter, TypePattern};
+
+    let h = harness().await;
+    h.models.on_intent("任务", intent("task", false, None));
+    let first = h.post("任务一", None, vec![]).await;
+    let old = h.store.snapshot().await.unwrap();
+    let second = h.post("任务二", None, vec![]).await;
+    h.settle().await;
+
+    let subject = Subject::parse(&first.conversation_id.to_string()).unwrap();
+    let old_messages: Vec<_> = old
+        .by_subject(&subject)
+        .into_iter()
+        .filter(|event| event.ty == EventType::MessagePosted)
+        .collect();
+    assert_eq!(old_messages.len(), 1);
+    assert_eq!(
+        serde_json::from_value::<gantry_core::entities::Message>(old_messages[0].data.clone())
+            .unwrap(),
+        first
+    );
+    let filter = EventFilter {
+        include: vec![TypePattern::Exact(EventType::DeliveryCreated)],
+        ..Default::default()
+    };
+    let old_deliveries = old.scan(Seq::ZERO, &filter, 200).unwrap();
+    assert!(old_deliveries.events.is_empty());
+    assert_eq!(old_deliveries.head, old.head_seq());
+    assert_eq!(old_deliveries.scanned_to, old.head_seq());
+
+    let fresh = h.store.snapshot().await.unwrap();
+    let deliveries = fresh.scan(Seq::ZERO, &filter, 200).unwrap();
+    assert_eq!(deliveries.events.len(), 2);
+    let sources: Vec<_> = deliveries
+        .events
+        .iter()
+        .map(|event| {
+            serde_json::from_value::<DeliveryCreatedData>(event.data.clone())
+                .unwrap()
+                .source_message_id
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(sources, vec![first.id, second.id]);
+    let page = h
+        .conv
+        .list_messages(
+            &first.conversation_id,
+            PageQuery {
+                limit: 200,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.last_seq, fresh.head_seq());
+    for message in [first, second] {
+        assert!(page
+            .items
+            .iter()
+            .any(|item| item.id == message.id && item.delivery_id.is_some()));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_message_and_delivery_writes_match_each_page_watermark() {
+    use gantry_core::entities::{Actor, ActorKind, Message};
+    use gantry_core::events::{DeliveryCreatedData, NewEvent, Subject};
+    use gantry_core::ids::{Dlv, Msg};
+    use gantry_store::EventFilter;
+    use tokio::sync::mpsc;
+
+    let h = harness().await;
+    let cnv = h.conversation().await;
+    let template = h.post("initial", None, vec![]).await;
+    let initial_head = h.store.events().head().await.unwrap();
+    let (ready_tx, mut ready_rx) = mpsc::channel(1);
+    let (release_tx, mut release_rx) = mpsc::channel(1);
+    let store = h.store.clone();
+    let project = h.project;
+    let writer = tokio::spawn(async move {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../../gantry-core/fixtures/events/cases.json"))
+                .unwrap();
+        for n in 1..=20 {
+            let mut message = template.clone();
+            message.id = Id::<Msg>::from_parts(1, n).unwrap();
+            message.text = format!("message {n}");
+            let delivery = Id::<Dlv>::from_parts(2, n).unwrap();
+            let mut data = cases["valid"]["delivery.created"].clone();
+            data["source_message_id"] = serde_json::json!(message.id);
+            let mut tx = store.begin_write().await.unwrap();
+            for (ty, subject, data) in [
+                (
+                    EventType::MessagePosted,
+                    Subject::parse(&cnv.to_string()).unwrap(),
+                    serde_json::to_value(&message).unwrap(),
+                ),
+                (
+                    EventType::DeliveryCreated,
+                    Subject::parse(&delivery.to_string()).unwrap(),
+                    data,
+                ),
+            ] {
+                tx.append(NewEvent {
+                    ty,
+                    subject,
+                    project_id: Some(project),
+                    actor: Actor::new(ActorKind::Engine, "test"),
+                    causation_id: None,
+                    correlation_id: None,
+                    data,
+                    dedup_key: None,
+                })
+                .await
+                .unwrap();
+            }
+            ready_tx.send(()).await.unwrap();
+            release_rx.recv().await.unwrap();
+            tx.commit().await.unwrap();
+        }
+    });
+    let mut pages = Vec::new();
+    for n in 0..20 {
+        ready_rx.recv().await.unwrap();
+        let before = h
+            .conv
+            .list_messages(
+                &cnv,
+                PageQuery {
+                    limit: 200,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.last_seq.as_u64(), initial_head.as_u64() + 2 * n);
+        pages.push(before);
+        release_tx.send(()).await.unwrap();
+        pages.push(
+            h.conv
+                .list_messages(
+                    &cnv,
+                    PageQuery {
+                        limit: 200,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    writer.await.unwrap();
+    pages.push(
+        h.conv
+            .list_messages(
+                &cnv,
+                PageQuery {
+                    limit: 200,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+    );
+    let events = h
+        .store
+        .events()
+        .scan(
+            gantry_core::entities::Seq::ZERO,
+            &EventFilter::default(),
+            200,
+        )
+        .await
+        .unwrap()
+        .events;
+    for page in pages {
+        let mut expected: Vec<Message> = events
+            .iter()
+            .filter(|e| {
+                e.seq <= page.last_seq
+                    && e.ty == EventType::MessagePosted
+                    && e.subject.as_str() == cnv.to_string()
+            })
+            .map(|e| serde_json::from_value(e.data.clone()).unwrap())
+            .collect();
+        for event in events
+            .iter()
+            .filter(|e| e.seq <= page.last_seq && e.ty == EventType::DeliveryCreated)
+        {
+            let data: DeliveryCreatedData = serde_json::from_value(event.data.clone()).unwrap();
+            if let Some(message) = expected
+                .iter_mut()
+                .find(|m| Some(m.id) == data.source_message_id)
+            {
+                message.delivery_id = Some(event.subject.as_str().parse().unwrap());
+            }
+        }
+        expected.sort_by_key(|message| std::cmp::Reverse(message.id));
+        assert_eq!(page.items, expected, "head {}", page.last_seq.as_u64());
+    }
+}
+
+#[tokio::test]
 async fn list_messages_seq_matches_and_desc_cursor_is_stable() {
     let h = harness().await;
     for n in 0..5 {
