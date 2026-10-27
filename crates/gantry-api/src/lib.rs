@@ -23,6 +23,8 @@ pub mod control;
 pub mod devices;
 pub mod handlers;
 pub mod idempotency;
+pub mod listener;
+pub mod pairing;
 pub mod problem;
 pub mod query;
 pub mod rate;
@@ -31,6 +33,7 @@ pub mod registry;
 pub mod server;
 pub mod settings;
 pub mod sse;
+pub mod tls;
 pub mod validate;
 
 pub use auth::{AuthContext, PeerCert};

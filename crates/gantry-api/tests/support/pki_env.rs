@@ -94,12 +94,16 @@ impl Paired {
 }
 
 pub struct PkiEnv {
-    pub core: ApiCore,
+    pub core: Arc<ApiCore>,
     pub store: Store,
     pub clock: Arc<FakeClock>,
-    pub pairing: PairingService,
+    pub pairing: Arc<PairingService>,
     pub admin: Arc<StoreAdmin>,
     pub root_pem: String,
+    pub intermediate_pem: String,
+    pub server_crt_pem: String,
+    pub server_key_pem: String,
+    pub directory: Arc<StoreDirectory>,
     pub forge: Arc<gantry_fakes::forge::FakeForge>,
     pub policy: Arc<gantry_policy::PolicyEngine>,
     pub settings_ctx: Arc<super::settings_ctx::FakeSettingsContext>,
@@ -139,6 +143,9 @@ impl PkiEnv {
         let intermediate =
             Authority::load(&read("intermediate.crt"), &read("intermediate.key")).unwrap();
         let root_pem = read("root.crt");
+        let intermediate_pem = read("intermediate.crt");
+        let server_crt_pem = read("server.crt");
+        let server_key_pem = read("server.key");
         let root = IssuedCert::from_der(pem::parse(&root_pem).unwrap().into_contents()).unwrap();
         let _ = fs::remove_dir_all(&dir);
         let journal_dir = temp_dir();
@@ -160,13 +167,13 @@ impl PkiEnv {
         .await
         .unwrap();
         let issuer = Arc::new(Issuer::new(intermediate, root));
-        let pairing = PairingService::new(
+        let pairing = Arc::new(PairingService::new(
             store.clone(),
             clock.clone(),
             entropy.clone(),
             issuer.clone(),
             PairingConfig::new("https://gantry.example.test:8443"),
-        );
+        ));
         let admin = Arc::new(StoreAdmin::new(
             store.clone(),
             clock.clone(),
@@ -185,7 +192,7 @@ impl PkiEnv {
             clock: clock.clone(),
             ids: ids.clone(),
             store: store.clone(),
-            devices: directory,
+            devices: directory.clone(),
             admin: admin.clone(),
             approvals: approvals.clone(),
             forge: forge.clone(),
@@ -197,12 +204,16 @@ impl PkiEnv {
             idempotency: Arc::new(MemoryIdempotency::new(clock.clone())),
         };
         Self {
-            core: ApiCore::new(ApiConfig::default(), svc),
+            core: Arc::new(ApiCore::new(ApiConfig::default(), svc)),
             store,
             clock,
             pairing,
             admin,
             root_pem,
+            intermediate_pem,
+            server_crt_pem,
+            server_key_pem,
+            directory,
             forge,
             policy,
             settings_ctx,

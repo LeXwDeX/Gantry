@@ -55,6 +55,14 @@ impl EventStream {
     pub async fn next_frame(&mut self) -> Option<Bytes> {
         self.rx.recv().await
     }
+
+    /// 供传输层（hyper 响应体）轮询下一帧。
+    pub fn poll_frame(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Bytes>> {
+        self.rx.poll_recv(cx)
+    }
 }
 
 /// 每设备并发流计数；许可在任务结束时释放。
