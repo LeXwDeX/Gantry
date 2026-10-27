@@ -504,7 +504,7 @@ stateDiagram-v2
 2. 审批 `pending`（懒过期）→ 否则 `NotPending{status}`。
 3. 取该设备的 challenge：无 → `ChallengeInvalid{None}`；`nonce` 不等（常量时间比较）→ `Mismatch`；已用 → `Used`；已过期 → `Expired`。
 4. 用**服务端保存的** `payload_canonical` 重建待签字节（客户端不能提交 payload），`verify_es256`，不通过 → `SignatureInvalid`。签名串必须是严格 base64url、无填充、长度 86，解码后恰为 64 字节；其余一律 `SignatureInvalid`。
-5. PR 类动作：`payload.subject_digest == current_subject.head_sha`（`current_subject` 由 `api` 在调用前让 `forge` 强制对账一次后传入，其 `repo` / `number` 须与审批 `target` 一致，否则视为未提供；缺失则退回读 `store` 快照；**M1 实现**：未提供时跳过本步，主体由消费时的权威检查兜底，回读快照待 #150 的快照投影接入 `ForgeReader` 后补上）。不等 → **先落盘** `pending → invalidated`（`approval.invalidated`，`data` 含新旧 head），**再**返回 `StaleHead{current_head_sha}`（这次调用不回滚状态转移）。补丁与内部动作的主体在消费时核对。
+5. PR 类动作：`payload.subject_digest == current_subject.head_sha`（`current_subject` 由 `api` 在调用前让 `forge` 强制对账一次后传入，其 `repo` / `number` 须与审批 `target` 一致，否则视为未提供；缺失则退回读快照：审批的交付单元 → 项目 → `ForgeReader::pull_request`；仍读不到（无交付单元、无快照、仓库不一致、读失败）则跳过本步，由消费时的权威检查兜底）。不等 → **先落盘** `pending → invalidated`（`approval.invalidated`，`data` 含新旧 head），**再**返回 `StaleHead{current_head_sha}`（这次调用不回滚状态转移）。补丁与内部动作的主体在消费时核对。
 6. 通过：同一事务写 `device_id`、`signature`、`status = granted`，标记 challenge `used_at`，追加 `approval.granted`（`data`：`approval_id`、`device_id`、`approval_pubkey_fpr`、`payload_sha256`），`200`。
 
 **`consume_internal(tx, req)`** 对应 api.md §6.6 第 4 步的 #2–#5（#1 缺头与 #6 角色由 `api` 判）：`status` 不是 `granted` → `NotGranted`（`consumed` → `Consumed`，过期 → `Expired`）；`action` / `target` 与路由推出的不一致 → `ActionMismatch` / `TargetMismatch`；`body_digest ≠ subject_digest` → `DigestMismatch`；`rev_check`（settings）：`target.base_rev` 须等于 `if_match_rev` 且等于 `current_rev` → 否则 `BaseRevMismatch`（`if_match_rev ≠ current_rev` 的 `412` 由 `api` 在此之前判，优先级更高）。全部通过则 `consumed` + `approval.consumed`（`data.consumed_by = "req:<request_id>"`），与调用方传入的 `tx` 同事务。
@@ -515,7 +515,7 @@ stateDiagram-v2
 2. 审批必须 `granted` 且未过期（懒过期）→ 否则 `ApprovalInvalid`。
 3. `action` 与 `kind` 匹配、`target` 与载荷目标一致（`push_branch`：`target.branch == branch`；`force` 时 `expected_remote_oid` 也要一致）；`merge_pr`：`approval.subject_digest == expected_head_sha == live_head_sha` → 否则 `HeadChanged`；`force_push`：`subject_digest == local_head_oid`。（`patch_apply_protected` 不经本方法：它由 `repo` 在提交前经 `consume_patch_approval` 消费。）
 4. 按当前配置重判该动作，处置为 `deny` → `ApprovalInvalid{NotGranted}`（审批状态不变）。
-5. 通过：`granted → consumed`，写 `policy_consumed(consumed_by = act)`，追加 `approval.consumed`（`data` 含 `consumed_by`、`subject_digest`——core.md 要求消费事件带消费时核对的摘要），返回 `Consumed`。
+5. 通过：`granted → consumed`，写 `policy_consumed(consumed_by = act)`（**M1 实现**：Forge 动作的幂等判断直接读同一事务追加的 `approval.consumed.data.consumed_by`，它与表中的值一致，所以不另写表；`policy_consumed` 目前只记内部动作的消费），追加 `approval.consumed`（`data` 含 `consumed_by`、`subject_digest`——core.md 要求消费事件带消费时核对的摘要），返回 `Consumed`。
 
 这些比较与 forge-actions §2.5 / forge.md §7.8 的机械复核重复，是有意的纵深防御；规则重判是 `forge` 做不了的部分。消费之后执行失败（终态）**不退回**审批：`forge` 追加 `outbox.failed`，入队方要重做须新 `epoch` 并取得新审批（P-54）。
 

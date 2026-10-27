@@ -345,6 +345,25 @@ impl PolicyApprovals {
         }
     }
 
+    /// `current_subject` 缺失时退回读快照：审批的交付单元 → 项目 → `ForgeReader` 的 PR。
+    /// 读不到（无交付单元、无快照、仓库不一致、读失败）就跳过这一步，主体由消费时的
+    /// 权威检查兜底。
+    async fn snapshot_head(&self, approval: &Approval) -> Option<GitOid> {
+        let ApprovalTarget::Pr { repo, number } = &approval.target else {
+            return None;
+        };
+        let delivery = approval.delivery_id?;
+        let snapshot = self.engine.store.snapshot().await.ok()?;
+        let project = snapshot.delivery(&delivery)?.project_id;
+        let pr = self
+            .engine
+            .forge
+            .pull_request(&project, *number)
+            .await
+            .ok()??;
+        (pr.repo == *repo).then_some(pr.head_sha)
+    }
+
     fn new_nonce(&self) -> Nonce {
         let mut bytes = [0u8; NONCE_BYTES];
         self.entropy.fill(&mut bytes);
@@ -553,6 +572,11 @@ impl ApprovalService for PolicyApprovals {
                 status: record.approval.status,
             });
         }
+        // 第 5 步要用的当前 head 在开写事务前读（只读、无副作用，不改变校验顺序）。
+        let live_head = match current_head(&record.approval.target, req.current_subject.as_ref()) {
+            Some(head) => Some(head),
+            None => self.snapshot_head(&record.approval).await,
+        };
         // 3. 本设备的 challenge。
         let now = self.now();
         let mut tx = self.engine.store.begin_write().await.map_err(port_error)?;
@@ -588,10 +612,9 @@ impl ApprovalService for PolicyApprovals {
         )
         .map_err(|_| GrantError::SignatureInvalid)?;
         // 5. PR 类：主体一致性（提前失败；权威检查在消费时）。不等先落盘失效再返回。
-        if let (Some(head), SubjectDigest::Git(signed)) = (
-            current_head(&record.approval.target, req.current_subject.as_ref()),
-            record.approval.subject_digest,
-        ) {
+        if let (Some(head), SubjectDigest::Git(signed)) =
+            (live_head, record.approval.subject_digest)
+        {
             if head != signed {
                 approvals::transition(
                     &mut tx,

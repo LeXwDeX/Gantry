@@ -3,156 +3,25 @@
 
 mod support;
 
-use std::sync::Arc;
-
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
 use gantry_core::canon::{sha256, SubjectDigest};
 use gantry_core::entities::{
     Actor, ActorKind, Approval, ApprovalAction, ApprovalStatus, ApprovalTarget, DeviceRole,
     DeviceStatus, ForgeActionKind, Seq,
 };
 use gantry_core::events::EventType;
-use gantry_core::ids::{Dev, Dlv, IdGen};
+use gantry_core::ids::Dlv;
 use gantry_core::ports::{
     ActionDecision, ActionFacts, ActionRequest, ClientProfile, MismatchReason, PageQuery,
     PolicyError, PolicyPort,
 };
 use gantry_core::settings::{SettingsResource, SettingsScope};
-use gantry_core::testing::{FakeClock, SeqEntropy};
-use gantry_fakes::forge::FakeForge;
 use gantry_policy::service::{
     ApprovalQuery, ChallengeError, ChallengeReason, ConsumeError, ConsumeInternal, CurrentSubject,
-    DeviceKey, GrantError, GrantRequest, InternalAction, InternalApprovalSpec, RevCheck,
+    GrantError, InternalAction, InternalApprovalSpec, RevCheck,
 };
-use gantry_policy::{ApprovalService, PolicyApprovals, PolicyDeps, PolicyEngine, POLICY_MODULE};
-use gantry_store::{Store, StoreDeps};
-use p256::ecdsa::signature::Signer as _;
-use p256::ecdsa::{Signature, SigningKey};
+use gantry_policy::ApprovalService;
+use support::desk::*;
 use support::*;
-
-struct Desk {
-    store: Store,
-    clock: Arc<FakeClock>,
-    engine: Arc<PolicyEngine>,
-    approvals: PolicyApprovals,
-}
-
-impl Desk {
-    async fn new() -> Self {
-        let clock = Arc::new(FakeClock::new(MS as i64));
-        let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
-        let store = Store::open_in_memory(
-            StoreDeps {
-                clock: clock.clone(),
-                ids: ids.clone(),
-            },
-            &[POLICY_MODULE],
-        )
-        .await
-        .expect("in-memory store");
-        let forge = Arc::new(FakeForge::new_in(store.clone()));
-        forge.insert_project(project());
-        forge.upsert_pr(project_id(), "gantry/feature", pull_request(oid("head")));
-        let engine = Arc::new(PolicyEngine::new(PolicyDeps {
-            store: store.clone(),
-            forge,
-            clock: clock.clone(),
-            ids,
-        }));
-        let approvals = PolicyApprovals::new(engine.clone(), Arc::new(SeqEntropy::new(11)));
-        Self {
-            store,
-            clock,
-            engine,
-            approvals,
-        }
-    }
-
-    /// `merge_pr`（PR 7、head）的 pending 审批。
-    async fn merge_approval(&self) -> Approval {
-        let req = ActionRequest {
-            project_id: project_id(),
-            delivery_id: Some(id::<Dlv>(3)),
-            kind: ForgeActionKind::MergePr,
-            facts: ActionFacts::MergePr {
-                repo: slug(),
-                number: 7,
-                expected_head_sha: oid("head"),
-            },
-            requested_by: ctx().actor,
-            epoch: 1,
-        };
-        let ActionDecision::NeedsApproval { spec, .. } = self
-            .engine
-            .decide_action(req, &ctx())
-            .await
-            .expect("decide")
-        else {
-            panic!("expected NeedsApproval");
-        };
-        self.engine
-            .request_approval(spec, ctx())
-            .await
-            .expect("request approval")
-    }
-
-    async fn events(&self, ty: EventType) -> Vec<gantry_core::events::Event<serde_json::Value>> {
-        let log = self.store.events();
-        let mut out = Vec::new();
-        let filter = gantry_store::EventFilter {
-            project_ids: None,
-            include: vec![gantry_store::TypePattern::Exact(ty)],
-            exclude: Vec::new(),
-        };
-        let page = log.scan(Seq::ZERO, &filter, 200).await.expect("scan");
-        out.extend(page.events);
-        out
-    }
-}
-
-fn signing_key(seed: u8) -> SigningKey {
-    SigningKey::from_slice(&[seed; 32]).expect("signing key")
-}
-
-fn device(seed: u8) -> DeviceKey {
-    DeviceKey {
-        device_id: id::<Dev>(u128::from(seed)),
-        role: DeviceRole::Approver,
-        profile: ClientProfile::Desktop,
-        status: DeviceStatus::Active,
-        approval_pubkey_fpr: sha(&format!("pubkey-{seed}")),
-        verifying_key: *signing_key(seed).verifying_key(),
-    }
-}
-
-fn device_ctx(device: &DeviceKey) -> gantry_core::ports::ActorCtx {
-    let mut ctx = ctx();
-    ctx.actor = Actor::new(ActorKind::Device, device.device_id.to_string());
-    ctx
-}
-
-/// 客户端：对待签字节签名（前缀 + JCS 载荷），返回 base64url。
-fn sign(seed: u8, payload: &gantry_core::canon::ApprovalPayload) -> String {
-    let bytes = payload.signing_bytes().expect("signing bytes");
-    let signature: Signature = signing_key(seed).sign(&bytes);
-    URL_SAFE_NO_PAD.encode(signature.to_bytes())
-}
-
-fn grant_req(
-    approval: &Approval,
-    device: &DeviceKey,
-    nonce: &str,
-    signature: String,
-) -> GrantRequest {
-    GrantRequest {
-        approval_id: approval.id,
-        device: device.clone(),
-        nonce: nonce.to_owned(),
-        signature,
-        current_subject: None,
-    }
-}
 
 #[tokio::test]
 async fn challenge_is_stable_until_used_or_expired() {
@@ -678,4 +547,239 @@ async fn list_filters_and_pages() {
         second.items[0].signature.is_some(),
         second.items[0].id == internal.id
     );
+}
+
+/// §12.2：手机档案（即使 approver）、operator、已吊销设备 `grant` → `Forbidden`，
+/// 且这一步先于其余校验，没有副作用。
+#[tokio::test]
+async fn grant_and_deny_reject_devices_that_may_not_approve() {
+    let desk = Desk::new().await;
+    let approval = desk.merge_approval().await;
+    let challenge = desk
+        .approvals
+        .challenge(&approval.id, &device(1))
+        .await
+        .expect("challenge");
+    let signature = sign(1, &challenge.payload);
+    let mut operator = device(1);
+    operator.role = DeviceRole::Operator;
+    let mut mobile = device(1);
+    mobile.profile = ClientProfile::Mobile;
+    let mut revoked = device(1);
+    revoked.status = DeviceStatus::Revoked;
+    for dev in [operator, mobile, revoked] {
+        let req = grant_req(
+            &approval,
+            &dev,
+            challenge.payload.nonce.as_str(),
+            signature.clone(),
+        );
+        assert_eq!(
+            desk.approvals.grant(req, &device_ctx(&dev)).await,
+            Err(GrantError::Forbidden)
+        );
+        assert_eq!(
+            desk.approvals
+                .deny(&approval.id, &dev, None, &device_ctx(&dev))
+                .await,
+            Err(GrantError::Forbidden)
+        );
+    }
+    assert!(desk.events(EventType::ApprovalGranted).await.is_empty());
+    assert!(desk.events(EventType::ApprovalDenied).await.is_empty());
+}
+
+/// 用过的 nonce → `ChallengeInvalid{Used}`。按校验顺序，正常流程里审批一旦 granted
+/// 就先报 `NotPending`；这里直接把 challenge 行标成已用，覆盖这一支。
+#[tokio::test]
+async fn used_challenge_is_reported_as_used() {
+    let desk = Desk::new().await;
+    let approval = desk.merge_approval().await;
+    let dev = device(1);
+    let challenge = desk
+        .approvals
+        .challenge(&approval.id, &dev)
+        .await
+        .expect("challenge");
+    let key = format!(
+        "{}/{}/{}",
+        approval.id, dev.device_id, challenge.payload.nonce
+    );
+    let mut tx = desk.store.begin_write().await.expect("begin");
+    let mut row: serde_json::Value = tx
+        .module_conn("policy")
+        .get("policy_challenges", &key)
+        .expect("get")
+        .expect("challenge row");
+    row["used_at"] = serde_json::to_value(ts()).expect("ts");
+    tx.module_conn("policy")
+        .put("policy_challenges", &key, &row)
+        .expect("put");
+    tx.commit().await.expect("commit");
+    let req = grant_req(
+        &approval,
+        &dev,
+        challenge.payload.nonce.as_str(),
+        sign(1, &challenge.payload),
+    );
+    assert_eq!(
+        desk.approvals.grant(req, &device_ctx(&dev)).await,
+        Err(GrantError::ChallengeInvalid {
+            reason: ChallengeReason::Used
+        })
+    );
+    // 用过的行不再复用：下一次 challenge 换新 nonce。
+    let fresh = desk
+        .approvals
+        .challenge(&approval.id, &dev)
+        .await
+        .expect("challenge");
+    assert_ne!(fresh.payload.nonce, challenge.payload.nonce);
+}
+
+/// 两个 approver 设备并发 `grant` 同一审批：恰有一个成功，另一个 `NotPending{granted}`。
+#[tokio::test]
+async fn concurrent_grants_have_exactly_one_winner() {
+    let desk = Desk::new().await;
+    let approval = desk.merge_approval().await;
+    let (a, b) = (device(1), device(2));
+    let ca = desk
+        .approvals
+        .challenge(&approval.id, &a)
+        .await
+        .expect("challenge");
+    let cb = desk
+        .approvals
+        .challenge(&approval.id, &b)
+        .await
+        .expect("challenge");
+    let (ctx_a, ctx_b) = (device_ctx(&a), device_ctx(&b));
+    let (ra, rb) = tokio::join!(
+        desk.approvals.grant(
+            grant_req(
+                &approval,
+                &a,
+                ca.payload.nonce.as_str(),
+                sign(1, &ca.payload)
+            ),
+            &ctx_a,
+        ),
+        desk.approvals.grant(
+            grant_req(
+                &approval,
+                &b,
+                cb.payload.nonce.as_str(),
+                sign(2, &cb.payload)
+            ),
+            &ctx_b,
+        ),
+    );
+    let results = [ra, rb];
+    assert_eq!(
+        results.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    assert!(results.iter().any(|r| r
+        == &Err(GrantError::NotPending {
+            status: ApprovalStatus::Granted
+        })));
+    assert_eq!(desk.events(EventType::ApprovalGranted).await.len(), 1);
+}
+
+/// 懒过期：越过审批 `expires_at` 后，challenge / grant 入口先置 `expired`，只发一次事件。
+#[tokio::test]
+async fn expired_approval_is_expired_lazily_by_challenge_and_grant() {
+    let desk = Desk::new().await;
+    let approval = desk.merge_approval().await;
+    let dev = device(1);
+    let challenge = desk
+        .approvals
+        .challenge(&approval.id, &dev)
+        .await
+        .expect("challenge");
+    desk.clock.advance_ms(86_400_000);
+    let req = grant_req(
+        &approval,
+        &dev,
+        challenge.payload.nonce.as_str(),
+        sign(1, &challenge.payload),
+    );
+    assert_eq!(
+        desk.approvals.grant(req, &device_ctx(&dev)).await,
+        Err(GrantError::NotPending {
+            status: ApprovalStatus::Expired
+        })
+    );
+    assert_eq!(
+        desk.approvals.challenge(&approval.id, &dev).await,
+        Err(ChallengeError::NotPending {
+            status: ApprovalStatus::Expired
+        })
+    );
+    assert_eq!(desk.events(EventType::ApprovalExpired).await.len(), 1);
+}
+
+/// `consume_internal` 第七种原因：审批还没被批准 → `NotGranted`。
+#[tokio::test]
+async fn consume_internal_requires_a_granted_approval() {
+    let desk = Desk::new().await;
+    let body = serde_json::json!({});
+    let target = settings_target(1);
+    let pending = desk
+        .approvals
+        .create_internal(
+            InternalApprovalSpec {
+                action: ApprovalAction::SettingsUpdate,
+                target: target.clone(),
+                subject_digest: gantry_policy::signing::request_digest(&body).expect("digest"),
+            },
+            &ctx(),
+        )
+        .await
+        .expect("create internal");
+    let mut tx = desk.store.begin_write().await.expect("begin");
+    assert_eq!(
+        desk.approvals
+            .consume_internal(&mut tx, consume_req(&pending, target, &body, (1, 1)))
+            .await,
+        Err(ConsumeError::Mismatch {
+            reason: MismatchReason::NotGranted
+        })
+    );
+}
+
+/// grant 第 5 步：`current_subject` 缺失时退回读快照（交付单元 → 项目 → PR）。
+#[tokio::test]
+async fn grant_falls_back_to_the_pr_snapshot_for_the_current_head() {
+    let desk = Desk::new().await;
+    desk.create_delivery().await;
+    let approval = desk.merge_approval().await;
+    let dev = device(1);
+    let challenge = desk
+        .approvals
+        .challenge(&approval.id, &dev)
+        .await
+        .expect("challenge");
+    desk.forge
+        .upsert_pr(project_id(), "gantry/feature", pull_request(oid("moved")));
+    let req = grant_req(
+        &approval,
+        &dev,
+        challenge.payload.nonce.as_str(),
+        sign(1, &challenge.payload),
+    );
+    assert_eq!(
+        desk.approvals.grant(req, &device_ctx(&dev)).await,
+        Err(GrantError::StaleHead {
+            current_head_sha: oid("moved")
+        })
+    );
+    let read = desk
+        .approvals
+        .get(&approval.id)
+        .await
+        .expect("get")
+        .expect("some");
+    assert_eq!(read.status, ApprovalStatus::Invalidated);
 }
