@@ -1,5 +1,5 @@
 //! Worker 协议类型（`gantry-worker/1`）：JobSpec、result.json、进度事件、proposals、
-//! 各 role 的 structured_output、ResultManifest、ValidatedPatch 与 PatchFacts。
+//! 各 role 的 structured_output、ResultBundle、ValidatedPatch 与 PatchFacts。
 //!
 //! 权威来源：`docs/interfaces/worker-protocol.md` §4–§8，`docs/modules/repo.md` §6.3。
 //! 沙盒交回的一切都是不可信输入；本模块只定义形状与本地一致性校验，不做 IO。
@@ -1555,8 +1555,50 @@ impl<'de> Deserialize<'de> for ProgressEvent {
 }
 
 // ---------------------------------------------------------------------------
-// ResultManifest（worker-protocol §5.2，服务端生成）
+// ResultBundle（worker-protocol §5.2，服务端生成；#84 拍板）
 // ---------------------------------------------------------------------------
+
+pub const RESULT_BUNDLE_VERSION: u32 = 1;
+
+/// `bundle_version` 字段固定为 1。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResultBundleVersion;
+
+impl ResultBundleVersion {
+    pub const VALUE: u32 = RESULT_BUNDLE_VERSION;
+}
+
+impl Serialize for ResultBundleVersion {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(Self::VALUE)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResultBundleVersion {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        if value == Self::VALUE {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(
+                "unsupported result bundle version",
+            ))
+        }
+    }
+}
+
+impl JsonSchema for ResultBundleVersion {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ResultBundleVersion".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "const": RESULT_BUNDLE_VERSION,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1568,6 +1610,13 @@ pub enum ResultTerminalCause {
     Lost,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultTimerKind {
+    Wall,
+    Idle,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResultTerminal {
     pub cause: ResultTerminalCause,
@@ -1577,14 +1626,71 @@ pub struct ResultTerminal {
     pub signal: Option<i32>,
     pub oom: bool,
     #[serde(default)]
-    pub timer: Option<String>,
+    pub timer: Option<ResultTimerKind>,
     pub cancel_requested: bool,
 }
 
+/// 内容寻址对象的引用（CAS 摘要 + 字节数）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileArtifact {
     pub sha256: Sha256Digest,
     pub bytes: u64,
+}
+
+/// `files` 的键：只允许 `out/` 白名单里的文件名（worker-protocol §5.1）。
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+pub enum BundleFileName {
+    #[serde(rename = "result.json")]
+    ResultJson,
+    #[serde(rename = "changes.patch")]
+    ChangesPatch,
+    #[serde(rename = "report.md")]
+    ReportMd,
+    #[serde(rename = "proposals.json")]
+    ProposalsJson,
+    #[serde(rename = "progress.jsonl")]
+    ProgressJsonl,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ResultLogs {
+    #[serde(default)]
+    pub stdout_tail: Option<FileArtifact>,
+    #[serde(default)]
+    pub stderr_tail: Option<FileArtifact>,
+}
+
+/// Egress 计量（权威用量）加 P-70 加权值。M1 只定义形状，语义留到 M2。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BundleUsageMetered {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub requests: u64,
+    #[serde(default)]
+    pub weighted_tokens: Option<u64>,
+}
+
+impl BundleUsageMetered {
+    pub fn token_usage(&self) -> TokenUsage {
+        TokenUsage::new(
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
+            self.requests,
+        )
+    }
+}
+
+/// `EgressFlags` 中可入清单的部分；`upstream_error_summary` 是不可信文本，不入清单。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BundleEgressFlags {
+    pub capped: bool,
+    pub incomplete: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1598,6 +1704,9 @@ pub enum PatchVerdict {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PatchValidationSummary {
     pub verdict: PatchVerdict,
+    /// 补丁内容摘要，等于 `files["changes.patch"].sha256`（= 补丁审批的 subject_digest，P-20）。
+    pub sha256: Sha256Digest,
+    /// 必须与 `attempt.finished.result_tree` 一致；事件为权威来源，由引擎写入时核对。
     #[serde(default)]
     pub result_tree: Option<GitOid>,
     pub files: u32,
@@ -1615,9 +1724,19 @@ pub enum ProposalDisposition {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProposalDispositionEntry {
     pub id: String,
+    pub kind: ProposalKind,
     pub disposition: ProposalDisposition,
     #[serde(default)]
     pub reasons: Option<Vec<String>>,
+    /// 被接受提议的净化文本（引擎另存的 CAS 对象）；执行器只读它，不碰 worker 原始文件。
+    #[serde(default)]
+    pub text_ref: Option<FileArtifact>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BundleUnexpectedArtifact {
+    pub name: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1630,21 +1749,79 @@ pub struct ResultClassification {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResultValidation {
-    pub patch: PatchValidationSummary,
+    #[serde(default)]
+    pub patch: Option<PatchValidationSummary>,
+    #[serde(default)]
     pub proposals: Vec<ProposalDispositionEntry>,
-    pub unexpected_artifacts: Vec<String>,
+    /// M1 只定义形状，语义留到 M2（隔离区引用与 worker-protocol OQ-12 一起定）。
+    #[serde(default)]
+    pub unexpected_artifacts: Option<Vec<BundleUnexpectedArtifact>>,
 }
 
+/// 尝试结果清单：JCS 规范化后入 CAS，`Attempt.result_ref` 是规范化字节的摘要。
+///
+/// 不带 `project_id`：归属经 `Attempt.result_ref` 反查（Q-12 以清单为索引授权）。
+/// 不含 `result_commit`：提交时间戳取自本清单的 `collected_at`，`result_commit` 只在事件里。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ResultManifest {
+pub struct ResultBundle {
+    pub bundle_version: ResultBundleVersion,
     pub job_id: AttemptId,
     pub job_sha256: Sha256Digest,
+    /// 沙盒停止时间（`Lost` 时取判定丢失那条事件的时间），截到秒；重复 collect 结果相同。
+    pub collected_at: Timestamp,
     pub terminal: ResultTerminal,
-    pub files: BTreeMap<String, FileArtifact>,
-    pub usage_metered: TokenUsage,
-    pub usage_reported: UsageReported,
+    #[serde(default)]
+    pub files: BTreeMap<BundleFileName, FileArtifact>,
+    #[serde(default)]
+    pub logs: ResultLogs,
+    #[serde(default)]
+    pub usage_metered: Option<BundleUsageMetered>,
+    #[serde(default)]
+    pub usage_reported: Option<UsageReported>,
+    #[serde(default)]
+    pub egress: Option<BundleEgressFlags>,
     pub classification: ResultClassification,
-    pub validation: ResultValidation,
+    /// `result.json` 缺失或无效时为空。
+    #[serde(default)]
+    pub validation: Option<ResultValidation>,
+}
+
+impl ResultBundle {
+    /// 清单本地一致性（worker-protocol §5.2）。与事件的一致性由引擎写入时核对。
+    pub fn validate(&self) -> Result<(), WorkerError> {
+        if self.collected_at.as_millis() % 1000 != 0 {
+            return Err(WorkerError::BundleCollectedAtNotSeconds);
+        }
+        if self.terminal.cause == ResultTerminalCause::Exited && self.terminal.exit_code.is_none() {
+            return Err(WorkerError::BundleExitCodeMissing);
+        }
+        let Some(validation) = &self.validation else {
+            return Ok(());
+        };
+        if let Some(patch) = &validation.patch {
+            match self.files.get(&BundleFileName::ChangesPatch) {
+                Some(file) if file.sha256 == patch.sha256 => {}
+                _ => return Err(WorkerError::BundlePatchMismatch),
+            }
+            if patch.verdict == PatchVerdict::Deny && patch.result_tree.is_some() {
+                return Err(WorkerError::BundleDeniedPatchHasTree);
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for proposal in &validation.proposals {
+            if !ids.insert(proposal.id.as_str()) {
+                return Err(WorkerError::BundleDuplicateProposal);
+            }
+            let accepted = proposal.disposition == ProposalDisposition::Accepted;
+            if proposal.text_ref.is_some() && !accepted {
+                return Err(WorkerError::BundleTextRefNotAccepted);
+            }
+            if accepted && proposal.kind == ProposalKind::OpenPr && proposal.text_ref.is_none() {
+                return Err(WorkerError::BundleOpenPrTextMissing);
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1956,6 +2133,20 @@ pub enum WorkerError {
     ProposalKindMismatch,
     #[error("thread proposals require a target handle")]
     ProposalMissingTarget,
+    #[error("result bundle collected_at must be whole seconds")]
+    BundleCollectedAtNotSeconds,
+    #[error("exited terminal requires exit_code")]
+    BundleExitCodeMissing,
+    #[error("validation.patch requires files[\"changes.patch\"] with the same sha256")]
+    BundlePatchMismatch,
+    #[error("denied patch must not carry result_tree")]
+    BundleDeniedPatchHasTree,
+    #[error("proposal ids in validation must be unique")]
+    BundleDuplicateProposal,
+    #[error("text_ref is only allowed on accepted proposals")]
+    BundleTextRefNotAccepted,
+    #[error("accepted open_pr proposal requires text_ref")]
+    BundleOpenPrTextMissing,
 }
 
 #[derive(Debug, thiserror::Error)]

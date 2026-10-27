@@ -17,10 +17,10 @@ use gantry_core::entities::{
 use gantry_core::events::{
     ApprovalConsumedData, ApprovalDeniedData, ApprovalExpiredData, ApprovalGrantedData,
     ApprovalInvalidatedData, ApprovalRequestedData, AttemptFinishedData, AttemptProgressData,
-    AttemptStartedData, BudgetChargedData, BudgetExhaustedData, ConversationEventData,
-    DeliveryAbandonedData, DeliveryCreatedData, DeliveryLevelChangedData, DeliveryPausedData,
-    DeliveryResumedData, DeliveryStageChangedData, DevicePairedData, DeviceRevokedData,
-    DeviceUpdatedData, Event, EventType, ForgeSyncedData, GuardianEscalatedData,
+    AttemptStartedData, BudgetChargedData, BudgetExhaustedData, BudgetLimitRaisedData,
+    ConversationEventData, DeliveryAbandonedData, DeliveryCreatedData, DeliveryLevelChangedData,
+    DeliveryPausedData, DeliveryResumedData, DeliveryStageChangedData, DevicePairedData,
+    DeviceRevokedData, DeviceUpdatedData, Event, EventType, ForgeSyncedData, GuardianEscalatedData,
     GuardianHealRequestedData, GuardianTriagedData, InboxDismissedData, InboxRaisedData,
     InboxResolvedData, NodeEventData, NodeRetryRequestedData, OutboxCancelledData,
     OutboxEnqueuedData, OutboxExecutingData, OutboxFailedData, OutboxSucceededData,
@@ -37,7 +37,9 @@ use gantry_core::forge::{
 };
 use gantry_core::ports::OutboxEnqueueEnvelope;
 use gantry_core::settings;
-use gantry_core::worker::{JobSpec, ProgressEvent, Proposals, ResultJson, StructuredOutput};
+use gantry_core::worker::{
+    JobSpec, ProgressEvent, Proposals, ResultBundle, ResultJson, StructuredOutput,
+};
 use serde_json::Value;
 
 use crate::schema;
@@ -251,6 +253,7 @@ fn event_data_schema(ty: EventType) -> Option<Value> {
         E::BudgetCharged => schema::for_type::<BudgetChargedData>(),
         E::PolicyDenied => schema::for_type::<PolicyDeniedData>(),
         E::BudgetExhausted => schema::for_type::<BudgetExhaustedData>(),
+        E::BudgetLimitRaised => schema::for_type::<BudgetLimitRaisedData>(),
         E::DevicePaired => schema::for_type::<DevicePairedData>(),
         E::DeviceUpdated => schema::for_type::<DeviceUpdatedData>(),
         E::DeviceRevoked => schema::for_type::<DeviceRevokedData>(),
@@ -396,6 +399,10 @@ fn worker() -> Vec<Artifact> {
     let mut all = vec![
         Artifact::typed::<JobSpec>("schemas/worker/job.schema.json", "worker::JobSpec"),
         Artifact::typed::<ResultJson>("schemas/worker/result.schema.json", "worker::ResultJson"),
+        Artifact::typed::<ResultBundle>(
+            "schemas/worker/result-bundle.schema.json",
+            "worker::ResultBundle",
+        ),
         Artifact::typed::<Proposals>("schemas/worker/proposals.schema.json", "worker::Proposals"),
         Artifact::typed::<ProgressEvent>(
             "schemas/worker/progress-event.schema.json",

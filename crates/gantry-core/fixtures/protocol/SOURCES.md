@@ -9,7 +9,7 @@
 | `forge/events.json` | forge-actions §6.4（`pr_synchronized`、`check_suite_completed`） | 两个完整信封原样。 |
 | `worker/job_spec.json` | worker-protocol §4.1 | `job.json` 示例原样。 |
 | `worker/result.json` | worker-protocol §5.2 | `result.json` 示例原样。 |
-| `worker/manifest.json` | worker-protocol §5.2（`ResultBundle` 清单示例） | 原样。 |
+| `worker/result_bundle.json` | worker-protocol §5.2（`ResultBundle` 清单示例，#84 拍板形状） | 原样。 |
 | `worker/proposals.json` | worker-protocol §5.4 | 原样。 |
 | `worker/progress.jsonl` | worker-protocol §7.1 | 8 行 JSON Lines 原样。 |
 | `worker/outputs.json` | worker-protocol §6.3（`plan`、`review:security`、`arbiter`） | 三个 `structured_output` 示例，按 role 键合并；内容原样。 |

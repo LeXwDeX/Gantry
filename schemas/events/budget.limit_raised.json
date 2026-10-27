@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "dimension": {
+      "$ref": "#/$defs/BudgetDimension"
+    },
+    "from": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "to": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "by": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "dimension",
+    "from",
+    "to",
+    "by"
+  ],
+  "description": "`budget.limit_raised`（decisions D-19，#129）：用户对 `budget_exhausted` 选\n`raise_cap` 后，引擎给耗尽维度追加一份该档模板的原值。`to = from + by`，`by > 0`。",
+  "title": "BudgetLimitRaisedData",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "BudgetDimension": {
+      "type": "string",
+      "enum": [
+        "tokens_by_tier.utility",
+        "tokens_by_tier.planner",
+        "tokens_by_tier.worker",
+        "nodes",
+        "rounds",
+        "wall_time",
+        "concurrency",
+        "forge_writes"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-event-type": "budget.limit_raised",
+  "x-gantry-envelope": "schemas/entities/event-envelope.json"
+}

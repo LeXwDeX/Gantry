@@ -10,7 +10,7 @@
 
 ## 1. 范围与排除
 
-本文件覆盖 13 个事件：`attempt.progress`、`guardian.triaged`、`guardian.heal_requested`、`guardian.escalated`、`approval.invalidated`、`approval.expired`、`approval.denied`、`outbox.enqueued`、`outbox.executing`、`outbox.cancelled`、`forge.synced`、`budget.charged`、`policy.denied`。
+本文件覆盖 13 个事件：`attempt.progress`、`guardian.triaged`、`guardian.heal_requested`、`guardian.escalated`、`approval.invalidated`、`approval.expired`、`approval.denied`、`outbox.enqueued`、`outbox.executing`、`outbox.cancelled`、`forge.synced`、`budget.charged`、`policy.denied`。另有批准后经契约 PR 增补的 `budget.limit_raised`（§2.2.6.6，#129）。
 
 `forge.drift_detected` 不在本文件范围内；它由独立 drift 契约定义。本文件不定义该事件的 `data`、信封、九种 `kind` 的判别、`DriftTarget` 或合成规则。
 
@@ -910,6 +910,50 @@
 - 现有 schema 仍拒绝新 data，持久表未实现；`Attempt.usage` 保持非空，公开终态延迟到结算。`incomplete` 的长期等待需人工处置，不自动重跑或抹账。
 
 确认者：`E+M+X+C+U`（预算）与 `P+C+U`（策略）。本节是推荐规格，待契约审查，不是用户批准、契约冻结或实施完成。
+
+##### 2.2.6.6 `budget.limit_raised`（#129，decisions D-19）
+
+用户对 `budget_exhausted` 上报项选 `raise_cap` 后，引擎给耗尽的那个维度追加一份该档预算模板的原值（D-19），并写本事件记录这次追加。本节在本文件批准之后由 #129 增补，不属于原送审的 13 个事件。
+
+**信封与 actor**
+
+- 写入方只有 `engine`：在处理 `inbox.resolved(chosen, option_id = raise_cap)` 的同一决策事务里追加；`actor` 取该决策的 `ActorCtx.actor`（引擎），`causation_id` 指向那条 `inbox.resolved`。
+- `subject`：被追加的交付单元台账（`dlv_…`），与触发它的 `budget.exhausted` 相同。
+
+**data**
+
+```json
+{"dimension": "rounds", "from": 3, "to": 6, "by": 3}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `dimension` | `BudgetDimension` 字符串（与 `budget.exhausted.dimension` 同一词表，如 `nodes`、`rounds`、`tokens_by_tier.worker`） | 被追加的维度，即耗尽的那个维度 |
+| `from` | `u64` | 追加前该维度的上限 |
+| `by` | `u64` | 追加量 = 该档预算模板在该维度的原值（模板在交付单元创建时按 `level_cap` 固定，P-57） |
+| `to` | `u64` | 追加后的上限 |
+
+**一致性（`core` 校验）**
+
+- `by > 0`，否则拒绝，指针 `/by`；
+- `to = from + by`，且不溢出 `u64`，否则拒绝，指针 `/to`；
+- 未知字段拒绝（`deny_unknown_fields`）；四个字段都必填。
+
+**语义**
+
+- 引擎在预算台账投影里折叠：`limits[dimension] = to`，`used` 不变，不写 `budget.charged`；该维度不再满足耗尽条件后解除 `waiting_human` 并继续派发（engine.md §7.9）。折叠的实现不在本契约内（#73 或之后的切片）。
+- 每选一次 `raise_cap` 追加一次；追加与处理该 `inbox.resolved` 的决策同事务，重放不重复追加（engine.md §7.14.1）。
+
+**测试矩阵**
+
+| 用例 | 期望 |
+| --- | --- |
+| `{rounds, 3, 6, 3}` | 通过。 |
+| `by = 0` | 拒绝（`/by`）。 |
+| `to ≠ from + by` | 拒绝（`/to`）。 |
+| `from + by` 溢出 `u64` | 拒绝（`/to`）。 |
+| 多余字段（如 `reason`） | 拒绝。 |
+| 缺 `from` | 拒绝。 |
 
 ### 2.3 通用候选约束（契约审查须确认）
 
