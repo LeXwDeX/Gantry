@@ -1181,6 +1181,29 @@ M1 的执行体在主循环里串行处理（交付单元之间也串行），�
 - `restart_resumes_from_the_cursor_without_redispatching`：跑到 `propose` 停机，同一 store 起新运行时，走完全程且不重新派发尝试。
 - `a_rejected_enqueue_degrades_only_that_delivery`：上面的错误边界。
 
+**崩溃点矩阵**（`tests/crash.rs`，#74）：共用装配在 `tests/world/`。跨重启持久的部分（store、repo 的锁围栏映射、沙盒与策略状态）放在 `World` 里，每次 `World::runtime()` 只新建 `EngineRuntime`，相当于重启引擎进程。端口里设有闸门 `Gate`：调用到达已布防的点就永不返回，测试随即中止主循环任务，模拟进程被杀。
+
+- 由闸门触发的崩溃点：
+  - `attempt.started` 之后、沙盒受理之前；
+  - `collect` 之后、本地提交之前；
+  - 提交之后、`attempt.finished` 之前；
+  - `JudgeAction` 之后、`ActionJudged` 回流之前。
+- 由测试编排的崩溃点（在引擎停机期间写入事件）：
+  - `delivery.created` 之后；
+  - 入队之后、forge 执行之前；
+  - `outbox.succeeded` 之后、引擎处理之前。
+
+每个崩溃点都重启后跑到 `closed`，并与不崩溃的基线逐项比较：
+
+- 阶段序列一致；
+- 台账用量一致；
+- `attempt.started` 只有一条；
+- 同一 `job_id` 只有一个本地提交；
+- 每个 Outbox 幂等键只有一行，`create_pr` 只成功一次；
+- `release`：不崩溃时恰一次，跨重启至少一次。
+
+"GitHub 已创建、本地未记录"这一窗口归 forge 执行器（按幂等标记对账），引擎侧只保证同一幂等键不再入队。
+
 `FakeRepo` 不写事件，测试外包一层，按真实 repo 的口径写 `worktree.created` / `worktree.locked`（围栏 = 事件 `seq`）/ `worktree.unlocked` / `worktree.removed` / `patch.validated`。
 
 ## 8. 不变式与安全要求
