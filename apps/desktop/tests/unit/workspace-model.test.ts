@@ -25,6 +25,8 @@ import { buildChatRows } from "@/features/workspace/model";
 function message(id: string, role: Message["role"]): Message {
   return {
     id,
+    created_at: "2026-10-24T12:00:00.000Z",
+    updated_at: "2026-10-24T12:00:00.000Z",
     conversation_id: "cnv",
     role,
     agent_kind: role === "agent" ? "utility" : null,

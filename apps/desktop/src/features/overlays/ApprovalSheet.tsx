@@ -838,7 +838,7 @@ function targetRows(target: ApprovalTarget): TargetRow[] {
       return [
         { label: "仓库", value: target.repo, mono: true },
         { label: "分支", value: target.branch, mono: true },
-        { label: "远端 OID", value: target.expected_remote_oid, mono: true },
+        { label: "远端 OID", value: target.expected_remote_oid ?? "—", mono: true },
       ];
     case "review_thread":
       return [

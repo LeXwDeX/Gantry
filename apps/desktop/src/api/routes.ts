@@ -25,6 +25,7 @@ import type {
   Stage,
   StageStatus,
   Workflow,
+  WorkflowSummary,
   WorkflowNode,
   Worktree,
   Level,
@@ -180,7 +181,7 @@ export type RouteBody = {
   "worktrees.get": Worktree;
   "worktrees.lock_put": Worktree;
   "worktrees.lock_delete": Worktree;
-  "workflows.list": ApiList<Workflow>;
+  "workflows.list": ApiList<WorkflowSummary>;
   "workflows.get": Workflow;
   "attempts.list": ApiList<Attempt>;
   "attempts.get": Attempt;
