@@ -10,6 +10,8 @@ description = "Gantry 与 GitHub 之间的唯一通道：Outbox 入队与执行�
 gantry-core = { path = "../gantry-core" }
 gantry-store = { path = "../gantry-store" }
 async-trait.workspace = true
+# App JWT（RS256，内部用 ring）；#92 D1 拍板。
+jsonwebtoken = { version = "9.3", default-features = false, features = ["use_pem"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
