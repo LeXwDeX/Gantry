@@ -165,7 +165,7 @@ erDiagram
 | `decision_needed` | `{kind, reason_code, options[]: {id, label, primary?}, node_id?, patch?}`。`kind`：`gate_reject`（gate `REJECT`）/ `manual_action`（需要用户在 Gantry 之外手动完成，如 workflow 补丁，P-48；`patch = {ref: "sha256:…", paths[]}` 指向结果库里的补丁）/ `review_dispute`（评审争议：是否交回前台改代码，P-79）/ `other`（新增值只追加）。`reason_code` 与 `options[]` 取下文词表 |
 | `spec_needed` | `{missing[]: {aspect, question}}`（来自准入 `REVISE` 或计划的 `blocking_questions`）；**无选项**，用户以自由文本答复（发消息，`refs` 指向该交付单元），由会话服务处理后关闭（P-79） |
 | `budget_exhausted` | `{dimension, limit, used, options[]}`；`options[]` 固定为 `raise_cap`（仅桌面，追加额度见 decisions D-19）/ `abandon`（P-79） |
-| `escalation` | `{reason_code, node_id?, attempt_id?, target_level?, evidence[]: Ref 或 {kind: "result", ref: "sha256:…"}, options[]?}`（gate `BLOCKED` 时附证据）。**升档一律用 `escalation`**（`reason_code = level_cap_exceeded`，`target_level` 为规则要求的档位，选项见下文词表），手机档案不可对它 `choose`（P-35、P-63）；其余 `reason_code` 无选项 |
+| `escalation` | `{reason_code, node_id?, attempt_id?, target_level?, action_id?, evidence[]: Ref 或 {kind: "result", ref: "sha256:…"}, options[]?}`（gate `BLOCKED` 时附证据）。**升档一律用 `escalation`**（`reason_code = level_cap_exceeded`，`target_level` 为规则要求的档位，选项见下文词表），手机档案不可对它 `choose`（P-35、P-63）。`reason_code = outbox_failed:<code>` 时 `action_id` 必填，为终态失败的 Outbox 动作（`act_…`）；其余 `reason_code` 不得带 `action_id`（`core` 校验，#67）。只有 `level_cap_exceeded` 与 `outbox_failed:<code>` 带选项，其余 `reason_code` 无选项 |
 | `security_finding` | `{source: Ref, finding: {severity, category, title: UntrustedText}, attempt_id?}` |
 
 ### 上报项的 reason_code 与选项词表
@@ -183,7 +183,8 @@ erDiagram
 | `budget_exhausted` | — | `raise_cap`（仅桌面，D-19）/ `abandon` | `engine`、`guardian`（T-07 补写） | `raise_cap`：按 D-19 追加额度后继续；`abandon`：放弃 |
 | `approval_needed` | — | 无（只能经审批路由处理，`choose` 返回 `409`） | `engine` / `guardian` | — |
 | `security_finding` | — | 无 | `guardian` | — |
-| `escalation` | `gate_blocked`、`arbiter_escalate`、`attempt_failed`、`no_progress`、`no_change`、`merge_denied_by_policy`、`approval_shape_undefined`、`app_permission_missing`、`models_not_configured`、`outbox_failed:<code>`、`policy.path_protected:<规则 id>`（M1 依赖清单 / lockfile）；`guardian.*`（[guardian §7.9](modules/guardian.md#79-上报) 的词表，评审争议三码除外） | 无 | `engine`、`guardian`、`forge`（`app_permission_missing`） | — |
+| `escalation` | `outbox_failed:<code>`（Outbox 动作终态失败，`payload.action_id` 为该动作；`<code>` 取 forge-actions 的失败码，映射见 [engine §9](modules/engine.md#9-错误与恢复)） | `retry`（**primary**）/ `abandon`（#67） | `engine` | `retry`：对 `action_id` 那个动作的期望意图以 `epoch + 1` 重新判定并入队（新幂等键）；需要审批的动作同时需要新审批（P-54），已消费的旧审批不复用；意图已不在当前阶段的期望动作集合里时不入队，只关闭该项；`abandon`：放弃 |
+| `escalation` | `gate_blocked`、`arbiter_escalate`、`attempt_failed`、`no_progress`、`no_change`、`merge_denied_by_policy`、`approval_shape_undefined`、`app_permission_missing`、`models_not_configured`、`policy.path_protected:<规则 id>`（M1 依赖清单 / lockfile）；`guardian.*`（[guardian §7.9](modules/guardian.md#79-上报) 的词表，评审争议三码除外） | 无 | `engine`、`guardian`、`forge`（`app_permission_missing`） | — |
 
 新增 `reason_code` 或选项 id 须经契约 PR 回写本表；未列出的 `option_id` 由 `notify` 拒绝（`422`）。
 
