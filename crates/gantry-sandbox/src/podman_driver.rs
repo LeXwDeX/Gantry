@@ -611,6 +611,8 @@ impl SandboxDriver for PodmanDriver {
     }
 
     async fn purge_staging(&self, layout: &StagingLayout) -> Result<(), DriverError> {
+        let dir = layout.dir();
+        let _ = tokio::task::spawn_blocking(move || crate::stage::unseal(&dir)).await;
         match tokio::fs::remove_dir_all(layout.dir()).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),

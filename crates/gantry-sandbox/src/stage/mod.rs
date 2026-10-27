@@ -159,6 +159,25 @@ fn seal(dir: &Path) -> Result<(), StageError> {
     set_mode(dir, 0o555)
 }
 
+/// 销毁前恢复目录的写权限，让 `remove_dir_all` 能删掉封好的 `inputs/`。
+/// 不跟随符号链接；出错时尽力而为（删除失败由调用方报告）。
+pub fn unseal(dir: &Path) {
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let _ = set_mode(dir, 0o755);
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                unseal(&entry.path());
+            }
+        }
+    }
+}
+
 /// 执行 staging。`prepare_dirs` 之后、`start` 之前调用；`out/` 必须为空。
 pub fn stage(
     layout: &StagingLayout,

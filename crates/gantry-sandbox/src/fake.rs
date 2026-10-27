@@ -113,6 +113,8 @@ pub enum FailPoint {
     PrepareDirs,
     ReadOut,
     Remove,
+    /// 下一次 `logs` 读出一行后报错中断（模拟日志接口断开）。
+    LogsInterrupt,
 }
 
 struct FakeContainer {
@@ -134,6 +136,8 @@ struct State {
     failures: BTreeSet<FailPoint>,
     calls: Vec<DriverCall>,
     reads: Vec<PathBuf>,
+    /// 信号记录在容器删除后仍保留，供断言使用。
+    signal_log: BTreeMap<ContainerId, Vec<SignalRecord>>,
     next_id: u64,
 }
 
@@ -189,11 +193,7 @@ impl FakeDriver {
     }
 
     pub fn signals(&self, id: &ContainerId) -> Vec<SignalRecord> {
-        self.lock()
-            .containers
-            .get(id)
-            .map(|c| c.signals.clone())
-            .unwrap_or_default()
+        self.lock().signal_log.get(id).cloned().unwrap_or_default()
     }
 
     pub fn container_count(&self) -> usize {
@@ -257,6 +257,14 @@ impl FakeDriver {
             .map(|start| Instant::now().duration_since(start))
             .unwrap_or_default();
         container.signals.push(SignalRecord { at, signal });
+        state
+            .signal_log
+            .entry(id.clone())
+            .or_default()
+            .push(SignalRecord { at, signal });
+        let Some(container) = state.containers.get_mut(id) else {
+            return;
+        };
         let honor_term = match container.script.behavior {
             FakeBehavior::ExitAfter { honor_term, .. } | FakeBehavior::Forever { honor_term } => {
                 honor_term
@@ -506,6 +514,7 @@ impl SandboxDriver for FakeDriver {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut state = self.lock();
         state.calls.push(DriverCall::Logs(id.clone(), since));
+        let interrupt = state.failures.remove(&FailPoint::LogsInterrupt);
         let Some(container) = state.containers.get(id) else {
             let _ = tx.send(Err(DriverError::NotFound));
             return Box::pin(ChannelStream(rx));
@@ -553,6 +562,13 @@ impl SandboxDriver for FakeDriver {
                     line,
                 };
                 if tx.send(Ok(chunk)).is_err() {
+                    return;
+                }
+                if interrupt {
+                    let _ = tx.send(Err(DriverError::Runtime {
+                        op: "logs",
+                        message: "injected interruption".into(),
+                    }));
                     return;
                 }
             }
@@ -635,6 +651,7 @@ impl SandboxDriver for FakeDriver {
         self.lock()
             .calls
             .push(DriverCall::PurgeStaging(layout.sandbox_id()));
+        crate::stage::unseal(&layout.dir());
         match std::fs::remove_dir_all(layout.dir()) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),

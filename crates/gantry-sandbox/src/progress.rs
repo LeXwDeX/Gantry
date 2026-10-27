@@ -174,7 +174,7 @@ impl TailBuffer {
 }
 
 /// 一个 job 的进度采集器。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ProgressCollector {
     job_id: AttemptId,
     limits: ProgressLimits,
