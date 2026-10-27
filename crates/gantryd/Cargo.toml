@@ -37,6 +37,7 @@ gantry-fakes = { path = "../gantry-fakes" }
 gantry-forge = { path = "../gantry-forge" }
 gantry-notify = { path = "../gantry-notify" }
 gantry-policy = { path = "../gantry-policy" }
+gantry-repo = { path = "../gantry-repo" }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 base64 = "0.22"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
