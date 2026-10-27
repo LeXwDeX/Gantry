@@ -401,9 +401,10 @@ async fn approval_chain_failure_fails_closed() {
     );
 }
 
-/// #66（E3）拍板前，没有上报词表码的 Deny 不规定 `report`。
+/// #66 已定"engine 发起的 Deny 必带 ReportHint"，但其余 DenyReason 在上报词表里
+/// 还没有对应码（policy.md OQ-P15），拍板前没有合法取值。
 #[tokio::test]
-#[ignore = "待 #66（E3）拍板：Deny 无 ReportHint 时的上报码"]
+#[ignore = "待 policy.md OQ-P15 拍板：其余 DenyReason 的上报码"]
 async fn every_engine_deny_carries_a_report_hint() {
     let h = Harness::new();
     let decision = h
