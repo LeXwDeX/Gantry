@@ -162,6 +162,10 @@ pub struct IdentityFile {
     pub renewed_at: Option<String>,
     /// 最近见到的服务端事件日志纪元号（P-67）。
     pub log_epoch: Option<u64>,
+    /// 已被吊销（`close(device_revoked)` / `401 device_revoked`）：密钥与证书已删，只剩此标记，
+    /// 让 `identity_status` 报 `revoked` 直到用户 `identity_reset`（S-10）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub revoked: bool,
 }
 
 impl IdentityFile {
@@ -177,7 +181,7 @@ impl IdentityFile {
         self.api_base_url.starts_with("https://")
             && is_sha256_fingerprint(&self.ca_fingerprint)
             && self.device_id.starts_with("dev_")
-            && self.cert_chain_pem.len() == 3
+            && (self.revoked || self.cert_chain_pem.len() == 3)
             && self.key_labels().validate().is_ok()
     }
 }

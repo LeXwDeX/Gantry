@@ -9,11 +9,13 @@ use serde_json::{json, Value};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::approval::Signer;
+use crate::events::{self, ConnState, EventsConfig, FrameSink, Phase, StreamHandle};
 use crate::http::{HttpClient, Origin};
 use crate::ipc::{ShellError, ShellErrorCode};
 use crate::keys::{DeviceKeys, KeyError, KeyStore};
 use crate::pairing::{self, PairTransport, PendingIdentity};
 use crate::routes;
+use crate::sse::StreamState;
 use crate::storage::{AppStore, IdentityFile};
 use crate::tls::{chain_from_pem, client_config, ClientIdentity, RootFingerprint};
 
@@ -44,6 +46,9 @@ pub struct Shell {
     pending: Mutex<Option<PendingIdentity>>,
     connected: RwLock<Option<Arc<Connected>>>,
     signer: Arc<Signer>,
+    conn: Mutex<ConnState>,
+    stream: Mutex<Option<StreamHandle>>,
+    events_config: EventsConfig,
 }
 
 impl Shell {
@@ -61,7 +66,16 @@ impl Shell {
             pending: Mutex::new(None),
             connected: RwLock::new(None),
             signer: Signer::new(),
+            conn: Mutex::new(ConnState::default()),
+            stream: Mutex::new(None),
+            events_config: EventsConfig::default(),
         }
+    }
+
+    /// 测试用：缩短空闲判定与退避。
+    pub fn with_events_config(mut self, config: EventsConfig) -> Self {
+        self.events_config = config;
+        self
     }
 
     pub fn store(&self) -> &AppStore {
@@ -82,7 +96,11 @@ impl Shell {
         if let Some(c) = self.connected.read().unwrap().as_ref() {
             return Ok(c.clone());
         }
-        let identity = self.store.identity().ok_or_else(ShellError::not_paired)?;
+        let identity = self
+            .store
+            .identity()
+            .filter(|i| !i.revoked)
+            .ok_or_else(ShellError::not_paired)?;
         let keys: Arc<dyn DeviceKeys> = Arc::from(self.keys.load(&identity.key_labels())?);
         let origin = Origin::parse(&identity.api_base_url).ok_or_else(ShellError::not_paired)?;
         let pinned =
@@ -130,6 +148,12 @@ impl Shell {
         let Some(identity) = self.store.identity() else {
             return Ok(unpaired());
         };
+        if identity.revoked {
+            let mut status = unpaired();
+            status["state"] = json!("revoked");
+            status["device"] = json!({ "id": identity.device_id, "name": identity.device_name, "platform": identity.platform });
+            return Ok(status);
+        }
         let connected = self.connected()?;
         let cert = leaf_validity(&identity.cert_chain_pem);
         let state = match &cert {
@@ -239,6 +263,8 @@ impl Shell {
         self.store.ui_state_clear()?;
         self.signer.clear();
         *self.connected.write().unwrap() = None;
+        self.stream.lock().unwrap().take();
+        *self.conn.lock().unwrap() = ConnState::default();
         Ok(unpaired())
     }
 
@@ -269,6 +295,104 @@ impl Shell {
             self.signer.clear();
         }
         Ok(changed)
+    }
+
+    // ---- 事件流（§7.3）----
+
+    /// `events_open`：打开唯一事件流，已打开则替换旧流。`after_seq` 是 UI 快照的最小 `X-Event-Seq`。
+    pub fn events_open(
+        self: &Arc<Self>,
+        after_seq: Option<u64>,
+        sink: Arc<dyn FrameSink>,
+    ) -> Result<(), ShellError> {
+        let connected = self.connected()?;
+        let state = Arc::new(Mutex::new(StreamState::new(
+            after_seq,
+            connected.identity.log_epoch,
+        )));
+        // 先停旧流，再起新流：同时只存在一条。
+        self.stream.lock().unwrap().take();
+        let handle = events::spawn(self.clone(), state, sink, self.events_config.clone());
+        *self.stream.lock().unwrap() = Some(handle);
+        Ok(())
+    }
+
+    /// `events_ack`：UI 已应用到 `seq`。乱序或回退被忽略。
+    pub fn events_ack(&self, seq: u64) {
+        if let Some(h) = self.stream.lock().unwrap().as_ref() {
+            h.state.lock().unwrap().ack(seq);
+        }
+    }
+
+    pub fn events_close(&self) {
+        self.stream.lock().unwrap().take();
+    }
+
+    /// 当前事件流的重连游标（测试与诊断用）。
+    pub fn events_cursor(&self) -> Option<u64> {
+        self.stream
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|h| h.state.lock().unwrap().cursor())
+    }
+
+    /// `connection_state`（§6.2）。
+    pub fn connection_state(&self) -> Value {
+        let mut conn = self.conn.lock().unwrap().clone();
+        if let Some(identity) = self.store.identity() {
+            conn.log_epoch = conn.log_epoch.or(identity.log_epoch);
+            conn.cert_not_after =
+                leaf_validity(&identity.cert_chain_pem).map(|(_, _, na)| rfc3339(na));
+        }
+        // `live` 当且仅当事件流已建立且最近空闲窗口内收到过字节。
+        if conn.phase == Phase::Live
+            && conn
+                .last_bytes_at
+                .is_some_and(|t| t.elapsed() > self.events_config.idle)
+        {
+            conn.phase = Phase::Reconnecting;
+        }
+        conn.to_json()
+    }
+
+    pub(crate) fn set_phase(&self, phase: Phase, sink: &dyn FrameSink) {
+        let changed = {
+            let mut conn = self.conn.lock().unwrap();
+            let changed = conn.phase != phase;
+            conn.phase = phase;
+            changed
+        };
+        if changed {
+            sink.send(json!({ "t": "state", "state": self.connection_state() }));
+        }
+    }
+
+    pub(crate) fn on_stream_open(&self, sink: &dyn FrameSink) {
+        {
+            let mut conn = self.conn.lock().unwrap();
+            conn.epoch += 1;
+            conn.phase = Phase::Live;
+            conn.last_bytes_at = Some(std::time::Instant::now());
+        }
+        sink.send(json!({ "t": "state", "state": self.connection_state() }));
+    }
+
+    pub(crate) fn touch_bytes(&self) {
+        self.conn.lock().unwrap().last_bytes_at = Some(std::time::Instant::now());
+    }
+
+    /// 吊销即清除（S-10）：停止请求、丢弃待签内容、删除两把密钥与证书，只留"已吊销"标记。
+    pub(crate) fn mark_revoked(&self, sink: &dyn FrameSink) {
+        if let Some(mut identity) = self.store.identity() {
+            let _ = self.keys.delete(&identity.key_labels());
+            identity.cert_chain_pem.clear();
+            identity.revoked = true;
+            let _ = self.store.save_identity(&identity);
+        }
+        self.signer.clear();
+        *self.connected.write().unwrap() = None;
+        self.set_phase(Phase::Revoked, sink);
     }
 
     // ---- API ----
