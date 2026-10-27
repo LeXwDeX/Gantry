@@ -4,8 +4,8 @@
 //! 只驱动业务语义，不再从它们的 data 推一遍快照，避免两条路径不一致。
 //! 折叠只读 `changes[].to`；`from` 在本地已有值时必须与之相等，否则拒绝
 //! （forge 按"回读值 − 当前快照"做差，`from` 不等说明两边已经漂移）。本地没有
-//! 值时不比较 `from`，因此首次快照无论按 #150 的方案 A（`from = null`）还是
-//! 别的方式落地，折叠规则都不用改。
+//! 值时不比较 `from`。首次快照（`data.initial`，#150 拍板）整行覆盖写入，不比较
+//! 任何 `from`：GitHub 回读值为准，forge 只在本地没有快照时发它。
 //!
 //! 快照按 `(project_id, number)` 存放；读取按 `(repo, number)`，由
 //! `project.added` / `project.updated` 维护的 `project → repo` 索引解析。PR 的
@@ -21,8 +21,8 @@ use gantry_core::entities::{
     ActorKind, CheckSummary, IssueRef, IssueState, PullRequestRef, PullRequestState, ReviewState,
 };
 use gantry_core::events::{
-    Event, EventType, ForgeSyncedChange, ForgeSyncedData, ForgeSyncedState, ForgeSyncedTargetKind,
-    ProjectEventData, SchemaError,
+    Event, EventType, ForgeSyncedChange, ForgeSyncedData, ForgeSyncedInitial, ForgeSyncedState,
+    ForgeSyncedTargetKind, ProjectEventData, SchemaError,
 };
 use gantry_core::forge::IssueStateReason;
 use gantry_core::ids::ProjectId;
@@ -126,6 +126,9 @@ impl GithubSnapshots {
                         ..PrSnapshotRow::default()
                     });
                 check_node(&row.node_id, &data.target.node_id)?;
+                if let Some(initial) = &data.initial {
+                    row.apply_initial(initial)?;
+                }
                 for change in &data.changes {
                     row.apply(change)?;
                 }
@@ -142,6 +145,9 @@ impl GithubSnapshots {
                         ..IssueSnapshotRow::default()
                     });
                 check_node(&row.node_id, &data.target.node_id)?;
+                if let Some(initial) = &data.initial {
+                    row.apply_initial(initial)?;
+                }
                 for change in &data.changes {
                     row.apply(change)?;
                 }
@@ -185,6 +191,37 @@ impl GithubSnapshots {
 }
 
 impl PrSnapshotRow {
+    fn apply_initial(&mut self, initial: &ForgeSyncedInitial) -> Result<(), FoldError> {
+        let ForgeSyncedInitial::Pr {
+            state,
+            title,
+            head_sha,
+            base_ref,
+            base_sha,
+            draft,
+            mergeable_state,
+            in_merge_queue,
+            checks,
+            review_state,
+        } = initial
+        else {
+            return Err(FoldError::Precondition(
+                "issue initial snapshot on a pull request".to_owned(),
+            ));
+        };
+        self.state = Some(pr_state(*state));
+        self.title = Some(title.clone());
+        self.head_sha = Some(*head_sha);
+        self.base_ref = Some(base_ref.clone());
+        self.base_sha = Some(*base_sha);
+        self.draft = Some(*draft);
+        self.mergeable_state = Some(mergeable_state.clone());
+        self.in_merge_queue = Some(*in_merge_queue);
+        self.checks = Some(checks.clone());
+        self.review_state = Some(review_state.clone());
+        Ok(())
+    }
+
     fn apply(&mut self, change: &ForgeSyncedChange) -> Result<(), FoldError> {
         match change {
             ForgeSyncedChange::State { from, to } => {
@@ -248,6 +285,23 @@ impl PrSnapshotRow {
 }
 
 impl IssueSnapshotRow {
+    fn apply_initial(&mut self, initial: &ForgeSyncedInitial) -> Result<(), FoldError> {
+        let ForgeSyncedInitial::Issue {
+            state,
+            state_reason,
+            title,
+        } = initial
+        else {
+            return Err(FoldError::Precondition(
+                "pull request initial snapshot on an issue".to_owned(),
+            ));
+        };
+        self.state = Some(issue_state(*state)?);
+        self.state_reason = Some(*state_reason);
+        self.title = Some(title.clone());
+        Ok(())
+    }
+
     fn apply(&mut self, change: &ForgeSyncedChange) -> Result<(), FoldError> {
         match change {
             ForgeSyncedChange::State { from, to } => set(

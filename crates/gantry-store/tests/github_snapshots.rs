@@ -99,8 +99,8 @@ fn checks(passed: u32, failed: u32, pending: u32, required_ok: bool) -> Value {
     json!({"passed": passed, "failed": failed, "pending": pending, "required_ok": required_ok})
 }
 
-/// 首次全量快照。`from` 取一个与 `to` 不同的占位值：当前契约不允许 `from = null`，
-/// 首次快照的 `from` 由 #150 的方案 A 契约 PR 决定；投影在本地无值时不比较 `from`。
+/// 用 `changes` 一次写满（投影在本地无值时不比较 `from`）。forge 的首次快照改用
+/// `initial`（#150 拍板），见 `initial_snapshot_fills_the_row_then_changes_apply`。
 fn first_pr_snapshot() -> Value {
     json!([
         {"field": "state", "from": "closed", "to": "open"},
@@ -501,4 +501,73 @@ async fn rebuild_from_log_matches_incremental_fold() {
         rebuilt.pr_snapshot(&repo("acme/web"), 57).unwrap().state,
         PullRequestState::Merged
     );
+}
+
+/// #150 拍板的首次快照：`initial` 一次写满整行，之后的 `changes` 按 `from` 校验。
+#[tokio::test]
+async fn initial_snapshot_fills_the_row_then_changes_apply() {
+    let store = store().await;
+    let p = project(1);
+    let mut first = synced(p, pr(57), json!([]), "2026-10-24T12:41:03.120Z");
+    first.data["initial"] = json!({
+        "type": "pr",
+        "state": "open",
+        "title": title("修复登录"),
+        "head_sha": SHA_A,
+        "base_ref": "main",
+        "base_sha": SHA_BASE,
+        "draft": false,
+        "mergeable_state": "unknown",
+        "in_merge_queue": false,
+        "checks": checks(0, 0, 0, false),
+        "review_state": "none"
+    });
+    let mut issue_first = synced(p, issue(42), json!([]), "2026-10-24T12:41:03.120Z");
+    issue_first.data["initial"] = json!({
+        "type": "issue",
+        "state": "open",
+        "state_reason": null,
+        "title": title("登录失败")
+    });
+    append_all(
+        &store,
+        vec![
+            project_added(p, "acme/web"),
+            first,
+            issue_first,
+            synced(
+                p,
+                pr(57),
+                json!([{"field": "mergeable_state", "from": "unknown", "to": "clean"}]),
+                "2026-10-24T12:42:00.000Z",
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let mut snap = store.snapshot().await.unwrap();
+    let got = snap
+        .pr_snapshot(&repo("acme/web"), 57)
+        .await
+        .unwrap()
+        .expect("initial makes the pr readable");
+    assert_eq!(got.head_sha.to_string(), SHA_A);
+    assert_eq!(got.mergeable_state, "clean");
+    assert_eq!(got.synced_at.to_string(), "2026-10-24T12:42:00.000Z");
+    let issue = snap
+        .issue_snapshot(&repo("acme/web"), 42)
+        .await
+        .unwrap()
+        .expect("initial makes the issue readable");
+    assert_eq!(issue.state_reason, None);
+
+    // initial 之后 from 照常校验。
+    let stale = synced(
+        p,
+        pr(57),
+        json!([{"field": "mergeable_state", "from": "unknown", "to": "dirty"}]),
+        "2026-10-24T12:43:00.000Z",
+    );
+    assert!(append_all(&store, vec![stale]).await.is_err());
 }
