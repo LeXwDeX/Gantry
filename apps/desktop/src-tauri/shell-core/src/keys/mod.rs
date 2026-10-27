@@ -133,6 +133,8 @@ pub enum KeyBackend {
     SecureEnclave,
     Tpm,
     TestSoftware,
+    /// 本机没有可用的硬件后端（[`UnavailableKeyStore`]）。
+    Unavailable,
 }
 
 impl KeyBackend {
@@ -141,6 +143,7 @@ impl KeyBackend {
             Self::SecureEnclave => "secure_enclave",
             Self::Tpm => "tpm",
             Self::TestSoftware => "test_software",
+            Self::Unavailable => "unavailable",
         }
     }
 }
@@ -226,6 +229,27 @@ pub trait KeyStore: Send + Sync {
     fn load(&self, labels: &KeyLabels) -> Result<Box<dyn DeviceKeys>, KeyError>;
     /// 删除两把密钥；不存在视为成功（幂等）。
     fn delete(&self, labels: &KeyLabels) -> Result<(), KeyError>;
+}
+
+/// 硬件不可用时的密钥库：生成一律失败，加载一律 `key_unavailable`（fail-closed，OQ-S2）。
+pub struct UnavailableKeyStore(pub String);
+
+impl KeyStore for UnavailableKeyStore {
+    fn backend(&self) -> KeyBackend {
+        KeyBackend::Unavailable
+    }
+
+    fn generate(&self) -> Result<Box<dyn DeviceKeys>, KeyError> {
+        Err(KeyError::HardwareUnavailable(self.0.clone()))
+    }
+
+    fn load(&self, _labels: &KeyLabels) -> Result<Box<dyn DeviceKeys>, KeyError> {
+        Err(KeyError::KeyUnavailable)
+    }
+
+    fn delete(&self, _labels: &KeyLabels) -> Result<(), KeyError> {
+        Ok(())
+    }
 }
 
 /// 本平台的硬件密钥库。`key_dir` 是应用数据目录下仅当前用户可访问的目录。

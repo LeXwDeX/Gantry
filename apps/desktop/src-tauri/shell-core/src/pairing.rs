@@ -375,6 +375,8 @@ impl PendingIdentity {
             api_base_url: self.response.api_base_url,
             ca_fingerprint: self.pinned_fingerprint,
             device_id: self.response.device.id,
+            device_name: self.response.device.name,
+            platform: self.response.device.platform,
             cert_chain_pem: self.response.certificate_chain,
             tls_key_label: labels.tls,
             approval_key_label: labels.approval,

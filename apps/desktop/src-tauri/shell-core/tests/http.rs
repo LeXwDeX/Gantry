@@ -3,209 +3,21 @@
 //! 本进程内起 hyper + tokio-rustls 服务端，证书由 TestCA 与 gantry-pki 签发。
 #![cfg(feature = "test-software-keys")]
 
-use std::convert::Infallible;
-use std::net::SocketAddr;
+mod support;
+use support::{now, origin, serve, serve_simple, Handler, Pki, Seen};
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use gantry_core::ids::DeviceId;
-use gantry_core::testing::SeqEntropy;
-use gantry_core::time::Timestamp;
 use gantry_desktop_shell::http::{HttpClient, HttpPairTransport, NetError, Origin};
 use gantry_desktop_shell::ipc::ShellErrorCode;
 use gantry_desktop_shell::keys::software::{PresenceDouble, TestSoftwareKeyStore};
 use gantry_desktop_shell::pairing;
 use gantry_desktop_shell::routes::prepare;
 use gantry_desktop_shell::tls::{chain_from_pem, client_config, ClientIdentity, RootFingerprint};
-use gantry_fakes::test_ca::TestCA;
-use gantry_pki::{Authority, CertPolicy, CertSerial};
-use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Incoming};
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
-
-fn now() -> Timestamp {
-    Timestamp::from_millis(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64,
-    )
-}
-
-fn der(pem_text: &str) -> CertificateDer<'static> {
-    CertificateDer::from(pem::parse(pem_text).unwrap().into_contents())
-}
-
-struct Pki {
-    ca: TestCA,
-    inter: Authority,
-}
-
-impl Pki {
-    fn new() -> Self {
-        let ca = TestCA::new().unwrap();
-        let read = |n: &str| std::fs::read_to_string(ca.root_dir().join(n)).unwrap();
-        let inter = Authority::load(&read("inter.crt"), &read("inter.key")).unwrap();
-        Self { ca, inter }
-    }
-
-    fn fp(&self) -> String {
-        self.ca.root_fingerprint().to_string()
-    }
-
-    fn chain_tail(&self) -> [String; 2] {
-        [
-            self.ca.intermediate_cert_pem().to_string(),
-            self.ca.root_cert_pem().to_string(),
-        ]
-    }
-
-    fn server_config(&self, mtls: bool) -> Arc<ServerConfig> {
-        let (leaf, key) = self
-            .inter
-            .issue_server_leaf(
-                &["localhost".to_string()],
-                now(),
-                &CertPolicy::default(),
-                &SeqEntropy::new(3),
-            )
-            .unwrap();
-        let chain = vec![
-            der(&leaf.pem),
-            der(self.ca.intermediate_cert_pem()),
-            der(self.ca.root_cert_pem()),
-        ];
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            pem::parse(key.as_str()).unwrap().into_contents(),
-        ));
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let builder = ServerConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap();
-        let builder = if mtls {
-            let mut roots = RootCertStore::empty();
-            roots.add(der(self.ca.root_cert_pem())).unwrap();
-            builder.with_client_cert_verifier(
-                WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-                    .build()
-                    .unwrap(),
-            )
-        } else {
-            builder.with_no_client_auth()
-        };
-        Arc::new(builder.with_single_cert(chain, key).unwrap())
-    }
-
-    fn issue_device(&self, public: &gantry_pki::P256PublicKey) -> String {
-        let id: DeviceId = "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().unwrap();
-        self.inter
-            .issue_device_leaf(
-                &id,
-                public,
-                &CertSerial::generate(&SeqEntropy::new(9)),
-                now(),
-                &CertPolicy::default(),
-            )
-            .unwrap()
-            .pem
-    }
-}
-
-#[derive(Clone)]
-struct Seen {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-type Handler = Arc<dyn Fn(Seen) -> (u16, Vec<(String, String)>, Vec<u8>) + Send + Sync>;
-
-/// 起一个 HTTPS 服务端，返回地址。`delay` 让每个请求先睡一会儿（测并发与超时）。
-async fn serve(
-    config: Arc<ServerConfig>,
-    handler: Handler,
-    delay: Duration,
-    live: Arc<AtomicUsize>,
-    peak: Arc<AtomicUsize>,
-) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let acceptor = TlsAcceptor::from(config);
-    tokio::spawn(async move {
-        loop {
-            let Ok((tcp, _)) = listener.accept().await else {
-                return;
-            };
-            let acceptor = acceptor.clone();
-            let handler = handler.clone();
-            let (live, peak) = (live.clone(), peak.clone());
-            tokio::spawn(async move {
-                let Ok(tls) = acceptor.accept(tcp).await else {
-                    return;
-                };
-                let service = hyper::service::service_fn(move |req: Request<Incoming>| {
-                    let handler = handler.clone();
-                    let (live, peak) = (live.clone(), peak.clone());
-                    async move {
-                        let n = live.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(n, Ordering::SeqCst);
-                        tokio::time::sleep(delay).await;
-                        let seen = Seen {
-                            method: req.method().to_string(),
-                            path: req.uri().to_string(),
-                            headers: req
-                                .headers()
-                                .iter()
-                                .map(|(k, v)| {
-                                    (k.to_string(), v.to_str().unwrap_or_default().to_string())
-                                })
-                                .collect(),
-                            body: req.into_body().collect().await.unwrap().to_bytes().to_vec(),
-                        };
-                        let (status, headers, body) = handler(seen);
-                        live.fetch_sub(1, Ordering::SeqCst);
-                        let mut resp = Response::builder().status(status);
-                        for (k, v) in headers {
-                            resp = resp.header(k, v);
-                        }
-                        Ok::<_, Infallible>(resp.body(Full::new(Bytes::from(body))).unwrap())
-                    }
-                });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(TokioIo::new(tls), service)
-                    .await;
-            });
-        }
-    });
-    addr
-}
-
-async fn serve_simple(config: Arc<ServerConfig>, handler: Handler) -> SocketAddr {
-    serve(
-        config,
-        handler,
-        Duration::ZERO,
-        Arc::default(),
-        Arc::default(),
-    )
-    .await
-}
-
-fn origin(addr: SocketAddr) -> Origin {
-    Origin {
-        host: "localhost".into(),
-        port: addr.port(),
-    }
-}
 
 #[tokio::test]
 async fn pairing_over_real_tls_then_mtls_me() {
