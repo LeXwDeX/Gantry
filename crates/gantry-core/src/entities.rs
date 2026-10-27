@@ -695,12 +695,42 @@ pub enum LockHolder {
     Human,
 }
 
+impl LockHolder {
+    /// engine / guardian 的锁代表某个交付单元在写；人工锁不绑定交付单元（#122）。
+    pub fn binds_delivery(self) -> bool {
+        !matches!(self, Self::Human)
+    }
+
+    /// 写进 `WorktreeLock` / `worktree.locked` 的 `delivery_id`：人工锁一律为 `None`。
+    /// 端口内部的令牌可以仍带工作树所属的交付单元，出边界时经这里投影。
+    pub fn bound_delivery(self, delivery: DeliveryId) -> Option<DeliveryId> {
+        self.binds_delivery().then_some(delivery)
+    }
+
+    /// `holder ∈ {engine, guardian}` 时 `delivery_id` 必填，`holder = human` 时必须为空。
+    pub fn check_delivery(self, delivery_id: Option<&DeliveryId>) -> Result<(), EntityError> {
+        if self.binds_delivery() == delivery_id.is_some() {
+            Ok(())
+        } else {
+            Err(EntityError::LockDeliveryBinding)
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorktreeLock {
     pub holder: LockHolder,
-    pub delivery_id: DeliveryId,
+    /// engine / guardian 锁必填；人工锁为 `null`（#122）。
+    #[serde(default)]
+    pub delivery_id: Option<DeliveryId>,
     pub acquired_at: Timestamp,
     pub lease_until: Timestamp,
+}
+
+impl WorktreeLock {
+    pub fn validate(&self) -> Result<(), EntityError> {
+        self.holder.check_delivery(self.delivery_id.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -714,6 +744,12 @@ pub struct Worktree {
     pub lock: Option<WorktreeLock>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+impl Worktree {
+    pub fn validate(&self) -> Result<(), EntityError> {
+        self.lock.as_ref().map_or(Ok(()), WorktreeLock::validate)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2855,6 +2891,10 @@ pub enum EntityError {
     EscalationActionIdMismatch,
     #[error("budget ledger subject and id columns are inconsistent")]
     BudgetSubject,
+    #[error(
+        "worktree lock: engine/guardian locks require delivery_id, human locks must not carry one"
+    )]
+    LockDeliveryBinding,
 }
 
 #[cfg(test)]
