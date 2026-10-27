@@ -3,9 +3,10 @@
 //!
 //! 两层接口（P-52）：引擎面 `core::ports::SandboxService` 由本模块实现；容器面
 //! `SandboxDriver` 只在本模块内部使用。本 crate 目前交付容器面的请求类型
-//! [`spec::ContainerSpec`]、参数闸 [`invariants::validate_invariants`] 与 Podman
-//! 参数渲染 [`podman::render_create_args`]。
+//! [`spec::ContainerSpec`]、参数闸 [`invariants::validate_invariants`]、Podman
+//! 参数渲染 [`podman::render_create_args`]，以及先停后取的产物提取规则 [`intake`]。
 
+pub mod intake;
 pub mod invariants;
 pub mod podman;
 pub mod spec;

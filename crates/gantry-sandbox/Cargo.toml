@@ -10,5 +10,9 @@ description = "Gantry 沙盒管理：引擎面 SandboxService 与容器面 Sandb
 gantry-core = { path = "../gantry-core" }
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
+libc = "0.2"
