@@ -43,11 +43,8 @@ impl MirrorEntry {
         }
     }
 
-    pub fn guard(&self) -> MirrorGuard {
-        MirrorGuard {
-            git_dir: self.git_dir.clone(),
-            fetch_refspecs: vec![FETCH_REFSPEC.to_owned()],
-        }
+    pub fn guard(&self, lock: MirrorLock) -> MirrorGuard {
+        MirrorGuard::new(self.git_dir.clone(), vec![FETCH_REFSPEC.to_owned()], lock)
     }
 }
 
