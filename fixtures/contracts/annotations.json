@@ -458,18 +458,24 @@
       "note": "forge-actions §2.1 入队信封；字段与 OutboxAction 的执行字段分离，含 enqueued_by"
     },
     {
-      "sha256": "4a29a75c0a4e2e436c4cc0b0ca65308a3332db54e2d82f605fc5491647c8367c",
-      "schema": "schemas/forge/forge.event.v1.json",
+      "sha256": "1567894a1dc1b0c164df2a6054cff61e100be804ef46c41c0bb74cd4b77e483e",
+      "schema": "schemas/forge/outbox-action.json",
       "rust": "none",
-      "mode": "skip",
-      "note": "github_ref 与 expected_effects 的组合展示；无单一 core 类型"
+      "mode": "partial",
+      "note": "forge-actions §4.2 执行前写入的 expected_effects；OutboxAction 行只列 kind 与该字段，其余省略"
+    },
+    {
+      "sha256": "35fbfe0b4314d8abb75d3961b501c0c14131bfe1d2d1161a7ac53c02b07b12ab",
+      "schema": "schemas/events/outbox.succeeded.json",
+      "rust": "event:outbox.succeeded",
+      "note": "forge-actions §4.2 成功后写入的 github_ref，按 outbox.succeeded data 完整验证"
     },
     {
       "sha256": "9911a924ae311ede157cdec544883b47658407b10d3b0d341fb1e98f4ed5a927",
       "schema": "schemas/forge/forge.event.v1.json",
       "rust": "none",
       "mode": "skip",
-      "note": "GitHub App manifest；不属 Gantry 协议类型"
+      "note": "GitHub App manifest；GitHub 的外部格式，不属 Gantry 协议类型（理由见 unverified.json）"
     },
     {
       "sha256": "f3a4a967c6f5acecc4391d94e6e79e06b0bed68bbafce345bc29dff2a5bc9429",

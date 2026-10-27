@@ -515,21 +515,33 @@ worker 的 `escalate` 提议不是 GitHub 写动作，不经 Outbox。
 
 ### 4.2 `github_ref` 的形状
 
-执行前写 `expected_effects`（OutboxAction 的独立字段，data-model），成功后写 `github_ref` 补充对象 ID。下例把 `create_pr` 成功后的两者放在一起展示：
+执行前写 `expected_effects`（OutboxAction 的独立字段，data-model），成功后写 `github_ref` 补充对象 ID。两者是同一 Outbox 行上的两个字段，分属不同类型，下面以 `create_pr` 为例分开展示。
+
+执行前写入的 `expected_effects`（OutboxAction 行，只列 `kind` 与该字段，其余字段省略；`matched_webhook_deliveries` 是 webhook 匹配后追加的）：
 
 ```json
 {
-  "bot": { "github_id": 9988776, "login": "gantry-acme[bot]" },
-  "pr": { "number": 57, "node_id": "PR_kwDOabc123_example", "head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486" },
-  "marker": "gantry:v1 act=act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+  "kind": "create_pr",
   "expected_effects": [
     {
       "event": "pull_request.opened",
       "match": { "head_ref": "gantry/42-fix-pagination", "base_ref": "main" },
       "matched_webhook_deliveries": ["72d3162e-cc78-11e3-81ab-4c9367dc0958"]
     }
-  ],
-  "recorded_at": "2026-10-24T12:40:58.221Z"
+  ]
+}
+```
+
+成功后写入的 `github_ref`（与 `outbox.succeeded` 事件的 `data` 同形）：
+
+```json
+{
+  "github_ref": {
+    "bot": { "github_id": 9988776, "login": "gantry-acme[bot]" },
+    "pr": { "number": 57, "node_id": "PR_kwDOabc123_example", "head_sha": "d7d018f867d6c5b78e82906386420d45a4d84486" },
+    "marker": "gantry:v1 act=act_01JBA1F3Q9TX2N7B5D8H0M4RVC",
+    "recorded_at": "2026-10-24T12:40:58.221Z"
+  }
 }
 ```
 
