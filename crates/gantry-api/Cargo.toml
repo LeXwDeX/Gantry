@@ -12,12 +12,14 @@ gantry-store = { path = "../gantry-store" }
 async-trait.workspace = true
 bytes = "1"
 http = "1"
+jsonschema = { version = "0.59", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
-jsonschema = { version = "0.59", default-features = false }
+gantry-fakes = { path = "../gantry-fakes" }
 tokio.workspace = true
