@@ -566,7 +566,7 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 
 守护的编排状态以事件日志为准（I4）。P-60 新增三种事件（形状以 data-model §5.2 与 `schemas/events/` 为准，下表为本模块需要的字段）；`conversation` 把它们渲染为事件行：
 
-本节事件 data 的送审字段见 [event-data.md](../interfaces/event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+本节事件 data 的字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
 
 | 事件 | `data`（要点） |
 | --- | --- |

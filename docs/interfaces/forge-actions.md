@@ -1218,6 +1218,6 @@ GraphQL 的主限流（按点数）与 `rateLimit { cost remaining resetAt }` �
 - 提交签名验证 / git commits API：docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification、docs.github.com/en/rest/git/commits
 - 合并队列：docs.github.com/en/pull-requests/…/merging-a-pull-request-with-a-merge-queue
 
-## 补充范围（送审，尚未批准）
+## 补充范围（已批准（2026-10-27，用户统一批准））
 
-`§7.2`–`§7.4` 的 drift 形状与 `forge.drift_detected.data` 的送审定义见 [forge-drift.md](forge-drift.md)。该文件尚未批准，不是权威契约；当前 `schemas/forge/drift.json` 与 `schemas/events/forge.drift_detected.json` 仍拒绝一切，运行时保持 fail-closed。
+`§7.2`–`§7.4` 的 drift 形状与 `forge.drift_detected.data` 的定义见 [forge-drift.md](forge-drift.md)。当前 `schemas/forge/drift.json` 与 `schemas/events/forge.drift_detected.json` 仍拒绝一切，运行时保持 fail-closed。

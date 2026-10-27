@@ -382,4 +382,4 @@ stateDiagram-v2
 
 每个事件 `data` 的 JSON Schema 放在 `schemas/events/<type>.json`（M0 产出）。
 
-其中 `attempt.progress`、`guardian.*` 三事件、`approval.*` 三事件、`outbox.*` 三事件、`forge.synced`、`budget.charged`、`policy.denied` 共 13 个事件的 `data` 送审字段见 [event-data.md](interfaces/event-data.md)（尚未批准）；`forge.drift_detected` 由独立 drift 契约定义。契约批准前运行时仍按 fail-closed 拒绝，本节其余语义不变。
+其中 `attempt.progress`、`guardian.*` 三事件、`approval.*` 三事件、`outbox.*` 三事件、`forge.synced`、`budget.charged`、`policy.denied` 共 13 个事件的 `data` 字段见 [event-data.md](interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））；`forge.drift_detected` 由独立 drift 契约定义。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。

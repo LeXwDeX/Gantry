@@ -1190,6 +1190,6 @@ claude -p \
 | OQ-16 | 预热池（M2）下"先启动、后注入"用 `READY` 文件标记是否接受 | worker 启动逻辑；M2 | — | §3.2，**[提议]** |
 | OQ-17 | 仓库内的 `CLAUDE.md` / `AGENTS.md` 是否自动载入 agent 上下文：它们对 agent 有用，但按 I5 属于"仓库内容" | 适配层的 prompt 组装 | 作为 `file_excerpt` 材料包装后注入；或完全不载入 | 未处理，适配层按 I5 不赋予其权限 |
 
-## 13. 事件 data 送审契约
+## 13. 事件 data 契约
 
-13 个事件 data 的送审字段见 [event-data.md](event-data.md)（尚未批准）。契约批准前运行时仍按 fail-closed 拒绝，本文其余语义不变。
+13 个事件 data 的字段见 [event-data.md](event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本文其余语义不变。

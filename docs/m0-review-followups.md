@@ -1,5 +1,7 @@
 # M0 复核修复清单
 
+> **历史记录，不作为规格。** 本文是 M0 时期的复核修复过程记录，保留作追溯。现行规格见 [architecture.md](architecture.md)、[decisions.md](decisions.md)、[interfaces/](interfaces/) 与 [modules/](modules/)，当前状态见 [AGENTS.md](../AGENTS.md) 与 [NEXT-STEPS.md](../NEXT-STEPS.md)；与现行文档冲突时以现行文档为准。
+
 本文件记录实现期复核发现，不修改权威契约，也不代表验收已经通过。
 
 ## 首轮独立验证
