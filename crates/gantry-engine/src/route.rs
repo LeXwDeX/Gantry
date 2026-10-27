@@ -195,7 +195,11 @@ impl Router {
             }
             T::WorktreeLocked => {
                 let data: WorktreeLockedData = decode(event)?;
-                deliver(Some(data.delivery_id))
+                // 人工锁不绑定交付单元（#122）：与 unlocked 一样按工作树归属投递。
+                deliver(
+                    data.delivery_id
+                        .or_else(|| self.worktrees.get(&data.worktree_id).copied()),
+                )
             }
             T::WorktreeUnlocked => {
                 let data: WorktreeUnlockedData = decode(event)?;

@@ -140,7 +140,8 @@ impl WorktreeTable {
                         }
                         None => ActiveLock {
                             holder: data.holder,
-                            delivery_id: data.delivery_id,
+                            // 人工锁不绑定交付单元（#122），事件里为 null；内部令牌沿用工作树所属的交付单元。
+                            delivery_id: data.delivery_id.unwrap_or(state.delivery_id),
                             fence: event.seq,
                             acquired_at: event.ts,
                             lease_until: data.lease_until,
@@ -148,7 +149,7 @@ impl WorktreeTable {
                     };
                     state.worktree.lock = Some(WorktreeLock {
                         holder: lock.holder,
-                        delivery_id: lock.delivery_id,
+                        delivery_id: lock.holder.bound_delivery(lock.delivery_id),
                         acquired_at: lock.acquired_at,
                         lease_until: lock.lease_until,
                     });

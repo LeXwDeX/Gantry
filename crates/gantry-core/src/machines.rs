@@ -898,7 +898,8 @@ pub mod worktree_lock {
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct LockRequest {
         pub holder: LockHolder,
-        pub delivery_id: DeliveryId,
+        /// engine / guardian 必填，human 必须为空（`LockHolder::check_delivery`）。
+        pub delivery_id: Option<DeliveryId>,
         pub lease_until: Timestamp,
         /// 调用方（api.md §3.7）给出的上限；`human` 锁超过它时拒绝。
         pub max_lease: Option<Timestamp>,
@@ -914,6 +915,8 @@ pub mod worktree_lock {
         LeaseTooLong,
         #[error("only the current holder may renew or release")]
         NotHolder,
+        #[error("engine/guardian locks require delivery_id, human locks must not carry one")]
+        DeliveryBinding,
     }
 
     pub fn acquire(
@@ -921,6 +924,9 @@ pub mod worktree_lock {
         req: &LockRequest,
         now: Timestamp,
     ) -> Result<WorktreeLock, LockError> {
+        req.holder
+            .check_delivery(req.delivery_id.as_ref())
+            .map_err(|_| LockError::DeliveryBinding)?;
         if req.lease_until <= now {
             return Err(LockError::InvalidLease);
         }
@@ -1121,17 +1127,19 @@ mod tests {
         let delivery: DeliveryId = "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM".parse().unwrap();
         let request = LockRequest {
             holder: LockHolder::Human,
-            delivery_id: delivery,
+            delivery_id: None,
             lease_until: ts(2_000),
             max_lease: Some(ts(3_000)),
         };
         let lock = acquire(None, &request, ts(1_000)).unwrap();
+        assert!(lock.validate().is_ok());
         assert!(acquire(Some(&lock), &request, ts(1_500)).is_ok());
         assert_eq!(
             acquire(
                 Some(&lock),
                 &LockRequest {
                     holder: LockHolder::Engine,
+                    delivery_id: Some(delivery),
                     ..request.clone()
                 },
                 ts(1_500)
@@ -1160,6 +1168,37 @@ mod tests {
             )
             .unwrap_err(),
             LockError::LeaseTooLong
+        );
+    }
+
+    /// #122：engine / guardian 锁必须绑定交付单元，人工锁必须不绑定。
+    #[test]
+    fn worktree_lock_delivery_binding() {
+        use worktree_lock::*;
+        let delivery: DeliveryId = "dlv_01JBA1D7P2KS6W8Y0A4C1F5GJM".parse().unwrap();
+        let request = |holder, delivery_id| LockRequest {
+            holder,
+            delivery_id,
+            lease_until: ts(2_000),
+            max_lease: None,
+        };
+        for holder in [LockHolder::Engine, LockHolder::Guardian] {
+            let lock = acquire(None, &request(holder, Some(delivery)), ts(1_000)).unwrap();
+            assert!(lock.validate().is_ok());
+            assert_eq!(
+                acquire(None, &request(holder, None), ts(1_000)).unwrap_err(),
+                LockError::DeliveryBinding
+            );
+        }
+        assert_eq!(
+            acquire(None, &request(LockHolder::Human, Some(delivery)), ts(1_000)).unwrap_err(),
+            LockError::DeliveryBinding
+        );
+        let mut lock = acquire(None, &request(LockHolder::Human, None), ts(1_000)).unwrap();
+        lock.delivery_id = Some(delivery);
+        assert_eq!(
+            lock.validate(),
+            Err(crate::entities::EntityError::LockDeliveryBinding)
         );
     }
 }
