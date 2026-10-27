@@ -898,7 +898,9 @@ async fn egress_stub_closes_calls_with_read_only_terminal_proof() {
     let read_twice = egress.call_terminal(&call).await.expect("read again");
     assert_eq!(read_once, read_twice);
     assert_eq!(read_once.terminal.as_ref(), Some(&terminal));
-    terminal.verify(call, &read_once.items).expect("proof verifies");
+    terminal
+        .verify(call, &read_once.items)
+        .expect("proof verifies");
     assert_eq!(read_once.settleable_terminal(), Some(&terminal));
     let mut tampered = read_once.items.clone();
     tampered[0].weight_rev += 1;
@@ -942,8 +944,8 @@ async fn egress_stub_closes_calls_with_read_only_terminal_proof() {
     assert!(expired.settleable_terminal().is_none());
 
     // 从未签发的路径 token → NotFound。
-    let unknown = gantry_core::egress::SvcTokenId::parse("svt_01JBX5A2C4E6G8J1L3N5Q7S9ZZ")
-        .expect("id");
+    let unknown =
+        gantry_core::egress::SvcTokenId::parse("svt_01JBX5A2C4E6G8J1L3N5Q7S9ZZ").expect("id");
     assert!(matches!(
         egress.close_call(&unknown, &ulid(96), &ctx).await,
         Err(EgressError::NotFound)

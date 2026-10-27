@@ -651,7 +651,10 @@ fn egress_usage_record_requires_weight_rev() {
     assert_eq!(page.items[1].weight_rev, 6);
     assert!(page.terminal.is_none());
     let mut value = parse(USAGE);
-    value["items"][0].as_object_mut().unwrap().remove("weight_rev");
+    value["items"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("weight_rev");
     assert!(serde_json::from_value::<UsagePage>(value).is_err());
 }
 
