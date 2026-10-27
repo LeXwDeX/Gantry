@@ -664,9 +664,11 @@ impl Conversation {
             }
         }
         // 最近的历史消息（不含本条）。
-        if let Some(log) =
-            projection::conversation_log(&self.store, &message.conversation_id, upto).await?
-        {
+        if let Some(log) = projection::conversation_log(
+            &self.store.snapshot().await?,
+            &message.conversation_id,
+            upto,
+        )? {
             let history: Vec<_> = log
                 .messages
                 .iter()
@@ -721,9 +723,9 @@ impl Conversation {
     }
 
     async fn log(&self, cnv: &ConversationId) -> Result<(Seq, ConversationLog), ConvError> {
-        let head = self.store.events().head().await.map_err(port_error)?;
-        let log = projection::conversation_log(&self.store, cnv, head)
-            .await
+        let snapshot = self.store.snapshot().await.map_err(port_error)?;
+        let head = snapshot.head_seq();
+        let log = projection::conversation_log(&snapshot, cnv, head)
             .map_err(port_error)?
             .ok_or(ConvError::NotFound)?;
         Ok((head, log))

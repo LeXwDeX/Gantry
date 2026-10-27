@@ -1633,6 +1633,21 @@ impl ReadSnapshot {
         Seq::from_wire(self.inner.head).unwrap_or(Seq::ZERO)
     }
 
+    /// 扫描本快照中的事件，语义与 `EventLog::scan` 相同。
+    pub fn scan(
+        &self,
+        after: Seq,
+        filter: &EventFilter,
+        limit: u32,
+    ) -> Result<ScanPage, StoreError> {
+        scan_in(&self.inner, after, filter, limit)
+    }
+
+    /// 按事件序号升序返回本快照中属于该 subject 的事件。
+    pub fn by_subject(&self, subject: &Subject) -> Vec<Event<Value>> {
+        by_subject_in(&self.inner, subject)
+    }
+
     pub fn settings_current(
         &self,
         scope: &SettingsScope,
@@ -2004,38 +2019,9 @@ impl EventLog {
         filter: &EventFilter,
         limit: u32,
     ) -> Result<ScanPage, StoreError> {
-        if !(1..=200).contains(&limit) {
-            return Err(StoreError::PreconditionFailed(
-                "scan limit must be 1..=200".to_owned(),
-            ));
-        }
+        validate_scan_limit(limit)?;
         let inner = self.store.inner.read().map_err(|_| StoreError::Poisoned)?;
-        let head = Seq::from_wire(inner.head).unwrap_or(Seq::ZERO);
-        if after > head {
-            return Err(StoreError::CursorAhead { head });
-        }
-        let mut events = Vec::new();
-        let mut last_hit = None;
-        for event in inner.events.iter().filter(|event| event.seq > after) {
-            if !filter.matches(event) {
-                continue;
-            }
-            events.push(event.clone());
-            last_hit = Some(event.seq);
-            if events.len() == limit as usize {
-                break;
-            }
-        }
-        let scanned_to = if events.len() == limit as usize {
-            last_hit.unwrap_or(after)
-        } else {
-            head
-        };
-        Ok(ScanPage {
-            events,
-            scanned_to,
-            head,
-        })
+        scan_in(&inner, after, filter, limit)
     }
 
     pub async fn get(&self, id: &EventId) -> Result<Option<Event<Value>>, StoreError> {
@@ -2055,13 +2041,61 @@ impl EventLog {
 
     pub async fn by_subject(&self, subject: &Subject) -> Result<Vec<Event<Value>>, StoreError> {
         let inner = self.store.inner.read().map_err(|_| StoreError::Poisoned)?;
-        Ok(inner
-            .events
-            .iter()
-            .filter(|event| &event.subject == subject)
-            .cloned()
-            .collect())
+        Ok(by_subject_in(&inner, subject))
     }
+}
+
+fn validate_scan_limit(limit: u32) -> Result<(), StoreError> {
+    if !(1..=200).contains(&limit) {
+        return Err(StoreError::PreconditionFailed(
+            "scan limit must be 1..=200".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn scan_in(
+    inner: &Inner,
+    after: Seq,
+    filter: &EventFilter,
+    limit: u32,
+) -> Result<ScanPage, StoreError> {
+    validate_scan_limit(limit)?;
+    let head = Seq::from_wire(inner.head).unwrap_or(Seq::ZERO);
+    if after > head {
+        return Err(StoreError::CursorAhead { head });
+    }
+    let mut events = Vec::new();
+    let mut last_hit = None;
+    for event in inner.events.iter().filter(|event| event.seq > after) {
+        if !filter.matches(event) {
+            continue;
+        }
+        events.push(event.clone());
+        last_hit = Some(event.seq);
+        if events.len() == limit as usize {
+            break;
+        }
+    }
+    let scanned_to = if events.len() == limit as usize {
+        last_hit.unwrap_or(after)
+    } else {
+        head
+    };
+    Ok(ScanPage {
+        events,
+        scanned_to,
+        head,
+    })
+}
+
+fn by_subject_in(inner: &Inner, subject: &Subject) -> Vec<Event<Value>> {
+    inner
+        .events
+        .iter()
+        .filter(|event| &event.subject == subject)
+        .cloned()
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
