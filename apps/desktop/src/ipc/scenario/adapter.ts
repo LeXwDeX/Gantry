@@ -882,13 +882,18 @@ export class ScenarioIpcAdapter implements IpcAdapter {
         if (delivery.stage === "closed" || delivery.stage === "abandoned") {
           return problem(409, "conflict", "Delivery is terminal.");
         }
+        // 契约 #59：调上限只写 kind = cap，level_effective 由投影派生为 min，不另发 effective 事件。
+        const from = delivery.level_cap;
+        if (from === level) return ok(delivery);
         delivery.level_cap = level;
         if (LEVEL_RANK[level] < LEVEL_RANK[delivery.level_effective]) {
           delivery.level_effective = level;
         }
         this.emitEvent("delivery.level_changed", delivery.id, delivery.project_id, {
-          delivery_id: delivery.id,
-          level_cap: level,
+          from,
+          to: level,
+          kind: "cap",
+          reason: "user",
         });
         return ok(delivery);
       }
