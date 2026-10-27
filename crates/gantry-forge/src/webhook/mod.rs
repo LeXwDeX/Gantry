@@ -1,6 +1,7 @@
 //! Webhook 接收（forge.md §7.4、FA §5.1–§5.3）。
 //!
-//! 独立监听，只绑回环地址、明文 HTTP（P-65），只服务 `POST /webhook`。每个请求按 FA §5.1
+//! 独立监听，只绑回环地址、明文 HTTP（P-65），服务 `POST /webhook`，以及 App 创建期间的
+//! `GET /setup/github/callback`（交给 [`crate::setup::SetupService`]）。每个请求按 FA §5.1
 //! 的顺序处理：体积 → 必需头 → HMAC（原始字节、常量时间、当前 secret 失败再试上一个）→
 //! App ID → `ping` → 订阅清单 → 路由提示 → 单事务落盘（`delivery_id` 去重）→ 202 / 200。
 //! 落盘提交后才回应，随后唤醒分发器；响应前不做任何回读。
@@ -40,6 +41,8 @@ pub const INBOX_TABLE: &str = "forge_webhook_inbox";
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 /// `X-GitHub-Delivery` 是 GUID；放宽到 128 字符，仍拒绝控制字符。
 const MAX_DELIVERY_ID: usize = 128;
+/// App Manifest 创建回调（P-65；forge.md §7.14）。
+pub const CALLBACK_PATH: &str = "/setup/github/callback";
 /// 关闭前读掉剩余输入的时间与字节上限。
 const LINGER: Duration = Duration::from_millis(500);
 const LINGER_MAX_BYTES: usize = 1024 * 1024;
@@ -75,6 +78,8 @@ pub struct WebhookDeps {
     pub app_id: u64,
     pub clock: Arc<dyn Clock>,
     pub options: WebhookOptions,
+    /// App 创建期间的 setup 服务；`None` 时回调路径一律 404。
+    pub setup: Option<Arc<crate::setup::SetupService>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -241,6 +246,19 @@ impl Handler {
         )
         .await
         {
+            Ok(Ok(ReadOutcome::Request(request)))
+                if request.method == "GET" && request.path.starts_with(CALLBACK_PATH) =>
+            {
+                let (status, body) = self.setup_callback(&request.path).await;
+                let response = format!(
+                    "HTTP/1.1 {status} {}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\ncache-control: no-store\r\nconnection: close\r\n\r\n{body}",
+                    reason(status),
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+                return;
+            }
             Ok(Ok(ReadOutcome::Request(request))) => self.handle(request).await,
             Ok(Ok(ReadOutcome::Status(status))) => {
                 bump(if status == 413 {
@@ -272,6 +290,19 @@ impl Handler {
             }
         })
         .await;
+    }
+
+    /// `GET /setup/github/callback`：只在有未完成的 setup 会话时响应，否则 404（forge.md §7.14）。
+    async fn setup_callback(&self, path: &str) -> (u16, String) {
+        let Some(setup) = &self.deps.setup else {
+            return (404, String::new());
+        };
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        if route != CALLBACK_PATH || !setup.has_pending() {
+            return (404, String::new());
+        }
+        let response = setup.callback(query).await;
+        (response.status, response.body)
     }
 
     async fn handle(&self, mut request: Request) -> u16 {
@@ -466,12 +497,15 @@ async fn read_request(stream: &mut TcpStream, max_body: usize) -> std::io::Resul
         // GitHub 带 Content-Length；不接受分块，避免无上限缓冲。
         return Ok(ReadOutcome::Status(400));
     }
-    let Some(length) = headers
+    let length = match headers
         .iter()
         .find(|(name, _)| name == "content-length")
-        .and_then(|(_, value)| value.parse::<usize>().ok())
-    else {
-        return Ok(ReadOutcome::Status(400));
+        .map(|(_, value)| value.parse::<usize>())
+    {
+        Some(Ok(length)) => length,
+        // 浏览器的 GET（setup 回调）不带 body。
+        None if method == "GET" => 0,
+        _ => return Ok(ReadOutcome::Status(400)),
     };
     // 步 1：先看 Content-Length，超限不读 body。
     if length > max_body {

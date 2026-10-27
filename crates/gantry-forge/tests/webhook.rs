@@ -116,6 +116,7 @@ async fn harness_with(options: WebhookOptions, seed_secrets: bool) -> Harness {
         app_id: APP_ID,
         clock,
         options,
+        setup: None,
     })
     .await
     .expect("bind");
@@ -397,6 +398,7 @@ async fn binding_a_non_loopback_address_fails() {
             read_timeout: Duration::from_secs(1),
             ..WebhookOptions::default()
         },
+        setup: None,
     })
     .await;
     assert!(matches!(result, Err(WebhookError::NonLoopback(_))));

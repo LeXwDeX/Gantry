@@ -70,12 +70,24 @@ impl GithubClient {
         path: &str,
         body: Option<&Value>,
     ) -> Result<HttpResponse, ApiError> {
+        self.call_with(Some(token), method, path, body).await
+    }
+
+    async fn call_with(
+        &self,
+        token: Option<&SecretString>,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<HttpResponse, ApiError> {
         let mut headers = vec![
             ("accept", "application/vnd.github+json".to_owned()),
             ("x-github-api-version", "2022-11-28".to_owned()),
             ("user-agent", "gantry-forge".to_owned()),
-            ("authorization", format!("Bearer {}", token.expose_secret())),
         ];
+        if let Some(token) = token {
+            headers.push(("authorization", format!("Bearer {}", token.expose_secret())));
+        }
         let body = body.map(|value| value.to_string().into_bytes());
         if body.is_some() {
             headers.push(("content-type", "application/json".to_owned()));
@@ -296,6 +308,17 @@ impl GithubClient {
             Value::Array(items) => Ok(items),
             _ => Err(ApiError::Decode("comments is not an array".into())),
         }
+    }
+
+    /// 不带鉴权的调用：App Manifest 转换（`code` 本身即凭据）与公开的用户查询（forge.md §7.14）。
+    pub async fn anonymous_json(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, ApiError> {
+        let response = self.call_with(None, method, path, body).await?;
+        serde_json::from_slice(&response.body).map_err(|error| ApiError::Decode(error.to_string()))
     }
 
     /// 远端分支 head；分支不存在返回 `None`。
