@@ -1123,7 +1123,7 @@ fn create_pr_follows_proposal_texts() {
 }
 
 #[test]
-fn commands_are_deferred_to_slice_5() {
+fn m2_commands_are_not_supported_yet() {
     let sim = Sim::low();
     let ctx = gantry_core::ports::context::ActorCtx {
         actor: Actor::new(ActorKind::Device, "dev"),
@@ -1137,10 +1137,20 @@ fn commands_are_deferred_to_slice_5() {
     };
     let request_id = ctx.request_id;
     let out = sim.decide(
-        Input::Command(gantry_engine::decide::Command::Pause { ctx }),
+        Input::Command(gantry_engine::decide::Command::SupplySpec {
+            inbox_id: common::INBOX.parse().unwrap(),
+            message: "msg_01JB7N3R5T8X2V6M9Q4K1W7YZD".parse().unwrap(),
+            ctx,
+        }),
         InputIdentity::Command(request_id),
     );
-    assert!(matches!(out.as_slice(), [Decision::Reply(Err(_))]));
+    // §7.14.5 末：M1 尚未启用的命令返回 NotSupportedYet，不静默返回空。
+    assert!(matches!(
+        out.as_slice(),
+        [Decision::Reply(Err(
+            gantry_engine::decide::CommandRejection::NotSupportedYet(_)
+        ))]
+    ));
 }
 
 // ---------------------------------------------------------------------------

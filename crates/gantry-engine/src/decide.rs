@@ -83,6 +83,21 @@ pub enum Command {
     Classify(ClassifyRequest),
 }
 
+impl Command {
+    /// 控制命令的调用上下文；M2 的命令没有。
+    pub fn ctx(&self) -> Option<&ActorCtx> {
+        match self {
+            Command::SetLevelCap { ctx, .. }
+            | Command::Pause { ctx }
+            | Command::Resume { ctx }
+            | Command::Abandon { ctx, .. }
+            | Command::RetryNode { ctx, .. }
+            | Command::SupplySpec { ctx, .. } => Some(ctx),
+            Command::RequestHeal(_) | Command::Classify(_) => None,
+        }
+    }
+}
+
 pub enum ClassifyRequest {
     Ci(CiClassifyRequest),
     Finding(FindingClassifyRequest),

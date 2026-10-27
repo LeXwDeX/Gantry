@@ -792,3 +792,259 @@ async fn external_writes_wait_while_the_lease_is_held() {
     let second = tokio::time::timeout(Duration::from_millis(100), h.store.begin_write()).await;
     assert!(second.is_ok(), "the lease is released after rollback");
 }
+
+// ---------------------------------------------------------------------------
+// §12.2"设置热加载"与 models_not_configured（§9）：设置在两次决策之间切换
+// ---------------------------------------------------------------------------
+
+fn actor_with(h: &Harness, config: ActorConfig) -> DeliveryActor {
+    DeliveryActor::new(
+        h.delivery,
+        ActorDeps {
+            store: h.store.clone(),
+            inbox: Arc::new(FakeInbox::new_in(h.store.clone())),
+            outbox: h.forge.clone(),
+            effects: h.runner.clone(),
+            snapshots: h.snapshots.clone(),
+            cas: Arc::new(h.store.cas()),
+        },
+        config,
+    )
+}
+
+async fn write_settings_updated(store: &Store) {
+    let event = NewEvent {
+        ty: "settings.updated".parse().unwrap(),
+        subject: Subject::parse("settings").unwrap(),
+        project_id: None,
+        actor: Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"),
+        causation_id: None,
+        correlation_id: None,
+        data: json!({"scope": "global", "resource": "levels", "schema_version": 1, "base_rev": 0,
+                     "value": {}, "relaxes": [], "secret_changes": []}),
+        dedup_key: None,
+    };
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(event).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+fn models_item(state: &DeliveryState) -> Option<&gantry_engine::state::OpenInbox> {
+    state
+        .open_inbox
+        .values()
+        .find(|i| i.reason_code.as_ref().map(|r| r.as_str()) == Some("models_not_configured"))
+}
+
+/// 模型表缺项 → 不派发并上报 `escalation(models_not_configured)`；两次决策之间切换设置后，
+/// `settings.updated` 关闭该项并以新设置派发（`attempt.started.config_rev` 取新值）。
+/// "进行中的决策用旧值"由结构保证：`reconfigure` 需要 `&mut self`，不能与 `handle` 并发，
+/// 每一轮在开始时取一份配置（`DeliveryActor::round`）。
+#[tokio::test]
+async fn settings_reload_applies_between_decisions() {
+    let h = Harness::new().await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    let mut old = config();
+    old.models.clear();
+    let mut actor = actor_with(&h, old);
+    h.settle(&mut actor).await;
+    h.pump(&mut router, &mut actor).await;
+    assert!(h.runner.plans().is_empty());
+    assert_eq!(
+        h.runner.count(|e| matches!(e, Effect::AcquireLock { .. })),
+        0
+    );
+    let state = h.state().await;
+    let item = models_item(&state).expect("models_not_configured raised");
+    assert_eq!(item.kind, InboxKind::Escalation);
+
+    // 两次决策之间切换设置（新 config_rev），再由 settings.updated 广播触发求值。
+    let mut new = config();
+    new.settings.config_rev = Seq::new(2).unwrap();
+    actor.reconfigure(new);
+    write_settings_updated(&h.store).await;
+    h.pump(&mut router, &mut actor).await;
+    let state = h.state().await;
+    assert!(models_item(&state).is_none());
+    let plans = h.runner.plans();
+    assert_eq!(plans.len(), 1, "dispatched after the reload");
+    let attempt = state
+        .node(&plans[0].node_id)
+        .unwrap()
+        .attempts
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(attempt.config_rev, Seq::new(2).unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// §7.14.2 `InboxResolved.item`：路由器从收件箱投影补上原上报项，选项经执行体落地
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn inbox_resolved_carries_the_raised_item_and_upgrade_applies() {
+    use gantry_core::entities::{InboxOption, InboxPayload, ReasonCode, Severity};
+    use gantry_core::ports::inbox::{
+        DedupKey, InboxPort, OptionId, RaiseOutcome, RaiseRequest, SafeSummary,
+    };
+    let h = Harness::new().await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    let mut actor = h.actor();
+    let inbox = FakeInbox::new_in(h.store.clone());
+    let engine_ctx = ActorCtx {
+        actor: Actor::new(ActorKind::Engine, "engine"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: gantry_core::ids::Ulid::from_parts(1, 1).unwrap(),
+        idempotency_key: None,
+        dedup_key: None,
+        causation_id: None,
+    };
+    let raised = inbox
+        .raise(
+            None,
+            RaiseRequest {
+                project_id: Some(project_id()),
+                delivery_id: Some(h.delivery),
+                kind: InboxKind::Escalation,
+                severity: Severity::Blocker,
+                summary: SafeSummary::new("需要升档"),
+                payload: InboxPayload::Escalation {
+                    reason_code: ReasonCode::parse("level_cap_exceeded").unwrap(),
+                    node_id: None,
+                    attempt_id: None,
+                    target_level: Some(Level::Medium),
+                    action_id: None,
+                    evidence: Vec::new(),
+                    options: Some(vec![
+                        InboxOption::new("upgrade", "升档", true),
+                        InboxOption::new("narrow", "缩小范围", false),
+                        InboxOption::new("abandon", "放弃", false),
+                    ]),
+                },
+                dedup_key: DedupKey::new("esc:test:level_cap_exceeded"),
+                supersedes: Vec::new(),
+                actor: Actor::new(ActorKind::Engine, "engine"),
+                causation_id: None,
+            },
+            &engine_ctx,
+        )
+        .await
+        .unwrap();
+    let RaiseOutcome::Created(written) = raised else {
+        panic!("expected a new item")
+    };
+    let id = written.item.id;
+    let active = BTreeSet::from([h.delivery]);
+    let _ = router.poll(&active).await.unwrap();
+
+    let user = ActorCtx {
+        actor: Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"),
+        ..engine_ctx
+    };
+    inbox
+        .choose(&id, &OptionId::new("upgrade"), None, &user)
+        .await
+        .unwrap();
+    let dispatches = router.poll(&active).await.unwrap();
+    let [dispatch] = dispatches.as_slice() else {
+        panic!("expected exactly one dispatch")
+    };
+    let Input::Event(gantry_engine::decide::Observed {
+        data:
+            gantry_engine::decide::ObservedData::InboxResolved {
+                item: Some(item), ..
+            },
+        ..
+    }) = &dispatch.input
+    else {
+        panic!("inbox.resolved must carry the raised item")
+    };
+    assert_eq!(item.id, id);
+    assert_eq!(item.target_level, Some(Level::Medium));
+    assert_eq!(item.raised_by, gantry_engine::state::RaisedBy::Engine);
+    assert!(item.options.contains(&OptionId::new("upgrade")));
+
+    // 交给执行体：upgrade → level_changed(cap, Low → Medium)。
+    for d in dispatches {
+        actor.handle(d.input, d.identity).await.unwrap();
+        router.processed(d.delivery, d.seq);
+    }
+    assert_eq!(h.state().await.delivery.level_cap, Level::Medium);
+}
+
+// ---------------------------------------------------------------------------
+// 命令幂等（#73 决定 3）：同一请求身份重放返回首次结果；新请求照常检查前置条件
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn repeated_command_returns_first_result_new_request_is_checked() {
+    use gantry_core::entities::{FailureClass, FailureDetail};
+    use gantry_engine::decide::{Command, CommandRejection};
+
+    let h = Harness::new().await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    let mut actor = h.actor();
+    h.settle(&mut actor).await;
+    h.pump(&mut router, &mut actor).await;
+    let plan = h.runner.plans().remove(0);
+    let failed = Finalized {
+        attempt_id: plan.attempt_id,
+        node_id: plan.node_id,
+        status: AttemptStatus::Failed,
+        failure_class: Some(FailureClass::ExecFailed),
+        failure_detail: Some(FailureDetail::parse("exec.bad_job").unwrap()),
+        result_ref: None,
+        usage_metered: TokenUsage::default(),
+        weighted_tokens: 0,
+        weight_audit: serde_json::from_value(json!({"basis": "job_token", "config_rev": 1, "weights": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25}})).unwrap(),
+        wall_time_s: 60,
+        verdict: None,
+        patch: PatchResult::None,
+        proposals: vec![],
+        signals: OutputSignals::default(),
+    };
+    actor
+        .handle(
+            Input::Report(EffectReport::AttemptFinalized(failed)),
+            InputIdentity::Report(EffectKey::Run(plan.attempt_id)),
+        )
+        .await
+        .unwrap();
+
+    let ctx = |key: &str| ActorCtx {
+        actor: Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: gantry_core::ids::Ulid::from_parts(T0 as u64, 7).unwrap(),
+        idempotency_key: None,
+        dedup_key: Some(key.to_owned()),
+        causation_id: None,
+    };
+    let retry = |key: &str| {
+        let command = Command::RetryNode {
+            node_id: plan.node_id,
+            ctx: ctx(key),
+        };
+        (
+            Input::Command(command),
+            InputIdentity::Command(gantry_core::ids::Ulid::from_parts(T0 as u64, 7).unwrap()),
+        )
+    };
+    let (input, identity) = retry("retry-1");
+    assert_eq!(actor.handle(input, identity).await.unwrap(), vec![Ok(())]);
+    // 节点已重新排队并派发；同一请求重放 → 首次结果 Ok，不再写事件。
+    let head = h.store.events().head().await.unwrap();
+    let (input, identity) = retry("retry-1");
+    assert_eq!(actor.handle(input, identity).await.unwrap(), vec![Ok(())]);
+    assert_eq!(h.store.events().head().await.unwrap(), head);
+    // 新请求：节点已不是 failed → InvalidState。
+    let (input, identity) = retry("retry-2");
+    assert_eq!(
+        actor.handle(input, identity).await.unwrap(),
+        vec![Err(CommandRejection::InvalidState("node is not failed"))]
+    );
+}

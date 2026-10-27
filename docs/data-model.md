@@ -188,6 +188,21 @@ erDiagram
 
 新增 `reason_code` 或选项 id 须经契约 PR 回写本表；未列出的 `option_id` 由 `notify` 拒绝（`422`）。
 
+### 引擎写入的 dedup_key
+
+`engine` 写上报项与业务事件时使用下列 `dedup_key`（#73）。上报项的键决定"同一键已有 `open` 项时不再新建"；事件的键由 store 去重，同一键重放只保留第一条。
+
+| 用途 | 格式 | 说明 |
+| --- | --- | --- |
+| 尝试失败上报 `escalation(attempt_failed)` | `esc:<delivery_id>:attempt_failed:<node_id>` | `RetryNode` 在同一决策中按此键关闭 |
+| 受保护路径 / 其他失败子码的上报 | `esc:<delivery_id>:<failure_detail>:<node_id>` | 如 `policy.path_protected:lockfiles` |
+| 动作被策略拒绝 | `esc:<delivery_id>:<reason>:<action_key>` | `<action_key>` 为 Outbox 幂等键 |
+| 模型未配置 | `esc:<delivery_id>:models_not_configured:<node_id>` | 设置更新后表项存在即关闭 |
+| 预算耗尽 `budget_exhausted` | `budget:<delivery_id>:<dimension>` | `<dimension>` 如 `tokens_by_tier.worker` |
+| 合并审批 `approval_needed` | `approval:<approval_id>` | — |
+| 控制命令写的业务事件 | 第 1 条为 `ctx.dedup_key`，第 n 条（n ≥ 2）为 `<ctx.dedup_key>:<n>` | 与 api 的约定（#99）；`ctx.dedup_key` 为空时不带。执行体按它识别同一请求的重放并返回首次结果 |
+| 上报项选项执行写的事件 | `inbox-option:<inbox.resolved 事件 id>`，第 n 条为 `…:<n>` | 同一 `inbox.resolved` 重放不重复执行 |
+
 ### 审批动作的 target 与 subject_digest
 
 `Approval.action` ∈ `ForgeActionKind` ∪ {`settings_update`、`device_role_change`、`device_revoke`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、`patch_apply_protected`}（P-54）。下表是**全部**已定义形状；`action` 合法但不在下表中（例如某个 `ForgeActionKind` 被配置为 `approve`，而它的形状尚未定义）时一律 **fail-closed**：不创建审批，按拒绝处理并上报（`escalation`，`reason_code = approval_shape_undefined`）。`target` 中的数组在规范化时保持原序（[api.md §6.3](interfaces/api.md#63-规范化与签名)）。

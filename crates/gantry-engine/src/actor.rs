@@ -308,7 +308,21 @@ impl DeliveryActor {
             proposals: &self.proposals,
             consts: config.consts,
         };
-        let decisions = decide(&state, input, &env);
+        // 幂等优先（#73）：命令的请求身份（`ctx.dedup_key`）已写进日志 → 同一请求的重放，返回首次结果
+        // `Ok`，不再求前置条件（首次被拒时不写事件，键不会出现）。新请求照常求值，例如对已不是 failed
+        // 的节点再发 RetryNode → InvalidState。
+        let replayed = match input {
+            Input::Command(command) => match command.ctx().and_then(|c| c.dedup_key.as_deref()) {
+                Some(key) => store.events().by_dedup_key(key).await?.is_some(),
+                None => false,
+            },
+            _ => false,
+        };
+        let decisions = if replayed {
+            vec![Decision::Reply(Ok(()))]
+        } else {
+            decide(&state, input, &env)
+        };
         let ctx = self.ctx(u64::try_from(now.as_millis()).unwrap_or(0));
         let mut round = Round {
             now,

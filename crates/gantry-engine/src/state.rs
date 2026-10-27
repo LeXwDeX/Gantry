@@ -14,17 +14,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use gantry_core::canon::{sha256, GitOid, IdempotencyKey, Sha256Digest, SubjectDigest};
 use gantry_core::entities::{
     role_profile, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, BudgetDimension,
-    BudgetUsed, Exec, FailureClass, FailureDetail, ForgeActionKind, GithubPrRef, InboxKind,
-    InboxPayload, LockHolder, NodeStatus, PullRequestRef, ReasonCode, Role, Seq, Severity, Stage,
-    StageStatus, Tier, Verdict, WorkflowStatus,
+    BudgetLimits, BudgetUsed, Exec, FailureClass, FailureDetail, ForgeActionKind, GithubPrRef,
+    InboxItem, InboxKind, InboxPayload, LockHolder, NodeStatus, PullRequestRef, ReasonCode, Role,
+    Seq, Severity, Stage, StageStatus, Tier, Verdict, WorkflowStatus,
 };
 use gantry_core::events::{
     AttemptFinishedData, AttemptStartedData, BudgetChargeSource, BudgetChargedData,
-    BudgetChargedDimension, BudgetExhaustedData, Event, EventType, InboxRaisedData,
-    InboxResolvedData, NodeDescriptor, NodeEventData, NodeRetryRequestedData, OutboxEnqueuedData,
-    OutboxFailedData, OutboxFailureCode, OutboxSucceededData, PatchValidatedData,
-    WorkflowCreatedData, WorkflowFinishedData, WorkflowRevisedData, WorktreeCreatedData,
-    WorktreeLockedData, WorktreeRemovedData, WorktreeUnlockedData,
+    BudgetChargedDimension, BudgetExhaustedData, BudgetLimitRaisedData, Event, EventType,
+    InboxRaisedData, InboxResolvedData, NodeDescriptor, NodeEventData, NodeRetryRequestedData,
+    OutboxEnqueuedData, OutboxFailedData, OutboxFailureCode, OutboxSucceededData,
+    PatchValidatedData, WorkflowCreatedData, WorkflowFinishedData, WorkflowRevisedData,
+    WorktreeCreatedData, WorktreeLockedData, WorktreeRemovedData, WorktreeUnlockedData,
 };
 use gantry_core::ids::{
     ActionId, ApprovalId, AttemptId, DeliveryId, InboxId, NodeId, WorkflowId, WorktreeId,
@@ -93,6 +93,9 @@ pub struct LedgerState {
     pub used: BudgetUsed,
     /// 已写过的 `budget.exhausted`：(维度, seq)；"本阶段尚无同维度耗尽"以 `stage_entered` 为界。
     pub exhausted: Vec<(BudgetDimension, Seq)>,
+    /// 已写过的 `budget.limit_raised`：(维度, 追加量 `by`, seq)（D-19，#129）。
+    /// 折叠时 `delivery.budget.limits[维度]` 改为 `to`；模板原值 = 当前上限 − 同维度 `by` 之和。
+    pub raised: Vec<(BudgetDimension, u64, Seq)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -519,6 +522,14 @@ impl DeliveryState {
                 let data: BudgetExhaustedData = decode(event, ty)?;
                 self.ledger.exhausted.push((data.dimension, event.seq));
             }
+            // limits[dimension] = to，used 不变（event-data.md §2.2.6.6）。
+            EventType::BudgetLimitRaised => {
+                let data: BudgetLimitRaisedData = decode(event, ty)?;
+                set_limit(&mut self.delivery.budget.limits, data.dimension, data.to);
+                self.ledger
+                    .raised
+                    .push((data.dimension, data.by, event.seq));
+            }
             EventType::InboxRaised => {
                 let data: InboxRaisedData = decode(event, ty)?;
                 let item = open_inbox(&data, event);
@@ -704,12 +715,56 @@ fn add_nodes(
 }
 
 fn open_inbox(data: &InboxRaisedData, event: &Event<Value>) -> OpenInbox {
-    let item = &data.item;
-    let raised_by = match event.actor.kind {
-        ActorKind::Engine => RaisedBy::Engine,
-        ActorKind::Guardian => RaisedBy::Guardian,
-        _ => RaisedBy::Other,
-    };
+    OpenInbox::from_item(&data.item, RaisedBy::of(event.actor.kind), event.seq)
+}
+
+impl RaisedBy {
+    /// `inbox.raised` 信封的 `actor.kind` → 创建方。
+    pub fn of(kind: ActorKind) -> Self {
+        match kind {
+            ActorKind::Engine => RaisedBy::Engine,
+            ActorKind::Guardian => RaisedBy::Guardian,
+            _ => RaisedBy::Other,
+        }
+    }
+}
+
+/// 某维度的上限（`BudgetDimension` 与 `BudgetLimits` 字段的对应）。
+pub fn limit_of(limits: &BudgetLimits, dimension: BudgetDimension) -> u64 {
+    match dimension {
+        BudgetDimension::TokensByTier(tier) => {
+            limits.tokens_by_tier.get(&tier).copied().unwrap_or(0)
+        }
+        BudgetDimension::Nodes => limits.nodes,
+        BudgetDimension::Rounds => limits.rounds,
+        BudgetDimension::WallTime => limits.wall_time,
+        BudgetDimension::Concurrency => limits.concurrency,
+        BudgetDimension::ForgeWrites => limits.forge_writes,
+    }
+}
+
+fn set_limit(limits: &mut BudgetLimits, dimension: BudgetDimension, value: u64) {
+    match dimension {
+        BudgetDimension::TokensByTier(tier) => {
+            limits.tokens_by_tier.insert(tier, value);
+        }
+        BudgetDimension::Nodes => limits.nodes = value,
+        BudgetDimension::Rounds => limits.rounds = value,
+        BudgetDimension::WallTime => limits.wall_time = value,
+        BudgetDimension::Concurrency => limits.concurrency = value,
+        BudgetDimension::ForgeWrites => limits.forge_writes = value,
+    }
+}
+
+impl OpenInbox {
+    /// 由上报项构造（`inbox.raised.item`，或 store 收件箱投影按 `inbox_id` 取回的项）。
+    /// `raised_by` 与 `raised_seq` 来自 `inbox.raised` 的信封，上报项本身不带。
+    pub fn from_item(item: &InboxItem, raised_by: RaisedBy, raised_seq: Seq) -> Self {
+        open_inbox_item(item, raised_by, raised_seq)
+    }
+}
+
+fn open_inbox_item(item: &InboxItem, raised_by: RaisedBy, raised_seq: Seq) -> OpenInbox {
     let mut open = OpenInbox {
         id: item.id,
         kind: item.kind.clone(),
@@ -722,7 +777,7 @@ fn open_inbox(data: &InboxRaisedData, event: &Event<Value>) -> OpenInbox {
         approval_id: None,
         target_level: None,
         options: Vec::new(),
-        raised_seq: event.seq,
+        raised_seq,
     };
     let options = |options: &[gantry_core::entities::InboxOption]| {
         options
