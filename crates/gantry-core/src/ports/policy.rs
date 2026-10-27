@@ -79,11 +79,13 @@ pub enum ActionFacts {
     },
     ResolveReviewThread {
         repo: RepoSlug,
+        number: u64,
+        thread_node_id: String,
         thread_has_human_comment: bool,
     },
-    Other {
-        repo: RepoSlug,
-    },
+    /// 其余动作：由入队方从待入队载荷投影出的目标身份（与 `policy.denied.target`
+    /// 同形），policy 不从仓库名猜目标（event-data §2.2.6）。
+    Other { target: crate::events::PolicyTarget },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -505,7 +505,12 @@ fn merge_request(requested_by: Actor) -> ActionRequest {
         project_id: project().id,
         delivery_id: None,
         kind: ForgeActionKind::MergePr,
-        facts: ActionFacts::Other { repo: slug() },
+        facts: ActionFacts::Other {
+            target: gantry_core::events::PolicyTarget::Pr {
+                repo: slug(),
+                number: 7,
+            },
+        },
         requested_by,
     }
 }
@@ -547,7 +552,12 @@ async fn policy_decisions_and_approvals_are_single_use() {
         project_id,
         delivery_id: None,
         kind: ForgeActionKind::MergePr,
-        facts: ActionFacts::Other { repo: slug() },
+        facts: ActionFacts::Other {
+            target: gantry_core::events::PolicyTarget::Pr {
+                repo: slug(),
+                number: 7,
+            },
+        },
         requested_by: actor(),
     };
     action_conformance(&policy, action.clone(), &ctx)

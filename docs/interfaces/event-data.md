@@ -769,7 +769,7 @@
 
 **目标判别**
 
-`PolicyTarget` 是推荐新增的事件投影类型，不是现有生产类型；目标必须来自 `ActionRequest.target`，不能从 `ActionFacts::Other` 猜。
+`PolicyTarget` 已是 core 类型（`events::PolicyTarget`）。目标必须来自请求本身：`MergePr` / `PushBranch` / `ResolveReviewThread` 取 `ActionFacts` 里的对象身份，其余动作取 `ActionFacts::Other.target`（#89 Q1）；不能从仓库名猜。
 
 | `kind` | 字段 | 用途 |
 | --- | --- | --- |
@@ -813,7 +813,7 @@
 
 3 个预留项保留配置与拒绝语义，但没有当前执行路径：`delete_branch` 是破坏性删除，`publish_release` 是发布写，`change_repo_settings` 是仓库设置写；第一版均无执行器，不产生事件，不虚构调用。
 
-**端口来源**：`ActionRequest` 需要新增 `target`（或等价字段），由入队方在入队前从尚未入队的请求 payload 投影；这是契约变更建议，本轮不改生产代码，也不要求已创建编号。当前 `ActionFacts` 不完整：`Other` 只有 `repo`，`ResolveReviewThread` 缺 thread id。未补 `target` 前，缺目标身份的动作 fail-closed，不能退化为 `repo`（否则同仓库不同 PR 会被合并）。
+**端口来源**（#89 Q1 已决）：`ActionFacts::ResolveReviewThread` 带 `{repo, number, thread_node_id, thread_has_human_comment}`；`ActionFacts::Other` 带 `target: PolicyTarget`，由入队方在入队前从待入队载荷投影。`target.kind` 与动作 id 不符时按 fail-closed 处理，不能退化为 `repo`（否则同仓库不同 PR 会被合并）。
 
 **补丁 `reasons`**
 
@@ -903,7 +903,7 @@
 
 - ~~B-01 方向已确认、字段待审~~：2026-10-27 已批准并补端口（#82，[egress-call-terminal.md](egress-call-terminal.md)）；direct call 的最终结算、释放和零判定以其 `terminal` 证明为据。
 - `decide_proposals` 缺 P78 `ActorCtx`：proposal 分支不能发事件；需加参数。
-- `ActionRequest` 缺统一 `target`，`ActionFacts::Other`/`ResolveReviewThread` 缺对象身份；未补前不能发对应 `policy.denied`，不能退化为 `repo`。
+- ~~`ActionRequest` 缺统一 `target`，`ActionFacts::Other`/`ResolveReviewThread` 缺对象身份~~：#89 Q1 已补（`Other.target`、`ResolveReviewThread.{number, thread_node_id}`）。
 - `DenyReason` 缺 `PatchNotApproved`；`file_mode_change` 仍是 OQ-P5 候选。
 - ~~`UsageRecord` 缺 `weight_rev`~~（#82 已补）；`FinalUsage` 缺权重快照；权重审计仍需补契约。
 - `BudgetDimension` 缺 `Attempts`；需枚举同步，不新增配置键。
