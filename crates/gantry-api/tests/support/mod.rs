@@ -110,8 +110,8 @@ pub struct Harness {
     pub clock: Arc<FakeClock>,
     pub devices: Arc<Devices>,
     pub store: Store,
-    pub engine: Arc<doubles::StoreEngine>,
-    pub conversation: Arc<doubles::StoreConversation>,
+    pub engine: Arc<gantry_fakes::engine::FakeEngine>,
+    pub conversation: Arc<doubles::ConvFaults>,
     pub idempotency: Arc<MemoryIdempotency>,
 }
 
@@ -135,13 +135,8 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
     })
     .unwrap();
     let devices = Arc::new(Devices::default());
-    let engine = Arc::new(doubles::StoreEngine::new(store.clone()));
-    let conversation = Arc::new(doubles::StoreConversation {
-        store: store.clone(),
-        ids: ids.clone(),
-        known: Mutex::default(),
-        calls: Mutex::default(),
-    });
+    let engine = Arc::new(gantry_fakes::engine::FakeEngine::new());
+    let conversation = Arc::new(doubles::ConvFaults::new());
     let idempotency = Arc::new(MemoryIdempotency::new(clock.clone()));
     let svc = Services {
         clock: clock.clone(),
@@ -229,4 +224,19 @@ pub fn assert_problem(resp: &ApiResponse, status: u16, code: &str) -> Value {
     assert!(header(resp, "access-control-allow-origin").is_none());
     validate("Problem", &b);
     b
+}
+
+/// 换一个幂等存储重建同一套服务（模拟重启后 `api_idempotency` 的完成记录丢失）。
+pub fn rebuild_with_idempotency(h: &Harness, idempotency: Arc<MemoryIdempotency>) -> Harness {
+    let mut svc = h.core.services().clone();
+    svc.idempotency = idempotency.clone();
+    Harness {
+        core: ApiCore::new(ApiConfig::default(), svc),
+        clock: h.clock.clone(),
+        devices: h.devices.clone(),
+        store: h.store.clone(),
+        engine: h.engine.clone(),
+        conversation: h.conversation.clone(),
+        idempotency,
+    }
 }

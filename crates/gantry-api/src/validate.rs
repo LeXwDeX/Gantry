@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use jsonschema::error::ValidationErrorKind;
+use jsonschema::ValidationError;
 use jsonschema::Validator;
 use serde_json::{json, Value};
 
@@ -43,57 +44,77 @@ pub fn body(component: &str, value: &Value) -> Result<(), Problem> {
     let validator = validator(component);
     let mut errors: Vec<FieldError> = Vec::new();
     for error in validator.iter_errors(value) {
-        let pointer = error.instance_path().to_string();
-        match error.kind() {
-            ValidationErrorKind::AdditionalProperties { unexpected } => {
-                for field in unexpected {
-                    errors.push(unknown_field(&pointer, field));
-                }
-            }
-            // `additionalProperties: false` 且没有 `properties`（`EmptyRequest`）时，
-            // 校验器对整个对象报 `false` schema：其中每个键都是未知字段。
-            ValidationErrorKind::FalseSchema => match value.pointer(&pointer) {
-                Some(Value::Object(map)) => {
-                    errors.extend(map.keys().map(|field| unknown_field(&pointer, field)))
-                }
-                _ => errors.push(FieldError::new(pointer, "unknown_field", "unknown field")),
-            },
-            ValidationErrorKind::Required { property } => {
-                let name = property.as_str().unwrap_or_default();
-                errors.push(FieldError::new(
-                    format!("{pointer}/{}", escape(name)),
-                    "required",
-                    "field is required",
-                ));
-            }
-            ValidationErrorKind::AnyOf { context }
-            | ValidationErrorKind::OneOfNotValid { context } => {
-                // 各分支都不匹配：取分支里最具体的原因（枚举 > 范围 > 类型）。
-                let code = context
-                    .iter()
-                    .flatten()
-                    .map(|e| code_of(e.kind()))
-                    .min_by_key(|code| match *code {
-                        "enum" => 0,
-                        "range" => 1,
-                        _ => 2,
-                    })
-                    .unwrap_or("type");
-                errors.push(FieldError::new(pointer, code, message_of(code)));
-            }
-            kind => {
-                let code = code_of(kind);
-                errors.push(FieldError::new(pointer, code, message_of(code)));
-            }
-        }
+        collect(&error, value, &mut errors);
     }
     if errors.is_empty() {
         Ok(())
     } else {
-        // `allOf` 包装与 `oneOf` 分支可能对同一位置报多条；按指针与 code 去重。
+        // `allOf` 包装可能对同一位置报多条；按指针与 code 去重。
         errors.dedup_by(|a, b| a.pointer == b.pointer && a.code == b.code);
         Err(Problem::validation(errors))
     }
+}
+
+fn collect(error: &ValidationError<'_>, value: &Value, out: &mut Vec<FieldError>) {
+    let pointer = error.instance_path().to_string();
+    match error.kind() {
+        ValidationErrorKind::AdditionalProperties { unexpected } => {
+            for field in unexpected {
+                out.push(unknown_field(&pointer, field));
+            }
+        }
+        // `additionalProperties: false` 且没有 `properties`（`EmptyRequest`）时，
+        // 校验器对整个对象报 `false` schema：其中每个键都是未知字段。
+        ValidationErrorKind::FalseSchema => match value.pointer(&pointer) {
+            Some(Value::Object(map)) => {
+                out.extend(map.keys().map(|field| unknown_field(&pointer, field)))
+            }
+            _ => out.push(FieldError::new(pointer, "unknown_field", "unknown field")),
+        },
+        ValidationErrorKind::Required { property } => {
+            let name = property.as_str().unwrap_or_default();
+            out.push(FieldError::new(
+                format!("{pointer}/{}", escape(name)),
+                "required",
+                "field is required",
+            ));
+        }
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            match best_branch(context, &pointer) {
+                // 选中"种类匹配"的分支，沿用它的逐字段错误与指针。
+                Some(branch) => {
+                    for inner in branch {
+                        collect(inner, value, out);
+                    }
+                }
+                None => out.push(FieldError::new(pointer, "type", message_of("type"))),
+            }
+        }
+        kind => {
+            let code = code_of(kind);
+            out.push(FieldError::new(pointer, code, message_of(code)));
+        }
+    }
+}
+
+/// 在 `anyOf` / `oneOf` 的各分支里挑出最可能是客户端意图的那个：
+/// 排除判别字段（`kind` 等常量）不符的分支与"整个值类型不对"的分支，
+/// 余下取错误最少者（`Ref` 按 `kind` 选分支；`level_cap` 选枚举分支而不是 `null`）。
+fn best_branch<'a>(
+    context: &'a [Vec<ValidationError<'static>>],
+    pointer: &str,
+) -> Option<&'a Vec<ValidationError<'static>>> {
+    let disqualified = |branch: &Vec<ValidationError<'static>>| {
+        branch.iter().any(|e| {
+            matches!(e.kind(), ValidationErrorKind::Constant { .. })
+                || (matches!(e.kind(), ValidationErrorKind::Type { .. })
+                    && e.instance_path().to_string() == pointer)
+        })
+    };
+    context
+        .iter()
+        .filter(|branch| !branch.is_empty() && !disqualified(branch))
+        .min_by_key(|branch| branch.len())
 }
 
 fn unknown_field(pointer: &str, field: &str) -> FieldError {

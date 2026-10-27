@@ -397,10 +397,11 @@ impl ApiCore {
 
         // 11. 幂等登记：重放 / 冲突 / 进行中
         let device_id = a.auth.device.id;
+        let mut lease = None;
         if let Some(key) = key {
             let print = idempotency::fingerprint(a.route.method, &a.instance, parsed.as_ref());
             match self.svc.idempotency.begin(&device_id, key, print) {
-                Begin::Proceed => {}
+                Begin::Proceed(held) => lease = Some(held),
                 Begin::Replay(stored) => return replay_response(stored, a.log_epoch, a.rate),
                 Begin::InProgress => {
                     return fail(Problem::new(
@@ -432,12 +433,14 @@ impl ApiCore {
             Ok(reply) => success_response(reply, &a.request_id, a.log_epoch, a.rate),
             Err(problem) => fail(problem),
         };
-        if let Some(key) = key {
+        if let (Some(key), Some(lease)) = (key, lease) {
             // 首次响应是 5xx 不登记，允许同键重试；4xx 登记并重放。
             if resp.status().is_server_error() {
-                self.svc.idempotency.abandon(&device_id, key);
+                self.svc.idempotency.abandon(&device_id, key, lease);
             } else {
-                self.svc.idempotency.finish(&device_id, key, stored(&resp));
+                self.svc
+                    .idempotency
+                    .finish(&device_id, key, lease, stored(&resp));
             }
         }
         resp
