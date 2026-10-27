@@ -34,30 +34,41 @@
 
 **未实现或未验证**：Outbox 执行与审批消费（`PolicyPort` 尚未接入引擎）；终结管线与 `waiting_human` / `blocked` 自动切换；`attempt.*`、`budget.charged` 的事件写入；真实 GitHub App、模型、Podman、目标主机与代码签名。M1 端到端退出标准全部未验证，取证分级见 [M1 验收证据分级（提议）](docs/m1-acceptance.md)。
 
-**M0 遗留**（见 M0 遗留收口里程碑，issue 待开）：
+**M0 遗留**（里程碑 [M0.9 M0 遗留收口](https://github.com/LeXwDeX/gantry/milestone/2)）：
 
-- B-01 Egress 调用级终结：`core::ports::egress::EgressControl` 只有 `call_usage` 等用量查询和整令牌吊销，还没有调用级关闭屏障；候选方案见 [调用级终结（送审草案）](docs/interfaces/egress-call-terminal.md)。在它批准并实现之前，直接调用的最终结算、释放和零判定都没有可信证据。
-- `xtask schemas --check` 报告的 OpenAPI / core 人工核对差异尚未逐项判定是允许的视图差异还是漂移。
-- 3 个显式未验证文档块（`github_ref` 组合、App Manifest、`ResultBundle`）仍按 `example` / `contract-undefined` 登记。
+- #82：B-01 Egress 调用级终结：`core::ports::egress::EgressControl` 只有 `call_usage` 等用量查询和整令牌吊销，还没有调用级关闭屏障；候选方案见 [调用级终结（送审草案）](docs/interfaces/egress-call-terminal.md)。在它批准并实现之前，直接调用的最终结算、释放和零判定都没有可信证据。
+- #83：`xtask schemas --check` 报告的 OpenAPI / core 人工核对差异尚未逐项判定是允许的视图差异还是漂移。
+- #84：3 个显式未验证文档块（`github_ref` 组合、App Manifest、`ResultBundle`）仍按 `example` / `contract-undefined` 登记。
 
 ## 待拍板
 
-以下事项需要用户决定，不自行拍板。
+以下事项需要用户决定，不自行拍板。M1 宣布方式、Q-10、Q-11 汇总在 #87。
 
 | 事项 | 阻塞什么 |
 | --- | --- |
 | #66 E3：`Deny { report: None }` 的上报码（`needs-decision`） | #72（decide 切片 4，终结管线） |
 | #67 E6：Outbox 终态失败后的重做入口（`needs-decision`） | #73（decide 切片 5，控制面与异常路径） |
-| M1 宣布方式：单步还是两步（[m1-acceptance.md §5](docs/m1-acceptance.md#5-建议的推进方式待用户确认)） | M1 对外的中间状态怎么说；不阻塞开发 |
-| M0 契约的正式批准标记 | 契约文本仍为"送审、尚未批准"，后续契约 PR 以它为基线 |
-| GitHub 账户计费 | 远端 CI；恢复前所有 PR 只能靠本机检查合入 |
-| `decisions.md` 待决的 Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算）、Q-12（结果对象读取路由） | 分别影响 `pki` / `api` 的安装引导、`engine` / `notify` 的预算追加、M2 的补丁签名审批 |
+| #87 M1 宣布方式：单步还是两步（[m1-acceptance.md §5](docs/m1-acceptance.md#5-建议的推进方式待用户确认)） | M1 对外的中间状态怎么说；不阻塞开发 |
+| GitHub 账户计费（#86，由用户处理） | 远端 CI；恢复前所有 PR 只能靠本机检查合入 |
+| #87 `decisions.md` 待决的 Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算） | 分别阻塞 `pki` 的安装引导期、`notify` 的选项与引擎预算追加 |
+| Q-12（结果对象读取路由） | M2 的补丁签名审批；不在 M1 范围 |
+
+M0 契约文本的"送审、尚未批准"标注已由用户在 2026-10-27 统一批准，改标注见 #85。
 
 ## 后续规划（2026-10-26 起，按顺序；每步单独授权）
 
 原则不变：契约先于实现、一个 PR 一件事、待决项不自行拍板、替身通过不等于真实环境通过。
 
-**协作方式**：Claude 负责指挥与评审，开发按 GitHub 里程碑与 issue 推进。每完成一个里程碑回来做一次**里程碑评审**：对照本节与 issue 的完成标准检查已合入代码，纠偏、查错，必要时调整框架结构；评审结论与下一轮的里程碑和 issue 再写回本文件。当前里程碑：[M1.1 决策器：契约补缺与 decide 实现](https://github.com/LeXwDeX/gantry/milestone/1)（阶段 1、2）。阶段 3 起的里程碑在 M1.1 评审时再开。
+**协作方式**：Claude 负责指挥与评审，开发按 GitHub 里程碑与 issue 推进。每完成一个里程碑回来做一次**里程碑评审**：对照本节与 issue 的完成标准检查已合入代码，纠偏、查错，必要时调整框架结构；评审结论与下一轮的里程碑和 issue 再写回本文件。2026-10-27 起全部任务已建成 issue，按里程碑推进：
+
+| 里程碑 | 对应阶段 | issue |
+| --- | --- | --- |
+| [M0.9 M0 遗留收口](https://github.com/LeXwDeX/gantry/milestone/2) | M0 遗留 | #82–#86 |
+| [M1.1 决策器：契约补缺与 decide 实现](https://github.com/LeXwDeX/gantry/milestone/1) | 阶段 1、2 | #64–#75 |
+| [M1.2 服务端泳道（替身对接）](https://github.com/LeXwDeX/gantry/milestone/3) | 阶段 3 | #88–#100；待拍板汇总 #87 |
+| [M1.3 桌面端、组装与部署](https://github.com/LeXwDeX/gantry/milestone/4) | 阶段 3 | #101–#104 |
+| [M1.4 M1 验收（B / C 级）](https://github.com/LeXwDeX/gantry/milestone/5) | 阶段 4、5 | #105–#107 |
+| [M2-prep Agent 扩展性预留](https://github.com/LeXwDeX/gantry/milestone/6) | 阶段 6 | #108–#110 |
 
 ### 阶段 0：合并上一轮 PR（已完成）
 
@@ -95,19 +106,27 @@ M1.1 的 issue（#64–#75）都还没有动工。
 
 ### 阶段 3：M1 其他泳道（按对引擎端到端的依赖排序）
 
+服务端泳道见 [M1.2](https://github.com/LeXwDeX/gantry/milestone/3)（#88–#100），组装、桌面与部署见 [M1.3](https://github.com/LeXwDeX/gantry/milestone/4)（#101–#104）。
+
 `policy` v0 与 `notify`（端口与替身已有，体量小）→ `repo`（镜像、工作树、锁、补丁）→ `forge`（Outbox 执行、webhook、对账，先对 `FakeGitHub`）→ `models` + `egress`（回环反向代理、计量）→ `sandbox` + `worker`（rootless Podman、Claude Code 适配）→ `api` + `pki` + `secrets`（mTLS、配对、签名审批）→ `desktop-shell`（密钥、事件流、签名）。每个泳道按其模块规格"测试与验收"一节逐条完成；规格不足时停下开 Issue。
 
-**复盘建议（2026-10-27，待用户决定）**：`policy`、`notify`、`repo` 只依赖 `core::ports` 和现有替身，不依赖 `decide`，可以考虑与阶段 2 并行推进。是否提前为它们开里程碑由用户决定；在决定之前仍按上面的顺序。
+**并行推进（2026-10-27）**：已按泳道开 issue，与阶段 2 并行推进。各泳道只依赖 `core::ports` 和现有替身，不依赖 `decide`；上面的顺序是对引擎端到端的依赖顺序，不是开工顺序。
 
 ### 阶段 4：B 级环境（本机虚拟机）
+
+见 [M1.4](https://github.com/LeXwDeX/gantry/milestone/5)：#105（A 级跨泳道集成）、#106（B 级环境）。
 
 按 [M1 验收证据分级](docs/m1-acceptance.md) §3 的 B 列，把每条退出标准做成可重复脚本；不需要任何第三方账号。
 
 ### 阶段 5：C 级外部资源
 
+见 [M1.4](https://github.com/LeXwDeX/gantry/milestone/5)：#107（需拍板）。
+
 B 级全绿后，按 [§4 清单](docs/m1-acceptance.md#4-外部资源最小清单c-级)申请资源，只复跑 B 级已通过的场景。
 
 ### 阶段 6：Agent 可扩展性预留（调研 → 设计 → 契约，不早于阶段 2 完成）
+
+见 [M2-prep Agent 扩展性预留](https://github.com/LeXwDeX/gantry/milestone/6)：#108（调研）、#109（ADR）、#110（契约）。
 
 **现状**：worker 规格把仓库内的 `.claude/`、hooks、`.mcp.json`、插件、项目级技能一律禁用（worker.md K2、§6.4；worker-protocol §10"适配层：Claude Code 与预留"；I5），`WorkerAdapter`（`core::ports::worker`）只有镜像、命令、环境、能力表与 `validate_agent_options`，没有任何扩展点。这是正确的安全底线，但未来要换需求时没有落脚处。
 
