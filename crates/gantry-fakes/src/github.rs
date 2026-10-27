@@ -95,6 +95,8 @@ struct GithubState {
     /// `(repo, issue / PR number) -> 评论`（Issue 与 PR 对话区共用，同 GitHub）。
     comments: HashMap<(String, u64), Vec<Value>>,
     next_comment: u64,
+    /// 设置后，投递带 `X-GitHub-Hook-Installation-Target-ID`（= App ID）。
+    app_id: Option<u64>,
 }
 
 /// M0 的 GitHub 替身。
@@ -129,6 +131,7 @@ impl FakeGitHub {
             issued_tokens: 0,
             comments: HashMap::new(),
             next_comment: 1,
+            app_id: None,
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -374,19 +377,49 @@ impl FakeGitHub {
     ) -> Result<Vec<WebhookDelivery>, GithubError> {
         let body = serde_json::to_string(payload)
             .map_err(|error| GithubError::new(format!("serialize webhook: {error}")))?;
-        let (targets, delivery_id) = {
+        let delivery_id = {
             let mut state = self.lock();
             let id = format!("{:032x}", state.next_delivery);
             state.next_delivery = state.next_delivery.saturating_add(1);
-            (state.webhooks.clone(), id)
+            id
+        };
+        self.send_delivery(event, &delivery_id, body)
+    }
+
+    /// 以原 `X-GitHub-Delivery` 重投一次已投递过的载荷（官方的手动 / 程序重投语义）。
+    pub fn redeliver(&self, delivery_id: &str) -> Result<Vec<WebhookDelivery>, GithubError> {
+        let original = self
+            .lock()
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.delivery_id == delivery_id)
+            .cloned()
+            .ok_or_else(|| GithubError::new("unknown delivery"))?;
+        self.send_delivery(&original.event, delivery_id, original.body)
+    }
+
+    /// 投递时附带的 App ID（`X-GitHub-Hook-Installation-Target-ID`）。
+    pub fn set_app_id(&self, app_id: u64) {
+        self.lock().app_id = Some(app_id);
+    }
+
+    fn send_delivery(
+        &self,
+        event: &str,
+        delivery_id: &str,
+        body: String,
+    ) -> Result<Vec<WebhookDelivery>, GithubError> {
+        let (targets, app_id) = {
+            let state = self.lock();
+            (state.webhooks.clone(), state.app_id)
         };
         let mut delivered = Vec::new();
         for target in targets {
-            let status = send_webhook(&target, event, &delivery_id, &body)?;
+            let status = send_webhook(&target, event, delivery_id, &body, app_id)?;
             delivered.push(WebhookDelivery {
                 url: target.url,
                 event: event.to_owned(),
-                delivery_id: delivery_id.clone(),
+                delivery_id: delivery_id.to_owned(),
                 status,
                 body: body.clone(),
             });
@@ -947,6 +980,25 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 return not_found();
             };
             let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+            // 同 GitHub：令牌不能获得安装未获批的权限，多请求一项整次被拒。
+            let rank = |level: Option<&str>| match level {
+                Some("write") | Some("admin") => 2,
+                Some("read") => 1,
+                _ => 0,
+            };
+            if let Some(requested) = body.get("permissions").and_then(Value::as_object) {
+                let exceeds = requested.iter().any(|(name, level)| {
+                    rank(level.as_str()) > rank(granted.get(name).and_then(Value::as_str))
+                });
+                if exceeds {
+                    return Response {
+                        status: 422,
+                        body: json!({"message": "The permissions requested are not granted to this installation."})
+                            .to_string(),
+                        retry_after_s: None,
+                    };
+                }
+            }
             state.issued_tokens += 1;
             Response {
                 status: 201,
@@ -1178,6 +1230,7 @@ fn send_webhook(
     event: &str,
     delivery_id: &str,
     body: &str,
+    app_id: Option<u64>,
 ) -> Result<u16, GithubError> {
     let (host, path) = split_url(&target.url)?;
     let mut stream = TcpStream::connect(&host)
@@ -1188,6 +1241,11 @@ fn send_webhook(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\ncontent-type: application/json\r\nX-GitHub-Event: {event}\r\nX-GitHub-Delivery: {delivery_id}\r\ncontent-length: {}\r\nconnection: close\r\n",
         body.len()
     );
+    if let Some(app_id) = app_id {
+        head.push_str(&format!(
+            "X-GitHub-Hook-Installation-Target-ID: {app_id}\r\nX-GitHub-Hook-Installation-Target-Type: integration\r\n"
+        ));
+    }
     if let Some(secret) = &target.secret {
         let signature = hmac_sha256(secret, body)?;
         head.push_str(&format!("X-Hub-Signature-256: sha256={signature}\r\n"));

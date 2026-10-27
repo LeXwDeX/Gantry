@@ -8,14 +8,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gantry_core::entities::{Actor, ActorKind, Device, DevicePlatform, DeviceStatus};
+use gantry_core::entities::{Actor, ActorKind, Device, DevicePlatform};
 use gantry_core::events::{DevicePairedData, EventType, NewEvent, Subject};
 use gantry_core::ids::{Clock, Dev, Entropy, IdGen};
 use gantry_core::secret::SecretString;
 use gantry_core::time::Timestamp;
-use gantry_store::{Page, Store, WriteTx};
+use gantry_store::{Store, WriteTx};
 use tokio::sync::watch;
 
+use crate::admin::active_devices;
 use crate::ca::{Authority, IssuedCert};
 use crate::config::CertPolicy;
 use crate::csr::{parse_approval_pubkey, validate_csr};
@@ -154,6 +155,9 @@ pub struct PairingService {
     issuer: Arc<Issuer>,
     config: PairingConfig,
     window: watch::Sender<Option<PairingWindow>>,
+    /// 会话表的读改写与窗口发布串行化：持锁直到提交并发布完毕，
+    /// 避免较早提交的操作晚发布、用旧状态覆盖较新的窗口。
+    sessions: tokio::sync::Mutex<()>,
 }
 
 impl PairingService {
@@ -173,6 +177,7 @@ impl PairingService {
             issuer,
             config,
             window: watch::channel(None).0,
+            sessions: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -183,8 +188,10 @@ impl PairingService {
 
     /// 创建会话并作废此前所有 `open` 会话（`gantry pair`）。
     pub async fn open_session(&self, created_by_uid: u32) -> Result<PairingTicket, PkiError> {
-        let now = self.clock.now();
+        let _serial = self.sessions.lock().await;
         let mut tx = self.store.begin_write().await.map_err(store_error)?;
+        // 取得写事务之后再取时间：排队等待不能侵占新令牌的有效期。
+        let now = self.clock.now();
         let mut table = load_sessions(&mut tx)?;
         let opened = table.open(
             now,
@@ -205,7 +212,7 @@ impl PairingService {
 
     /// 主机取消会话；已结束的会话取消视为成功。
     pub async fn cancel_session(&self, id: PairingSessionId) -> Result<(), PkiError> {
-        self.update_sessions(|table| match table.cancel(id) {
+        self.update_sessions(|table, _now| match table.cancel(id) {
             Ok(()) => Ok(()),
             Err(SessionError::NotFound) => Err(PkiError::NotFound),
             Err(SessionError::NotOpen) => Ok(()),
@@ -215,8 +222,7 @@ impl PairingService {
 
     /// 把已过期的 `open` 会话置为 `expired` 并刷新窗口（后台任务定期调用）。
     pub async fn expire_sessions(&self) -> Result<(), PkiError> {
-        let now = self.clock.now();
-        self.update_sessions(|table| {
+        self.update_sessions(|table, now| {
             table.expire(now);
             Ok(())
         })
@@ -235,8 +241,10 @@ impl PairingService {
 
     /// `POST /v1/pair`（§7.4.3）。
     pub async fn redeem(&self, req: PairRequest) -> Result<PairResponse, PairError> {
-        let now = self.clock.now();
+        let _serial = self.sessions.lock().await;
         let mut tx = self.store.begin_write().await.map_err(store_error)?;
+        // 取得写事务之后再取时间：排队期间过期的令牌不能按旧时间被接受。
+        let now = self.clock.now();
         let mut table = load_sessions(&mut tx)?;
 
         // 第 2 步：令牌。不匹配的计数要提交，令牌本身不在这里消耗。
@@ -432,12 +440,13 @@ impl PairingService {
 
     async fn update_sessions(
         &self,
-        f: impl FnOnce(&mut SessionTable) -> Result<(), PkiError>,
+        f: impl FnOnce(&mut SessionTable, Timestamp) -> Result<(), PkiError>,
     ) -> Result<(), PkiError> {
-        let now = self.clock.now();
+        let _serial = self.sessions.lock().await;
         let mut tx = self.store.begin_write().await.map_err(store_error)?;
+        let now = self.clock.now();
         let mut table = load_sessions(&mut tx)?;
-        f(&mut table)?;
+        f(&mut table, now)?;
         save_sessions(&mut tx, &table)?;
         tx.commit().await.map_err(store_error)?;
         self.publish_window(&table, now);
@@ -476,29 +485,4 @@ fn save_sessions(tx: &mut WriteTx, table: &SessionTable) -> Result<(), PkiError>
         .put(PAIRING_SESSIONS, SESSIONS_KEY, table)
         .map_err(store_error)?;
     Ok(())
-}
-
-async fn active_devices(tx: &mut WriteTx) -> Result<Vec<Device>, PkiError> {
-    let mut reader = tx.read();
-    let mut out = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = reader
-            .devices(&Page {
-                limit: 200,
-                cursor,
-                ..Page::default()
-            })
-            .await
-            .map_err(store_error)?;
-        out.extend(
-            page.items
-                .into_iter()
-                .filter(|device| device.status == DeviceStatus::Active),
-        );
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(out),
-        }
-    }
 }

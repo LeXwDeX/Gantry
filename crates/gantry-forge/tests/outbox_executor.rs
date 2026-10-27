@@ -19,7 +19,7 @@ use gantry_core::forge::{
     ActionPayload, CloseIssuePayload, CreatePrPayload, IssueStateReason, MergeMode, MergePrPayload,
     PushBranchPayload, PushTransport, UpdatePrPayload,
 };
-use gantry_core::ids::{ActionId, ApprovalId, Id, IdGen, IdKind, Prj, Ulid};
+use gantry_core::ids::{ActionId, ApprovalId, Id, IdGen, IdKind, Prj, ProjectId, Ulid};
 use gantry_core::ports::{
     ActorCtx, ApprovalSpec, CommitRecord, EnqueueRequest, EnqueuedBy, EnqueuedByModule, ForgeError,
     MirrorWant, OutboxPort, PolicyPort,
@@ -31,8 +31,9 @@ use gantry_fakes::github::{FakeGitHub, ScriptedFailure};
 use gantry_fakes::policy::FakePolicy;
 use gantry_fakes::repo::FakeRepo;
 use gantry_forge::{
-    CrashPoint, ExecError, Executor, ExecutorDeps, ExecutorOptions, FaultInjector, Forge,
-    ForgeConfig, Permission, ProjectBinding, StaticTokenProvider, StepOutcome,
+    AuthError, CrashPoint, ExecError, Executor, ExecutorDeps, ExecutorOptions, FaultInjector,
+    Forge, ForgeConfig, Permission, ProjectBinding, StaticTokenProvider, StepOutcome,
+    TokenProvider, TokenPurpose,
 };
 use gantry_store::{Store, StoreDeps};
 
@@ -166,10 +167,21 @@ impl Harness {
     }
 
     fn executor(&self, faults: Option<Arc<dyn FaultInjector>>) -> Executor {
+        self.executor_with(
+            faults,
+            Arc::new(StaticTokenProvider::new(SecretString::new(TOKEN.into()))),
+        )
+    }
+
+    fn executor_with(
+        &self,
+        faults: Option<Arc<dyn FaultInjector>>,
+        tokens: Arc<dyn TokenProvider>,
+    ) -> Executor {
         self.forge
             .executor(ExecutorDeps {
                 policy: self.policy.clone(),
-                tokens: Arc::new(StaticTokenProvider::new(SecretString::new(TOKEN.into()))),
+                tokens,
                 api_base: self.github.base_url(),
                 ids: self.ids.clone(),
                 options: ExecutorOptions {
@@ -486,6 +498,61 @@ async fn secondary_rate_limit_requeues_without_consuming_attempts() {
         "zero requests while waiting"
     );
     h.advance(1_000);
+    assert_eq!(
+        exec.run_once().await.unwrap().unwrap().outcome,
+        StepOutcome::Succeeded
+    );
+}
+
+/// 第一次换令牌被限流、之后放行的令牌源。
+struct RateLimitedOnce {
+    fired: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl TokenProvider for RateLimitedOnce {
+    async fn token(
+        &self,
+        _project: &ProjectId,
+        _purpose: TokenPurpose,
+    ) -> Result<Arc<SecretString>, AuthError> {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            return Err(AuthError::RateLimited {
+                retry_after: Some(Duration::from_secs(120)),
+            });
+        }
+        Ok(Arc::new(SecretString::new(TOKEN.into())))
+    }
+
+    fn invalidate(&self, _project: &ProjectId) {}
+}
+
+/// 换令牌被限流：动作回 queued 等到期，不扣尝试次数，期间零请求（FA §10.3）。
+#[tokio::test]
+async fn rate_limited_token_exchange_waits_without_consuming_attempts() {
+    let h = Harness::new();
+    let head = oid("head");
+    h.github.set_branch(REPO, HEAD, &head.to_string());
+    let act = h.enqueue(create_pr(head), None).await;
+    let exec = h.executor_with(
+        None,
+        Arc::new(RateLimitedOnce {
+            fired: AtomicBool::new(false),
+        }),
+    );
+    assert_eq!(
+        exec.run_once().await.unwrap().unwrap().outcome,
+        StepOutcome::Requeued
+    );
+    let action = h.action(&act);
+    assert_eq!(action.status, OutboxStatus::Queued);
+    assert_eq!(action.attempts, 0);
+    assert_eq!(
+        action.not_before,
+        Some(Timestamp::from_millis(MS + 120_000))
+    );
+    assert_eq!(h.github.write_count(), 0);
+    h.advance(120_000);
     assert_eq!(
         exec.run_once().await.unwrap().unwrap().outcome,
         StepOutcome::Succeeded
