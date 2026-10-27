@@ -23,8 +23,9 @@ use gantry_core::ports::{
     ExecutionCheck, Expect, ForgeReader, GateError, HealPort, InboxPort, LockError, MirrorWant,
     ModelProvider, OptionId, OutboxPort, PatchApprovalCheck, PatchPermit, PathRuleSet, PolicyPort,
     PrRefresher, PushToken, RaiseError, RaiseOutcome, RaiseRequest, ReconcileTarget, RepoError,
-    RepoService, RuleId, SafeSummary, SandboxService, SecretSink, SecretSource, SecretValue,
-    SecretVersion, SecretsError, StoreError, TxHandle, ValidatePatch, WorkerAdapter, WorktreeLocks,
+    RepoService, ReportHint, RuleId, SafeSummary, SandboxService, SecretSink, SecretSource,
+    SecretValue, SecretVersion, SecretsError, StoreError, TxHandle, ValidatePatch, WorkerAdapter,
+    WorktreeLocks,
 };
 use gantry_core::secret::{Consumer, SecretName};
 use gantry_core::time::Timestamp;
@@ -480,6 +481,61 @@ async fn repo_locks_expire_and_patch_commit_is_idempotent() {
         .is_some());
 }
 
+fn merge_denied_hint() -> ReportHint {
+    ReportHint {
+        inbox_kind: InboxKind::Escalation,
+        payload_kind: None,
+        reason_code: ReasonCode::parse("merge_denied_by_policy").expect("reason code"),
+        severity: Severity::Warn,
+        attach_patch: false,
+    }
+}
+
+fn deny_without_report() -> ActionDecision {
+    ActionDecision::Deny {
+        action_id: PolicyActionId::MergePr,
+        reason: DenyReason::ActionDenied,
+        report: None,
+        config_rev: Seq::ZERO,
+    }
+}
+
+fn merge_request(requested_by: Actor) -> ActionRequest {
+    ActionRequest {
+        project_id: project().id,
+        delivery_id: None,
+        kind: ForgeActionKind::MergePr,
+        facts: ActionFacts::Other { repo: slug() },
+        requested_by,
+    }
+}
+
+// policy.md §6.1（#66）：engine 发起的动作，Deny 必带 ReportHint。
+#[tokio::test]
+#[should_panic(expected = "must carry a ReportHint")]
+async fn policy_engine_deny_without_report_hint_panics() {
+    let policy = FakePolicy::new(ts());
+    policy.script_decision(ForgeActionKind::MergePr, deny_without_report());
+    let _ = policy.decide_action(merge_request(actor()), &ctx()).await;
+}
+
+#[tokio::test]
+async fn policy_guardian_deny_may_omit_report_hint() {
+    let policy = FakePolicy::new(ts());
+    policy.script_decision(ForgeActionKind::MergePr, deny_without_report());
+    let decision = policy
+        .decide_action(
+            merge_request(Actor::new(ActorKind::Guardian, "test")),
+            &ctx(),
+        )
+        .await
+        .expect("decision");
+    assert!(matches!(
+        decision,
+        ActionDecision::Deny { report: None, .. }
+    ));
+}
+
 #[tokio::test]
 async fn policy_decisions_and_approvals_are_single_use() {
     let policy = FakePolicy::new(ts());
@@ -503,13 +559,16 @@ async fn policy_decisions_and_approvals_are_single_use() {
         ActionDecision::Deny {
             action_id: PolicyActionId::MergePr,
             reason: DenyReason::ActionDenied,
-            report: None,
+            report: Some(merge_denied_hint()),
             config_rev: Seq::ZERO,
         },
     );
     assert!(matches!(
         policy.decide_action(action, &ctx).await.expect("decision"),
-        ActionDecision::Deny { .. }
+        ActionDecision::Deny {
+            report: Some(_),
+            ..
+        }
     ));
 
     let spec = ApprovalSpec {

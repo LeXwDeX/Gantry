@@ -1030,7 +1030,7 @@ pub struct AttemptPlan {
 | `Enqueue` | `Report::ActionJudged` 为 `Allow`；意图仍 ∈ `expected_actions`；`outbox` 仍无该键；`depends_on` 指向的动作已在 `outbox` | `Report::ActionJudged` |
 | `Effect(RequestApproval)` | 判定为 `NeedsApproval` 且 `pending = None` | `Report::ActionJudged` |
 | `Raise(approval_needed)` | 阶段为 `merge`；`approvals` 中有本交付单元 `pending` 的审批，且 `open_inbox` 中没有带该 `approval_id` 的项（覆盖崩溃窗口与 T11 后回到 `merge`） | `Report::ApprovalRequested`、`Observed(ApprovalRequested)`、`Tick(Settle)` |
-| `Raise(*)`（其余） | §7.11 对应情形成立；`open_inbox` 中无同 `dedup_key` 项。`Deny` 的上报取 `ReportHint`；`merge_pr` 无 `ReportHint` 时用 `merge_denied_by_policy`；其他动作见 7.14.6 E3 | 各情形 |
+| `Raise(*)`（其余） | §7.11 对应情形成立；`open_inbox` 中无同 `dedup_key` 项。`Deny` 的上报一律取 `ReportHint`：引擎发起的动作 `Deny` 必带 `ReportHint`（policy.md §6.1，#66 已落地），引擎不自拟上报码；`merge_pr` 的 `Deny(ActionDenied)` 对应 `merge_denied_by_policy` | 各情形 |
 | `Resolve` | `open_inbox` 中有对应项，且解除条件成立（节点重试成功、审批失效、GitHub 上已处理、`supersedes`） | `Observed`、`Tick(Settle)` |
 | Low 档 `inbox.resolved(replan)` | 当前 `low.implement` 的 `workflow.finished(cancelled)` + 其未终结节点 `node.finished(cancelled)` + 新 `low.implement` 的 `workflow.created`，同一决策完成；阶段不变（data-model："Low 档重新实现"） | `Observed(InboxResolved)` |
 
@@ -1044,7 +1044,7 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | --- | --- | --- | --- |
 | E1 | **已落地（#64）**：`attempt.finished` 增加可选 `result_commit`，`core` 校验 `status = succeeded` 且有 `result_tree` 时必填、有 `result_commit` 时必须有 `result_tree`。原缺口：本地提交的 `commit_oid` 不在任何事件里（repo.md OQ-R2），T6 的 `push_branch.local_head_oid` = `Evidence.candidate_head` 无法从日志重建 | 引擎投影把它读入 `AttemptState.result_commit`（阶段 2 切片 1） | **M1（阻塞端到端与"重启一致"）** |
 | E2 | 无进展检测的 finding 指纹没有落盘处 | 判定节点的 `node.finished` 增加可选 `fingerprints[]`（`FindingFingerprint` 十六进制，≤ 64 条，只在 `REVISE` / `REJECT` 时出现） | M2 / M3（M1 无轮次，`round_history` 恒空） |
-| E3 | `PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报（policy.md 未规定何时省略 `report`） | 二选一：policy.md 规定对 `engine` 发起的动作 `Deny` 必带 `ReportHint`；或 data-model 词表增加通用码 | M1（`merge_pr` 以外的动作） |
+| E3 | **已落地（#66）**：policy.md §6.1 规定引擎发起的动作 `Deny` 必带 `ReportHint`，`reason_code` 只取 data-model 上报词表已列的码，不新增词表项；`FakePolicy` 对违约脚本直接 panic。原缺口：`PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报。**待决**：`merge_pr` 的 `ActionDenied` 与 `ApprovalShapeUndefined` 以外的 `DenyReason` 在词表里没有对应码（policy.md OQ-P15） | 引擎按 `ReportHint` 上报 | M1（`merge_pr` 以外的动作） |
 | E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**`ActionKey` 衔接已定（#125，方案 1）**：执行体开事务前按 `(result_ref, proposal_id)` 从 CAS 预取原文进只读的 `DecideEnv.proposals`（7.14.2、7.14.3），`expected_actions` 用它算 `create_pr` 的完整意图与 `ActionKey`，`decide` 仍纯、不读 CAS；forge-actions §2.2 不改 | 引擎投影读入 `AttemptState.accepted_open_pr`；`DecideEnv` 增加 `proposals`（#69），`create_pr` 路径使用它（#70） | M1（体验；不阻塞） |
 | E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
 | E4 | **已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`），区分"job 从未被受理"与"受理后丢失"；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`，不把未起沙盒的尝试判成 `infra.lost` | 见 sandbox.md §6.1、§7.10；`FakeSandboxService` 按受理集合分类 | M1（"重启一致"） |
