@@ -37,7 +37,9 @@ use gantry_core::forge::{
 };
 use gantry_core::ports::OutboxEnqueueEnvelope;
 use gantry_core::settings;
-use gantry_core::worker::{JobSpec, ProgressEvent, Proposals, ResultJson, StructuredOutput};
+use gantry_core::worker::{
+    JobSpec, ProgressEvent, Proposals, ResultBundle, ResultJson, StructuredOutput,
+};
 use serde_json::Value;
 
 use crate::schema;
@@ -396,6 +398,10 @@ fn worker() -> Vec<Artifact> {
     let mut all = vec![
         Artifact::typed::<JobSpec>("schemas/worker/job.schema.json", "worker::JobSpec"),
         Artifact::typed::<ResultJson>("schemas/worker/result.schema.json", "worker::ResultJson"),
+        Artifact::typed::<ResultBundle>(
+            "schemas/worker/result-bundle.schema.json",
+            "worker::ResultBundle",
+        ),
         Artifact::typed::<Proposals>("schemas/worker/proposals.schema.json", "worker::Proposals"),
         Artifact::typed::<ProgressEvent>(
             "schemas/worker/progress-event.schema.json",

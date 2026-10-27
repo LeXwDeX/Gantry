@@ -8,13 +8,6 @@
       "line": 1002,
       "kind": "example",
       "note": "GitHub App manifest 片段供 deploy 使用。它是 GitHub 定义的外部格式，不是 Gantry 协议类型：Gantry 只生成、不解析它，为它定义 core 类型等于替 GitHub 冻结一份我们不拥有的 schema；其中 merge_queues 键名仍待核实（OQ-1）。权限是否到位由 forge 启动自检（§9.5）对比安装实际获批权限来保证，不靠本块。deploy 模块落地时，若改为由代码生成 manifest，再在 deploy 侧用生成结果与 §9.2 权限表做一致性测试。"
-    },
-    {
-      "sha256": "f3a4a967c6f5acecc4391d94e6e79e06b0bed68bbafce345bc29dff2a5bc9429",
-      "source": "docs/interfaces/worker-protocol.md",
-      "line": 499,
-      "kind": "contract-undefined",
-      "note": "ResultBundle 仍为 [提议]，core 无对应类型。推荐形状与待拍板问题见 issue #84（needs-decision），拍板前不定义类型。"
     }
   ]
 }

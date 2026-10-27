@@ -494,12 +494,14 @@ worker 只能写 `/gantry/out/` 下这四个文件名（精确匹配、区分大
 | `agent` | object | 是 | 实际用的 CLI 与版本、模型名 |
 | `started_at`、`ended_at` | time | 是 | 自报，仅展示 |
 
-服务端把 `result.json`、各产物、采集的 stdout 尾部、运行时事实、`egress` 计量、校验结论组成 `ResultBundle`，存为内容寻址对象；`Attempt.result_ref` 指向其清单哈希。该对象库的位置、备份、保留期见 OQ-12。清单**由服务端生成**（不是 worker 写的），形状 **[提议]**：
+服务端把 `result.json`、各产物、采集的 stdout / stderr 尾部、运行时事实、`egress` 计量、校验结论组成 `ResultBundle`，存为内容寻址对象；`Attempt.result_ref` 指向其清单哈希。该对象库的位置、备份、保留期见 OQ-12。清单**由服务端生成**（不是 worker 写的）：`sandbox` 交原料（`JobOutcome`），`engine` 组装清单，经 `core::jcs` 规范化后入 CAS。形状已在 #84 拍板，Rust 类型是 `gantry_core::worker::ResultBundle`，schema 是 `schemas/worker/result-bundle.schema.json`：
 
 ```json
 {
+  "bundle_version": 1,
   "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
   "job_sha256": "sha256:5e8c9902207afaeb7120430c585a445f21e92932081d64bc99f80e4925bcb002",
+  "collected_at": "2026-10-24T12:58:48.000Z",
   "terminal": { "cause": "exited", "exit_code": 0, "signal": null, "oom": false, "timer": null, "cancel_requested": false },
   "files": {
     "result.json": { "sha256": "sha256:b4d78c6828c77821e5673bb398468fb13dd99b7a44bc3a228f4429bcaea3dbc8", "bytes": 3120 },
@@ -508,21 +510,43 @@ worker 只能写 `/gantry/out/` 下这四个文件名（精确匹配、区分大
     "proposals.json": { "sha256": "sha256:c0cbf0fbcaf64c0b201506063e2b6b12b9999482a61de6d6078321000fafdf76", "bytes": 640 },
     "progress.jsonl": { "sha256": "sha256:7c9e0d75ba6d887d43620bee283b0a39704a4a7ef82b39364a46c97cdc207d73", "bytes": 48211 }
   },
-  "usage_metered": { "input_tokens": 415200, "output_tokens": 18100, "cache_read_tokens": 351000, "cache_write_tokens": 21000, "requests": 26 },
+  "logs": {
+    "stdout_tail": { "sha256": "sha256:3f1a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a", "bytes": 4096 },
+    "stderr_tail": { "sha256": "sha256:9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d", "bytes": 512 }
+  },
+  "usage_metered": { "input_tokens": 415200, "output_tokens": 18100, "cache_read_tokens": 351000, "cache_write_tokens": 21000, "requests": 26, "weighted_tokens": null },
   "usage_reported": { "input_tokens": 412000, "output_tokens": 18300, "cache_read_tokens": 350000, "cache_write_tokens": 21000, "turns": 24, "tool_calls": 61 },
+  "egress": { "capped": false, "incomplete": false },
   "classification": { "failure_class": null, "failure_detail": null },
   "validation": {
-    "patch": { "verdict": "allow", "result_tree": "f2c03d84a858156b0121130fd1ec2f391aa90865", "files": 2 },
+    "patch": { "verdict": "allow", "sha256": "sha256:a4895eb44afc336fecbba6e520cd67e178dace0276655d102fceffa8e5f70570", "result_tree": "f2c03d84a858156b0121130fd1ec2f391aa90865", "files": 2 },
     "proposals": [
-      { "id": "p1", "disposition": "accepted" },
-      { "id": "p2", "disposition": "accepted" }
+      { "id": "p1", "kind": "open_pr", "disposition": "accepted", "reasons": null, "text_ref": { "sha256": "sha256:d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26", "bytes": 812 } },
+      { "id": "p2", "kind": "reply_review_thread", "disposition": "accepted", "reasons": null, "text_ref": { "sha256": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b", "bytes": 214 } }
     ],
     "unexpected_artifacts": []
   }
 }
 ```
 
-`terminal.cause` ∈ `exited` / `killed_timer` / `killed_cancel` / `killed_runtime` / `lost`；`disposition` ∈ `accepted` / `needs_approval` / `denied` / `invalid`（后两者带 `reasons[]`）。
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `bundle_version` | 是 | 固定 `1` |
+| `job_id`、`job_sha256` | 是 | 同 JobSpec / `result.json` |
+| `collected_at` | 是 | **确定性时间，截到秒**：取沙盒停止时间（`TerminalFacts` 一侧的服务端观测值）；`terminal.cause = lost` 时没有停止时间，取引擎判定该尝试丢失的那条事件的时间戳。重复 `collect` 得到同一清单、同一 `result_ref`（§3.5）；`repo` 的提交时间戳也取它（repo.md §6.3），所以重放得到同一 `result_commit` |
+| `terminal` | 是 | 运行时终止事实；`cause` ∈ `exited` / `killed_timer` / `killed_cancel` / `killed_runtime` / `lost`，`exited` 时 `exit_code` 必填；`timer` ∈ `wall` / `idle` |
+| `files` | 是，可为空 | 键只能是 `result.json` / `changes.patch` / `report.md` / `proposals.json` / `progress.jsonl`，值是 CAS 引用 `{sha256, bytes}` |
+| `logs` | 是，可为空 | `stdout_tail` / `stderr_tail` 的 CAS 引用 |
+| `classification` | 是 | `failure_class` / `failure_detail`，必须与 `attempt.finished` 一致（引擎写入时核对） |
+| `validation` | 可为 `null` | `result.json` 缺失或无效（§5.2"不符即整份无效"）时为 `null`，清单仍然生成以便取证 |
+| `validation.patch` | 可为 `null` | `sha256` 必须等于 `files["changes.patch"].sha256`（= 补丁审批的 subject_digest，P-20）；`verdict = deny` 时 `result_tree` 为 `null`；`result_tree` 以 `attempt.finished` 为准，引擎写入时核对 |
+| `validation.proposals[]` | 是，可为空 | `{id, kind, disposition, reasons, text_ref}`；`id` 唯一；`disposition` ∈ `accepted` / `needs_approval` / `denied` / `invalid`（后两者带 `reasons[]`）；`text_ref` 只出现在 `accepted` 上，是引擎另存的**净化文本**的 CAS 引用，`accepted` 的 `open_pr` 必须有。`text_ref` 对象的内容是该提议 `params`（§5.4，如 `open_pr` 的 `{title, body, draft}`）经引擎净化后的 JCS 规范化 JSON。执行体预取提议原文（engine.md §7.14.2 "提议原文预取"，`ProposalRef { result_ref, proposal_id }`）时，先读 `result_ref` 指向的本清单，按 `proposal_id` 找到条目，再读它的 `text_ref`；不碰 worker 原始的 `proposals.json` |
+| `usage_metered`、`usage_reported`、`egress`、`validation.unexpected_artifacts` | 否 | M1 只定义形状，语义留到 M2。`usage_metered` 是 Egress 计量加 `weighted_tokens`（P-70）；`egress` 只有 `capped` / `incomplete`，`upstream_error_summary` 是不可信文本，不入清单 |
+
+不入清单的内容：
+- `result_commit`：提交时间戳取自本清单的 `collected_at`，提交在清单定稿之后才产生；`result_commit` 只在 `attempt.finished` 里（engine.md §7.14.6 E1）。`attempt.finished` 是 `result_tree` / `result_commit` 的权威来源。
+- `project_id`：归属经 `Attempt.result_ref` 反查。结果读取（decisions.md Q-12，路由形态归 M2）以清单为索引授权：只允许读本项目某个 Attempt 的 `result_ref`，以及该清单 `files` / `logs` / `text_ref` 列出的摘要；摘要本身不是权限。
+- 被拒产物的隔离区引用：留到 M2，与 OQ-12 一起定。
 
 ### 5.3 补丁格式：unified diff（git 扩展头）
 

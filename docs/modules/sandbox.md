@@ -154,7 +154,7 @@ pub struct JobOutcome {
     pub terminal: TerminalFacts,           // == ResultBundle.terminal
     pub partial: bool,                     // 超时 / 取消 / 被杀后提取：仅供诊断
     pub files: BTreeMap<ArtifactName, CasObject>,   // 只可能有 result.json / changes.patch / report.md / proposals.json
-    pub unexpected: Vec<UnexpectedArtifact>,        // {name, reason}：丢弃的文件，进 ResultBundle.validation.unexpected_artifacts
+    pub unexpected: Vec<UnexpectedArtifact>,        // {name, reason}：丢弃的文件，进 ResultBundle.validation.unexpected_artifacts（M1 可选，语义 M2）
     pub progress: Option<CasObject>, pub progress_stats: ProgressStats,
     pub stdout_tail: CasObject, pub stderr_tail: CasObject,
     pub usage_metered: TokenUsage,         // egress 计量：input / output / cache_read / cache_write / requests
@@ -628,7 +628,7 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 | OQ-S7 | `devcontainer.json` 安全子集的字段清单，以及"环境复现"在无网络沙盒里如何完成（依赖安装走哪个白名单） | M2 | 只保证加固项不可被覆盖 |
 | OQ-S8 | 预热池用 `READY` 文件标记是否接受（worker-protocol OQ-16）；本文让**所有**路径都创建 `READY`（常规路径在 `start` 前，预热池在认领后），以统一 worker 逻辑，这比契约字面（"M1 不需要"）多做了一步；池分桶策略与 TTL | M2、worker 启动逻辑 | §7.2 第 7 步、§7.11 |
 | OQ-S9 | 事件缺口：`Sandbox.status` 的 `running` / `stopped` / `lost` 没有对应事件；`artifact.unexpected` 审计不在事件目录里 | 投影与审计 | 状态保存在 `meta.json` 与标签；`unexpected` 进 `ResultBundle` |
-| OQ-S10 | （替身部分**已决：见裁决 C5 / P-51**——`Store::open_in_memory`、`EgressStub` 为 M0 替身）CAS 归属已由 store.md 提议归 `store`（其 OQ-3）：`Cas::put` / `put_file` / `open`，`CasKind::{ResultBundle, Artifact, Progress, Quarantine}`，`sandbox` 写原始产物、`engine` 写结果包清单（store.md §4），与本文一致。仍待定：`ResultBundle` 清单的形状（worker-protocol §5.2 标 **[提议]**）；被拒产物保留期（OQ-12）；`store.cas.max_object_bytes`（默认 64 MiB）与产物上限的关系；原 M0 替身缺口已补 | `sandbox`、`engine`、`store` | `sandbox` 交原料，`engine` 组装清单 |
+| OQ-S10 | （替身部分**已决：见裁决 C5 / P-51**——`Store::open_in_memory`、`EgressStub` 为 M0 替身）CAS 归属已由 store.md 提议归 `store`（其 OQ-3）：`Cas::put` / `put_file` / `open`，`CasKind::{ResultBundle, Artifact, Progress, Quarantine}`，`sandbox` 写原始产物、`engine` 写结果包清单（store.md §4），与本文一致。`ResultBundle` 清单形状**已决**（#84，worker-protocol §5.2，`core::worker::ResultBundle`）：`collected_at` 取 `Timings.stopped` 截到秒（`Lost` 取引擎判定丢失那条事件的时间），不取 `collected`；`stdout_tail` / `stderr_tail` 进 `logs`；`progress` 进 `files["progress.jsonl"]`；`usage_metered` 与 `weighted_tokens` 进 `usage_metered`；`EgressFlags` 只有 `capped` / `incomplete` 入清单，`upstream_error_summary` 留在诊断；`partial` 与 `timings` 不入清单。仍待定：被拒产物保留期与隔离区引用（OQ-12，M2）；`store.cas.max_object_bytes`（默认 64 MiB）与产物上限的关系；原 M0 替身缺口已补 | `sandbox`、`engine`、`store` | `sandbox` 交原料，`engine` 组装清单 |
 | OQ-S11 | **已决：见裁决 C6 / P-52**（引擎面 `SandboxService`、容器面 `SandboxDriver`，`engine` 只依赖前者；M0 引擎面替身为 `FakeSandboxService`）。原问题：命名层级：milestones 里的 `FakeSandboxDriver` 被说成替代 `sandbox` + `worker`、供 `engine` 使用，所以它应实现引擎面接口；architecture §11 的 `SandboxDriver` trait 则是容器面。engine.md 把引擎面端口也叫 `SandboxDriver`，并把它写成逐步的 `create / stage / start / cancel / collect / destroy / 重新接管`、回传 `RawArtifacts`；本文把引擎面接口收敛成 `SandboxService::submit / cancel / release / recover`（生命周期由本模块内部驱动），回传 `JobOutcome`。两边需要对齐一个名字与粒度 | M0 替身与 trait 命名、`engine` 的终结管线 | 已落实到 §6；`RawArtifacts` 已统一为 `JobOutcome` |
 | OQ-S12 | 材料总量分配算法（总量 512 KiB 超限时各条如何分配）与 `attempt.progress` 的采样参数骨架未定 | stage、展示 | §7.2 / §7.6 的 **[提议]** |
 | OQ-S13 | M3 逃逸检测的信号清单（意外的系统调用拒绝 / gVisor panic 日志、Egress 收到无效或跨网段的 `job_token`、挂载点之外的宿主文件变化……）及告警去向（InboxItem？日志？） | M3 | 暂不实现，仅预留 `capacity()` 与日志字段 |
