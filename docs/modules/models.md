@@ -11,7 +11,7 @@
 3. **直接调用（`invoke_direct`）**：为 `exec = direct` 的角色（`intent`、`admission`、`summarize`、`classify`，[architecture §9](../architecture.md#9-三类模型)）执行"无工具、无代码执行"的结构化文本调用，经 Egress 的回环 HTTP 反向代理发出，使用服务令牌 `svc_token`（P-16、P-50）。
 4. **重试、降级、超时**：按 [config.md §3.4](../interfaces/config.md) 与 `models.retry` 执行；记录实际使用的提供方 / 模型。
 5. **输入隔离与输出校验**：不可信材料按 [worker-protocol §4.4](../interfaces/worker-protocol.md) 的规则包装；输出按角色 schema（worker-protocol §6）校验后再交付。
-6. **用量记账**：取得 Egress 对本次调用的计量（`svc_token` 与 `job_token` 同一计量口径），折算为四类 token 与加权 token（权重 `levels.token_weights`，P-44、P-70），随结果返回；记入交付台账，或在没有交付单元时记入该项目的**会话台账**（`BudgetLedger.subject = conversation`，P-58）。
+6. **用量记账**：取得 Egress 对本次调用的计量（`svc_token` 与 `job_token` 同一计量口径），折算为四类 token 与加权 token（权重 `levels.token_weights`，P-44、P-70），随结果返回；记入交付台账，或在没有交付单元时记入该会话当日的**会话台账**（`BudgetLedger.subject = conversation`，按会话计，P-58）；无项目 / 交付 / 会话的全局调用不记账。
 7. **能力表与校验支持**：向 `api` 的设置校验器提供模型能力（V04 工具调用、V05 推理深度、V06 适配器与降级、V21 偏离提示、V22 超时一致），并向 `catalog` 贡献 `models.capabilities` 与 `models.adapters`。
 8. **热加载与健康**：`settings.updated` 后在两次调用之间原子切换；向 `settings/status` 报告 `applied_rev` 与健康。
 9. **`ModelProvider` 扩展点**：trait 定义在 `core::ports`（P-51），本模块实现第一版 `AnthropicProvider`（[architecture §11](../architecture.md#11-扩展点)），其他提供方后续追加；M0 的 `FakeModelProvider` 实现同一 trait。
@@ -198,7 +198,7 @@ pub trait CapabilityTable: Send + Sync {
 5. 按 §7.6 重试 / 降级；每次尝试用 `request_timeout_s`，整体不超过 `min(total_timeout_s, deadline)`。
 6. 响应 → `StopReason` 处理（`Refusal` → `ContentRefused`，不重试不降级；`MaxTokens` → `OutputTruncated`，不重试）→ 解析 JSON → `OutputValidator`（角色 schema + 一致性规则，如 `ACCEPT` ⇒ 无 blocker）。校验失败视为可重试错误，计入 `max_attempts`，重试时只回喂校验错误码，不回喂模型原输出。
 7. `UsageAccountant`：首次发送前持久化 `call_id`、台账、tier、已使用 token 集合；调用结束后先持久化"禁止继续发送"，再 `EgressControl::close_call` 关闭、`call_terminal(call_id)` 取终结证明，`CallStatement::settleable_terminal()` 返回证明（`terminal.verify(call_id, &items)` 通过且 `incomplete = false`）才按证明记账（interfaces/egress-call-terminal.md §2.2）；`incomplete = true` 不结算、不零判定；取不到 → 退回 `usage_reported` 并标 `ProviderReported`、记警告（OQ-3）；折算 `weighted_tokens`。降级调用的用量记入同一 tier，`served_by` 写实际使用的提供方 / 模型。
-8. **每次直接调用由本模块追加一条 `budget.charged`**（台账即请求头 `X-Gantry-Ledger` 声明的那个）（egress.md §11："`models` 经 `close_call` + `call_terminal` 记自己的 `budget.charged`"）：`Attempt` / `Aux` 归属的带 `delivery_id`、`tier`、`source = {kind: "direct_call", call_id}`；`Conversation` 归属的带 `conversation_id`，记入该项目的会话台账（`BudgetLedger.subject = conversation`，每日上限 `levels.none.daily_tokens`，P-58）；`Unattributed`（无项目的全局调用）两者都为空（OQ-3）。`Attempt` 归属的调用另把 `usage` 返回给 `engine` 写进 `attempt.finished.usage`（仅展示），`engine` 不重复写 `budget.charged`。
+8. **每次直接调用由本模块追加一条 `budget.charged`**（台账即请求头 `X-Gantry-Ledger` 声明的那个）（egress.md §11："`models` 经 `close_call` + `call_terminal` 记自己的 `budget.charged`"）：`Attempt` / `Aux` 归属的带 `delivery_id`、`tier`、`source = {kind: "direct_call", call_id}`；`Conversation` 归属的带 `conversation_id`，记入该会话当日的会话台账（`BudgetLedger.subject = conversation`，每日上限 `levels.none.daily_tokens` 按会话计，P-58）；`Unattributed`（无项目的全局调用）**不写** `budget.charged`（event-data §2.2.6.1：不建 `unattributed` 台账；用量仍由 Egress 计量，`DirectOutcome` 照常返回；#93 裁决）。`Attempt` 归属的调用另把 `usage` 返回给 `engine` 写进 `attempt.finished.usage`（仅展示），`engine` 不重复写 `budget.charged`。
 9. **对账**（P-74）：`svc_token` 被吊销（`service_token()` / `rotate_service_token()` 返回的 `revoked_previous`，含上一个进程留下的令牌）后，按 `EgressControl::svc_token_usage` 取该令牌的全部用量记录，与已写 `budget.charged` 的 `source.call_id` 比对，补记遗漏（补记的事件与正常记账同形，以 `source.call_id` 去重）；平时按 `usage_since` 游标定期对账。
 
 ### 7.4 Prompt 组装与隔离包装
@@ -214,7 +214,7 @@ pub trait CapabilityTable: Send + Sync {
 
 - 所有请求发往 Egress 的回环 HTTP 反向代理（`svc_model` 监听，base URL 由 `EgressControl::service_token()` 给出），路径 `/s/<svc_token>/<provider_id>/v1/messages` 等（令牌在路径中，egress-control §3.2）；Egress 去掉前缀后拼到 `providers.<id>.base_url` 之后转发。`base_url` 的主机必须属于 `egress.groups.model_api`（V11）。不再使用 Unix socket 数据通道（`egress.sock` 只承载控制面）。
 - 必填头（P-74）：`X-Gantry-Ledger: <台账 ID>`（`Attempt` / `Aux` 归属为交付台账 `dlv_…`；`Conversation` 归属为会话台账 `cnv_…:YYYY-MM-DD`，UTC 日；`Unattributed` 为 `unattributed`）、`x-gantry-tier: utility | planner`（由角色决定，直接角色不会是 `worker`）、`x-gantry-call-id`（= `DirectCall.call_id`）。Egress 视这些头为可信并据此记录归属，转发前全部剥离（egress.md §6.3）。
-- `svc_token` 与 `job_token` 同一计量口径（P-50）；每个 `gantryd` 进程一枚（P-74）：启动时签发（同时吊销上一个进程留下的令牌），到期前 1 h 轮换。收到 `403 token_invalid` 时经 `rotate_service_token()` 换新令牌后重试该请求一次，不计入 `max_attempts`；被吊销的令牌按步骤 9 对账。
+- `svc_token` 与 `job_token` 同一计量口径（P-50）；每个 `gantryd` 进程一枚（P-74）：启动时签发（同时吊销上一个进程留下的令牌），到期前 1 h 轮换。收到 `403 token_invalid`（提供方实现映射为 `ProviderError::EgressTokenInvalid`）时经 `rotate_service_token()` 换新令牌后重试该请求一次，不计入 `max_attempts`；被吊销的令牌按步骤 9 对账。
 - 请求里**不带真实 key**：认证信息由 Egress 丢弃并替换（architecture §9、P-16）；`svc_token` 只是记账与来源凭证，只在进程内存，不进日志。
 - `AnthropicProvider` 的具体请求参数（推理参数的映射、结构化输出方式、是否支持关闭思考等）随所用模型而异，实现时以锁定的 SDK 与官方文档为准，并写进能力表；不使用强制工具选择来取结构化输出，不发送采样参数。
 
@@ -223,7 +223,7 @@ pub trait CapabilityTable: Send + Sync {
 | 错误 | 处理 |
 | --- | --- |
 | 连接失败、超时、5xx / overload、429 | 在当前候选上按 `models.retry`（`max_attempts` 默认 3，`backoff_ms` 默认 1000，指数退避加抖动）重试；重试耗尽 → 换下一个降级候选 |
-| 模型不可用（404） | 直接换下一个候选 |
+| 模型不可用（404，`ProviderError::ModelNotFound`） | 直接换下一个候选 |
 | 4xx 请求错误 | 不重试，不降级 → `InvalidRequest` |
 | 内容策略拒绝（`StopReason::Refusal`） | 不重试，不降级 → `ContentRefused` |
 | 输出 schema 无效 / 一致性规则不满足 | 计入 `max_attempts` 重试；耗尽 → 换下一个候选；全部耗尽 → `SchemaInvalid` |
@@ -339,7 +339,7 @@ pub trait CapabilityTable: Send + Sync {
 - [ ] **输出校验**：合法输出通过；非法 JSON / 缺字段 / 一致性规则违反（`ACCEPT` 却有 blocker finding）→ 视为可重试错误，耗尽后 `SchemaInvalid`；重试时回喂的只有错误码。
 - [ ] **重试与期限**：5xx / 429 / 超时按 `max_attempts` 与退避（假时钟）重试；4xx 不重试；`Refusal` 不重试不降级；总期限到立即 `Timeout`；`deadline` 只能收紧。
 - [ ] **用量**：Egress 计量与提供方自报不一致时返回计量值（`Metered`）；计量缺失时退回自报并标 `ProviderReported` 且记警告；四类 token 与 `requests` 分别记录；`weighted_tokens` 按 `levels.token_weights` 计算（改权重后下一次调用生效，P-70）；偏离超阈值记审计警告。
-- [ ] **会话台账**：`Attribution::Conversation` 追加带 `conversation_id`、无 `delivery_id` 的 `budget.charged`；当日累计达到 `levels.none.daily_tokens` 后下一次 `Conversation` 调用返回 `BudgetExhausted` 且不发请求（P-58）；`Unattributed` 追加两者都为空的一条。
+- [ ] **会话台账**：`Attribution::Conversation` 追加带 `conversation_id`、无 `delivery_id` 的 `budget.charged`；当日累计达到 `levels.none.daily_tokens` 后下一次 `Conversation` 调用返回 `BudgetExhausted` 且不发请求（P-58）；`Unattributed` 不追加任何 `budget.charged`（event-data §2.2.6.1）。
 - [ ] **热加载**：进行中的调用使用旧快照完成；下一次调用用新配置；构建失败保留旧视图并 `degraded`；`applied_rev` 更新。
 - [ ] **并发闸**：同一 provider 的并发调用数不超过 `PROVIDER_MAX_INFLIGHT`，超出者排队且期限仍然生效。
 - [ ] **角色约束**：`invoke_direct` 传入沙盒角色（`build` 等）→ `InvalidRole`；`schema` 与角色不匹配 → `InvalidSchema`。
@@ -362,7 +362,7 @@ pub trait CapabilityTable: Send + Sync {
 | --- | --- | --- | --- |
 | OQ-1 | 模型能力数据的来源（config OQ-3）：内置表、配置声明还是 provider 探测；未知模型是拒绝还是警告。示例里的模型 id 都是占位符，无法在本文给出内置表 | trait + 可注入实现，不内置数据 | V04 / V05、catalog、`api` 校验 |
 | OQ-2 | **已决：见裁决 C4 / P-50**（`interfaces/egress-control.md`；`models` 走回环 HTTP 反向代理并用 `svc_token`，不再使用 `models_uds`；计量经 `EgressControl::call_usage`）。`CallUsage` 字段与保守估计仍以契约为准。原问题：与 Egress 的接口在 `interfaces/` 里没有契约（egress.md OQ-E2）：`models_uds` 路径、`x-gantry-*` 头、`call_usage` 的形状、对端认证都只在 egress.md §6.2–§6.3 以 [提议] 出现；`CallUsage` 的字段（是否含 `incomplete`）和用量不可解析时的保守估计（egress OQ-E4） | 已落实到 §6、§7.5 | 用量记账（M1 退出标准） |
-| OQ-3 | （部分**已决：见裁决 C12 / P-58**——无交付单元的项目内调用记入会话台账，`BudgetLedger.subject = conversation`，每日上限 `levels.none.daily_tokens`；无项目的全局调用如何记账、计量不可用时退回自报仍未决）`budget.charged` 的 schema 未定：无交付单元归属的调用（`intent`、状态问答、通知文案）`delivery_id` 为空是否允许（`BudgetLedger` 属于 Delivery，事件目录没有别的记账事件）；`direct` 调用的 `budget.charged` 由 `models` 写、沙盒尝试由 `engine` 写，两个写入方是否可接受；Egress 计量不可用时是否允许退回提供方自报（与"以 Egress 为准"的关系） | 每次直接调用一条 `budget.charged`，`delivery_id` 可空（需契约 PR）；计量缺失时退回自报并标记 | 成本可见性、`schemas/events` |
+| OQ-3 | （部分**已决：见裁决 C12 / P-58**——无交付单元的项目内调用记入该会话当日的会话台账，`BudgetLedger.subject = conversation`，每日上限 `levels.none.daily_tokens` 按会话计；无项目的全局调用不写 `budget.charged`（event-data §2.2.6.1，#93 裁决）；计量不可用时退回自报仍未决）`budget.charged` 的 schema 未定：无交付单元归属的调用（`intent`、状态问答、通知文案）`delivery_id` 为空是否允许（`BudgetLedger` 属于 Delivery，事件目录没有别的记账事件）；`direct` 调用的 `budget.charged` 由 `models` 写、沙盒尝试由 `engine` 写，两个写入方是否可接受；Egress 计量不可用时是否允许退回提供方自报（与"以 Egress 为准"的关系） | 每次直接调用一条 `budget.charged`，`delivery_id` 可空（需契约 PR）；计量缺失时退回自报并标记 | 成本可见性、`schemas/events` |
 | OQ-4 | **已决：见裁决 C24 / P-70**（config 增加 `levels.token_weights`）。原问题：token 加权：P-44 说权重是配置项（默认按提供方价格比例），config.md 没有对应键且 OQ-7 称不加权 | 已落实到 §7.7、§10 | 预算口径 |
 | OQ-5 | 输出 schema 不合时的修复策略：重新请求并计入 `max_attempts`（本文）还是单独的修复轮（worker 的 A6 是修复 1 轮）；`max_output_tokens` 的来源 | 计入 `max_attempts`，内部常量 | 成功率、成本 |
 | OQ-6 | 不可信材料的包装实现：core.md OQ-4 提议"规范化放 `core`、包装（nonce、标记行）留给 `sandbox`"，但 `models` 也要包装直接调用的材料，两处各写一份会漂移，是否把包装也放进 `core` 作为纯函数共用；直接调用的材料上限是否另设配置 | 规范化用 `core` 的实现；包装按同一规则在本模块自实现，上限用内部常量 | 一致性 |
