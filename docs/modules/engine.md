@@ -851,6 +851,20 @@ impl DecideEnv<'_> {
     pub fn mint(&self) -> IdMint;
 }
 
+/// EffectiveSettings 中引擎读取的子集（§10）。两次决策之间整体切换（§7.13）。
+pub struct EngineSettings {
+    pub config_rev: Seq,
+    pub project: ProjectFacts,                // 本交付单元所属项目的事实（#70）
+    // §10 的其余键（budget、escalation 等）随所需切片补入
+}
+/// 构造 push_branch / create_pr / merge_pr 的 payload 与 ActionFacts 所需的项目事实（#70）。
+pub struct ProjectFacts {
+    pub repo: RepoSlug,                       // Project.repo（project.added / updated）
+    pub default_branch: String,               // Project.default_branch：base_ref / create_pr.base
+    pub branch_prefix: String,                // forge 的 push.branch_prefix（§10 默认 "gantry/"）
+    pub allowed_merge_methods: Vec<MergeMethod>, // Project.allowed_merge_methods，至少一项（core 校验）
+}
+
 /// open_pr 提议原文表（#125）。执行体内存，不持久化；同一键的值恒定（CAS 内容寻址）。
 pub struct ProposalTexts(BTreeMap<ProposalRef, ProposalText>);
 impl ProposalTexts {
@@ -892,9 +906,11 @@ pub enum EffectKey {
 
 `Missing` 能退回模板，前提是缺失永久不变：CAS 在 M1 不删除对象（store.md OQ-5）。将来引入 CAS 保留期时，必须保留非终态交付单元的 `attempt.finished.result_ref` 所指对象，否则同一意图在恢复前后会得到不同的键。
 
+`merge_pr.merge_method` 在 M1 取 `ProjectFacts.allowed_merge_methods` 的第一项（OQ-14 定案前的做法，#70）。列表为空视为项目数据无效：`project.added` / `project.updated` 的 `data` 由 core 校验拒绝（`minItems: 1`），所以引擎不处理空列表。
+
 #### 7.14.4 `DeliveryState` 的补全字段
 
-§7.2 结构保留，补足以下类型与字段。除标注"内存"的以外，全部能从事件日志与 `store` 投影重建；`pr`、`issues` 来自 `store` 的 GitHub 快照投影（I4），`pr` 的绑定取 `create_pr` 的 `outbox.succeeded.github_ref.pr`。
+§7.2 结构保留，补足以下类型与字段。除标注"内存"的以外，全部能从事件日志与 `store` 投影重建。§7.2 的 `pr` 拆成两个字段（#70）：`pr` 是引擎从 `create_pr` 的 `outbox.succeeded.github_ref.pr` 折叠出的绑定（`GithubPrRef`）；`pr_snapshot` 是 PR 的 GitHub 快照（I4），见下表。`issues` 同样来自 `store` 的 GitHub 快照投影。
 
 ```rust
 pub struct AttemptState {
@@ -942,6 +958,7 @@ pub struct FindingFingerprint(Sha256Digest);
 | `title` | `String` | `delivery.created` |
 | `abandon_cause` | `Option<AbandonCause>` | `delivery.abandoned.reason`：`pr_closed` → `PrClosedUnmerged`，`issue_not_planned` → `IssueNotPlanned`，其余 → `UserAbandoned`；T15 只认 `PrClosedUnmerged`（core `next_stage_with_abandon`） |
 | `stage_entered` | `(Seq, Timestamp, Option<String>)` | 最近一次 `delivery.stage_changed`（或 `delivery.created`）的 `seq`、`ts` 与 `reason`；"本阶段内"类前置条件都以它为界 |
+| `pr_snapshot` | `Option<PullRequestRef>` | **只读，不由引擎折叠**：加载 `DeliveryState` 时从 `store` 的 GitHub 快照投影读取（#150；加载归 #71）。T8 的 `head_sha`、T10 的 `checks.required_ok` 与 PR 是否 open、合并入队的 `mergeable_state` 都读它。`decide` 的测试直接构造 |
 | `outbox` | `BTreeMap<ActionKey, OutboxState>` | `outbox.enqueued`（`action` 含 `kind`、`epoch`、幂等键）/ `succeeded` / `failed` / `cancelled`；`OutboxState = { action_id, kind, epoch, status, failure_code? }` |
 | `retried` | `BTreeSet<ActionId>` | `inbox.resolved(chosen, option_id = retry)`，取原上报项（`open_inbox` 中该项）的 `action_id`；只用于 `epoch` 推导（下文"`ActionKey` 与 `epoch`"，#67） |
 | `approvals` | `BTreeMap<ApprovalId, ApprovalLite>` | `approval.requested`（本交付单元）及后续状态事件；`ApprovalLite = { action, subject_digest, status }` |
