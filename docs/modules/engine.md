@@ -586,7 +586,9 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | `rounds` | 追加一轮时（评审迭代）；`HealPort::request_heal` 时（自愈轮） | 引擎 |
 | `forge_writes` | 观察到 `outbox.succeeded` 时 +1 | 事件；按小时限速由 Outbox 令牌桶执行，不进台账（P-22） |
 
-**预留（OQ-9，对应 worker-protocol OQ-14）**：派发前由 `ReservationPolicy` 决定本尝试的 `tokens_total`（JobSpec `constraints.limits.tokens_total`，Egress 强制硬切断）。默认实现：同一批同时派发的 *n* 个同层级尝试平分该层级剩余额度；尝试终结后以计量值替换预留。预留失败（剩余为零）→ 不派发，走耗尽处置。`direct` 调用没有 Egress 级别的 job 封顶（`models` 的调用按 `call_id` 计量，egress.md §6.3），引擎在调用前检查该层级剩余额度（台账含 `models` 写入的 `budget.charged`），最多超支一次调用。
+**预留（OQ-9，对应 worker-protocol OQ-14）**：派发前由 `ReservationPolicy` 决定本尝试的 `tokens_total`（JobSpec `constraints.limits.tokens_total`，Egress 强制硬切断）。当前默认策略 `EqualShareReservation` 对同层级额度计算 `limit` 减 `used`，减法饱和到零，再按同批次数平分并向下取整；缺该层级额度或批次数为零时返回零。它只做纯计算，不记录或扣除在途预留；当前 M1 的 `low.single` 可使用，多节点并发的预算守恒尚缺，见 #317。预留为零时不派发；额度不足对应的事件与上报仍由 #309 跟踪，不能视为已完整实现。
+
+预留回收及 `direct` 调用的额度控制仍按规格目标处理：尝试终结后以计量值替换预留；`direct` 调用没有 Egress 级别的 job 封顶（`models` 的调用按 `call_id` 计量，egress.md §6.3），引擎在调用前检查该层级剩余额度（台账含 `models` 写入的 `budget.charged`），最多超支一次调用。这些目标不等于当前平分策略已实现在途预算守恒。
 
 **辅助调用**：引擎自己的 commit 说明等 utility 调用**不是图节点**（否则占 `nodes`）：由引擎直接调 `models.invoke_direct`（`Attribution::Aux`），用量由 `models` 以 `budget.charged` 记入 utility 层。失败或额度耗尽时退回确定性模板（commit 说明退回 `<title>` + `Gantry-Attempt` trailer）。`guardian` 经 `ClassifyPort` 要求的 `classify` 则是节点，占 `nodes`（guardian.md §6 已对齐）。是否应统一建模见 OQ-9。
 
@@ -1125,7 +1127,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 
 ### 7.15 运行时入口：`EngineRuntime`（#277）
 
-`gantryd` 只做两件事：组好端口后调 `EngineRuntime::new(store, ports, settings)`，再 `run(shutdown)`。引擎内部的路由器、执行体池、副作用执行器都由运行时自己组装，`gantryd` 不碰它们。
+预期装配方式是 `gantryd` 组好端口后调 `EngineRuntime::new(store, ports, settings)`，再 `run(shutdown)`。引擎内部的路由器、执行体池、副作用执行器都由运行时自己组装，`gantryd` 不碰它们。真实生产装配目前仍返回 `NotReady`，实际接线归 #105。
 
 ```rust
 pub struct EnginePorts {
@@ -1149,19 +1151,37 @@ pub struct RuntimeSettings {
     pub cleanup_lease: Duration, // RemoveWorktree 在锁已释放时以 engine 身份取锁的租约
 }
 
+pub struct RuntimeStatus {
+    pub degraded: BTreeMap<DeliveryId, String>,
+    pub applied_rev: Seq,
+    pub cursor: Seq,
+    pub actor_count: usize,
+}
+
 impl EngineRuntime {
     pub async fn new(store: Store, ports: EnginePorts, settings: RuntimeSettings)
         -> Result<Arc<Self>, RuntimeError>;
     pub async fn run(self: Arc<Self>, shutdown: impl Future<Output = ()> + Send)
         -> Result<(), RuntimeError>;
     pub fn engine(&self) -> &Engine;                       // 现有写入口（create_delivery 等）
-    pub async fn reconfigure(&self, settings: RuntimeSettings); // settings.updated 热加载
+    pub async fn reconfigure(&self, settings: RuntimeSettings); // 调用方主动安装设置
+    pub async fn status(&self) -> Result<RuntimeStatus, RuntimeError>;
     pub async fn degraded(&self) -> BTreeMap<DeliveryId, String>; // status 报 degraded
     pub fn mailbox(&self) -> Deliver;                      // 外部定时器等投递到同一邮箱
 }
 
 impl DeliveryControl for EngineRuntime { … }               // §6；api 的控制路由直接持有它（#73）
 ```
+
+**设置换算**：`runtime_settings::from_settings` 接收同一项目生效修订的五类类型化设置 `Models`、`Levels`、`Policies`、`Sandbox`、`Egress`，以及同修订已解析的模型表和可信项目事实。它检查模型表修订与配置修订一致、沙盒 worker 模型与配置匹配、默认 Egress profile 及其组存在，并校验相关数值范围；它不自行读取存储或解析模型。无模型时保持空表，不虚构模型。M1 `Single` 的 build schema 必须与仓库生成的 `schemas/worker/output.build.schema.json` 字节一致；调用方还须向 sandbox 的 `OutputSchemas` 提供相同来源的字节，换算函数不能验证沙盒侧资产，生产注册表由 #319 跟踪。创建交付单元时，调用方仍须从同一快照选档并用已有 `create::budget_from_level` 固化预算。
+
+换算对墙钟时限、空闲超时、终止宽限和锁租约做带溢出检查的上界校验：锁租约的秒数由墙钟时限、宽限和锁租约余量相加，四项分别检查秒数转毫秒以及与 `Timestamp::MAX_MILLIS` 相加，避免 `u64` 或 `i64` 运算溢出。`from_settings` 还显式接收调用方提供的可信 `now: Timestamp`，以纯函数方式使用 `Timestamp::checked_add_secs` 检查该时点的最大锁租约和空闲截止时间能否表示。校验失败时返回错误，不溢出或静默夹取。此检查只覆盖传入的时点，不保证持续派发时的截止时间可表示；长运行后的再校验由 #322 跟踪。
+
+core 设置校验允许 `kill_grace_s = 0`，换算保留该合法值；当前真实 sandbox 的 `check_spec` 却拒绝零值，不能据此认为真实 sandbox 支持该值。此差异由 #321 跟踪，须在 #105 联调前解决。
+
+换算使用的轮询间隔 1 秒和清理租约 60 秒是引擎常量，不是用户设置。当前只构造 `Single` 角色的输出配置；模型解析和真实接线尚未完成，多节点并发预算守恒见 #317，默认档位及其限制见 #320。不能由换算成功推断所有模型、schema、并发路径或档位均已运行。
+
+**状态**：`status()` 返回已停止决策的交付单元及原因 `degraded`、当前配置修订 `applied_rev`、持久低水位游标 `cursor` 和驻留执行体数量 `actor_count`。后者包括 degraded 执行体，不是活动任务数。执行体、配置与降级原因按同一锁序读取；游标单独从持久存储读取，因此游标与内存数据不是跨存储原子快照。actor 与 runner 的 revision 或 repo 不一致、repo 与运行时绑定不一致，或清理租约与运行时固定的 `cleanup_lease` 不一致时，`status()` 返回错误；这只能避免错误上报，不代表现有安装行为已安全。持续安全的原子热加载由 #318 跟踪，`settings.updated` 自动订阅与生产接线归 #105。
 
 `run` 的主循环：
 
@@ -1400,6 +1420,8 @@ M1 的执行体在主循环里串行处理（交付单元之间也串行），�
 ## 13. 开放问题
 
 骨架没有定的点；"本文暂用"不是决定，实现者不得自行拍板，需要时开 Issue。
+
+当前实现的限制另由以下 issue 跟踪：多节点并发预算守恒 #317，安全原子热加载 #318，生产 schema 注册表 #319，默认档位及其限制 #320；模型解析、`settings.updated` 自动订阅和真实生产装配归 #105。当前设置换算不补造缺失模型，只配置 M1 `Single` 的 build schema，不能据此认定其他角色或档位已经可运行（§7.15）。
 
 | # | 问题 | 本文暂用 | 影响 |
 | --- | --- | --- | --- |
