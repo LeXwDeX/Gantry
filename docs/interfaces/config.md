@@ -1014,7 +1014,7 @@ M1 只要求"白名单、只对模型 API 注入 key、出网日志"。M1 的 `d
 | OQ-7 | ~~预算口径与 token 加权~~ | 已决：单位见 decisions.md P-22；加权见 decisions.md P-44、P-70（`levels.token_weights`，§4） | — |
 | OQ-8 | ~~Ultimate 的预算作用域与 `concurrency` 含义~~ | 已决：见 decisions.md P-22 | — |
 | OQ-9 | ~~`forge_writes_per_hour` 与 `limits.forge_writes` 口径~~ | 已决：见 decisions.md P-22（累计数进台账，按小时限速由 Outbox 令牌桶执行） | — |
-| OQ-10 | 运行中能否给交付单元追加预算？预算耗尽上报后用户有哪些处置？是否需要"全局暂停 / 紧急止损"（属控制动作还是配置）。预算模板在创建时按 `level_cap` 固定、之后调上限也不变已决：见 decisions.md P-57；单个交付单元的暂停 / 继续已决：见 decisions.md P-56；预算耗尽的处置选项已决为 `raise_cap` / `abandon`（P-79），`raise_cap` 追加多少与记什么事件待决（decisions.md Q-11） | 本文不提供追加预算与全局暂停 | `engine`、`desktop-ui` |
+| OQ-10 | 运行中能否给交付单元追加预算？预算耗尽上报后用户有哪些处置？是否需要"全局暂停 / 紧急止损"（属控制动作还是配置）。预算模板在创建时按 `level_cap` 固定、之后调上限也不变已决：见 decisions.md P-57；单个交付单元的暂停 / 继续已决：见 decisions.md P-56；预算耗尽的处置选项已决为 `raise_cap` / `abandon`（P-79）；`raise_cap` 的追加量与事件已决：每次追加一份该档模板原值，记 `budget.limit_raised`（decisions.md D-19，[event-data.md §2.2.6.6](event-data.md)，#129） | 本文不提供追加预算与全局暂停 | `engine`、`desktop-ui` |
 | OQ-11 | 项目能否放宽：提高预算、换图模板、新增 egress 分组？语言包仓库组是默认全开（项目收窄）还是项目按需选（需要"项目可选分组"标记）？ | 一律只收紧 / 只收窄；全局默认档案需覆盖各项目所需 | `egress`、`sandbox` |
 | OQ-12 | 危险动作是否允许 `auto`（architecture §7.4 与 design.md 冲突）？`force_push` 的目标范围（仅 Gantry 创建的分支？）。动作 id 词表已决：见 decisions.md P-28 | 取保守：前七个 id 不允许 `auto`；目标范围未建模 | `policy`、`forge`、`engine` |
 | OQ-13 | M1 与 P-11 的过渡、M1 的 merge 签名已决：见 decisions.md P-18、P-19。仍待定："依赖清单"的权威清单；是否纳入 `.github/actions`、CODEOWNERS 等 | 清单为 [建议] | `policy` |

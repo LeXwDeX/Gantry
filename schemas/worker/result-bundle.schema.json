@@ -1,0 +1,541 @@
+{
+  "type": "object",
+  "properties": {
+    "bundle_version": {
+      "$ref": "#/$defs/ResultBundleVersion"
+    },
+    "job_id": {
+      "$ref": "#/$defs/Id_att"
+    },
+    "job_sha256": {
+      "$ref": "#/$defs/Sha256Digest"
+    },
+    "collected_at": {
+      "$ref": "#/$defs/Timestamp",
+      "description": "沙盒停止时间（`Lost` 时取判定丢失那条事件的时间），截到秒；重复 collect 结果相同。"
+    },
+    "terminal": {
+      "$ref": "#/$defs/ResultTerminal"
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "changes.patch": {
+          "$ref": "#/$defs/FileArtifact"
+        },
+        "progress.jsonl": {
+          "$ref": "#/$defs/FileArtifact"
+        },
+        "proposals.json": {
+          "$ref": "#/$defs/FileArtifact"
+        },
+        "report.md": {
+          "$ref": "#/$defs/FileArtifact"
+        },
+        "result.json": {
+          "$ref": "#/$defs/FileArtifact"
+        }
+      },
+      "default": {}
+    },
+    "logs": {
+      "$ref": "#/$defs/ResultLogs",
+      "default": {
+        "stdout_tail": null,
+        "stderr_tail": null
+      }
+    },
+    "usage_metered": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BundleUsageMetered"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "usage_reported": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UsageReported"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "egress": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BundleEgressFlags"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "classification": {
+      "$ref": "#/$defs/ResultClassification"
+    },
+    "validation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResultValidation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "`result.json` 缺失或无效时为空。",
+      "default": null
+    }
+  },
+  "required": [
+    "bundle_version",
+    "job_id",
+    "job_sha256",
+    "collected_at",
+    "terminal",
+    "classification"
+  ],
+  "description": "尝试结果清单：JCS 规范化后入 CAS，`Attempt.result_ref` 是规范化字节的摘要。\n\n不带 `project_id`：归属经 `Attempt.result_ref` 反查（Q-12 以清单为索引授权）。\n不含 `result_commit`：提交时间戳取自本清单的 `collected_at`，`result_commit` 只在事件里。",
+  "title": "ResultBundle",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ResultBundleVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "Id_att": {
+      "type": "string",
+      "pattern": "^att_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "ResultTerminal": {
+      "type": "object",
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/ResultTerminalCause"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "signal": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "oom": {
+          "type": "boolean"
+        },
+        "timer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultTimerKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cause",
+        "oom",
+        "cancel_requested"
+      ]
+    },
+    "ResultTerminalCause": {
+      "type": "string",
+      "enum": [
+        "exited",
+        "killed_timer",
+        "killed_cancel",
+        "killed_runtime",
+        "lost"
+      ]
+    },
+    "ResultTimerKind": {
+      "type": "string",
+      "enum": [
+        "wall",
+        "idle"
+      ]
+    },
+    "FileArtifact": {
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "sha256",
+        "bytes"
+      ],
+      "description": "内容寻址对象的引用（CAS 摘要 + 字节数）。"
+    },
+    "ResultLogs": {
+      "type": "object",
+      "properties": {
+        "stdout_tail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stderr_tail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "BundleUsageMetered": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "weighted_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "requests"
+      ],
+      "description": "Egress 计量（权威用量）加 P-70 加权值。M1 只定义形状，语义留到 M2。"
+    },
+    "UsageReported": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "turns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "turns",
+        "tool_calls"
+      ],
+      "description": "worker 自报用量；只用于展示，不记账。"
+    },
+    "BundleEgressFlags": {
+      "type": "object",
+      "properties": {
+        "capped": {
+          "type": "boolean"
+        },
+        "incomplete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "capped",
+        "incomplete"
+      ],
+      "description": "`EgressFlags` 中可入清单的部分；`upstream_error_summary` 是不可信文本，不入清单。"
+    },
+    "ResultClassification": {
+      "type": "object",
+      "properties": {
+        "failure_class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureClass"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "failure_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureDetail"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "FailureClass": {
+      "type": "string",
+      "enum": [
+        "timeout",
+        "exec_failed",
+        "verdict_fail",
+        "policy_denied",
+        "cancelled",
+        "budget_exhausted",
+        "infra_error"
+      ]
+    },
+    "FailureDetail": {
+      "type": "string",
+      "pattern": "^[a-z0-9_.:-]{1,200}$"
+    },
+    "ResultValidation": {
+      "type": "object",
+      "properties": {
+        "patch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PatchValidationSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProposalDispositionEntry"
+          },
+          "default": []
+        },
+        "unexpected_artifacts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/BundleUnexpectedArtifact"
+          },
+          "description": "M1 只定义形状，语义留到 M2（隔离区引用与 worker-protocol OQ-12 一起定）。",
+          "default": null
+        }
+      }
+    },
+    "PatchValidationSummary": {
+      "type": "object",
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/PatchVerdict"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256Digest",
+          "description": "补丁内容摘要，等于 `files[\"changes.patch\"].sha256`（= 补丁审批的 subject_digest，P-20）。"
+        },
+        "result_tree": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitOid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "必须与 `attempt.finished.result_tree` 一致；事件为权威来源，由引擎写入时核对。",
+          "default": null
+        },
+        "files": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "verdict",
+        "sha256",
+        "files"
+      ]
+    },
+    "PatchVerdict": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "needs_approval",
+        "deny"
+      ]
+    },
+    "GitOid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ProposalDispositionEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProposalKind"
+        },
+        "disposition": {
+          "$ref": "#/$defs/ProposalDisposition"
+        },
+        "reasons": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "text_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "被接受提议的净化文本（引擎另存的 CAS 对象）；执行器只读它，不碰 worker 原始文件。",
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "disposition"
+      ]
+    },
+    "ProposalKind": {
+      "type": "string",
+      "enum": [
+        "open_pr",
+        "reply_review_thread",
+        "resolve_review_thread",
+        "escalate"
+      ]
+    },
+    "ProposalDisposition": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "needs_approval",
+        "denied",
+        "invalid"
+      ]
+    },
+    "BundleUnexpectedArtifact": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "reason"
+      ]
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "worker::ResultBundle"
+}

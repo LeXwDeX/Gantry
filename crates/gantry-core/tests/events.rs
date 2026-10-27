@@ -35,8 +35,8 @@ fn event(ty: &str, data: Value) -> Event<Value> {
 
 #[test]
 fn event_type_names_roundtrip_for_all_78() {
-    assert_eq!(EventType::ALL.len(), 78);
-    assert_eq!(EVENT_TYPES.len(), 78);
+    assert_eq!(EventType::ALL.len(), 79);
+    assert_eq!(EVENT_TYPES.len(), 79);
     for ty in EventType::ALL {
         let name = ty.as_str();
         assert_eq!(event_type_by_name(name), Some(ty), "catalog misses {name}");
@@ -113,6 +113,7 @@ fn catalog_matches_data_model_52() {
         "forge.drift_detected",
         "budget.charged",
         "budget.exhausted",
+        "budget.limit_raised",
         "policy.denied",
         "device.paired",
         "device.updated",
@@ -132,7 +133,7 @@ fn catalog_matches_data_model_52() {
         25,
         "23 forge kinds + synced/drift_detected"
     );
-    assert_eq!(names.len(), 78);
+    assert_eq!(names.len(), 79);
 }
 
 #[test]

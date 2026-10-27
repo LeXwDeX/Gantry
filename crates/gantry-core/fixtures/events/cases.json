@@ -356,6 +356,12 @@
       "limit": 40,
       "used": 40
     },
+    "budget.limit_raised": {
+      "dimension": "rounds",
+      "from": 3,
+      "to": 6,
+      "by": 3
+    },
     "device.paired": {
       "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
       "name": "laptop",
@@ -2272,6 +2278,56 @@
         }
       },
       "pointer_contains": "/item"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "rounds",
+        "from": 3,
+        "to": 3,
+        "by": 0
+      },
+      "pointer_contains": "/by"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "tokens_by_tier.worker",
+        "from": 100,
+        "to": 250,
+        "by": 100
+      },
+      "pointer_contains": "/to"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "nodes",
+        "from": 18446744073709551615,
+        "to": 18446744073709551615,
+        "by": 1
+      },
+      "pointer_contains": "/to"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "nodes",
+        "from": 4,
+        "to": 8,
+        "by": 4,
+        "reason": "raise_cap"
+      },
+      "pointer_contains": "reason"
+    },
+    {
+      "type": "budget.limit_raised",
+      "data": {
+        "dimension": "nodes",
+        "to": 8,
+        "by": 4
+      },
+      "pointer_contains": "from"
     },
     {
       "type": "worktree.locked",
