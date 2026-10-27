@@ -6,11 +6,14 @@
 //! 已落地：纯规则层（`host` 主机规范化与硬性拒绝表、`netdeny` 拒绝网段、`review` 配置视图
 //! 防御性复核、`token` 能力令牌铸造与哈希）、登记表（`registry`，持久化在 `db`）、出网审计
 //! （`audit`）、控制面服务（`control`）、模型反向代理（`model_proxy`，上游连接在 `upstream`，用量解析在
-//! `usage`）、包仓库 `CONNECT` 白名单（`connect`）。控制面客户端与进程入口在后续切片落地（#94）。
+//! `usage`）、包仓库 `CONNECT` 白名单（`connect`）。进程组装与引导配置（`daemon`，二进制 `gantry-egress`）。控制面客户端在后续切片落地（#94）。
 
 pub mod audit;
 pub mod connect;
+#[cfg(unix)]
 pub mod control;
+#[cfg(unix)]
+pub mod daemon;
 pub mod db;
 pub mod host;
 pub mod model_proxy;

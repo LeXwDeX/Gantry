@@ -538,6 +538,7 @@ dependencies = [
  "bytes",
  "gantry-core",
  "gantry-fakes",
+ "gantry-secrets",
  "getrandom 0.3.4",
  "http-body-util",
  "hyper",
