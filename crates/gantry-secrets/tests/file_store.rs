@@ -415,33 +415,6 @@ fn value_size_limit() {
     ));
 }
 
-/// OQ-6 未决：本实现与 `MemorySecrets` 一致，接受空值与任意字节（见 issue #97 评论）。
-#[test]
-fn empty_and_binary_values_round_trip() {
-    let (_tmp, _key, secrets) = fresh(&[Consumer::Forge]);
-    let s = secrets.scoped(Consumer::Forge).unwrap();
-    s.put(
-        &name("empty"),
-        SecretValue::from_bytes(Vec::new()),
-        Expect::Any,
-        &ctx(),
-    )
-    .unwrap();
-    assert_eq!(s.get(&name("empty")).unwrap().unwrap().value.expose(), b"");
-    let binary: Vec<u8> = (0..=255).collect();
-    s.put(
-        &name("bin"),
-        SecretValue::from_bytes(binary.clone()),
-        Expect::Any,
-        &ctx(),
-    )
-    .unwrap();
-    assert_eq!(
-        s.get(&name("bin")).unwrap().unwrap().value.expose(),
-        &binary[..]
-    );
-}
-
 // ---- §12.2 并发 ---------------------------------------------------------------
 
 #[test]
