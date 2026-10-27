@@ -15,20 +15,25 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gantry_core::events::EventType;
-use gantry_core::ids::{Clock, DeliveryId, Entropy};
+use gantry_core::entities::{Delivery, Node};
+use gantry_core::events::{EventType, Subject};
+use gantry_core::ids::{Clock, DeliveryId, Entropy, NodeId};
+use gantry_core::level::Level;
+use gantry_core::ports::context::{ActorCtx, ModuleError};
+use gantry_core::ports::engine::DeliveryControl;
 use gantry_core::ports::forge::{ForgeReader, OutboxPort};
 use gantry_core::ports::inbox::InboxPort;
 use gantry_core::ports::policy::PolicyPort;
 use gantry_core::ports::repo::RepoService;
 use gantry_core::ports::sandbox::SandboxService;
 use gantry_core::ports::worker::WorkerAdapter;
+use gantry_core::time::Timestamp;
 use gantry_store::{EventFilter, Store, TypePattern};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::actor::{ActorConfig, ActorDeps, ActorError, DeliveryActor, PrSnapshots};
 use crate::attempt::{AttemptPorts, ResultCas, RunnerConfig};
-use crate::decide::{Input, InputIdentity, TickReason};
+use crate::decide::{Command, CommandRejection, Input, InputIdentity, TickReason};
 use crate::effects::{Deliver, PortEffects};
 use crate::engine::{load_delivery_state, scan_events, Engine, EngineError};
 use crate::event_router::{EventRouter, RouterError};
@@ -306,17 +311,33 @@ impl EngineRuntime {
         input: Input,
         identity: InputIdentity,
     ) -> Result<(), RuntimeError> {
+        match self.submit(delivery, input, identity).await {
+            Ok(_) | Err(ActorError::NotFound | ActorError::Degraded) => Ok(()),
+            Err(source @ ActorError::Store(_)) => Err(RuntimeError::Actor { delivery, source }),
+            // 其余错误已在 submit 里把该交付单元标为 degraded。
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// 交给执行体并返回命令回复。错误边界（§7.15）：存储错误原样返回；`NotFound` 不留执行体；
+    /// 其余是引擎缺陷（收敛超限、端口拒绝事务内决策），该交付单元停止决策，原因记入 `degraded()`。
+    async fn submit(
+        &self,
+        delivery: DeliveryId,
+        input: Input,
+        identity: InputIdentity,
+    ) -> Result<Vec<Result<(), CommandRejection>>, ActorError> {
         let config = self.settings.lock().await.actor.clone();
         let mut actors = self.actors.lock().await;
         let actor = actors
             .entry(delivery)
             .or_insert_with(|| DeliveryActor::new(delivery, self.deps.clone(), config));
-        match actor.handle(input, identity).await {
-            Ok(_) | Err(ActorError::NotFound) => Ok(()),
-            // 存储故障不是某个交付单元的问题：主循环退出，由 gantryd 重启后 Tick(Recover) 接管。
-            Err(source @ ActorError::Store(_)) => Err(RuntimeError::Actor { delivery, source }),
-            // 引擎缺陷（收敛超限、端口拒绝事务内决策）：该交付单元停止决策（§7.14.1），
-            // 其他交付单元照常推进。
+        let result = actor.handle(input, identity).await;
+        match &result {
+            Ok(_) | Err(ActorError::Store(_)) => {}
+            Err(ActorError::NotFound) => {
+                actors.remove(&delivery);
+            }
             Err(source) => {
                 actor.degrade();
                 self.degraded
@@ -324,8 +345,121 @@ impl EngineRuntime {
                     .await
                     .entry(delivery)
                     .or_insert_with(|| source.to_string());
-                Ok(())
             }
+        }
+        result
+    }
+
+    /// 控制命令（§7.14.2 `Command`）：经执行体由 `decide` 求值，返回第一条回复。
+    async fn command(&self, delivery: DeliveryId, command: Command) -> Result<(), ModuleError> {
+        let Some(request_id) = command.ctx().map(|ctx| ctx.request_id) else {
+            return Err(ModuleError::Unavailable {
+                message: "command has no request context".to_owned(),
+            });
+        };
+        let pointer = match command {
+            Command::SetLevelCap { .. } => "/level_cap",
+            _ => "",
+        };
+        let replies = self
+            .submit(
+                delivery,
+                Input::Command(command),
+                InputIdentity::Command(request_id),
+            )
+            .await
+            .map_err(actor_error)?;
+        match replies.into_iter().next().unwrap_or(Ok(())) {
+            Ok(()) => Ok(()),
+            Err(CommandRejection::InvalidState(message)) => Err(ModuleError::InvalidState {
+                message: message.to_owned(),
+            }),
+            Err(CommandRejection::Validation(message)) => Err(ModuleError::Validation {
+                pointer: pointer.to_owned(),
+                message: message.to_owned(),
+            }),
+            Err(CommandRejection::NotSupportedYet(what)) => Err(ModuleError::Unavailable {
+                message: format!("not supported yet: {what}"),
+            }),
+        }
+    }
+
+    /// 端口返回的 `Delivery`：行取自折叠状态；时间戳取该交付单元首末两条 `delivery.*` 事件；
+    /// `pr` 取 PR 快照。
+    async fn delivery_entity(&self, id: &DeliveryId) -> Result<Delivery, ModuleError> {
+        let state = load_delivery_state(&self.store, id)
+            .await
+            .map_err(engine_error)?
+            .ok_or(ModuleError::NotFound)?;
+        let (created_at, updated_at) = self.span(&id.to_string()).await?;
+        let row = &state.delivery;
+        let pr = match &state.pr {
+            Some(pr) => {
+                self.deps
+                    .snapshots
+                    .pull_request(&row.project_id, pr.number)
+                    .await
+            }
+            None => None,
+        };
+        Ok(Delivery {
+            id: row.id,
+            project_id: row.project_id,
+            title: row.title.clone(),
+            level_cap: row.level_cap,
+            level_effective: row.level_effective,
+            stage: row.stage,
+            stage_status: state.stage_status(),
+            issues: row.issues.clone(),
+            pr,
+            worktree_id: state.worktree.as_ref().map(|w| w.id),
+            parent_id: None,
+            depends_on: Vec::new(),
+            origin: row.origin.clone(),
+            created_at,
+            updated_at,
+        })
+    }
+
+    async fn node_entity(&self, delivery: &DeliveryId, id: &NodeId) -> Result<Node, ModuleError> {
+        let state = load_delivery_state(&self.store, delivery)
+            .await
+            .map_err(engine_error)?
+            .ok_or(ModuleError::NotFound)?;
+        let (workflow_id, node) = state
+            .workflows
+            .iter()
+            .find_map(|(wf, w)| w.nodes.get(id).map(|n| (*wf, n)))
+            .ok_or(ModuleError::NotFound)?;
+        let (created_at, updated_at) = self.span(&id.to_string()).await?;
+        Ok(Node {
+            id: node.id,
+            workflow_id,
+            role: node.role.clone(),
+            tier: node.tier,
+            exec: node.exec,
+            depends_on: node.depends_on.clone(),
+            required: node.required,
+            status: node.status,
+            verdict: node.verdict,
+            superseded_by: node.superseded_by,
+            created_at,
+            updated_at,
+        })
+    }
+
+    /// 以 `subject` 为主体的首末两条事件的时间戳。
+    async fn span(&self, subject: &str) -> Result<(Timestamp, Timestamp), ModuleError> {
+        let subject = Subject::parse(subject).map_err(|_| ModuleError::NotFound)?;
+        let events = self
+            .store
+            .events()
+            .by_subject(&subject)
+            .await
+            .map_err(|e| unavailable(&e))?;
+        match (events.first(), events.last()) {
+            (Some(first), Some(last)) => Ok((first.ts, last.ts)),
+            _ => Err(ModuleError::NotFound),
         }
     }
 
@@ -354,5 +488,74 @@ impl EngineRuntime {
                 identity,
             });
         })
+    }
+}
+
+fn unavailable(error: &dyn std::fmt::Display) -> ModuleError {
+    ModuleError::Unavailable {
+        message: error.to_string(),
+    }
+}
+
+fn engine_error(error: EngineError) -> ModuleError {
+    match error {
+        EngineError::NotFound => ModuleError::NotFound,
+        other => unavailable(&other),
+    }
+}
+
+fn actor_error(error: ActorError) -> ModuleError {
+    match error {
+        ActorError::NotFound => ModuleError::NotFound,
+        ActorError::Degraded => ModuleError::Unavailable {
+            message: "delivery is degraded".to_owned(),
+        },
+        other => unavailable(&other),
+    }
+}
+
+/// 控制面端口（engine.md §6、§7.15，#73）：命令一律收 `ActorCtx`，经执行体由 `decide` 求值，
+/// 不绕过执行体直接写事件。`ctx.dedup_key` 是请求身份：同一请求重放返回首次结果（§7.14.5）。
+#[async_trait::async_trait]
+impl DeliveryControl for EngineRuntime {
+    async fn set_level_cap(
+        &self,
+        ctx: ActorCtx,
+        id: DeliveryId,
+        cap: Level,
+    ) -> Result<Delivery, ModuleError> {
+        self.command(id, Command::SetLevelCap { cap, ctx }).await?;
+        self.delivery_entity(&id).await
+    }
+
+    async fn abandon(
+        &self,
+        ctx: ActorCtx,
+        id: DeliveryId,
+        reason: Option<String>,
+    ) -> Result<Delivery, ModuleError> {
+        self.command(id, Command::Abandon { reason, ctx }).await?;
+        self.delivery_entity(&id).await
+    }
+
+    async fn pause(&self, ctx: ActorCtx, id: DeliveryId) -> Result<Delivery, ModuleError> {
+        self.command(id, Command::Pause { ctx }).await?;
+        self.delivery_entity(&id).await
+    }
+
+    async fn resume(&self, ctx: ActorCtx, id: DeliveryId) -> Result<Delivery, ModuleError> {
+        self.command(id, Command::Resume { ctx }).await?;
+        self.delivery_entity(&id).await
+    }
+
+    async fn retry_node(&self, ctx: ActorCtx, id: NodeId) -> Result<Node, ModuleError> {
+        let delivery = self
+            .engine
+            .delivery_of_node(&id)
+            .await
+            .map_err(engine_error)?;
+        self.command(delivery, Command::RetryNode { node_id: id, ctx })
+            .await?;
+        self.node_entity(&delivery, &id).await
     }
 }

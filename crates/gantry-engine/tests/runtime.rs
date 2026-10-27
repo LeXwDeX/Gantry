@@ -14,18 +14,19 @@ use futures_core::stream::BoxStream;
 use gantry_core::canon::{sha256, GitOid, RepoSlug, SubjectDigest};
 use gantry_core::entities::{
     Actor, ActorKind, ApprovalAction, ApprovalStatus, DeliveryOrigin, ForgeActionKind, GithubPrRef,
-    GithubRef, MergeMethod, PolicyActionId, Project, PullRequestRef, Role, SandboxLimits as Limits,
-    SandboxTrust, Seq, Stage, Tier, TokenUsage, TokenWeights,
+    GithubRef, MergeMethod, NodeStatus, PolicyActionId, Project, PullRequestRef, Role,
+    SandboxLimits as Limits, SandboxTrust, Seq, Stage, StageStatus, Tier, TokenUsage, TokenWeights,
 };
 use gantry_core::events::{
     ApprovalGrantedData, EventType, NewEvent, PatchValidatedData, Subject, WorktreeCreatedData,
     WorktreeLockedData, WorktreeRemovedData, WorktreeUnlockReason, WorktreeUnlockedData,
 };
 use gantry_core::ids::{
-    ApprovalId, AttemptId, DeliveryId, IdGen, MessageId, ProjectId, WorktreeId,
+    ApprovalId, AttemptId, DeliveryId, IdGen, MessageId, NodeId, ProjectId, WorktreeId,
 };
 use gantry_core::level::{Effort, Level};
-use gantry_core::ports::context::ActorCtx;
+use gantry_core::ports::context::{ActorCtx, ModuleError};
+use gantry_core::ports::engine::DeliveryControl;
 use gantry_core::ports::policy::{ActionDecision, ApprovalSpec};
 use gantry_core::ports::repo::{
     CommitInfo, CommitPatch, CommitRecord, CreateWorktree, LockToken, MirrorGuard, MirrorHealth,
@@ -406,6 +407,8 @@ struct GoldenSandbox {
     inner: FakeSandboxService,
     cas: Cas,
     jobs: Mutex<Vec<AttemptId>>,
+    /// 为真时 worker 以退出码 10 结束（`exec.bad_job`：不自动重试，节点 failed）。
+    fail: Mutex<bool>,
 }
 
 impl GoldenSandbox {
@@ -460,6 +463,9 @@ impl GoldenSandbox {
             (ArtifactName::new("changes.patch"), patch),
             (ArtifactName::new("proposals.json"), proposals),
         ]);
+        if *self.fail.lock().unwrap() {
+            outcome.terminal.exit_code = Some(10);
+        }
         outcome.usage_metered = TokenUsage::new(1_000, 200, 0, 0, 3);
         outcome.weighted_tokens = 2_000;
         outcome
@@ -691,6 +697,7 @@ impl World {
                 inner: FakeSandboxService::new(),
                 cas: store.cas(),
                 jobs: Mutex::new(Vec::new()),
+                fail: Mutex::new(false),
             }),
             snapshots: Arc::new(Snapshots::default()),
             repo,
@@ -1096,6 +1103,157 @@ async fn a_rejected_enqueue_degrades_only_that_delivery() {
     let degraded = runtime.degraded().await;
     assert!(degraded[&delivery].contains("approval"), "{degraded:?}");
     assert!(!main.is_finished(), "run keeps going");
+    stop.send(()).unwrap();
+    main.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// DeliveryControl（#73）：命令收 ActorCtx，经执行体由 decide 求值
+// ---------------------------------------------------------------------------
+
+fn ctx(key: &str, n: u128) -> ActorCtx {
+    ActorCtx {
+        actor: Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: gantry_core::ids::Ulid::from_parts(T0 as u64, n).unwrap(),
+        idempotency_key: None,
+        dedup_key: Some(key.to_owned()),
+        causation_id: None,
+    }
+}
+
+async fn head(world: &World) -> Seq {
+    world.store.events().head().await.unwrap()
+}
+
+#[tokio::test]
+async fn delivery_control_goes_through_the_actor() {
+    let world = World::new().await;
+    let runtime = world.runtime().await;
+    let id = runtime
+        .engine()
+        .create_delivery(new_delivery())
+        .await
+        .unwrap();
+
+    // pause：写 delivery.paused（dedup_key = ctx.dedup_key，actor 取调用方）。
+    let paused = runtime.pause(ctx("p1", 1), id).await.unwrap();
+    assert_eq!(paused.stage_status, StageStatus::Paused);
+    assert_eq!(paused.id, id);
+    let seq = world
+        .store
+        .events()
+        .by_dedup_key("p1")
+        .await
+        .unwrap()
+        .unwrap();
+    let event = world.store.events().get_by_seq(seq).await.unwrap().unwrap();
+    assert_eq!(event.ty, EventType::DeliveryPaused);
+    assert_eq!(event.actor.kind, ActorKind::Device);
+    // 同一请求重放 → 首次结果，不写事件。
+    let before = head(&world).await;
+    assert_eq!(
+        runtime.pause(ctx("p1", 2), id).await.unwrap().stage_status,
+        StageStatus::Paused
+    );
+    assert_eq!(head(&world).await, before);
+    // 暂停期间不派发。
+    assert!(world.sandbox.jobs.lock().unwrap().is_empty());
+
+    // resume；新请求在未暂停时 → InvalidState。
+    let resumed = runtime.resume(ctx("r1", 3), id).await.unwrap();
+    assert_eq!(resumed.stage, Stage::Implement);
+    assert!(matches!(
+        runtime.resume(ctx("r2", 4), id).await,
+        Err(ModuleError::InvalidState { .. })
+    ));
+
+    // set_level_cap(None) → Validation，指向 /level_cap。
+    assert!(matches!(
+        runtime.set_level_cap(ctx("c1", 5), id, Level::None).await,
+        Err(ModuleError::Validation { pointer, .. }) if pointer == "/level_cap"
+    ));
+
+    // abandon → 终态；之后的新命令 → InvalidState。
+    let abandoned = runtime
+        .abandon(ctx("a1", 6), id, Some("not needed".to_owned()))
+        .await
+        .unwrap();
+    assert_eq!(abandoned.stage, Stage::Abandoned);
+    assert!(matches!(
+        runtime.pause(ctx("p2", 7), id).await,
+        Err(ModuleError::InvalidState { .. })
+    ));
+
+    // 未知交付单元 → NotFound，且不留下执行体。
+    let missing: DeliveryId = "dlv_01JB7N3R5T8X2V6M9Q4K1W7YZD".parse().unwrap();
+    assert!(matches!(
+        runtime.pause(ctx("p3", 8), missing).await,
+        Err(ModuleError::NotFound)
+    ));
+    assert!(runtime.degraded().await.is_empty());
+}
+
+#[tokio::test]
+async fn retry_node_through_delivery_control() {
+    let world = World::new().await;
+    *world.sandbox.fail.lock().unwrap() = true;
+    let runtime = world.runtime().await;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let main = tokio::spawn(runtime.clone().run(async {
+        let _ = stopped.await;
+    }));
+    let id = runtime
+        .engine()
+        .create_delivery(new_delivery())
+        .await
+        .unwrap();
+
+    let failed_node = || async {
+        let state = load_delivery_state(&world.store, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .workflows
+            .values()
+            .flat_map(|w| w.nodes.values())
+            .find(|n| n.status == NodeStatus::Failed)
+            .map(|n| n.id)
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let node = loop {
+        if let Some(node) = failed_node().await {
+            break node;
+        }
+        assert!(Instant::now() < deadline, "node never failed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    // 正例：failed → queued，随后重新派发（这次成功）。
+    *world.sandbox.fail.lock().unwrap() = false;
+    let retried = runtime.retry_node(ctx("retry-1", 1), node).await.unwrap();
+    assert_eq!(retried.id, node);
+    assert_ne!(retried.status, NodeStatus::Failed);
+    // 同一请求重放 → Ok；新请求（节点已不是 failed）→ InvalidState。
+    assert!(runtime.retry_node(ctx("retry-1", 2), node).await.is_ok());
+    assert!(matches!(
+        runtime.retry_node(ctx("retry-2", 3), node).await,
+        Err(ModuleError::InvalidState { .. })
+    ));
+    // 未知节点 → NotFound。
+    let missing: NodeId = "nod_01JB7N3R5T8X2V6M9Q4K1W7YZD".parse().unwrap();
+    assert!(matches!(
+        runtime.retry_node(ctx("retry-3", 4), missing).await,
+        Err(ModuleError::NotFound)
+    ));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while world.sandbox.jobs.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "retry never dispatched");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     stop.send(()).unwrap();
     main.await.unwrap().unwrap();
 }

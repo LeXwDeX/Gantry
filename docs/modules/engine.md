@@ -143,8 +143,13 @@ pub trait EngineApi: Send + Sync {
 /// `core::ports::DeliveryControl`（core.md §6.10），由引擎实现（PATCH / abandon / pause / resume / retry 路由的业务部分）；
 /// `conversation` 在桌面端消息带 `level_cap` 且 `@` 已有交付时也调用 `set_level_cap`（P-82）。
 /// `ctx: ActorCtx`（`core::ports`，P-78）带发起设备、角色、档案与请求 ID；API 层的 `Idempotency-Key` 由 api 处理（控制路由必带，C26），引擎按目标状态幂等。
+/// 实现方是 `EngineRuntime`（§7.15，#73）：每个方法构造 `Command`（§7.14.2）交给该交付单元的执行体，由 `decide` 求值、
+/// 事务内写事件，不绕过执行体直接写日志；`ctx.dedup_key` 是请求身份，同一请求重放返回首次结果（§7.14.5）。
+/// 回复映射：`InvalidState` / `Validation`（`set_level_cap` 的 `pointer = /level_cap`）原样，`NotSupportedYet` → `Unavailable`，
+/// 交付单元或节点不存在 → `NotFound`，该交付单元 degraded → `Unavailable`。
+/// 旧的 `Engine::{pause, resume, abandon, set_level_cap, retry_node, advance_stage}` 已删除：阶段推进只由 `decide` 产生。
 #[async_trait]
-impl DeliveryControl for Engine {
+impl DeliveryControl for EngineRuntime {
     /// 终结阶段 → `InvalidState`。预算模板在创建时按 `level_cap` 固定，调档不改台账（P-57）；
     /// 用户降上限时 `level_effective` 取 min(原值, 新上限)，已触发的闸门保留；引擎自己从不自动降档。
     /// `Level::None` 不是合法的交付单元上限 → `Validation`。产生一条 `delivery.level_changed(kind = cap, reason = user)`；新值等于当前上限 → 不产生事件（P-82）。
@@ -1154,6 +1159,8 @@ impl EngineRuntime {
     pub async fn degraded(&self) -> BTreeMap<DeliveryId, String>; // status 报 degraded
     pub fn mailbox(&self) -> Deliver;                      // 外部定时器等投递到同一邮箱
 }
+
+impl DeliveryControl for EngineRuntime { … }               // §6；api 的控制路由直接持有它（#73）
 ```
 
 `run` 的主循环：

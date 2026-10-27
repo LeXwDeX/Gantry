@@ -1,14 +1,14 @@
-//! 崩溃恢复：同一事件日志重建引擎后继续推进。
+//! 崩溃恢复：同一事件日志重建引擎后，各交付单元的状态互不串扰。
 
 use std::sync::Arc;
 
-use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, Seq, Stage, StageStatus};
+use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, Seq, Stage};
+use gantry_core::events::{EventType, NewEvent, Subject};
 use gantry_core::ids::{DeliveryId, IdGen, MessageId, ProjectId};
 use gantry_core::level::Level;
-use gantry_core::machines::delivery::StageTrigger;
 use gantry_core::settings::resource::{LevelBudget, LevelEntry, TierBudget};
 use gantry_engine::create::{budget_from_level, NewDelivery};
-use gantry_engine::engine::{Engine, StageRequest};
+use gantry_engine::engine::Engine;
 use gantry_store::testing::{FakeClock, SeqEntropy};
 use gantry_store::{Store, StoreDeps};
 
@@ -50,18 +50,6 @@ fn delivery(id: &str, message: &str) -> NewDelivery {
     }
 }
 
-fn stage_request(id: DeliveryId) -> StageRequest {
-    StageRequest {
-        delivery_id: id,
-        project_id: "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA".parse().unwrap(),
-        from: Stage::Spec,
-        level_effective: Level::Low,
-        trigger: StageTrigger::AdmissionSkipped,
-        reason: None,
-        actor: Actor::new(ActorKind::Engine, "engine"),
-    }
-}
-
 #[tokio::test]
 async fn replayed_events_keep_deliveries_isolated() {
     let clock = Arc::new(FakeClock::new(1_700_000_000_000));
@@ -90,7 +78,20 @@ async fn replayed_events_keep_deliveries_isolated() {
         ))
         .await
         .unwrap();
-    engine.advance_stage(stage_request(first)).await.unwrap();
+    // spec → implement（引擎由 decide 写这条事件；这里直接写入日志）。
+    let event = NewEvent {
+        ty: EventType::DeliveryStageChanged,
+        subject: Subject::parse(&first.to_string()).unwrap(),
+        project_id: Some("prj_01JB7K2M9Q4X8V3N5R6T1W0YZA".parse().unwrap()),
+        actor: Actor::new(ActorKind::Engine, "engine"),
+        causation_id: None,
+        correlation_id: Some(first.to_string()),
+        data: serde_json::json!({"from": "spec", "to": "implement", "reason": "admission_skipped", "stage_status": "running"}),
+        dedup_key: None,
+    };
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(event).await.unwrap();
+    tx.commit().await.unwrap();
 
     let recovered = Engine::new(
         store.clone(),
@@ -115,15 +116,4 @@ async fn replayed_events_keep_deliveries_isolated() {
             .stage,
         Stage::Spec
     );
-
-    let paused = recovered
-        .pause(first, Actor::new(ActorKind::Device, "dev"))
-        .await
-        .unwrap();
-    assert_eq!(paused.stage_status, StageStatus::Paused);
-    let resumed = recovered
-        .resume(first, Actor::new(ActorKind::Device, "dev"))
-        .await
-        .unwrap();
-    assert_eq!(resumed.stage_status, StageStatus::Running);
 }
