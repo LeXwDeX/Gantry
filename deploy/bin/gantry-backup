@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# gantry-backup：一致性快照 + 加密归档 + 轮转 + 异地同步（deploy.md §7.10）。
+#
+# 用法：gantry-backup [--config /etc/gantry/gantry.toml] [--egress-config /etc/gantry-egress/egress.toml] [--tag <名>]
+#
+# 归档内容（architecture §6 的“需要备份”）：数据库在线快照、revocations.journal 副本、CAS、
+# 两个 secrets 实例的加密导出、两份引导配置（含 install-state.json）、MANIFEST.json。
+# 不含镜像仓、工作树、工作区、沙盒存储与根 CA 私钥。整个归档用 age 收件人公钥加密，
+# 私钥永不放在服务端。失败不静默：非 0 退出、journald 记录，且不删除上一份有效备份。
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/common.sh
+. "$SCRIPT_DIR/../lib/common.sh"
+# shellcheck disable=SC2034 # 由 lib/common.sh 的 log() 使用
+GANTRY_LOG_TAG=gantry-backup
+
+CONFIG=/etc/gantry/gantry.toml
+EGRESS_CONFIG=/etc/gantry-egress/egress.toml
+TAG=""
+GANTRY_CLI="${GANTRY_CLI:-gantry}"
+VERSION_FILE="${GANTRY_VERSION_FILE:-/opt/gantry/current/VERSION}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config) CONFIG="${2:?}"; shift 2 ;;
+    --egress-config) EGRESS_CONFIG="${2:?}"; shift 2 ;;
+    --tag) TAG="${2:?}"; shift 2 ;;
+    -h | --help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die 1 "未知参数：$1" ;;
+  esac
+done
+case "$TAG" in *[!A-Za-z0-9._-]*) die 1 "--tag 只能含字母、数字、. _ -" ;; esac
+
+cfg() { toml_get "$CONFIG" "$1" "$2"; }
+
+DATA_DIR="$(cfg server data_dir)" || die 1 "配置缺少 server.data_dir"
+SECRETS_DIR="$(cfg server secrets_dir)" || SECRETS_DIR="$DATA_DIR/secrets"
+DEST="$(cfg backup dest)" || DEST=/var/backups/gantry
+RECIPIENTS="$(cfg backup recipients)" || RECIPIENTS=""
+POST_HOOK="$(cfg backup post_hook)" || POST_HOOK=""
+KEEP_DAILY="$(cfg backup keep_daily)" || KEEP_DAILY=7
+KEEP_WEEKLY="$(cfg backup keep_weekly)" || KEEP_WEEKLY=4
+KEEP_MONTHLY="$(cfg backup keep_monthly)" || KEEP_MONTHLY=6
+EGRESS_DATA_DIR="$(toml_get "$EGRESS_CONFIG" egress data_dir)" || EGRESS_DATA_DIR=/var/lib/gantry-egress
+[ -n "$RECIPIENTS" ] || die 1 "backup.recipients 未配置（age 收件人公钥）"
+for n in "$KEEP_DAILY" "$KEEP_WEEKLY" "$KEEP_MONTHLY"; do
+  case "$n" in '' | *[!0-9]*) die 1 "backup.keep_* 须是非负整数" ;; esac
+done
+
+# run_as <用户> <命令…>：以服务用户身份执行。仅本机替身测试（非 root）时直接执行。
+run_as() {
+  local user="$1"
+  shift
+  if [ "$(id -u)" = 0 ]; then
+    runuser -u "$user" -- "$@"
+  elif [ "${GANTRY_BACKUP_TEST:-}" = 1 ]; then
+    "$@"
+  else
+    die 1 "须以 root 运行"
+  fi
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+umask 0077
+install -d -m 0700 "$DEST"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+HOST="$(hostname -s 2>/dev/null || hostname)"
+case "$HOST" in *[!A-Za-z0-9.-]*) HOST=host ;; esac
+NAME="gantry-${STAMP}${TAG:+-$TAG}"
+WORK="$(mktemp -d "$DEST/.work.XXXXXX")"
+ARCHIVE="$DEST/$NAME.tar.gz.age"
+PARTIAL="$ARCHIVE.partial"
+
+cleanup() {
+  rm -rf "$WORK"
+  rm -f "$PARTIAL"
+}
+on_error() {
+  error "备份失败（第 $1 行），上一份有效备份未受影响"
+}
+trap cleanup EXIT
+trap 'on_error $LINENO' ERR
+
+mkdir -p "$WORK/payload"
+P="$WORK/payload"
+
+# 1. 数据库：SQLite 在线备份接口取一致性快照，不直接拷贝运行中的 -wal（§7.10 第 1 步）。
+DB="$DATA_DIR/gantry.db"
+[ -f "$DB" ] || die 1 "数据库不存在：$DB"
+sqlite3 "file:${DB}?mode=ro" ".backup '$P/gantry.db'"
+INTEGRITY="$(sqlite3 "$P/gantry.db" 'PRAGMA integrity_check;')"
+[ "$INTEGRITY" = ok ] || die 1 "快照 integrity_check 未通过"
+# 日志元数据（schema_version、log_id、log_epoch、seq 头）由 store 解释快照得出，脚本不猜表结构。
+STORE_INFO="$("$GANTRY_CLI" store info --db "$P/gantry.db" --json)" || die 1 "读取快照元数据失败（gantry store info）"
+printf '%s\n' "$STORE_INFO" | jq -e 'has("schema_version") and has("log_id") and has("log_epoch") and has("seq_head")' >/dev/null ||
+  die 1 "gantry store info 输出缺字段"
+
+# 2. CAS：先 DB 快照、后复制 CAS（对象先写入、后被事件引用，不会漏掉快照引用的对象）。
+if [ -d "$DATA_DIR/cas" ]; then
+  cp -R "$DATA_DIR/cas" "$P/cas"
+else
+  mkdir "$P/cas"
+fi
+
+# 3. 吊销日志：复制只追加文件，末尾不完整的行丢弃（P-67）。
+JOURNAL="$DATA_DIR/pki/revocations.journal"
+if [ -f "$JOURNAL" ]; then
+  if [ -s "$JOURNAL" ] && [ "$(tail -c 1 "$JOURNAL" | od -An -c | tr -d ' ')" != '\n' ]; then
+    sed '$d' "$JOURNAL" >"$P/revocations.journal"
+  else
+    cp "$JOURNAL" "$P/revocations.journal"
+  fi
+else
+  : >"$P/revocations.journal"
+fi
+
+# 4. 密钥：两个实例各自加密导出（加密方式归 secrets；备份收件人独立于主机主密钥）。
+run_as gantry "$GANTRY_CLI" secrets export --dir "$SECRETS_DIR" --out - >"$P/secrets-gantry.export"
+run_as gantry-egress "$GANTRY_CLI" secrets export --dir "$EGRESS_DATA_DIR/secrets" --out - >"$P/secrets-egress.export"
+[ -s "$P/secrets-gantry.export" ] && [ -s "$P/secrets-egress.export" ] || die 1 "secrets 导出为空"
+
+# 5. 引导配置（无密钥）与安装状态。
+mkdir -p "$P/etc/gantry" "$P/etc/gantry-egress"
+cp -R "$(dirname "$CONFIG")/." "$P/etc/gantry/"
+cp -R "$(dirname "$EGRESS_CONFIG")/." "$P/etc/gantry-egress/"
+
+# 6. MANIFEST.json：组件清单与 SHA-256、版本、日志元数据、时间、主机。
+VERSION="unknown"
+[ ! -f "$VERSION_FILE" ] || VERSION="$(tr -d '[:space:]' <"$VERSION_FILE")"
+(
+  cd "$P"
+  find . -type f ! -name MANIFEST.json | LC_ALL=C sort | while IFS= read -r f; do
+    printf '%s\t%s\n' "${f#./}" "$(sha256_of "$f")"
+  done
+) >"$WORK/files.tsv"
+jq -n \
+  --arg version "$VERSION" \
+  --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg host "$HOST" \
+  --arg tag "$TAG" \
+  --argjson store "$STORE_INFO" \
+  --rawfile files "$WORK/files.tsv" \
+  '{
+     format: 1,
+     gantry_version: $version,
+     created_at: $created_at,
+     host: $host,
+     tag: (if $tag == "" then null else $tag end),
+     schema_version: $store.schema_version,
+     log_id: $store.log_id,
+     log_epoch: $store.log_epoch,
+     seq_head: $store.seq_head,
+     components: [ $files | split("\n")[] | select(length > 0) | split("\t") | {path: .[0], sha256: .[1]} ]
+   }' >"$P/MANIFEST.json"
+
+# 7. 打包并用 age 收件人公钥加密；先写 .partial，成功后原子改名。
+AGE_ARGS=()
+IFS=, read -r -a RCPTS <<<"$RECIPIENTS"
+for r in "${RCPTS[@]}"; do AGE_ARGS+=(-r "$r"); done
+tar -czf - -C "$P" . | age "${AGE_ARGS[@]}" -o "$PARTIAL"
+mv "$PARTIAL" "$ARCHIVE"
+chmod 0600 "$ARCHIVE"
+info "备份完成：$ARCHIVE"
+
+# 8. 异地同步：失败即备份失败（只在同一块盘上不算备份）。
+if [ -n "$POST_HOOK" ]; then
+  "$POST_HOOK" "$ARCHIVE" || die 1 "post_hook 失败：$POST_HOOK"
+fi
+
+# 9. 轮转：只在本次成功之后执行；带 tag 的归档（如 pre-upgrade-*）不参与轮转。
+# shellcheck source=../lib/rotate.sh
+. "$SCRIPT_DIR/../lib/rotate.sh"
+rotate_backups "$DEST" "$KEEP_DAILY" "$KEEP_WEEKLY" "$KEEP_MONTHLY"
+
+# 10. 记录最近一次成功，供 gantry doctor backup 读取（无密钥）。
+SIZE="$(wc -c <"$ARCHIVE" | tr -d ' ')"
+printf '{"archive":"%s","finished_at":"%s","size_bytes":%s,"post_hook":%s}\n' \
+  "$(basename "$ARCHIVE")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SIZE" \
+  "$([ -n "$POST_HOOK" ] && printf true || printf false)" >"$DEST/last-success.json"

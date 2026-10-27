@@ -1,0 +1,8 @@
+[Unit]
+Description=Gantry 服务端（gantryd、gantry-egress、主机防火墙）
+Documentation=https://github.com/LeXwDeX/gantry/blob/main/docs/modules/deploy.md
+Wants=gantry-firewall.service gantry-egress.service gantryd.service
+After=gantry-firewall.service
+
+[Install]
+WantedBy=multi-user.target

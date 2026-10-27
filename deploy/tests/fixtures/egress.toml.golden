@@ -1,0 +1,13 @@
+# gantry-egress 引导配置（egress.md §10，deploy.md §10）。由 install.sh 渲染，重启生效。
+# 本文件不含任何密钥：模型 key 等只在 /var/lib/gantry-egress/secrets。
+
+[egress]
+data_dir = "/var/lib/gantry-egress"
+control_socket = "/run/gantry/egress.sock"
+# 与主机防火墙（/etc/gantry/gantry.nft）里的沙盒网段一致（P-49）。
+sandbox_cidrs = "10.89.0.0/24"
+
+[egress.listen]
+sandbox_model = "10.89.0.1:8081"
+sandbox_connect = "10.89.0.1:3128"
+svc_model = "127.0.0.1:8082"

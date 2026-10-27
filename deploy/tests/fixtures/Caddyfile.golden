@@ -1,0 +1,25 @@
+# public 形态的 webhook 入口（deploy.md §7.6，P-65）：Caddy 用 ACME 申请公共受信证书并终止 TLS，
+# 只把 POST /webhook 与 GET /setup/github/callback 转到回环上的 forge 监听，其余一律 404。
+# mTLS API 与配对端口绝不经此入口暴露。由 install.sh 渲染到 /etc/caddy/Caddyfile.d/gantry.caddyfile。
+
+hooks.example.com {
+	@webhook {
+		method POST
+		path /webhook
+	}
+	handle @webhook {
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	@setup_callback {
+		method GET
+		path /setup/github/callback
+	}
+	handle @setup_callback {
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	handle {
+		respond 404
+	}
+}
