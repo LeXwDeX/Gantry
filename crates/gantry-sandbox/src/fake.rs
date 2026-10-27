@@ -113,6 +113,8 @@ pub enum FailPoint {
     PrepareDirs,
     ReadOut,
     Remove,
+    /// 下一次 `logs` 读出一行后报错中断（模拟日志接口断开）。
+    LogsInterrupt,
 }
 
 struct FakeContainer {
@@ -512,6 +514,7 @@ impl SandboxDriver for FakeDriver {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut state = self.lock();
         state.calls.push(DriverCall::Logs(id.clone(), since));
+        let interrupt = state.failures.remove(&FailPoint::LogsInterrupt);
         let Some(container) = state.containers.get(id) else {
             let _ = tx.send(Err(DriverError::NotFound));
             return Box::pin(ChannelStream(rx));
@@ -559,6 +562,13 @@ impl SandboxDriver for FakeDriver {
                     line,
                 };
                 if tx.send(Ok(chunk)).is_err() {
+                    return;
+                }
+                if interrupt {
+                    let _ = tx.send(Err(DriverError::Runtime {
+                        op: "logs",
+                        message: "injected interruption".into(),
+                    }));
                     return;
                 }
             }

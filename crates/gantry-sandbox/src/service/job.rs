@@ -25,13 +25,13 @@ use gantry_core::ports::sandbox::{
 use gantry_core::time::Timestamp;
 use gantry_store::Appended;
 use serde::Serialize;
-use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit};
+use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit};
 use tokio::time::Instant;
 
 use super::meta::{Meta, Phase, TerminalReason};
 use super::seams::CasKind;
 use super::{infra, Command, Inner, Occupancy, Outcome};
-use crate::driver::{DriverError, ExitFacts, SandboxDriver};
+use crate::driver::{DriverError, ExitFacts, LogCursor, SandboxDriver};
 use crate::intake::IntakePlan;
 use crate::invariants::{validate_invariants, InvariantContext};
 use crate::progress::{LineOutcome, ProgressCollector, ProgressLimits};
@@ -112,6 +112,21 @@ pub(super) struct JobActor<D> {
     container: Option<ContainerId>,
     created_event: bool,
     cancel_requested: bool,
+    /// `revoke` 的结果只取一次（错误出口的统一清理可能再次调用）。
+    revoked: Option<(TokenUsage, u64, EgressFlags)>,
+    /// 已执行过 `cleanup_failed`。
+    cleaned: bool,
+}
+
+/// 日志读取连续失败多少次后放弃（§9：只影响展示，不影响终态）。
+const LOG_RECONNECTS: u32 = 5;
+
+/// 日志读取任务发给监督循环的信号。
+enum LogSignal {
+    /// 一行合法事件：重置空闲计时器。
+    Activity,
+    /// 读取放弃：空闲计时器失去依据，停用，只剩墙钟与退出监督。
+    Gone,
 }
 
 /// 运行结束时的事实。
@@ -146,6 +161,8 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             container: None,
             created_event: false,
             cancel_requested: false,
+            revoked: None,
+            cleaned: false,
         }
     }
 
@@ -177,15 +194,18 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         self.cancel_requested
     }
 
-    pub(super) async fn run(mut self) -> Outcome {
-        let result = self.run_inner().await;
+    pub(super) async fn run(mut self, permit: oneshot::Receiver<OwnedSemaphorePermit>) -> Outcome {
+        let result = self.run_inner(permit).await;
+        // 所有错误出口统一清理：容器、令牌、staging 不随许可一起泄漏。
+        if let Err(err) = &result {
+            self.cleanup_failed(err).await;
+        }
         self.set_occupancy(Occupancy::Done);
         result
     }
 
-    async fn run_inner(&mut self) -> Outcome {
+    async fn run_inner(&mut self, permit: oneshot::Receiver<OwnedSemaphorePermit>) -> Outcome {
         self.phase(Phase::Queued)?;
-        let permits = Arc::clone(&self.inner.permits);
         let permit: OwnedSemaphorePermit = tokio::select! {
             biased;
             command = self.commands.recv() => {
@@ -194,7 +214,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 }
                 return self.finish_without_start().await;
             }
-            permit = permits.acquire_owned() => permit.map_err(|_| SandboxError::ShuttingDown)?,
+            permit = permit => permit.map_err(|_| SandboxError::ShuttingDown)?,
         };
         self.set_occupancy(Occupancy::Holding);
         let outcome = self.run_with_permit().await;
@@ -206,13 +226,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         if self.poll_cancel() {
             return self.finish_without_start().await;
         }
-        let grant = match self.prepare().await {
-            Ok(grant) => grant,
-            Err(err) => {
-                self.cleanup_failed(&err).await;
-                return Err(err);
-            }
-        };
+        let grant = self.prepare().await?;
         drop(grant);
         if self.poll_cancel() {
             // create / stage 阶段被取消：不 start，直接销毁，不取产物（§7.5）。
@@ -220,11 +234,10 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         }
         let id = self.container.clone().expect("prepared container");
         self.phase(Phase::Starting)?;
-        if let Err(err) = self.driver().start(&id).await {
-            let err = infra(InfraDetail::SandboxCreate, err.to_string());
-            self.cleanup_failed(&err).await;
-            return Err(err);
-        }
+        self.driver()
+            .start(&id)
+            .await
+            .map_err(driver_infra(InfraDetail::SandboxCreate))?;
         self.timings.started = Some(self.now());
         let wall = Duration::from_secs(self.spec.limits.wall_time_s);
         self.meta.deadline_ms = Some(self.now().as_millis() + wall.as_millis() as i64);
@@ -539,13 +552,14 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             self.inner.config.progress_sample,
         );
         let collector = Arc::new(Mutex::new(ProgressCollector::new(self.spec.job_id, limits)));
-        let (activity_tx, mut activity_rx) = mpsc::unbounded_channel::<()>();
+        let (activity_tx, mut activity_rx) = mpsc::unbounded_channel::<LogSignal>();
         let reader = self.spawn_log_reader(id, Arc::clone(&collector), activity_tx);
 
         let idle = Duration::from_secs(self.spec.timers.idle_timeout_s);
         let started = Instant::now();
         let deadline = started + wall;
         let mut idle_deadline = started + idle;
+        let mut idle_enabled = true;
         let driver = Arc::clone(&self.inner.deps.driver);
         let wait_id = id.clone();
         let mut exit_wait = tokio::spawn(async move { driver.wait(&wait_id).await });
@@ -568,10 +582,13 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => break TerminalReason::WallTimer,
-                _ = tokio::time::sleep_until(idle_deadline) => break TerminalReason::IdleTimer,
-                Some(()) = activity_rx.recv() => {
-                    idle_deadline = Instant::now() + idle;
+                _ = tokio::time::sleep_until(idle_deadline), if idle_enabled => {
+                    break TerminalReason::IdleTimer
                 }
+                Some(signal) = activity_rx.recv() => match signal {
+                    LogSignal::Activity => idle_deadline = Instant::now() + idle,
+                    LogSignal::Gone => idle_enabled = false,
+                },
             }
         };
         // 原因先写盘（fsync）再发信号：崩溃重启不会丢「为什么杀它」。
@@ -587,8 +604,6 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 _ => lost = true,
             }
         }
-        // 停止期间到达的取消只记 cancel_requested，不改原因。
-        self.poll_cancel();
         let mut reader = reader;
         if tokio::time::timeout(self.inner.config.log_drain_timeout, &mut reader)
             .await
@@ -596,6 +611,8 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         {
             reader.abort();
         }
+        // 停止期间（含等日志排空）到达的取消只记 cancel_requested，不改原因。
+        self.poll_cancel();
         self.timings.stopped = Some(self.now());
         self.phase(Phase::Stopped)?;
         let collector = collector.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -611,9 +628,10 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         &self,
         id: &ContainerId,
         collector: Arc<Mutex<ProgressCollector>>,
-        activity: mpsc::UnboundedSender<()>,
+        activity: mpsc::UnboundedSender<LogSignal>,
     ) -> tokio::task::JoinHandle<()> {
-        let mut stream = self.driver().logs(id, None);
+        let driver = Arc::clone(&self.inner.deps.driver);
+        let id = id.clone();
         let progress = self.progress.clone();
         let spool_path = self.layout.progress_spool();
         let store = self.inner.deps.store.clone();
@@ -627,29 +645,48 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 .append(true)
                 .open(&spool_path)
                 .ok();
-            while let Some(item) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
-                // 读取中断只影响展示，不影响终态（§9）。
-                let Ok(chunk) = item else { break };
-                let received_at = clock.now();
-                let (outcome, samples) = {
-                    let mut guard = collector.lock().unwrap_or_else(|p| p.into_inner());
-                    let outcome =
-                        guard.push_line(chunk.stream, &chunk.line, Instant::now(), received_at);
-                    let samples = guard.sample(Instant::now());
-                    (outcome, samples)
-                };
-                if outcome.activity() {
-                    let _ = activity.send(());
-                }
-                if let LineOutcome::Accepted(event) = &outcome {
-                    if let Some(file) = spool.as_mut() {
-                        let _ = file.write_all(&event.spool_line());
+            let mut cursor: Option<LogCursor> = None;
+            let mut failures = 0u32;
+            'connect: loop {
+                let mut stream = driver.logs(&id, cursor);
+                loop {
+                    let chunk = match std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
+                    {
+                        // 容器停止且读完；容器不在了由退出监督处理。
+                        None | Some(Err(DriverError::NotFound)) => break 'connect,
+                        // 读取中断：从上次 cursor 之后重连（§9）。
+                        Some(Err(_)) => break,
+                        Some(Ok(chunk)) => chunk,
+                    };
+                    failures = 0;
+                    cursor = Some(chunk.cursor);
+                    let received_at = clock.now();
+                    let (outcome, samples) = {
+                        let mut guard = collector.lock().unwrap_or_else(|p| p.into_inner());
+                        let outcome =
+                            guard.push_line(chunk.stream, &chunk.line, Instant::now(), received_at);
+                        let samples = guard.sample(Instant::now());
+                        (outcome, samples)
+                    };
+                    if outcome.activity() {
+                        let _ = activity.send(LogSignal::Activity);
+                    }
+                    if let LineOutcome::Accepted(event) = &outcome {
+                        if let Some(file) = spool.as_mut() {
+                            let _ = file.write_all(&event.spool_line());
+                        }
+                    }
+                    for sample in samples {
+                        let _ = progress.send(sample.clone());
+                        let _ = append_progress(&store, &actor, project_id, job_id, &sample).await;
                     }
                 }
-                for sample in samples {
-                    let _ = progress.send(sample.clone());
-                    let _ = append_progress(&store, &actor, project_id, job_id, &sample).await;
+                failures += 1;
+                if failures > LOG_RECONNECTS {
+                    let _ = activity.send(LogSignal::Gone);
+                    break;
                 }
+                tokio::time::sleep(Duration::from_millis(100 << (failures - 1))).await;
             }
             if let Some(file) = spool.as_mut() {
                 let _ = file.sync_all();
@@ -665,14 +702,11 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             self.spec.job.constraints.patch.as_ref(),
             self.inner.config.out_quota_bytes,
         );
-        let intake = match self.driver().read_out(id, &self.layout, &plan).await {
-            Ok(intake) => intake,
-            Err(err) => {
-                let err = infra(InfraDetail::Collect, err.to_string());
-                self.cleanup_failed(&err).await;
-                return Err(err);
-            }
-        };
+        let intake = self
+            .driver()
+            .read_out(id, &self.layout, &plan)
+            .await
+            .map_err(driver_infra(InfraDetail::Collect))?;
         let put = |bytes: &[u8], kind: CasKind| {
             self.inner
                 .deps
@@ -733,7 +767,10 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         if !self.meta.token_issued {
             return (TokenUsage::default(), 0, flags(false, true));
         }
-        match self
+        if let Some(revoked) = &self.revoked {
+            return revoked.clone();
+        }
+        let revoked = match self
             .inner
             .deps
             .egress
@@ -747,7 +784,9 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             ),
             // Egress 不可达：用量未知，标记为不完整（下界为 0），不让沙盒失败。
             Err(_) => (TokenUsage::default(), 0, flags(false, true)),
-        }
+        };
+        self.revoked = Some(revoked.clone());
+        revoked
     }
 
     /// 尚未启动（排队中或 create / stage 阶段被取消）：销毁、吊销、不取产物。
@@ -801,6 +840,10 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
 
     /// 前置阶段失败：容器、staging、令牌全部清理（§12.D 最后一条）。
     async fn cleanup_failed(&mut self, err: &SandboxError) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
         self.meta.phase = Phase::Failed;
         let _ = self.meta.save(&self.layout.meta_json());
         if let Some(id) = self.container.clone() {

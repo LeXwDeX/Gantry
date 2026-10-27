@@ -1,7 +1,8 @@
 //! 引擎面 `SandboxService` 的实现（sandbox.md §6.1、§7）。
 //!
 //! 每个 job 一个 tokio 任务（job actor）串行推进状态机；外部命令（取消）经 `mpsc`
-//! 送入。`Semaphore(max_concurrent_sandboxes)` 控制同时存在的沙盒数，FIFO 排队。
+//! 送入。`Semaphore(max_concurrent_sandboxes)` 控制同时存在的沙盒数；许可由单一的
+//! 分派任务按受理顺序发放（FIFO 以 `submit` 返回的顺序为准，不取决于任务调度）。
 //! 每次相位迁移先把 `meta.json` 原子写盘再执行动作。
 //!
 //! 契约缺口（见 #95 评论）：CAS 与 schema 注册表经 [`seams`] 注入；`IssueJobToken` 的
@@ -16,7 +17,7 @@ pub mod seams;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -32,7 +33,7 @@ use gantry_core::ports::sandbox::{
     SandboxError, SandboxService, SandboxSpec, SweepReport, UnfinishedAttempt,
 };
 use gantry_store::Store;
-use tokio::sync::{broadcast, mpsc, watch, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 
 use crate::driver::SandboxDriver;
 use crate::spec::{NetworkAttach, Runtime, StagingLayout};
@@ -90,14 +91,46 @@ struct Slot {
     commands: mpsc::UnboundedSender<Command>,
     progress: broadcast::Sender<ProgressSample>,
     occupancy: Arc<Mutex<Occupancy>>,
-    released: bool,
+    /// `release` 成功完成后置 `true`；异步锁串行化并发的 `release`。
+    released: Arc<tokio::sync::Mutex<bool>>,
 }
+
+type PermitWaiter = oneshot::Sender<OwnedSemaphorePermit>;
 
 pub(crate) struct Inner<D> {
     deps: SandboxDeps<D>,
     config: SandboxConfig,
     permits: Arc<Semaphore>,
     jobs: Mutex<BTreeMap<AttemptId, Slot>>,
+    /// 串行化 `submit`：受理记录写盘与入队在同一临界区内，同一 job 的并发提交不会
+    /// 同时写 `meta.json`，入队顺序即受理顺序。
+    submit_lock: tokio::sync::Mutex<()>,
+    /// 许可分派队列（首次 `submit` 时在当前运行时上启动分派任务）。
+    dispatch: OnceLock<mpsc::UnboundedSender<PermitWaiter>>,
+}
+
+impl<D> Inner<D> {
+    fn dispatcher(&self) -> &mpsc::UnboundedSender<PermitWaiter> {
+        self.dispatch.get_or_init(|| {
+            let (tx, mut rx) = mpsc::unbounded_channel::<PermitWaiter>();
+            let permits = Arc::clone(&self.permits);
+            tokio::spawn(async move {
+                while let Some(mut waiter) = rx.recv().await {
+                    // 排队中被取消的 job 已丢弃接收端：跳过，不占许可。
+                    let permit = tokio::select! {
+                        biased;
+                        () = waiter.closed() => continue,
+                        permit = Arc::clone(&permits).acquire_owned() => match permit {
+                            Ok(permit) => permit,
+                            Err(_) => break,
+                        },
+                    };
+                    let _ = waiter.send(permit);
+                }
+            });
+            tx
+        })
+    }
 }
 
 /// `SandboxService` 的实现，泛型于容器驱动。
@@ -114,6 +147,8 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 config,
                 permits,
                 jobs: Mutex::new(BTreeMap::new()),
+                submit_lock: tokio::sync::Mutex::new(()),
+                dispatch: OnceLock::new(),
             }),
         }
     }
@@ -147,6 +182,7 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             job_id: spec.job_id,
             sandbox_id: spec.sandbox_id,
         };
+        let _submitting = self.inner.submit_lock.lock().await;
         if let Some(slot) = self.jobs().get(&spec.job_id) {
             if slot.spec != spec {
                 return Err(SandboxError::InvalidSpec(
@@ -166,32 +202,22 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         let (result_tx, result_rx) = watch::channel(None);
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (progress_tx, _) = broadcast::channel(256);
+        let (permit_tx, permit_rx) = oneshot::channel();
         let occupancy = Arc::new(Mutex::new(Occupancy::Queued));
-        {
-            let mut jobs = self.jobs();
-            // 并发的同一 job 提交：后到者以先到者为准。
-            if let Some(slot) = jobs.get(&spec.job_id) {
-                return if slot.spec == spec {
-                    Ok(slot.handle)
-                } else {
-                    Err(SandboxError::InvalidSpec(
-                        "a different sandbox spec was already submitted for this job".into(),
-                    ))
-                };
-            }
-            jobs.insert(
-                spec.job_id,
-                Slot {
-                    spec: spec.clone(),
-                    handle,
-                    result: result_rx,
-                    commands: command_tx,
-                    progress: progress_tx.clone(),
-                    occupancy: Arc::clone(&occupancy),
-                    released: false,
-                },
-            );
-        }
+        self.jobs().insert(
+            spec.job_id,
+            Slot {
+                spec: spec.clone(),
+                handle,
+                result: result_rx,
+                commands: command_tx,
+                progress: progress_tx.clone(),
+                occupancy: Arc::clone(&occupancy),
+                released: Arc::default(),
+            },
+        );
+        // 分派任务没了，接收端会立刻报错，actor 以 ShuttingDown 结束。
+        let _ = self.inner.dispatcher().send(permit_tx);
         let actor = job::JobActor::new(
             Arc::clone(&self.inner),
             ctx.clone(),
@@ -202,7 +228,7 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             occupancy,
         );
         tokio::spawn(async move {
-            let outcome = actor.run().await;
+            let outcome = actor.run(permit_rx).await;
             let _ = result_tx.send(Some(outcome));
         });
         Ok(handle)
@@ -225,17 +251,35 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         let (tx, rx) = mpsc::unbounded_channel();
         if let Some(slot) = self.jobs().get(job_id) {
             let mut sub = slot.progress.subscribe();
+            let mut done = slot.result.clone();
+            // 订阅方丢弃流或 job 结束时退出转发，不留下常驻任务。
             tokio::spawn(async move {
                 loop {
-                    match sub.recv().await {
-                        Ok(sample) => {
-                            if tx.send(sample).is_err() {
-                                break;
+                    tokio::select! {
+                        biased;
+                        received = sub.recv() => match received {
+                            Ok(sample) => {
+                                if tx.send(sample).is_err() {
+                                    break;
+                                }
                             }
+                            // 订阅慢了丢样本没关系（仅展示）。
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        },
+                        () = tx.closed() => break,
+                        () = async { let _ = done.wait_for(Option::is_some).await; } => {
+                            loop {
+                                match sub.try_recv() {
+                                    Ok(sample) => {
+                                        let _ = tx.send(sample);
+                                    }
+                                    Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                            break;
                         }
-                        // 订阅慢了丢样本没关系（仅展示）。
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             });
@@ -252,19 +296,19 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
     }
 
     async fn release(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError> {
-        let (sandbox_id, already) = {
-            let mut jobs = self.jobs();
-            let slot = jobs.get_mut(job_id).ok_or(SandboxError::NotFound)?;
+        let (sandbox_id, released) = {
+            let jobs = self.jobs();
+            let slot = jobs.get(job_id).ok_or(SandboxError::NotFound)?;
             if slot.result.borrow().is_none() {
                 return Err(SandboxError::InvalidSpec(
                     "release before the job reached a terminal state".into(),
                 ));
             }
-            let already = slot.released;
-            slot.released = true;
-            (slot.handle.sandbox_id, already)
+            (slot.handle.sandbox_id, Arc::clone(&slot.released))
         };
-        if already {
+        // 并发的 release 排队；失败不置位，调用方可以重试。
+        let mut released = released.lock().await;
+        if *released {
             return Ok(());
         }
         let layout = StagingLayout::new(&self.inner.config.workspaces_dir, sandbox_id)
@@ -277,6 +321,7 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             .map_err(|err| infra(InfraDetail::Collect, err.to_string()))?;
         // 让 egress 忘记最终用量；它不在了也不影响本地释放。
         let _ = self.inner.deps.egress.forget_job(job_id, ctx).await;
+        *released = true;
         Ok(())
     }
 

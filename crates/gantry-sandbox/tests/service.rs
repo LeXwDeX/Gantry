@@ -867,3 +867,97 @@ async fn recover_and_sweep_fail_closed_in_this_slice() {
         .await
         .is_err());
 }
+
+fn heartbeat(at: u64, seq: u64) -> (Duration, LogStream, Vec<u8>) {
+    (
+        Duration::from_secs(at),
+        LogStream::Stdout,
+        format!(r#"{{"v":1,"seq":{seq},"type":"heartbeat","in_flight":0}}"#).into_bytes(),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn log_interruption_reconnects_from_cursor() {
+    let h = harness(1);
+    // 心跳间隔 90 秒 < 空闲 120 秒；读取在第一行后中断，重连后必须继续喂空闲计时器。
+    h.driver.script(
+        sbx(30),
+        FakeScript {
+            behavior: FakeBehavior::ExitAfter {
+                after: Duration::from_secs(300),
+                code: 0,
+                honor_term: true,
+            },
+            log: vec![
+                heartbeat(10, 1),
+                heartbeat(100, 2),
+                heartbeat(190, 3),
+                heartbeat(280, 4),
+            ],
+            out: vec![(
+                "result.json".into(),
+                FakeOutEntry::File(br#"{"status":"succeeded"}"#.to_vec()),
+            )],
+        },
+    );
+    h.driver.fail_next(FailPoint::LogsInterrupt);
+    h.service.submit(&ctx(), spec(30)).await.unwrap();
+    let outcome = h.service.wait(&att(30)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    let cursors: Vec<_> = h
+        .driver
+        .calls()
+        .iter()
+        .filter_map(|c| match c {
+            DriverCall::Logs(_, since) => Some(*since),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cursors,
+        vec![None, Some(gantry_sandbox::driver::LogCursor(1))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn progress_stream_ends_with_the_job() {
+    let h = harness(1);
+    h.driver.script(sbx(31), golden_script());
+    h.service.submit(&ctx(), spec(31)).await.unwrap();
+    let mut stream = h.service.progress(&att(31));
+    h.service.wait(&att(31)).await.unwrap();
+    let mut seen = 0;
+    while std::future::poll_fn(|cx| stream.as_mut().poll_next(cx))
+        .await
+        .is_some()
+    {
+        seen += 1;
+    }
+    assert_eq!(seen, 2);
+    // 结束后订阅：立即结束。
+    let mut late = h.service.progress(&att(31));
+    assert!(std::future::poll_fn(|cx| late.as_mut().poll_next(cx))
+        .await
+        .is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_submits_of_one_job_accept_once() {
+    let h = harness(1);
+    h.driver.script(sbx(32), golden_script());
+    let c = ctx();
+    let (a, b) = tokio::join!(
+        h.service.submit(&c, spec(32)),
+        h.service.submit(&c, spec(32))
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    h.service.wait(&att(32)).await.unwrap();
+    assert_eq!(
+        h.driver
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, DriverCall::Create { .. }))
+            .count(),
+        1
+    );
+}
