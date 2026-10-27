@@ -12,8 +12,8 @@ use gantry_core::entities::{
     PolicyActionId, ReasonCode, Severity,
 };
 use gantry_core::events::{
-    ApprovalRequestedData, EventType, NewEvent, PatchValidatedData, PolicySubject, PolicyTarget,
-    Subject,
+    ApprovalRequestedData, EventType, NewEvent, OutboxEnqueuedData, PatchValidatedData,
+    PolicySubject, PolicyTarget, Subject,
 };
 use gantry_core::ids::{ActionId, ApprovalId, Apr, Clock, IdGen, ProjectId};
 use gantry_core::ports::{
@@ -37,6 +37,7 @@ const DEFAULT_BRANCH_PREFIX: &str = "gantry/";
 /// `merge_pr` 被处置为 deny 时的上报码（data-model 上报词表、engine.md §7.14）。
 const REPORT_MERGE_DENIED: &str = "merge_denied_by_policy";
 const REPORT_SHAPE_UNDEFINED: &str = "approval_shape_undefined";
+const REPORT_ACTION_DENIED_PREFIX: &str = "policy.action_denied:";
 
 /// 装配依赖。`forge` 只用来读 PR 快照（当前 head）与项目的仓库，不写 GitHub。
 pub struct PolicyDeps {
@@ -201,10 +202,37 @@ impl PolicyEngine {
                 Judgement::Deny(DenyReason::ApprovalDenied)
             }
             Some(a) if a.status == ApprovalStatus::Consumed => {
-                Judgement::Deny(DenyReason::ApprovalConsumed)
+                // #89 Q3：只有更大 epoch 的新动作（retry）才需要新审批；同一或更早
+                // epoch、或查不到消费方的 epoch 时按已消费拒绝，防止重复执行。
+                let consumer_epoch = match &a.consumed_by {
+                    Some(action) => self.enqueued_epoch(action).await?,
+                    None => None,
+                };
+                match consumer_epoch {
+                    Some(epoch) if req.epoch > epoch => Judgement::NeedsApproval(spec, None),
+                    _ => Judgement::Deny(DenyReason::ApprovalConsumed),
+                }
             }
             _ => Judgement::NeedsApproval(spec, None),
         })
+    }
+
+    /// 消费审批的 Outbox 动作入队时的 `epoch`（`outbox.enqueued.action.epoch`）。
+    async fn enqueued_epoch(&self, action: &str) -> Result<Option<u32>, PolicyError> {
+        let Ok(subject) = Subject::parse(action) else {
+            return Ok(None);
+        };
+        let events = self
+            .store
+            .events()
+            .by_subject(&subject)
+            .await
+            .map_err(port_error)?;
+        Ok(events
+            .into_iter()
+            .filter(|event| event.ty == EventType::OutboxEnqueued)
+            .find_map(|event| serde_json::from_value::<OutboxEnqueuedData>(event.data).ok())
+            .map(|data| data.action.epoch))
     }
 
     /// 找 `sha256 == validation_ref` 且 `result_tree == expected_tree_oid` 的 patch.validated。
@@ -425,51 +453,80 @@ fn same_subject(approval: &Approval, spec: &ApprovalSpec) -> bool {
         && approval.subject_digest == spec.subject_digest
 }
 
-/// 拒绝的上报建议（policy.md §6.1，#66）：只取上报词表已列出的码。其余
-/// `DenyReason` 在词表里没有对应码（OQ-P15），拍板前没有合法取值，返回 `None`。
+/// 拒绝的上报建议（policy.md §6.1，#66、#133）。`HeadMismatch` 由 engine 刷新快照后
+/// 重判，不上报；其余原因都有词表码。
 fn report_for(id: PolicyActionId, reason: &DenyReason) -> Option<ReportHint> {
     let code = match (id, reason) {
-        (PolicyActionId::MergePr, DenyReason::ActionDenied) => REPORT_MERGE_DENIED,
-        (_, DenyReason::ApprovalShapeUndefined) => REPORT_SHAPE_UNDEFINED,
-        _ => return None,
+        (_, DenyReason::HeadMismatch) => return None,
+        (PolicyActionId::MergePr, DenyReason::ActionDenied) => REPORT_MERGE_DENIED.to_owned(),
+        (_, DenyReason::ApprovalShapeUndefined) => REPORT_SHAPE_UNDEFINED.to_owned(),
+        (_, reason) => format!("{REPORT_ACTION_DENIED_PREFIX}{}", deny_reason_name(reason)),
     };
     Some(ReportHint {
         inbox_kind: InboxKind::Escalation,
         payload_kind: None,
-        reason_code: ReasonCode::parse(code).expect("report codes are valid literals"),
+        reason_code: ReasonCode::parse(&code).expect("report codes are valid literals"),
         severity: Severity::Blocker,
         attach_patch: false,
     })
 }
 
-/// `policy.denied` 的目标。`ActionFacts` 不足以构造契约要求的目标时返回 `None`
-/// （`ResolveReviewThread` 缺 PR 号与线程 node id，`Other` 只有仓库），见 #89 的提问。
-fn denial_target(req: &ActionRequest) -> Option<(PolicyTarget, Option<PolicySubject>)> {
+/// `DenyReason` 的 snake_case 名，与 `policy.denied` 的 `policy.<deny_reason>` 一一对应。
+/// `DenyReason` 是 non_exhaustive；新增原因在补上映射前按链路不可用上报（与审计一致）。
+fn deny_reason_name(reason: &DenyReason) -> &'static str {
+    match reason {
+        DenyReason::ActionDenied => "action_denied",
+        DenyReason::ApprovalDenied => "approval_denied",
+        DenyReason::ApprovalConsumed => "approval_consumed",
+        DenyReason::HeadMismatch => "head_mismatch",
+        DenyReason::NoValidatedPatch => "no_validated_patch",
+        DenyReason::PatchDenied => "patch_denied",
+        DenyReason::MultipleApprovalsRequired => "multiple_approvals_required",
+        DenyReason::ApprovalShapeUndefined => "approval_shape_undefined",
+        _ => "approval_chain_unavailable",
+    }
+}
+
+/// `policy.denied` 的目标与主体（#89 Q1：`ActionFacts` 带上了动作目标身份）。
+fn denial_target(req: &ActionRequest) -> (PolicyTarget, Option<PolicySubject>) {
     match &req.facts {
         ActionFacts::MergePr {
             repo,
             number,
             expected_head_sha,
-        } => Some((
+        } => (
             PolicyTarget::Pr {
                 repo: repo.clone(),
                 number: *number,
             },
             Some(PolicySubject::Head(*expected_head_sha)),
-        )),
+        ),
         ActionFacts::PushBranch {
             repo,
             branch,
             local_head_oid,
             ..
-        } => Some((
+        } => (
             PolicyTarget::Branch {
                 repo: repo.clone(),
                 branch: branch.clone(),
             },
             Some(PolicySubject::Head(*local_head_oid)),
-        )),
-        ActionFacts::ResolveReviewThread { .. } | ActionFacts::Other { .. } => None,
+        ),
+        ActionFacts::ResolveReviewThread {
+            repo,
+            number,
+            thread_node_id,
+            ..
+        } => (
+            PolicyTarget::ReviewThread {
+                repo: repo.clone(),
+                number: *number,
+                thread_node_id: thread_node_id.clone(),
+            },
+            None,
+        ),
+        ActionFacts::Other { target } => (target.clone(), None),
     }
 }
 
@@ -591,25 +648,24 @@ impl PolicyPort for PolicyEngine {
                 config_rev,
             },
             Judgement::Deny(reason) => {
-                if let Some((target, subject_digest)) = denial_target(&req) {
-                    let subject = match req.delivery_id {
-                        Some(delivery) => Subject::parse(&delivery.to_string()),
-                        None => Subject::parse(&req.project_id.to_string()),
-                    }
-                    .expect("delivery and project ids are valid subjects");
-                    let denial = ActionDenial {
-                        project_id: req.project_id,
-                        subject,
-                        action_id: id,
-                        kind: req.kind,
-                        target,
-                        reason: audit::reason_code(&reason),
-                        subject_digest,
-                        config_rev,
-                    };
-                    self.append_committed(denial.event(ctx.causation_id))
-                        .await?;
+                let (target, subject_digest) = denial_target(&req);
+                let subject = match req.delivery_id {
+                    Some(delivery) => Subject::parse(&delivery.to_string()),
+                    None => Subject::parse(&req.project_id.to_string()),
                 }
+                .expect("delivery and project ids are valid subjects");
+                let denial = ActionDenial {
+                    project_id: req.project_id,
+                    subject,
+                    action_id: id,
+                    kind: req.kind,
+                    target,
+                    reason: audit::reason_code(&reason),
+                    subject_digest,
+                    config_rev,
+                };
+                self.append_committed(denial.event(ctx.causation_id))
+                    .await?;
                 ActionDecision::Deny {
                     action_id: id,
                     report: report_for(id, &reason),

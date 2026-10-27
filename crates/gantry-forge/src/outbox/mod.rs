@@ -50,6 +50,11 @@ impl Forge {
         executor::Executor::new(self.store.clone(), self.config.clone(), deps)
     }
 
+    /// 共享本实例配置的 `ForgeReader`。读取器不持有 store：读 GitHub 不产生事件、不改快照。
+    pub fn reader(&self, deps: crate::reader::ReaderDeps) -> crate::reader::Reader {
+        crate::reader::Reader::new(self.config.clone(), deps)
+    }
+
     /// 入队时的机械校验 + 落行。不读 `policies.*`（P-62）：是否需要审批由入队方决定，
     /// 这里只拒绝"规则上恒需审批却没带审批"的组合。
     async fn enqueue_on(

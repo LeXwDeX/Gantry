@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// 控制通道是 Unix 套接字，服务端只在 Linux 上运行；Windows 上本库为空。
+#![cfg(unix)]
 
 //! `gantryd`：服务端单进程（architecture §3）。
 //!
@@ -6,6 +8,7 @@
 //! 装配见 [`assembly`]；控制通道见 [`control`]。
 
 pub mod assembly;
+pub mod cli;
 pub mod config;
 pub mod control;
 

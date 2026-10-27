@@ -59,6 +59,10 @@ pub struct ActionRequest {
     pub kind: ForgeActionKind,
     pub facts: ActionFacts,
     pub requested_by: Actor,
+    /// 待入队动作的 `epoch`（forge-actions §2.2；engine.md §7.14.4，初值 1）。
+    /// 同主体审批已被消费时，消费它的动作 `epoch` 不小于本值 → `Deny(ApprovalConsumed)`；
+    /// 本值更大（用户 `retry` 后的新动作）→ `NeedsApproval { pending: None }`（#89 Q3）。
+    pub epoch: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

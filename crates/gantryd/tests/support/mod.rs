@@ -114,9 +114,8 @@ pub fn child_main(spec: &str) {
         .unwrap();
     runtime.block_on(async {
         let assembly = Arc::new(assemble_fakes());
-        let commands: Vec<Arc<dyn CommandSet>> = vec![Arc::new(fake_cmds::FakeCommands {
-            assembly: assembly.clone(),
-        })];
+        let commands: Vec<Arc<dyn CommandSet>> =
+            vec![Arc::new(fake_cmds::FakeCommands::new(assembly.clone()))];
         if let Err(error) = gantryd::serve(&config, assembly, commands, ControlAuth { uid }).await {
             eprintln!("gantryd: {error}");
             panic!("gantryd failed to start");

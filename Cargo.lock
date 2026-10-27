@@ -1076,6 +1076,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "gantry-core",
+ "gantry-deploy",
  "gantry-engine",
  "gantry-fakes",
  "gantry-notify",
