@@ -578,7 +578,7 @@ pub enum Decision {
     Effect(Effect),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     /// 执行器先 `resolve(base_ref)` 得到 base_sha 再 `create_worktree`（§7.14.5，#70 A）。
     EnsureWorktree {
@@ -650,7 +650,7 @@ impl TrustedInstructions {
 }
 
 /// `RunAttempt` 的全部输入；AttemptRunner 不再回读状态。
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AttemptPlan {
     pub attempt_id: AttemptId,
     pub node_id: NodeId,
@@ -670,4 +670,26 @@ pub struct AttemptPlan {
     pub refs: Vec<Ref>,
     pub lock: Option<LockToken>,
     pub resume: bool,
+}
+
+impl Effect {
+    /// 副作用的身份（§7.14.3）：发起前记入在途集合，对应的 `Report` 回流时移除。
+    pub fn key(&self, delivery: DeliveryId) -> EffectKey {
+        match self {
+            Effect::EnsureWorktree { .. } => EffectKey::Worktree(delivery),
+            Effect::RemoveWorktree { worktree_id, .. } => EffectKey::RemoveWorktree(*worktree_id),
+            Effect::AcquireLock { worktree_id, .. } => EffectKey::Lock(*worktree_id),
+            Effect::ReleaseLock { token } => EffectKey::Unlock(token.worktree_id, token.fence),
+            Effect::RenewLock { token, .. } => EffectKey::Renew(token.worktree_id, token.fence),
+            Effect::RunAttempt(plan) => EffectKey::Run(plan.attempt_id),
+            Effect::CancelAttempt { attempt_id, .. } => EffectKey::Cancel(*attempt_id),
+            Effect::ReleaseSandbox { attempt_id } => EffectKey::Release(*attempt_id),
+            Effect::JudgeAction { key, .. } => EffectKey::Judge(key.clone()),
+            Effect::RequestApproval { key, .. } => EffectKey::Approval(key.clone()),
+            Effect::InvalidateApproval { approval_id, .. } => EffectKey::Invalidate(*approval_id),
+            Effect::CancelOutbox { action_id, .. } => EffectKey::CancelOutbox(*action_id),
+            Effect::ReconcileNow { target } => EffectKey::Reconcile(ReconcileKey(*target)),
+            Effect::ScheduleTimer { kind, .. } => EffectKey::Timer(kind.clone()),
+        }
+    }
 }

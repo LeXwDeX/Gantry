@@ -682,7 +682,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 执行体对每个输入：
 
 0. **预取提议原文**（#125）：开事务前，按最近一次折叠出的状态（启动后首次决策前先只读折叠一次）补齐 `env.proposals`，规则见 7.14.2 末"提议原文预取"。这是 `decide` 之外唯一一处读 CAS 的地方。
-1. 打开 `WriteTx`，`tx.read()` 折叠得到 `DeliveryState`；调 `decide(state, input, env)`。
+1. 打开 `WriteTx`（拿到单写者租约）后读取并折叠得到 `DeliveryState`；调 `decide(state, input, env)`。读取的做法（#71）：不扩展 `TxReader`，而是在持有写租约期间，按 §7.14.2 路由表从**已提交日志**折叠。租约期间没有别的写者能提交，读到的就是本事务开始时的状态，与"`tx.read()` 读到本事务尚未追加任何内容时的状态"等价；每一轮 Settle 都开一个新事务。SQLite 实现在 `BEGIN IMMEDIATE` 期间读到的已提交状态同理。测试 `external_writes_wait_while_the_lease_is_held` 锁定"持租约期间外部写者必须等待"。
 2. 按序执行事务内决策；任何一步失败整笔回滚、不发副作用、不回 `Reply`。成功则提交。
 3. 提交后：把 `Reply` 交给调用方；对每个 `Effect` 先把它的 `EffectKey` 记入执行体内存里的**在途集合**（`env.inflight`），再发起。该副作用的 `Report`（含 `Done` 与 `EffectFailed`）到达时从在途集合移除；`ScheduleTimer` 的键在对应 `Tick(Timer)` 到达时移除。
 4. **收敛**：只要上一步产出过事务内决策，或提交后的状态里出现了 `env.proposals` 尚未收录的提议引用（预取后需要再求值一次），就先做第 0 步，再对新状态调用 `decide(state', Tick(Settle), env')`；某一轮不再产出事务内决策、也没有新的提议引用即停（此轮产出的副作用照常发起）。上限 `MAX_SETTLE = 16` 轮，超过视为引擎缺陷：记错误日志、`status` 报 `degraded`、停止为该交付单元决策；不写事件、不上报（词表里没有此码，P-79）。

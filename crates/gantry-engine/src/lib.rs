@@ -3,11 +3,13 @@
 //! M1 目前落地：`low.single` 模板、`DeliveryState` 折叠与 §7.14.2 路由、§7.14 决策器类型、
 //! 预算台账与控制面写入、Low 正常路径的 `decide`（#70）；执行体与调度仍未实现。
 
+pub mod actor;
 pub mod budget;
 pub mod create;
 pub mod decide;
 pub mod decider;
 pub mod engine;
+pub mod event_router;
 pub mod outbox;
 pub mod route;
 pub mod stage;
