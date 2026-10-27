@@ -15,22 +15,25 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use gantry_core::canon::Sha256Digest;
 use gantry_core::entities::Seq;
 use gantry_core::events::Event;
 use gantry_core::time::Timestamp;
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 
+use crate::cas::{CasKind, CasStat};
 use crate::module::{ModuleRegistry, ModuleTables};
 use crate::{Fold, Inner, OutboxRow, StoreError};
 
 /// 本二进制支持的 `meta.schema_version`。
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const DB_FILE: &str = "gantry.db";
 
 /// 迁移按序、只增（§7.9）；下标 + 1 = 版本号。
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
 
 CREATE TABLE events (
@@ -62,7 +65,17 @@ CREATE TABLE outbox (
   enqueued_seq    INTEGER NOT NULL,
   action          TEXT NOT NULL CHECK (json_valid(action))
 ) STRICT;
-"#];
+"#,
+    r#"
+CREATE TABLE cas_objects (
+  digest      TEXT PRIMARY KEY,
+  bytes       INTEGER NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('result_bundle','artifact','progress','quarantine')),
+  created_at  INTEGER NOT NULL,
+  quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1))
+) STRICT;
+"#,
+];
 
 /// `Store::open` 的引导配置（store.md §10）。未列出的项取规格默认值。
 #[derive(Clone, Debug)]
@@ -184,6 +197,67 @@ impl Durable {
             set_meta(&tx, "projected_seq", &next.head.to_string())?;
         }
         tx.commit().map_err(sqlite)
+    }
+
+    /// CAS 元数据（store.md §7.7）：首次写入定 `kind` 与 `created_at`；`quarantined` 只升不降。
+    pub(crate) fn cas_record(
+        &self,
+        digest: &Sha256Digest,
+        stat: &CasStat,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        conn.execute(
+            "INSERT INTO cas_objects (digest, bytes, kind, created_at, quarantined)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (digest) DO UPDATE SET quarantined = max(quarantined, excluded.quarantined)",
+            params![
+                digest.to_hex(),
+                stat.bytes as i64,
+                stat.kind.as_str(),
+                stat.created_at.as_millis(),
+                stat.quarantined as i64
+            ],
+        )
+        .map_err(sqlite)?;
+        Ok(())
+    }
+
+    pub(crate) fn cas_stat(&self, digest: &Sha256Digest) -> Result<Option<CasStat>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        let row = conn
+            .query_row(
+                "SELECT bytes, kind, created_at, quarantined FROM cas_objects WHERE digest = ?1",
+                params![digest.to_hex()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sqlite)?;
+        row.map(|(bytes, kind, created_at, quarantined)| {
+            Ok(CasStat {
+                bytes: bytes as u64,
+                kind: CasKind::parse(&kind)
+                    .ok_or_else(|| corrupt(format!("cas_objects.kind {kind}")))?,
+                created_at: Timestamp::from_millis(created_at),
+                quarantined: quarantined != 0,
+            })
+        })
+        .transpose()
+    }
+
+    pub(crate) fn cas_count(&self) -> Result<u64, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        conn.query_row("SELECT count(*) FROM cas_objects", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|n| n as u64)
+        .map_err(sqlite)
     }
 
     /// 直接写的游标（`Cursors::advance`）。

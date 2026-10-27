@@ -342,3 +342,171 @@ async fn open_temp_removes_its_directory() {
     tx.commit().await.unwrap();
     drop(store);
 }
+
+// ---------------------------------------------------------------------------
+// CAS 磁盘后端（store.md §7.7、§12.5）
+// ---------------------------------------------------------------------------
+
+fn object_file(dir: &Dir, digest: &gantry_core::canon::Sha256Digest) -> PathBuf {
+    let hex = digest.to_hex();
+    dir.0
+        .join("cas")
+        .join("sha256")
+        .join(&hex[..2])
+        .join(&hex[2..])
+}
+
+#[tokio::test]
+async fn cas_objects_live_on_disk_and_survive_reopen() {
+    use gantry_store::CasKind;
+    let dir = Dir::new("cas-disk");
+    let digest = {
+        let store = open(&dir, 1_700_000_000_000).await.unwrap();
+        let digest = store.cas().put(b"patch", CasKind::Artifact).await.unwrap();
+        store
+            .cas()
+            .put(b"patch", CasKind::Quarantine)
+            .await
+            .unwrap();
+        digest
+    };
+    let path = object_file(&dir, &digest);
+    assert_eq!(std::fs::read(&path).unwrap(), b"patch");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+    // 临时目录里不留东西。
+    assert_eq!(std::fs::read_dir(dir.0.join("cas/tmp")).unwrap().count(), 0);
+
+    let store = open(&dir, 1_700_000_100_000).await.unwrap();
+    let stat = store.cas().stat(&digest).await.unwrap().unwrap();
+    assert_eq!(stat.kind, CasKind::Artifact);
+    assert!(stat.quarantined);
+    assert_eq!(stat.created_at.as_millis(), 1_700_000_000_000);
+    assert_eq!(
+        store.cas().get_bytes(&digest, 16).await.unwrap().as_deref(),
+        Some(&b"patch"[..])
+    );
+}
+
+/// 文件先于行：崩溃后的"有文件无行"孤儿经 `verify` 补行；损坏对象被报告、读取被拒。
+#[tokio::test]
+async fn cas_verify_adds_rows_for_orphans_and_reports_corruption() {
+    use gantry_store::CasKind;
+    let dir = Dir::new("cas-verify");
+    let store = open(&dir, 1_700_000_000_000).await.unwrap();
+    let good = store.cas().put(b"good", CasKind::Progress).await.unwrap();
+
+    // 模拟"rename 之后、插行之前"崩溃：只有文件。
+    let orphan = gantry_core::canon::sha256(b"orphan");
+    let path = object_file(&dir, &orphan);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"orphan").unwrap();
+    assert!(store.cas().has(&orphan).await.unwrap());
+    assert!(store.cas().stat(&orphan).await.unwrap().is_none());
+
+    // 损坏：文件内容与摘要不符。
+    let damaged = store
+        .cas()
+        .put(b"damaged", CasKind::Artifact)
+        .await
+        .unwrap();
+    std::fs::write(object_file(&dir, &damaged), b"tampered").unwrap();
+
+    let report = store.cas().verify().await.unwrap();
+    assert_eq!(report.files, 3);
+    assert_eq!(report.rows_added, 1);
+    assert_eq!(report.corrupt, vec![damaged]);
+    assert_eq!(
+        store.cas().stat(&orphan).await.unwrap().unwrap().kind,
+        CasKind::Artifact
+    );
+    assert!(store.cas().stat(&good).await.unwrap().is_some());
+    assert!(matches!(
+        store.cas().get_bytes(&damaged, 64).await.unwrap_err(),
+        StoreError::Corrupt(_)
+    ));
+    // `open` 对小对象做同样的校验，不能绕过 verify_on_read。
+    assert!(matches!(
+        store.cas().open(&damaged).await.err().unwrap(),
+        StoreError::Corrupt(_)
+    ));
+    // 再跑一次是幂等的。
+    assert_eq!(store.cas().verify().await.unwrap().rows_added, 0);
+}
+
+#[tokio::test]
+async fn cas_put_file_over_limit_leaves_nothing_behind() {
+    use gantry_store::CasKind;
+    let dir = Dir::new("cas-limit");
+    let store = open(&dir, 1_700_000_000_000).await.unwrap();
+    let source = dir.0.join("big.bin");
+    let file = std::fs::File::create(&source).unwrap();
+    file.set_len(gantry_store::cas::DEFAULT_MAX_OBJECT_BYTES + 1)
+        .unwrap();
+    let error = store
+        .cas()
+        .put_file(&source, CasKind::Artifact)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StoreError::CasTooLarge { .. }), "{error:?}");
+    assert_eq!(std::fs::read_dir(dir.0.join("cas/tmp")).unwrap().count(), 0);
+    assert_eq!(
+        store
+            .cas()
+            .gc(&gantry_store::RetentionPolicy::default())
+            .await
+            .unwrap()
+            .scanned,
+        0
+    );
+}
+
+/// 迁移 n → n+1（§12.5）：旧版库（无 `cas_objects`）打开时补齐，版本号前进。
+#[tokio::test]
+async fn older_schema_is_migrated_forward() {
+    let dir = Dir::new("migrate");
+    {
+        let store = open(&dir, 1_700_000_000_000).await.unwrap();
+        let mut tx = store.begin_write().await.unwrap();
+        tx.append(delivery_created()).await.unwrap();
+        tx.commit().await.unwrap();
+        store
+            .execute_raw_sql(
+                "DROP TABLE cas_objects; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+            )
+            .unwrap();
+    }
+    let store = open(&dir, 1_700_000_100_000).await.unwrap();
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 1);
+    let digest = store
+        .cas()
+        .put(b"after migration", gantry_store::CasKind::Artifact)
+        .await
+        .unwrap();
+    drop(store);
+    // 版本若没前进，再次打开会重跑迁移并因 `cas_objects` 已存在而失败。
+    let store = open(&dir, 1_700_000_200_000).await.unwrap();
+    assert!(store.cas().stat(&digest).await.unwrap().is_some());
+}
+
+/// 崩溃留下的 `cas/tmp` 半成品在下次打开时清掉，不会与新临时文件撞名（§9）。
+#[tokio::test]
+async fn cas_tmp_leftovers_are_cleared_on_open() {
+    let dir = Dir::new("cas-tmp");
+    drop(open(&dir, 1_700_000_000_000).await.unwrap());
+    let tmp = dir.0.join("cas/tmp");
+    std::fs::write(tmp.join(format!("{}-0", std::process::id())), b"half").unwrap();
+    std::fs::write(tmp.join("stray"), b"half").unwrap();
+
+    let store = open(&dir, 1_700_000_100_000).await.unwrap();
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
+    store
+        .cas()
+        .put(b"fresh", gantry_store::CasKind::Artifact)
+        .await
+        .unwrap();
+}
