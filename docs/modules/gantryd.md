@@ -147,7 +147,7 @@ pub trait CommandSet: Send + Sync {
 
 ## 13. 开放问题
 
-- **真实装配接引擎**：需要 engine 提供 settings → `RuntimeSettings` 的换算（并在 `settings.updated` 时自动 reconfigure）、默认 `ReservationPolicy`、`status() -> RuntimeStatus`（degraded、`applied_rev`、游标）。已报协调会话排期，归 engine 泳道（#277 评论）。
+- **真实装配接引擎**：需要 engine 提供 settings → `RuntimeSettings` 的换算（并在 `settings.updated` 时自动 reconfigure）、默认 `ReservationPolicy`、`status() -> RuntimeStatus`（degraded、`applied_rev`、游标）。归 engine 泳道，#289 跟踪。
 - **持久存储**：SQLite store 接入后 `assemble_real` 才能启动；届时把 notify、真实 policy 等按端口挪入。
 - **`doctor` 的 `test_mode`**：`install.sh` 尚未把 `--test-mode` 写入 `install-state.json`，归 deploy（#104 评论）。
 - **`Type=notify`**：deploy 的单元约定 `READY=1`，gantryd 尚未发送（需要 sd_notify，归后续切片）。
