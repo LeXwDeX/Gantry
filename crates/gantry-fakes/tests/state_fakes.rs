@@ -242,7 +242,15 @@ async fn add_labels_idempotency_uses_canonical_target_and_label_set() {
     let first = forge.enqueue(request.clone(), &ctx).await.unwrap();
     assert!(first.created);
     assert_eq!(first.action.idempotency_key, expected_key);
-    assert_eq!(first.action.payload, request.payload);
+    // payload 与 intent 的 labels 都按规范形式存（排序去重），outbox.enqueued 校验要求二者相同。
+    assert_eq!(
+        first.action.payload,
+        ActionPayload::AddLabels(AddLabelsPayload {
+            repo: slug(),
+            number: 7,
+            labels: vec!["bug".into(), "ui".into()],
+        })
+    );
 
     let mut reordered = add_labels_request(0);
     if let ActionPayload::AddLabels(payload) = &mut reordered.payload {
@@ -1185,4 +1193,35 @@ async fn unknown_tx_is_rejected_by_write_ports() {
         error,
         GateError::Store(StoreError::Rejected { .. })
     ));
+}
+
+/// M1 的动作与引擎、真实 forge 共用 core 的 target / intent 推导，幂等键一致（#71）。
+#[tokio::test]
+async fn fake_forge_m1_actions_use_core_key_derivation() {
+    let forge = FakeForge::new(ts());
+    forge.insert_project(project());
+    let mut request = add_labels_request(1);
+    request.payload = ActionPayload::MergePr(gantry_core::forge::MergePrPayload {
+        repo: slug(),
+        pull_number: 12,
+        expected_head_sha: GitOid::parse("9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345").unwrap(),
+        merge_method: MergeMethod::Squash,
+        mode: gantry_core::forge::MergeMode::Auto,
+        commit_title: None,
+        commit_message: None,
+    });
+    request.requires_approval = Some(id::<Apr>(5));
+    let derived = gantry_core::forge::derive_target_intent(&request.payload).unwrap();
+    let expected = IdempotencyKey::derive(
+        &request.project_id,
+        &request.delivery_id,
+        ForgeActionKind::MergePr,
+        &derived.target,
+        &derived.intent,
+        1,
+    )
+    .unwrap();
+    let outcome = forge.enqueue(request, &ctx()).await.unwrap();
+    assert!(outcome.created);
+    assert_eq!(outcome.action.idempotency_key, expected);
 }

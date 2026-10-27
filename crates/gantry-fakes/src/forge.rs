@@ -376,21 +376,30 @@ impl FakeForge {
                 });
             }
         }
+        // add_labels 的 labels 在 payload 与 intent 中都必须排序去重且相同（event-data §2.2，
+        // outbox.enqueued 校验）；入队时先规范化 payload。
+        let mut payload = req.payload.clone();
+        if let ActionPayload::AddLabels(add) = &mut payload {
+            add.labels.sort();
+            add.labels.dedup();
+        }
         let payload_value =
-            serde_json::to_value(&req.payload).map_err(|error| EnqueueError::InvalidPayload {
+            serde_json::to_value(&payload).map_err(|error| EnqueueError::InvalidPayload {
                 pointer: "/payload".into(),
                 message: error.to_string(),
             })?;
-        // shortcut: target/intent 推导在 core OQ-9 冻结前由 fake 给出最小确定性
-        // 形式；真实 forge 可按同一输入实现，但不需要与本函数逐字一致。
-        let target = payload_target(&req.payload);
-        let mut intent = payload_value.clone();
-        if let ActionPayload::AddLabels(payload) = &req.payload {
-            let mut labels = payload.labels.clone();
-            labels.sort();
-            labels.dedup();
-            intent = serde_json::json!({ "labels": labels });
-        }
+        // M1 的动作与真实 forge、引擎的 `expected_actions` 共用 core 的推导，幂等键因此一致（#71）；
+        // core 尚未覆盖的动作（OQ-9）仍由 fake 给出最小确定性形式。
+        let (target, intent) = match gantry_core::forge::derive_target_intent(&payload) {
+            Ok(derived) => (derived.target, derived.intent),
+            Err(_) => {
+                let intent = match &payload {
+                    ActionPayload::AddLabels(add) => serde_json::json!({ "labels": add.labels }),
+                    _ => payload_value.clone(),
+                };
+                (payload_target(&payload), intent)
+            }
+        };
         let insert = OutboxInsert {
             project_id: req.project_id,
             delivery_id: req.delivery_id,

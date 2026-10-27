@@ -67,27 +67,95 @@ pub fn derive_target_intent(payload: &ActionPayload) -> Result<TargetIntent, Key
                 intent: Value::Object(intent),
             })
         }
-        ActionPayload::CloseIssue(p) => Ok(TargetIntent {
-            target: format!("issue:{}:close", p.number),
-            intent: json!({
-                "state_reason": val(&p.state_reason)?,
-                "require_merged_pr": p.require_merged_pr,
-            }),
-        }),
-        ActionPayload::MergePr(p) => Ok(TargetIntent {
-            target: format!("pr:{}:merge", p.pull_number),
-            intent: json!({
-                "expected_head_sha": val(&p.expected_head_sha)?,
-                "merge_method": val(&p.merge_method)?,
-                "mode": val(&p.mode)?,
-                "commit_title": p.commit_title,
-                "commit_message": p.commit_message,
-            }),
-        }),
+        ActionPayload::CloseIssue(p) => {
+            let mut intent = Map::new();
+            intent.insert("state_reason".into(), val(&p.state_reason)?);
+            // 可选字段有值才写（#202）。
+            if let Some(pr) = p.require_merged_pr {
+                intent.insert("require_merged_pr".into(), json!(pr));
+            }
+            Ok(TargetIntent {
+                target: format!("issue:{}:close", p.number),
+                intent: Value::Object(intent),
+            })
+        }
+        ActionPayload::MergePr(p) => {
+            let mut intent = Map::new();
+            intent.insert("expected_head_sha".into(), val(&p.expected_head_sha)?);
+            intent.insert("merge_method".into(), val(&p.merge_method)?);
+            intent.insert("mode".into(), val(&p.mode)?);
+            // 可选字段有值才写：`outbox.enqueued` 契约要求省略而不是 null（#202）。
+            if let Some(title) = &p.commit_title {
+                intent.insert("commit_title".into(), json!(title));
+            }
+            if let Some(message) = &p.commit_message {
+                intent.insert("commit_message".into(), json!(message));
+            }
+            Ok(TargetIntent {
+                target: format!("pr:{}:merge", p.pull_number),
+                intent: Value::Object(intent),
+            })
+        }
         other => Err(KeyError::NotInM1(other.kind())),
     }
 }
 
 fn val<T: Serialize>(value: &T) -> Result<Value, KeyError> {
     serde_json::to_value(value).map_err(|error| KeyError::Serialize(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canon::{GitOid, RepoSlug};
+    use crate::entities::MergeMethod;
+    use crate::forge::{MergeMode, MergePrPayload};
+
+    fn merge(title: Option<&str>) -> ActionPayload {
+        ActionPayload::MergePr(MergePrPayload {
+            repo: RepoSlug::parse("acme/web").unwrap(),
+            pull_number: 12,
+            expected_head_sha: GitOid::parse("9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345").unwrap(),
+            merge_method: MergeMethod::Squash,
+            mode: MergeMode::Auto,
+            commit_title: title.map(str::to_owned),
+            commit_message: None,
+        })
+    }
+
+    /// close_issue 的 require_merged_pr 为空时省略（#202）。
+    #[test]
+    fn close_issue_intent_omits_absent_require_merged_pr() {
+        let payload = |pr: Option<u64>| {
+            ActionPayload::CloseIssue(crate::forge::CloseIssuePayload {
+                repo: RepoSlug::parse("acme/web").unwrap(),
+                number: 7,
+                state_reason: serde_json::from_value(json!("completed")).unwrap(),
+                require_merged_pr: pr,
+            })
+        };
+        let intent = derive_target_intent(&payload(None)).unwrap().intent;
+        assert!(!intent
+            .as_object()
+            .unwrap()
+            .contains_key("require_merged_pr"));
+        let intent = derive_target_intent(&payload(Some(12))).unwrap().intent;
+        assert_eq!(intent["require_merged_pr"], 12);
+    }
+
+    /// 可选字段为空时省略，不写 null（#202）；有值时照写。
+    #[test]
+    fn merge_pr_intent_omits_absent_optional_fields() {
+        let intent = derive_target_intent(&merge(None)).unwrap().intent;
+        let object = intent.as_object().unwrap();
+        assert!(object.values().all(|v| !v.is_null()));
+        assert!(!object.contains_key("commit_title"));
+        assert!(!object.contains_key("commit_message"));
+
+        let intent = derive_target_intent(&merge(Some("Fix (#12)")))
+            .unwrap()
+            .intent;
+        assert_eq!(intent["commit_title"], "Fix (#12)");
+        assert!(!intent.as_object().unwrap().contains_key("commit_message"));
+    }
 }
