@@ -1,0 +1,12 @@
+[package]
+name = "gantry-deploy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 部署的 Rust 子命令（M1：gantry github setup、gantry doctor 子集、settings bootstrap-set 的客户端侧）"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

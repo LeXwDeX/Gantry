@@ -49,7 +49,12 @@ pub struct EgressClient {
     issued_to: IssuedTo,
     token_timeout: Duration,
     usage_timeout: Duration,
-    svc: Mutex<Option<SvcTokenGrant>>,
+    /// 缓存的 `svc_token`。异步锁覆盖"检查缓存 → 签发 → 写缓存"整段：签发会吊销此前全部
+    /// 令牌，并发签发会让某个调用拿到刚被吊销的令牌。
+    svc: tokio::sync::Mutex<Option<SvcTokenGrant>>,
+    /// 会话台账尝试首次签发时确定的 `day`：同一 `job_id` 跨 UTC 午夜重试时复用，
+    /// 否则重放会因台账日期不同得到 `binding_mismatch`。`forget_job` 时移除。
+    job_days: Mutex<BTreeMap<AttemptId, gantry_core::time::Date>>,
 }
 
 impl EgressClient {
@@ -61,7 +66,8 @@ impl EgressClient {
             // egress-control §2.1 [提议]：令牌与 secret 操作 5 s，用量拉取 10 s。
             token_timeout: Duration::from_secs(5),
             usage_timeout: Duration::from_secs(10),
-            svc: Mutex::new(None),
+            svc: tokio::sync::Mutex::new(None),
+            job_days: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -117,7 +123,12 @@ impl EgressClient {
         Err(problem_to_error(status, &bytes))
     }
 
-    async fn issue_svc(&self, ctx: &ActorCtx) -> Result<SvcTokenGrant, EgressError> {
+    /// 调用方须持有 `svc` 锁并传入其内容。
+    async fn issue_svc(
+        &self,
+        cache: &mut Option<SvcTokenGrant>,
+        ctx: &ActorCtx,
+    ) -> Result<SvcTokenGrant, EgressError> {
         let body = serde_json::to_value(IssueSvcTokenRequest {
             issued_to: self.issued_to.clone(),
             ttl_s: None,
@@ -132,7 +143,7 @@ impl EgressClient {
                 self.token_timeout,
             )
             .await?;
-        *self.svc.lock().unwrap_or_else(|p| p.into_inner()) = Some(grant.clone());
+        *cache = Some(grant.clone());
         Ok(grant)
     }
 
@@ -253,7 +264,13 @@ impl EgressControl for EgressClient {
         req: IssueJobToken,
         ctx: &ActorCtx,
     ) -> Result<JobTokenGrant, EgressError> {
-        let body = wire_job(&req, self.clock.now().to_date())?;
+        let day = *self
+            .job_days
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(req.job_id)
+            .or_insert_with(|| self.clock.now().to_date());
+        let body = wire_job(&req, day)?;
         let grant: IssueJobTokenResponse = self
             .call(
                 Method::POST,
@@ -317,22 +334,27 @@ impl EgressControl for EgressClient {
                 self.token_timeout,
             )
             .await?;
+        self.job_days
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(job_id);
         Ok(())
     }
 
     async fn service_token(&self, ctx: &ActorCtx) -> Result<SvcTokenGrant, EgressError> {
-        let cached = self.svc.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        if let Some(grant) = cached {
+        let mut cache = self.svc.lock().await;
+        if let Some(grant) = cache.as_ref() {
             let now = self.clock.now().as_millis();
             if grant.expires_at.as_millis() - now > ROTATE_BEFORE_S * 1000 {
-                return Ok(grant);
+                return Ok(grant.clone());
             }
         }
-        self.issue_svc(ctx).await
+        self.issue_svc(&mut cache, ctx).await
     }
 
     async fn rotate_service_token(&self, ctx: &ActorCtx) -> Result<SvcTokenGrant, EgressError> {
-        self.issue_svc(ctx).await
+        let mut cache = self.svc.lock().await;
+        self.issue_svc(&mut cache, ctx).await
     }
 
     async fn apply_config(

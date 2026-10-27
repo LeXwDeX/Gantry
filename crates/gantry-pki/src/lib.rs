@@ -9,18 +9,24 @@
 //! - [`text`]：设备名校验与终端输出净化（§8 终端注入）；
 //! - [`journal`]：吊销日志 `revocations.journal` 的追加、复制与重放筛选（§7.6，P-67、P-80）；
 //! - [`verifier`]：mTLS 握手校验器（§7.3）；
-//! - [`pairing`]：配对令牌、会话表、确认码、首台角色与安装引导期（§7.4，D-18）。
+//! - [`pairing`]：配对令牌、会话表、确认码、首台角色与安装引导期（§7.4，D-18）；
+//! - [`store_schema`]：本模块在 `store` 里的私有表（§7.2）；
+//! - [`directory`]：设备目录 `DeviceDirectory` 与握手在册查询（§6.2、§7.3 第 4 步）；
+//! - [`pairing_service`]：配对会话的开关与 `redeem` 单一写事务（§6.3、§7.4.3）。
 //!
-//! 设备注册表、配对、握手校验、吊销等依赖 `store` 的部分在后续切片中加入。
+//! 设备管理（改名、改角色、吊销、续期、重放）、`Pki::open` 与应急命令在后续切片中加入。
 
 pub mod bootstrap;
 pub mod ca;
 pub mod config;
 pub mod csr;
+pub mod directory;
 pub mod journal;
 pub mod keys;
 pub mod pairing;
+pub mod pairing_service;
 mod rng;
+pub mod store_schema;
 pub mod text;
 pub mod verifier;
 
@@ -47,6 +53,10 @@ pub enum PkiError {
     TimeRange,
     #[error("pki I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("store error: {0}")]
+    Store(String),
+    #[error("not found")]
+    NotFound,
 }
 
 impl From<rcgen::Error> for PkiError {
