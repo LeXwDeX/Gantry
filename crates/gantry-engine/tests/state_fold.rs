@@ -509,3 +509,25 @@ fn accepted_open_pr_is_folded_into_attempt() {
     assert_eq!(attempt.accepted_open_pr.as_deref(), Some("proposal-1"));
     assert_eq!(state.evidence.candidate_head, Some(v(json!(COMMIT))));
 }
+
+/// 被取代的旧项只出现在新项 `inbox.raised.data.supersedes` 里，不会另发 `inbox.resolved`；
+/// 折叠时要一并移出阻塞集合，否则它会一直阻塞（§7.11）。
+#[test]
+fn supersedes_unblocks() {
+    const NEW_INBOX: &str = "inb_01JBX2F5H7K9M1P3R5T7V9X0ZD";
+    let mut path = low_path();
+    path.truncate(25);
+    assert!(fold(&path).open_inbox.contains_key(&id(INBOX)));
+    path.push(spec(
+        "inbox.raised",
+        NEW_INBOX,
+        json!({
+            "item": {"id": NEW_INBOX, "project_id": PROJECT, "delivery_id": DELIVERY, "kind": "approval_needed", "severity": "blocker", "summary": "需要审批", "payload": {"approval_id": APPROVAL}, "status": "open", "dedup_key": "approval:new", "created_at": "2026-10-24T12:41:03.120Z", "updated_at": "2026-10-24T12:41:03.120Z"},
+            "supersedes": [INBOX]
+        }),
+    ));
+    let state = fold(&path);
+    assert!(!state.open_inbox.contains_key(&id(INBOX)));
+    assert!(state.open_inbox.contains_key(&id(NEW_INBOX)));
+    assert_eq!(state.open_inbox.len(), 1);
+}
