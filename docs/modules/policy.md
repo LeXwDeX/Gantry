@@ -103,6 +103,7 @@ pub trait PolicyPort: Send + Sync {
     /// spec 只能来自 decide_action / evaluate_patch / decide_proposals 返回的 NeedsApproval，调用方不能自拟。
     async fn request_approval(&self, spec: ApprovalSpec, ctx: ActorCtx /* core::ports，P-78 */) -> Result<Approval, PolicyError>;
     /// 审批的发起方在主体被替换时主动作废（如补丁被新 Attempt 取代、交付单元被放弃）。
+    /// reason 与 approval.invalidated 的 reason 一一对应，带事件要求的前后值（#89 Q2，event-data §2.2.3）。
     async fn invalidate(&self, id: &ApprovalId, reason: InvalidateReason, actor: Actor) -> Result<Approval, PolicyError>;
     /// 守护用：某 PR 上是否存在 pending / granted 的审批（"已审批 PR 上不得静默推送"）。
     async fn live_approvals_for_pr(&self, repo: &RepoSlug, number: u64) -> Result<Vec<Approval>, PolicyError>;
