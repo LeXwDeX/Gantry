@@ -25,6 +25,8 @@
 | D-15 | 同项目 agent 间可只读观察、通信和跨树文件阅读 | 用户 |
 | D-16 | GraphAgent（`graph-agent` 仓库）是 Gantry 的前身项目，Gantry 是其继任者；GraphAgent 是 AGPL 许可，只借鉴设计与教训，不复用代码 | 用户（[AGENTS.md §1](../AGENTS.md#1-项目当前情况)）；原 Q-05 |
 | D-17 | SpecGit 是 Gantry 的前身项目：并入其交付语义（Issue → PR → 验证完成），不作为独立 CLI 调用 | 用户（[AGENTS.md §1](../AGENTS.md#1-项目当前情况)）；原 Q-06 |
+| D-18 | **第一台配对设备是手机档案时**：安装引导期（P-66）一直持续到第一台**桌面**设备配对；第一台桌面设备成为 approver（P-23）；在此之前配对的手机都是 `operator`（P-76） | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-10 |
+| D-19 | **`budget_exhausted` 的 `raise_cap`**（P-79）：每选一次，给耗尽的那个维度追加一份该档模板的原值（如 `rounds` 3 → 6）；新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`），其契约另开 issue 跟踪；operator 即可操作，不需要签名，只在桌面档案出现 | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-11 |
 
 D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计算与工作树隔离推导出的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 行新增的用户机制决定；机制见待契约批准提案节的 P-83–P-86。
 
@@ -56,7 +58,7 @@ P-47–P-70 来自[第二轮裁决](reviews/2026-10-24-rulings-round2.md)（产�
 | P-20 | 审批状态：`pending → granted → consumed \| invalidated \| expired`；`pending → denied \| invalidated \| expired`。审批绑定 `subject_digest`：PR 类动作是 head SHA，补丁审批（PR 创建前）是补丁内容的 sha256。`Approval.action` 用 `ForgeActionKind` 标识或内部动作标识（`Approval.action` 的取值与消费时点已被 P-54 修订；补丁审批的动作标识改为 `patch_apply_protected`） | 补丁审批发生在 PR 之前，没有 head 可绑 |
 | P-21 | 事件目录补齐：`settings.updated`、`device.updated`、`inbox.dismissed`、`conversation.created`、`approval.expired`、`approval.consumed`、`outbox.executing`、`outbox.cancelled`、`forge.<kind>`（含 `forge.base_advanced`）、`attempt.progress`（采样，仅展示）、`patch.validated`、`patch.rejected`；全局事件的 `project_id` 为 `null` | 四份契约各自提出的缺口 |
 | P-22 | data-model 补齐 Attempt / Sandbox / InboxItem / Project / PR 快照 / OutboxAction / BudgetLedger 的字段与枚举，`Level` 线上格式为 `"None"`…`"Ultimate"`，定义 `UntrustedText` / `Ref` / `Card` / `CheckSummary`；每个项目一个主对话；`default_level` 移到配置 `levels.default_level`（项目可覆盖）。用量以 Egress 计量为准；`forge_writes` 是累计数，按小时限速是配置项、由 Outbox 令牌桶执行，二者不混用 | 契约需要可生成 schema 的确定形状 |
-| P-23 | 第一台配对设备为 approver（所有者）；之后配对的设备默认 operator；手机端按 api.md 的"客户端档案"只开放对话相关路由，默认不可审批。改角色、吊销需要 approver 签名（手机档案设备已被 P-76 修订：永远不能成为 approver） | 防会话劫持后自我提权 |
+| P-23 | 第一台配对设备为 approver（所有者）；之后配对的设备默认 operator；手机端按 api.md 的"客户端档案"只开放对话相关路由，默认不可审批。改角色、吊销需要 approver 签名（手机档案设备已被 P-76 修订：永远不能成为 approver；第一台配对设备是手机档案时已被 D-18 修订：第一台**桌面**设备成为 approver） | 防会话劫持后自我提权 |
 | P-24 | Gate 输出 `ACCEPT` / `REVISE` / `REJECT` / `BLOCKED`。准入 READY = `ACCEPT`，NOT_READY = `REVISE`（在对话中追问）。`REJECT` → 交付单元进入 `waiting_human`，上报 `decision_needed`（放弃或重新规划），记 `failure_class = verdict_fail`；`BLOCKED` → 上报 `escalation` 并附证据 | 统一判定语义，阶段机出边确定 |
 | P-25 | 新增模块 `repo`（仓库与工作树，`exec` 泳道）：每个项目的服务端裸镜像仓（由 `forge` 拉取更新）、工作树、写权锁、从镜像准备沙盒工作区、在干净检出上应用补丁、调用 `policy` 校验、生成提交；推送仍经 `forge` Outbox | 补丁闸门与镜像仓原本无主 |
 | P-26 | `forge` 订阅默认分支的 `push` 事件，产生 `forge.base_advanced`；引擎据此让 `merge` 阶段的交付单元重验 | GitHub 不会在 base 前移时给 PR 发事件 |
@@ -99,7 +101,7 @@ P-47–P-70 来自[第二轮裁决](reviews/2026-10-24-rulings-round2.md)（产�
 | P-63 | **上报项**：`InboxItem` 增加 `project_id` 与 `dedup_key`；`escalation`、`spec_needed`、`decision_needed` 的 `payload.options[]` 为 `{id, label, primary?}`；升档一律用 `escalation`（手机档案不可 `choose`，P-35）。新增 `GET /v1/inbox/summary`（按项目的 open 计数，手机可用）。桌面系统通知由 `inbox.raised`（`severity ≥ warn`）触发，不新增事件。`notify` 归 `be-engine` 泳道（M1 上报与计数），APNs 归 M4 `ops`（C17）（`reason_code` 与选项 id 词表已由 P-79 固定；手机推送令牌路由见 P-77） | 项目 tab 的徽标需要计数；重复上报需要去重键 |
 | P-64 | **证书链与续期**：配对时固定的是**离线根 CA** 指纹；服务端下发链 `[叶子, 中间 CA, 根]`，客户端校验根指纹与固定值一致；中间 CA 轮换不影响已配对设备。新增 `POST /v1/devices/self/renew`（mTLS，提交新 CSR），M1 交付；客户端在证书剩余 1/3 有效期时自动续期（建议值）（C18） | 固定中间 CA 会让中间 CA 轮换（M3）迫使所有设备重新配对 |
 | P-65 | **webhook 入口与 App 创建**：webhook 监听只在回环地址上以明文 HTTP 提供；对公网暴露一律经终止 TLS 的反向代理或隧道（公网证书）。首次部署顺序：先配置 webhook 入口，再用 App Manifest 创建 App；`gantry github setup` 生成一次性的 Manifest 提交页，并经同一入口的 `/setup/github/callback` 接收 `code`（细节需核实）（C19） | Manifest 创建时就要填 webhook URL；TLS 由成熟的反向代理 / 隧道终止，`gantryd` 不管理公网证书 |
-| P-66 | **安装引导期**：第一台设备配对之前，主机命令（需 root）可以写入 `github.*` 与 `sandbox.base_image` 等"仅 approver"配置，并写审计事件；第一台设备配对之后改为需要审批签名。`sandbox.base_image` 默认使用随版本发布、固定摘要的官方 worker 镜像（C20） | 配对前没有 approver 能签名，而 App 凭据与镜像又是跑通前提 |
+| P-66 | **安装引导期**：第一台设备配对之前，主机命令（需 root）可以写入 `github.*` 与 `sandbox.base_image` 等"仅 approver"配置，并写审计事件；第一台设备配对之后改为需要审批签名。`sandbox.base_image` 默认使用随版本发布、固定摘要的官方 worker 镜像（C20）（引导期结束时机已被 D-18 修订：持续到第一台**桌面**设备配对） | 配对前没有 approver 能签名，而 App 凭据与镜像又是跑通前提 |
 | P-67 | **备份恢复**：事件日志有 `log_epoch`，每次从备份恢复加一；事件流与快照响应携带 `log_epoch`，客户端发现变化就全量重同步。设备吊销同时追加写入日志之外的 `revocations.journal`（只追加），恢复时重放晚于备份的吊销（C21）（`revocations.journal` 的写入、复制与重放规则已由 P-80 细化） | 恢复后 `seq` 可能回退并被复用，客户端游标会错位；恢复不能让已吊销的设备复活 |
 | P-68 | **二进制文件**：第一版补丁中的二进制文件一律拒绝（与 worker-protocol 不生成 `--binary` 一致），撤销 P-41 中的 `binary_allowlist`；符号链接一律拒绝（C22） | 补丁格式本身就不携带二进制内容，白名单无从生效 |
 | P-69 | **补丁校验分工**：`repo` 做机械检查并产出 `PatchFacts`（能否干净应用、文件列表、大小、二进制、符号链接、子模块、权限位）；`policy` 基于 `PatchFacts` 和配置做规则判定（路径规则、大小上限）。应用失败等机械拒绝由 `repo` 发 `patch.rejected`（`reason`）；`policy.denied` 只用于策略判定。提交由 `repo` 创建；提交身份来自配置 `github.commit_identity`（App 创建时写入）（C23） | 事实与判定分开：`policy` 不解析补丁、不碰文件系统，`repo` 不做可配置的判断 |
@@ -141,9 +143,7 @@ P-83–P-86 只记录目标设计提案，均待契约批准，不作为当前�
 | Q-07 | 上报的离线通知渠道（桌面端关闭时） | 手机端推送；之前用邮件或 GitHub 通知兜底 | notify 模块 |
 | Q-08 | 依赖指向 `github.com` 源（git 依赖）时如何供给：沙盒内无 GitHub 网络（I1），第一版默认拒绝 | 服务端代理缓存（由服务端用只读令牌拉取，沙盒经 Egress 读缓存） | egress、repo、sandbox |
 | Q-09 | 仓库中的二进制资源（图片、字体、数据文件等）如何供给：补丁格式不携带二进制（P-68 一律拒绝），需要改二进制文件的任务目前无法完成 | 第一版一律拒绝并上报；M3 起"经审批放行"：worker 在 `out/` 另交二进制清单与内容（受大小上限约束），`repo` 校验后进入补丁审批 `patch_apply_protected` | worker-protocol、`repo`、`policy`、`worker` |
-| Q-10 | 第一台配对的设备是手机档案时怎么办：P-76 规定手机档案至多 `operator`，此时系统没有 approver，而 P-66 的安装引导期在"第一台设备配对"时就结束 | 安装引导期改为持续到第一台**桌面**设备配对；第一台桌面设备成为 approver；在此之前配对的手机为 `operator` | `pki`、`api`、`deploy`、P-23、P-66 |
-| Q-11 | `budget_exhausted` 的 `raise_cap` 选项（P-79）追加多少预算、记什么事件：预算模板在创建时按 `level_cap` 固定（P-57），追加方式此前未定（config OQ-10） | 每选一次把耗尽维度的上限追加一份该档模板的原值（如 `rounds` 3 → 6），新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`）；operator 即可，不需要签名，只在桌面档案 | `engine`、`notify`、`desktop-ui`、data-model、config |
 | Q-12 | 结果对象（补丁、`result_ref`）的读取路由：`patch_apply_protected` 审批要签补丁摘要，但客户端拿不到补丁内容（补丁尚未提交，GitHub 上也看不到），只能"盲签"；`manual_action` 的 workflow 补丁也没有下载入口（api.md OQ-11、desktop-shell OQ-S9） | 新增 `GET /v1/results/{sha256}`（viewer，仅桌面档案，M2；按内容寻址返回原始字节，大小上限同 `policies.patch.max_bytes`，客户端校验 `sha256` 后按不可信文本渲染）；补丁审批单在取不到内容时不允许签名。无论路由形态，`engine` / `api` 读取内部 CAS 前须校验同项目、用户授权与已发布快照映射，未授权对外不确认对象存在，不给沙盒直接入口，不以 digest 当权限 | `api`、`desktop-shell`、`desktop-ui`、`engine`（CAS 保留期）、M2 退出标准"签名批准后才提交推送"；该权限前置待 G1 冻结，Q-12 仍未决 |
 | Q-13 | 同项目 agent 之间是否需要在运行中即时通信（而不是只在下一次尝试投递） | 推荐只在下一次尝试投递（P-84）：不注入运行中 Attempt，未答复前不算已确认 | 协作契约、`core::ports`、worker 协议、desktop 呈现；不解决 Q-01–Q-12 |
 
-Q-05（`graph-agent` 仓库与 Gantry 的关系）、Q-06（SpecGit 的定位）已于 2026-10-27 移至已确定，见 D-16、D-17；编号不复用。
+Q-05（`graph-agent` 仓库与 Gantry 的关系）、Q-06（SpecGit 的定位）已于 2026-10-27 移至已确定，见 D-16、D-17；Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算）同日移至已确定，见 D-18、D-19。编号不复用。
