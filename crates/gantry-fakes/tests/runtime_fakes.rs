@@ -393,6 +393,7 @@ async fn fake_conversation_ensure_is_idempotent_and_scripts_messages() {
             gantry_core::ports::context::PageQuery {
                 cursor: None,
                 limit: 10,
+                order: None,
             },
         )
         .await
@@ -400,6 +401,65 @@ async fn fake_conversation_ensure_is_idempotent_and_scripts_messages() {
     assert_eq!(page.items.len(), 2);
     assert_eq!(page.last_seq.as_u64(), 2);
     assert_eq!(fake.calls().len(), 5);
+    assert_eq!(page.items[0].text, "scripted reply");
+    assert_eq!(page.items[1].text, "hello");
+    let desc = fake
+        .list_messages(
+            &first,
+            gantry_core::ports::PageQuery {
+                limit: 10,
+                order: Some(gantry_core::ports::PageOrder::Desc),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("descending list");
+    assert_eq!(desc, page);
+    let first_page = fake
+        .list_messages(
+            &first,
+            gantry_core::ports::PageQuery {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first page");
+    assert_eq!(first_page.items[0].text, "scripted reply");
+    let second_page = fake
+        .list_messages(
+            &first,
+            gantry_core::ports::PageQuery {
+                cursor: first_page.next_cursor,
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("second page");
+    assert_eq!(second_page.items[0].text, "hello");
+    assert_eq!(second_page.next_cursor, None);
+    assert_eq!(second_page.last_seq, page.last_seq);
+    let conversations = fake
+        .list_conversations(&project, Default::default())
+        .await
+        .expect("list conversations");
+    assert_eq!(conversations.items[0].id, first);
+    assert_eq!(conversations.last_seq, gantry_core::entities::Seq::ZERO);
+    let error = fake
+        .list_messages(
+            &first,
+            gantry_core::ports::PageQuery {
+                order: Some(gantry_core::ports::PageOrder::Asc),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("ascending order is unsupported");
+    assert!(matches!(
+        error,
+        gantry_core::ports::ConvError::InvalidRequest { .. }
+    ));
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ use gantry_core::entities::{AgentKind, MessageRole, MessageTone, Ref};
 use gantry_core::events::EventType;
 use gantry_core::ids::{Id, ProjectId};
 use gantry_core::level::Level;
-use gantry_core::ports::context::{ClientProfile, PageQuery};
+use gantry_core::ports::context::{ClientProfile, PageOrder, PageQuery};
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
 use gantry_core::ports::engine::EngineError;
 use gantry_models::ModelsError;
@@ -43,6 +43,7 @@ async fn project_added_creates_exactly_one_conversation() {
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, first);
     assert_eq!(page.items[0].project_id, h.project);
+    assert_eq!(page.last_seq, h.store.events().head().await.unwrap());
 }
 
 #[tokio::test]
@@ -546,6 +547,7 @@ async fn list_messages_seq_matches_and_desc_cursor_is_stable() {
             PageQuery {
                 cursor: None,
                 limit: 2,
+                order: None,
             },
         )
         .await
@@ -553,6 +555,19 @@ async fn list_messages_seq_matches_and_desc_cursor_is_stable() {
     assert_eq!(first.last_seq, h.store.events().head().await.unwrap());
     let texts: Vec<_> = first.items.iter().map(|m| m.text.clone()).collect();
     assert_eq!(texts, vec!["第 4 条", "第 3 条"]);
+    let desc = h
+        .conv
+        .list_messages(
+            &cnv,
+            PageQuery {
+                limit: 2,
+                order: Some(PageOrder::Desc),
+                ..PageQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(desc, first);
 
     // 新消息不影响已发出的游标。
     h.post("更新的一条", None, vec![]).await;
@@ -563,6 +578,7 @@ async fn list_messages_seq_matches_and_desc_cursor_is_stable() {
             PageQuery {
                 cursor: first.next_cursor.clone(),
                 limit: 2,
+                order: None,
             },
         )
         .await
@@ -577,9 +593,22 @@ async fn list_messages_seq_matches_and_desc_cursor_is_stable() {
             PageQuery {
                 cursor: Some("bogus".into()),
                 limit: 2,
+                order: None,
             },
         )
         .await
         .unwrap_err();
     assert!(matches!(bad, ConvError::InvalidRequest { .. }));
+    let asc = h
+        .conv
+        .list_messages(
+            &cnv,
+            PageQuery {
+                order: Some(PageOrder::Asc),
+                ..PageQuery::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(asc, ConvError::InvalidRequest { pointer, .. } if pointer == "/order"));
 }

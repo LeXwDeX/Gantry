@@ -446,6 +446,8 @@ pub mod fixtures { pub fn load(name: &str) -> serde_json::Value; } // 取自契�
 
 服务端模块之间的调用一律经下列 trait；`gantryd` 装配时注入实现。签名的权威是**提供方模块**的规格书（下表"签名"列），本节只列名字、方法与归属，避免两处漂移；请求 / 响应 / 错误类型随 trait 一起定义在 `core::ports`。
 
+`PageQuery` 的 `order: Option<PageOrder>` 接受 `Asc` 或 `Desc`；`None` 沿用提供方方法的原有默认顺序。提供方不支持指定方向时必须返回错误，不得忽略。`ConversationService` 的两个列表返回 `PageWithSeq`；水位取法和当前实现限制见 [conversation.md §7.11](conversation.md#711-分页与读一致)。
+
 ```rust
 /// 跨端口传递调用方的写事务（store::WriteTx 实现它；实现方向下转型取回 WriteTx）。core 不知道 SQLite。
 pub trait TxHandle: Send { fn as_any_mut(&mut self) -> &mut dyn std::any::Any; }

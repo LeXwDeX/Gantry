@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use gantry_core::entities::{Actor, ActorKind, Conversation, Message, Seq};
 use gantry_core::events::{EventType, NewEvent, Subject};
 use gantry_core::ids::{ConversationId, ProjectId};
-use gantry_core::ports::context::{ActorCtx, Page, PageQuery, PageWithSeq};
+use gantry_core::ports::context::{ActorCtx, PageQuery, PageWithSeq};
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
 use gantry_fakes::conversation::FakeConversation;
 use gantry_store::{Appended, Store};
@@ -102,7 +102,7 @@ impl ConversationService for ConvFaults {
         &self,
         project: &ProjectId,
         page: PageQuery,
-    ) -> Result<Page<Conversation>, ConvError> {
+    ) -> Result<PageWithSeq<Conversation>, ConvError> {
         self.inner.list_conversations(project, page).await
     }
 

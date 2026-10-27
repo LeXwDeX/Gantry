@@ -249,7 +249,14 @@ pub async fn list(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Pro
     let mut cursor = None;
     loop {
         let page = policy
-            .list(filter.clone(), PageQuery { cursor, limit: 200 })
+            .list(
+                filter.clone(),
+                PageQuery {
+                    cursor,
+                    limit: 200,
+                    order: None,
+                },
+            )
             .await
             .map_err(policy_error)?;
         all.extend(page.items);

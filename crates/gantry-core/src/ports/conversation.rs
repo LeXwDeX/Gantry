@@ -9,7 +9,7 @@ use crate::entities::{Conversation, Message, Ref};
 use crate::ids::{ConversationId, ProjectId};
 use crate::level::Level;
 
-use super::context::{ActorCtx, Page, PageQuery, PageWithSeq, StoreError};
+use super::context::{ActorCtx, PageQuery, PageWithSeq, StoreError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewUserMessage {
@@ -53,7 +53,7 @@ pub trait ConversationService: Send + Sync {
         &self,
         project: &ProjectId,
         page: PageQuery,
-    ) -> Result<Page<Conversation>, ConvError>;
+    ) -> Result<PageWithSeq<Conversation>, ConvError>;
 
     async fn list_messages(
         &self,

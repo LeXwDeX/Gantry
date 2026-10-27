@@ -102,9 +102,9 @@ pub trait ConversationService: Send + Sync {
     async fn post_user_message(&self, ctx: ActorCtx, cnv: ConversationId, msg: NewUserMessage)
         -> Result<Message, ConvError>;
 
-    /// GET /v1/projects/{id}/conversations（目前恰好一项）。
+    /// GET /v1/projects/{id}/conversations（目前恰好一项）；返回读取水位。
     async fn list_conversations(&self, project: &ProjectId, page: PageQuery)
-        -> Result<Page<Conversation>, ConvError>;
+        -> Result<PageWithSeq<Conversation>, ConvError>;
 
     /// GET /v1/conversations/{id}/messages；默认 order=desc；返回与快照一致的 seq。
     async fn list_messages(&self, cnv: &ConversationId, page: PageQuery)
@@ -298,6 +298,8 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 ### 7.11 分页与读一致
 
 `list_messages` 默认 `order = desc`，游标为不透明 keyset（api.md §3.2）；读事务内同时取投影与 `seq`，随响应返回。
+
+端口过渡状态：`PageQuery.order = None` 使用各方法的默认顺序。真实 `list_conversations` 最多返回项目的一项，按先读取的日志头折叠事件并返回同一水位；目前尚未实现游标和排序，显式排序会被拒绝。真实 `list_messages` 支持默认和显式 `Desc`，显式 `Asc` 返回 `InvalidRequest`；现有游标仍是内部事件序号，不是 HTTP 契约要求的游标。`FakeConversation` 无真实事件日志，对话列表使用测试序号零；消息列表的序号是消息数，均不代表生产全局水位。替身对话列表拒绝显式排序；消息列表的默认和显式 `Desc` 均按插入顺序倒序，显式 `Asc` 被拒绝，游标仍是偏移量。以上端口调整不代表 #280 的 HTTP 路由、分页或一致性已实现。
 
 ### 7.12 手机档案
 

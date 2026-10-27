@@ -89,11 +89,20 @@ impl StoreError {
     }
 }
 
-/// 端口方法的通用分页查询（不透明游标）。
+/// 分页排序方向。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageOrder {
+    Asc,
+    Desc,
+}
+
+/// 端口方法的通用分页查询（不透明游标）。`None` 使用各方法原有默认顺序。
+/// 实现不支持指定方向时必须返回错误，不能忽略。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageQuery {
     pub cursor: Option<String>,
     pub limit: u32,
+    pub order: Option<PageOrder>,
 }
 
 /// 端口方法的通用分页响应。
@@ -103,12 +112,23 @@ pub struct Page<T> {
     pub next_cursor: Option<String>,
 }
 
-/// 分页结果附带的最后事件序号，用于 `X-Event-Seq`。
+/// 分页结果附带同一读取水位的事件序号，用于 `X-Event-Seq`。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageWithSeq<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<String>,
     pub last_seq: crate::entities::Seq,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PageOrder, PageQuery};
+
+    #[test]
+    fn page_order_is_optional_and_distinguishes_directions() {
+        assert_eq!(PageQuery::default().order, None);
+        assert_ne!(PageOrder::Asc, PageOrder::Desc);
+    }
 }
 
 /// 模块健康度（`settings/status` 的低基数枚举）。

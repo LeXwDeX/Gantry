@@ -422,7 +422,11 @@ async fn list_is_stable_when_items_arrive_during_paging() {
         let page = h
             .notify
             .list(InboxQuery {
-                page: PageQuery { cursor, limit: 2 },
+                page: PageQuery {
+                    cursor,
+                    limit: 2,
+                    order: None,
+                },
                 ..InboxQuery::default()
             })
             .await
@@ -451,6 +455,7 @@ async fn list_is_stable_when_items_arrive_during_paging() {
             page: PageQuery {
                 cursor: None,
                 limit: 200,
+                order: None,
             },
             ..InboxQuery::default()
         })

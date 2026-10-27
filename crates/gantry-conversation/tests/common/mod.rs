@@ -508,6 +508,7 @@ impl Harness {
                 PageQuery {
                     cursor: None,
                     limit: 200,
+                    order: None,
                 },
             )
             .await

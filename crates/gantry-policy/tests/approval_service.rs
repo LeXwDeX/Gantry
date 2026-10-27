@@ -519,6 +519,7 @@ async fn list_filters_and_pages() {
             PageQuery {
                 cursor: None,
                 limit: 1,
+                order: None,
             },
         )
         .await
@@ -532,12 +533,32 @@ async fn list_filters_and_pages() {
             PageQuery {
                 cursor: Some(cursor),
                 limit: 1,
+                order: None,
             },
         )
         .await
         .expect("list");
     assert_eq!(second.items.len(), 1);
     assert_eq!(second.next_cursor, None);
+    for order in [
+        gantry_core::ports::PageOrder::Asc,
+        gantry_core::ports::PageOrder::Desc,
+    ] {
+        let result = desk
+            .approvals
+            .list(
+                ApprovalQuery::default(),
+                PageQuery {
+                    order: Some(order),
+                    ..PageQuery::default()
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(gantry_core::ports::PolicyError::InvalidRequest { .. })
+        ));
+    }
     let mut ids = vec![first.items[0].id, second.items[0].id];
     ids.sort();
     let mut expected = vec![merge.id, internal.id];
