@@ -104,6 +104,93 @@
     ]
   },
   {
+    "id": "egress-revoke-call-missing-call-id",
+    "schema": "schemas/egress/revoke-svc-token-request.json",
+    "rust": "egress::RevokeSvcTokenRequest",
+    "data": {
+      "scope": "call"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "egress-revoke-call-id-without-scope",
+    "schema": "schemas/egress/revoke-svc-token-request.json",
+    "rust": "egress::RevokeSvcTokenRequest",
+    "data": {
+      "call_id": "01JBX5D2F4H6K8M0P2R4T6V8XZ"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "egress-revoke-unknown-scope",
+    "schema": "schemas/egress/revoke-svc-token-request.json",
+    "rust": "egress::RevokeSvcTokenRequest",
+    "data": {
+      "scope": "token",
+      "call_id": "01JBX5D2F4H6K8M0P2R4T6V8XZ"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "egress-usage-record-missing-weight-rev",
+    "schema": "schemas/egress/usage-page.json",
+    "rust": "egress::UsagePage",
+    "data": {
+      "items": [
+        {
+          "seq": 1,
+          "at": "2026-10-24T12:41:03.120Z",
+          "caller": { "kind": "svc", "svc_token_id": "svt_01JBX5A2C4E6G8J1L3N5Q7S9UW", "call_id": "01JBX5D2F4H6K8M0P2R4T6V8XZ" },
+          "project_id": null,
+          "ledger": null,
+          "tier": "utility",
+          "provider": "anthropic",
+          "model": "m",
+          "usage": { "input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0, "cache_write_tokens": 0, "requests": 1 },
+          "weighted_tokens": 2,
+          "incomplete": false
+        }
+      ],
+      "next_cursor": "1"
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
+    "id": "egress-call-terminal-state-not-closed",
+    "schema": "schemas/egress/close-call-response.json",
+    "rust": "egress::CloseCallResponse",
+    "data": {
+      "call_id": "01JBX5D2F4H6K8M0P2R4T6V8XZ",
+      "terminal": {
+        "state": "draining",
+        "closed_at": "2026-10-24T12:41:05.002Z",
+        "last_seq": 0,
+        "record_count": 0,
+        "svc_token_ids": [],
+        "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "requests": 0 },
+        "weighted_tokens": 0,
+        "records_digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "incomplete": false
+      }
+    },
+    "should_fail": [
+      "schema",
+      "rust"
+    ]
+  },
+  {
     "id": "outbox-action-kind-payload-mismatch",
     "schema": "schemas/forge/outbox-action.json",
     "rust": "entities::OutboxAction",

@@ -87,7 +87,22 @@
       "rust": "egress::PresentResponse"
     },
     {
-      "sha256": "c5b452055adb13dd56a6f74d0c5638796b0a43d8b02e00dede04cccfbda60bfa",
+      "sha256": "1676fcb9b1529590d2eee07435e0a8db1e60f379d67e5a07537f9f49958d9b09",
+      "schema": "schemas/egress/usage-page.json",
+      "rust": "egress::UsagePage"
+    },
+    {
+      "sha256": "c5fec5ae6e9ad758c52d5e3697aa7d8c9db9ae6a959d789d196601bd36f31497",
+      "schema": "schemas/egress/revoke-svc-token-request.json",
+      "rust": "egress::RevokeSvcTokenRequest"
+    },
+    {
+      "sha256": "ff4fd113591da7835b077b6b6c5161c8fbd0112753a7c99388e89c44726e1f0d",
+      "schema": "schemas/egress/close-call-response.json",
+      "rust": "egress::CloseCallResponse"
+    },
+    {
+      "sha256": "cbd9c6a980582927d1b6bdc4b62104963c0d949a4f4d383fec60afa49a1d4b0e",
       "schema": "schemas/egress/usage-page.json",
       "rust": "egress::UsagePage"
     },

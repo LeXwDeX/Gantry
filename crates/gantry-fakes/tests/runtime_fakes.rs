@@ -914,6 +914,137 @@ async fn egress_stub_rejects_expired_service_tokens() {
     egress.shutdown();
 }
 
+fn svc_headers(call_id: &str) -> [(&'static str, &str); 3] {
+    [
+        ("X-Gantry-Ledger", "unattributed"),
+        ("x-gantry-tier", "utility"),
+        ("x-gantry-call-id", call_id),
+    ]
+}
+
+#[tokio::test]
+async fn egress_stub_closes_calls_with_read_only_terminal_proof() {
+    use gantry_core::egress::{records_digest, CallTerminalState};
+    use gantry_core::ports::egress::EgressError;
+
+    let mut egress = EgressStub::with_default_config();
+    let ctx = ctx();
+    let first = egress.service_token(&ctx).await.expect("service token");
+    let first_url = first
+        .model_base_urls
+        .get("anthropic")
+        .expect("url")
+        .to_owned();
+    let call = ulid(93);
+    let call_text = call.to_string();
+    for _ in 0..2 {
+        let (status, _, _) = http("POST", &first_url, &svc_headers(&call_text), "{}");
+        assert_eq!(status, 200);
+    }
+
+    // 未关闭：terminal 缺省，不得结算。
+    let open = egress.call_terminal(&call).await.expect("statement");
+    assert_eq!(open.items.len(), 2);
+    assert!(open.terminal.is_none());
+    assert!(open.settleable_terminal().is_none());
+    assert!(open.items.iter().all(|record| record.weight_rev == 1));
+
+    // 轮换后，新 token 与该调用无关联 → 409；旧（已吊销）token 仍可关闭。
+    let second = egress.rotate_service_token(&ctx).await.expect("rotate");
+    assert!(matches!(
+        egress.close_call(&second.svc_token_id, &call, &ctx).await,
+        Err(EgressError::Conflict { .. })
+    ));
+    let closed = egress
+        .close_call(&first.svc_token_id, &call, &ctx)
+        .await
+        .expect("close");
+    assert_eq!(closed.call_id, call);
+    let terminal = closed.terminal.clone();
+    assert_eq!(terminal.state, CallTerminalState::Closed);
+    assert_eq!(terminal.record_count, 2);
+    assert_eq!(terminal.svc_token_ids, vec![first.svc_token_id.clone()]);
+    assert!(!terminal.incomplete);
+
+    // 重复关闭幂等：同一份 terminal。
+    let again = egress
+        .close_call(&first.svc_token_id, &call, &ctx)
+        .await
+        .expect("close again");
+    assert_eq!(again, closed);
+
+    // 关闭后再计量被拒：403 token_invalid，且无新记录。
+    let second_url = second
+        .model_base_urls
+        .get("anthropic")
+        .expect("url")
+        .to_owned();
+    let before = egress.usage_records().len();
+    let (status, _, body) = http("POST", &second_url, &svc_headers(&call_text), "{}");
+    assert_eq!(status, 403);
+    assert!(body.contains("token_invalid"));
+    assert_eq!(egress.usage_records().len(), before);
+
+    // 只读、可重复读取，且证明与明细一致。
+    let read_once = egress.call_terminal(&call).await.expect("read");
+    let read_twice = egress.call_terminal(&call).await.expect("read again");
+    assert_eq!(read_once, read_twice);
+    assert_eq!(read_once.terminal.as_ref(), Some(&terminal));
+    terminal
+        .verify(call, &read_once.items)
+        .expect("proof verifies");
+    assert_eq!(read_once.settleable_terminal(), Some(&terminal));
+    let mut tampered = read_once.items.clone();
+    tampered[0].weight_rev += 1;
+    assert!(terminal.verify(call, &tampered).is_err());
+    assert!(terminal.verify(call, &read_once.items[..1]).is_err());
+
+    // 零接收：任一签发过的 token 都可关闭，摘要为 `[]` 的摘要。
+    let silent = ulid(94);
+    let zero = egress
+        .close_call(&second.svc_token_id, &silent, &ctx)
+        .await
+        .expect("close silent call");
+    assert_eq!(zero.terminal.record_count, 0);
+    assert_eq!(zero.terminal.last_seq, 0);
+    assert!(zero.terminal.svc_token_ids.is_empty());
+    assert_eq!(
+        zero.terminal.records_digest,
+        records_digest(&[]).expect("digest")
+    );
+
+    // 中断记录 → incomplete；过保留期 → 仍 closed，但 incomplete，明细为空。
+    let interrupted = ulid(95);
+    let interrupted_text = interrupted.to_string();
+    let (status, _, _) = http("POST", &second_url, &svc_headers(&interrupted_text), "{}");
+    assert_eq!(status, 200);
+    egress.interrupt_call_records(&interrupted);
+    let partial = egress
+        .close_call(&second.svc_token_id, &interrupted, &ctx)
+        .await
+        .expect("close interrupted");
+    assert!(partial.terminal.incomplete);
+    let statement = egress.call_terminal(&interrupted).await.expect("read");
+    assert!(statement.settleable_terminal().is_none());
+
+    egress.expire_call_records(&call);
+    let expired = egress.call_terminal(&call).await.expect("read expired");
+    assert!(expired.items.is_empty());
+    let expired_terminal = expired.terminal.as_ref().expect("tombstone kept");
+    assert_eq!(expired_terminal.state, CallTerminalState::Closed);
+    assert!(expired_terminal.incomplete);
+    assert!(expired.settleable_terminal().is_none());
+
+    // 从未签发的路径 token → NotFound。
+    let unknown =
+        gantry_core::egress::SvcTokenId::parse("svt_01JBX5A2C4E6G8J1L3N5Q7S9ZZ").expect("id");
+    assert!(matches!(
+        egress.close_call(&unknown, &ulid(96), &ctx).await,
+        Err(EgressError::NotFound)
+    ));
+    egress.shutdown();
+}
+
 fn openssl_supports_explicit_dates() -> bool {
     let Ok(output) = Command::new("openssl").args(["x509", "-help"]).output() else {
         return false;

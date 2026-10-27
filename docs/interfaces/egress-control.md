@@ -94,7 +94,7 @@
 | 4.2 | 查询尝试的当前用量 | `GET /control/v1/jobs/{job_id}/usage` | `sandbox` | 读 | M1 |
 | 4.2 | 遗忘尝试（`attempt.finished` 落库之后） | `DELETE /control/v1/jobs/{job_id}` | `sandbox` | 是 | M1 |
 | 4.3 | 签发 `svc_token`（并吊销此前的） | `POST /control/v1/svc-tokens` | `models`（进程启动、轮换） | 否（每次新令牌） | M1 |
-| 4.3 | 吊销 `svc_token` | `POST /control/v1/svc-tokens/{svc_token_id}/revoke` | `models` | 是 | M1 |
+| 4.3 | 吊销 `svc_token`；或按 `call_id` 关闭一次调用（`scope: "call"`，[egress-call-terminal.md](egress-call-terminal.md)） | `POST /control/v1/svc-tokens/{svc_token_id}/revoke` | `models` | 是 | M1 |
 | 4.4 | 写入 secret：暂存 | `POST /control/v1/secrets/stage` | `api` | 以 `request_id` 为键 | M1 |
 | 4.4 | 写入 secret：激活 / 丢弃 | `POST /control/v1/secrets/staged/{staged_id}/activate`、`…/discard` | `api` | 是 | M1 |
 | 4.4 | 列出暂存项（启动对账） | `GET /control/v1/secrets/staged` | `api` | 读 | M1 |
@@ -214,7 +214,8 @@
 | 字段 | `issued_to` 只进审计；`ttl_s` 可选，默认 86400，范围 3600–604800 **[提议]** |
 | 签发即轮换 | 签发成功即吊销此前所有未吊销的 `svc_token`，`revoked_previous` 列出它们（P-74）；`models` 对其中每一枚做一次对账（下行） |
 | 吊销 | `POST /control/v1/svc-tokens/{svc_token_id}/revoke`，请求体 `{}`，响应 `200 {"svc_token_id": "…", "state": "revoked", "revoked_at": "…"}`；已吊销原样返回 |
-| 记账 | Egress 每个请求完成即写一条用量记录（实时计量，归属取自请求头）。`models` 在每次调用结束后按 `x-gantry-call-id` 取该调用的用量（§4.5），以 `weighted_tokens` 记 `budget.charged` 到 `X-Gantry-Ledger` 指明的台账 |
+| 调用级关闭 | 同一端点，请求体 `{"scope": "call", "call_id": "…"}`：关闭全局 `call_id` 并返回 `200 {call_id, terminal}`，不吊销令牌；语义、关联校验与错误见 [egress-call-terminal.md](egress-call-terminal.md) §2 |
+| 记账 | Egress 每个请求完成即写一条用量记录（实时计量，归属取自请求头）。`models` 在每次调用结束后先按 `call_id` 关闭该调用（上一行），再按 `call_id` 取带 `terminal` 的用量（§4.5），证明完整才以 `weighted_tokens` 记 `budget.charged` 到 `X-Gantry-Ledger` 指明的台账 |
 | 对账 | 令牌吊销后（`revoked_previous` 或显式吊销），`models` 用 `GET /control/v1/usage?svc_token_id=<id>` 取该令牌的全部记录，与已记账的 `call_id` 比对，补记遗漏（P-74）；平时也按游标定期对账 |
 | 封顶 | Egress 不对 `svc_token` 封顶（令牌不绑定台账）；会话台账的每日上限与交付台账的余额由 `models` 在派发前检查 |
 
@@ -272,7 +273,7 @@
 
 ### 4.5 拉取用量
 
-`GET /control/v1/usage?after=<cursor>&limit=<n>`（`limit` 默认 200，最大 1000），或 `GET /control/v1/usage?call_id=<ULID>`（取某次 `svc_token` 调用的记录），或 `GET /control/v1/usage?svc_token_id=<svt_…>&after=<cursor>`（取某枚 `svc_token` 的全部记录，吊销后对账用，P-74）。每一条记录对应一次已完成（或中断）的上游请求：
+`GET /control/v1/usage?after=<cursor>&limit=<n>`（`limit` 默认 200，最大 1000），或 `GET /control/v1/usage?call_id=<ULID>`（取某次 `svc_token` 调用的记录；已关闭的调用另带只读终结证明 `terminal`，见 [egress-call-terminal.md](egress-call-terminal.md) §3），或 `GET /control/v1/usage?svc_token_id=<svt_…>&after=<cursor>`（取某枚 `svc_token` 的全部记录，吊销后对账用，P-74）。每一条记录对应一次已完成（或中断）的上游请求：
 
 ```json
 {
@@ -288,6 +289,7 @@
       "model": "example-utility-model",
       "usage": { "input_tokens": 3201, "output_tokens": 410, "cache_read_tokens": 2800, "cache_write_tokens": 0, "requests": 1 },
       "weighted_tokens": 5531,
+      "weight_rev": 7,
       "incomplete": false
     },
     {
@@ -301,6 +303,7 @@
       "model": "example-worker-model",
       "usage": { "input_tokens": 18200, "output_tokens": 2400, "cache_read_tokens": 9000, "cache_write_tokens": 1200, "requests": 1 },
       "weighted_tokens": 32600,
+      "weight_rev": 6,
       "incomplete": false
     }
   ],
@@ -313,7 +316,7 @@
 | 游标 | `seq` 在 Egress 内单调递增；`after` 取上一页的 `next_cursor`（不透明字符串）；没有更多时 `next_cursor` 为当前最后一条的游标，调用方下次带它轮询 |
 | 交付语义 | 至少一次：调用方以 `seq` 去重，把游标与它写下的 `budget.charged` 放在同一个 `store` 事务里推进 |
 | 归属 | `caller.kind = job` 的 `project_id`、`ledger`、`tier` 取自令牌绑定；`caller.kind = svc` 的 `ledger`、`tier` 由请求头 `X-Gantry-Ledger`、`x-gantry-tier` 解析而来（P-74），`project_id` 为 `null`（Egress 不知道台账属于哪个项目，由 `models` 记账时补全） |
-| 加权 | `weighted_tokens` = `Σ token_weights.<类别> × 该类别 token 数`，权重取签发令牌时的快照（`job_token`）或请求时的当前配置（`svc_token`），与台账口径一致（P-70） |
+| 加权 | `weighted_tokens` = `Σ token_weights.<类别> × 该类别 token 数`，权重取签发令牌时的快照（`job_token`）或请求时的当前配置（`svc_token`），与台账口径一致（P-70）。`weight_rev`（u64，必填）是计量时生效的权重表所属配置修订：`job_token` 记录取签发请求的 `config_rev`（§4.1，权重快照），`svc_token` 记录取请求时已应用配置视图的 `rev`（§4.6）；晚到记录不按当前配置重算 |
 | 记账分工 | `caller.kind = svc` 的记录由 `models` 逐条记账，令牌吊销时按 `svc_token_id` 全量对账（P-74）；`caller.kind = job` 的记录不记账，尝试用量以 §4.2 的 `FinalUsage` 为准（OQ-4） |
 | 保留 | 记录至少保留 7 天 **[提议]**；游标早于保留窗口 → `410 cursor_expired`，调用方从当前位置继续，并对仍未记账的 `svc` 调用逐个按 `call_id` 补查 |
 | 不含 | 请求 / 响应体、头、令牌原文、上游 URL 的查询串 |
@@ -394,6 +397,7 @@
 | `provider_id` 不是令牌绑定的（`job_token`）或不存在 | 拒绝 | `403`，`error.type = provider_not_allowed` |
 | 加权用量达到 `tokens_total` | 拒绝新请求，置 `capped`；在途请求允许完成 | `403`，`error.type = budget_exhausted` |
 | 回环请求缺 `X-Gantry-Ledger` / `x-gantry-tier` / `x-gantry-call-id` 之一，或格式不符 | 拒绝，不转发、不计量 | `400`，`error.type = ledger_header_invalid` **[提议]** |
+| 回环请求的 `x-gantry-call-id` 处于 `draining` / `closed`（egress-call-terminal §2.1） | 拒绝，不转发、不计量；与令牌无效同一响应 | `403`，`error.type = token_invalid`（审计记 `call.closed`） |
 | 请求带 `authorization`、`x-api-key`、`x-gantry-*` 等头 | 沙盒侧一律丢弃（身份只来自令牌）；回环侧读取 `X-Gantry-Ledger`、`x-gantry-tier`、`x-gantry-call-id` 作归属（P-74），转发上游前全部剥离 | — |
 | 正常 | 去掉前缀，注入 provider 的真实 key，转发；按令牌归属计量 | 透传上游响应，不回显令牌与 key |
 
@@ -407,11 +411,11 @@
 | --- | --- | --- | --- |
 | —（连接被关闭） | — | 对端进程用户不符（§2.2） | 部署错误，不重试；`gantryd` 健康检查报 `egress` 不可用 |
 | 400 | `invalid_request` | JSON 语法错误、查询参数错误 | 调用方缺陷，不重试 |
-| 404 | `not_found` | `job_id`、`svc_token_id`、`staged_id` 不存在，或路由不存在 | `revoke` 遇到它说明已遗忘，按"已吊销"处理 |
+| 404 | `not_found` | `job_id`、`svc_token_id`、`staged_id` 不存在，或路由不存在 | `revoke` 遇到它说明已遗忘，按"已吊销"处理；调用级关闭遇到它说明路径 token 从未签发，调用方缺陷 |
 | 409 | `binding_mismatch` | 同一 `job_id` 以不同绑定签发 | 引擎缺陷，不重试，`infra.egress` |
 | 409 | `job_revoked` | 对已吊销的 `job_id` 签发 | 新尝试用新 `job_id` |
 | 409 | `stale_rev` | 下发的配置 `rev` 小于已应用的 | 忽略（已有更新的视图） |
-| 409 | `conflict` | `request_id` 重放但内容不同；回收仍被引用的 secret | 调用方缺陷 |
+| 409 | `conflict` | `request_id` 重放但内容不同；回收仍被引用的 secret；调用级关闭时路径 token 对该 `call_id` 没有已接受请求、而该调用的已接受请求属于别的 token（egress-call-terminal §2） | 调用方缺陷；调用级关闭改用有关联的 token |
 | 410 | `staged_expired` | 激活过期的暂存项 | 重新暂存 |
 | 410 | `cursor_expired` | 用量游标早于保留窗口 | 见 §4.5 |
 | 422 | `validation_failed` | 字段缺失 / 越界 / 未知字段；`groups` 不在档案内；`secret_ref` 不合规；附 `errors[]` | 调用方缺陷或配置未同步 |
@@ -446,7 +450,8 @@
 - [ ] 同一 `job_id` 以相同绑定重复签发 → 新令牌可用、旧令牌失效、用量不清零；以不同绑定签发 → `409 binding_mismatch`。
 - [ ] 加权用量达到 `tokens_total` → 后续请求 `403 budget_exhausted`，`FinalUsage.capped = true`。
 - [ ] secret：暂存后数据面仍用旧值；激活后新请求用新值；丢弃后 `present` 不变；任何响应、日志、审计里都搜不到值；暂存过期后激活 → `410 staged_expired`。
-- [ ] 用量拉取：重复拉取同一游标得到同一批记录；`svc` 记录按 `call_id` 可查；`job` 记录的累计与 `FinalUsage` 一致。
+- [ ] 用量拉取：重复拉取同一游标得到同一批记录；`svc` 记录按 `call_id` 可查；`job` 记录的累计与 `FinalUsage` 一致；每条记录的 `weight_rev` 等于计量时生效的权重修订（§4.5「加权」行）。
+- [ ] 调用级关闭与终结证明：见 [egress-call-terminal.md](egress-call-terminal.md) §7。
 - [ ] 配置视图：`rev` 回退 → `409 stale_rev`；非法视图（含 `api.github.com`）→ `422 config_invalid`，旧视图继续生效、`health = degraded`。
 - [ ] Egress 重启：已签发未吊销的令牌继续有效（登记表持久化，只存哈希）；有在途请求的尝试 `incomplete = true`。
 - [ ] 访问日志与审计里没有任何令牌原文（对日志做令牌前缀 `gjt1_` / `gst1_` 的全文搜索）。
@@ -468,6 +473,7 @@
 | OQ-9 | ~~沙盒调用方按网络身份（源地址）映射到 job~~ | 已决：见 decisions.md P-49（`job_token`） | — |
 | OQ-10 | ~~`models` 经 Unix socket（`models_uds`）还是 HTTP 调用 Egress~~ | 已决：见 decisions.md P-50（回环 HTTP + `svc_token`；`egress.sock` 只承载控制面） | — |
 
-## 补充范围（送审，尚未批准）
+## 补充范围
 
-§4.6 注入视图细节见 [config-view-injection.md](config-view-injection.md)；§4.2/§4.5 调用级终结候选见 [egress-call-terminal.md](egress-call-terminal.md)。两份都未批准；未批准前，端点行为不变。
+- §4.6 注入视图细节见 [config-view-injection.md](config-view-injection.md)（送审，尚未批准；未批准前端点行为不变）。
+- §4.3 / §4.5 的调用级终结见 [egress-call-terminal.md](egress-call-terminal.md)（2026-10-27 批准，#82）。

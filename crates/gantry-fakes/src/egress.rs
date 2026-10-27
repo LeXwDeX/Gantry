@@ -1,11 +1,12 @@
 //! `EgressStub`：实现控制面端口，并起一个回环 HTTP 假数据面。
 //!
 //! 覆盖签发 / 重签 / 吊销 / 遗忘 `job_token`、进程级 `svc_token` 轮换、用量
-//! 拉取、配置视图、按 request_id 幂等的 secret 暂存。数据面接受
+//! 拉取、调用级关闭与终结证明（`egress-call-terminal.md`）、配置视图、按 request_id
+//! 幂等的 secret 暂存。数据面接受
 //! `/j/<job_token>/<provider>/…` 与 `/s/<svc_token>/<provider>/…`，拒绝错误、
 //! 已撤销或过期令牌。它不是 Egress 的真实实现，也不做 DNS、TLS 或上游转发。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,16 +16,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use gantry_core::egress::{
-    ConfigApplyResponse, ConfigView, ConnectProxyUrl, DeniedCounters, FinalUsage,
-    IssueSvcTokenResponse, JobToken, JobTokenState, LedgerRef, ModelBaseUrls, StagedId,
-    StagedSecretItem, SvcToken, SvcTokenId, UpstreamErrors, UsageCaller, UsagePage, UsageRecord,
+    CallTerminal, CloseCallResponse, ConfigApplyResponse, ConfigView, ConnectProxyUrl,
+    DeniedCounters, FinalUsage, IssueSvcTokenResponse, JobToken, JobTokenState, LedgerRef,
+    ModelBaseUrls, StagedId, StagedSecretItem, SvcToken, SvcTokenId, UpstreamErrors, UsageCaller,
+    UsagePage, UsageRecord,
 };
 use gantry_core::entities::{Seq, Tier, TokenUsage, TokenWeights};
 use gantry_core::ids::{AttemptId, DeliveryId, Ulid};
 use gantry_core::ports::context::{ActorCtx, Health};
 use gantry_core::ports::egress::{
-    CallUsage, EgressConfigView, EgressControl, EgressEndpoints, EgressError, EgressStatus,
-    InjectionId, IssueJobToken, JobTokenGrant, JobUsage, ProviderId, SvcTokenGrant, UsageCursor,
+    CallClosed, CallStatement, CallUsage, EgressConfigView, EgressControl, EgressEndpoints,
+    EgressError, EgressStatus, InjectionId, IssueJobToken, JobTokenGrant, JobUsage, ProviderId,
+    SvcTokenGrant, UsageCursor,
 };
 use gantry_core::ports::models::{CallId, UsageSource};
 use gantry_core::ports::sandbox::GroupName;
@@ -100,6 +103,14 @@ pub enum EgressCall {
     SvcTokenUsage {
         svc_token_id: SvcTokenId,
     },
+    CloseCall {
+        svc_token_id: SvcTokenId,
+        call_id: CallId,
+        ctx: ActorCtx,
+    },
+    CallTerminal {
+        call_id: CallId,
+    },
     Status,
     DataPlane {
         kind: &'static str,
@@ -141,6 +152,8 @@ struct JobEntry {
     expires_at_instant: Instant,
     revoked_at: Option<Timestamp>,
     final_usage: Option<FinalUsage>,
+    /// 签发时的权重修订；该令牌的用量记录都带它（`UsageRecord.weight_rev`）。
+    weight_rev: u64,
     usage: TokenUsage,
     weighted_tokens: u64,
     capped: bool,
@@ -164,6 +177,12 @@ struct State {
     jobs: BTreeMap<AttemptId, JobEntry>,
     job_by_token: HashMap<String, AttemptId>,
     svc: Option<SvcEntry>,
+    /// 签发过的全部 `svc_token_id`（含已吊销）；调用级关闭的路径 token 只需签发过。
+    svc_issued: BTreeSet<SvcTokenId>,
+    /// 已关闭调用的墓碑与证明；替身没有真实 inflight，关闭即从 accepting 直达 closed。
+    closed_calls: BTreeMap<CallId, CallTerminal>,
+    /// 已过保留期的调用（明细已删，证明 `incomplete = true`）。
+    expired_calls: BTreeSet<CallId>,
     usage: Vec<UsageRecord>,
     next_seq: u64,
     calls: Vec<EgressCall>,
@@ -470,6 +489,9 @@ impl EgressStub {
             jobs: BTreeMap::new(),
             job_by_token: HashMap::new(),
             svc: None,
+            svc_issued: BTreeSet::new(),
+            closed_calls: BTreeMap::new(),
+            expired_calls: BTreeSet::new(),
             usage: Vec::new(),
             next_seq: 0,
             calls: Vec::new(),
@@ -526,6 +548,25 @@ impl EgressStub {
 
     pub fn usage_records(&self) -> Vec<UsageRecord> {
         self.lock().usage.clone()
+    }
+
+    /// 测试钩子：模拟该调用的用量记录过了保留期（明细删除，墓碑保留）。
+    pub fn expire_call_records(&self, call_id: &CallId) {
+        let mut state = self.lock();
+        state
+            .usage
+            .retain(|record| !is_call_record(record, call_id));
+        state.expired_calls.insert(*call_id);
+    }
+
+    /// 测试钩子：把该调用已有的用量记录标为中断（`incomplete = true`）。只影响此后的关闭。
+    pub fn interrupt_call_records(&self, call_id: &CallId) {
+        let mut state = self.lock();
+        for record in state.usage.iter_mut() {
+            if is_call_record(record, call_id) {
+                record.incomplete = true;
+            }
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -597,6 +638,7 @@ impl EgressControl for EgressStub {
 
         let issued_at = now();
         let job_ttl = state.job_ttl;
+        let weight_rev = state.applied_rev.unwrap_or(0);
         state.jobs.insert(
             req.job_id,
             JobEntry {
@@ -606,6 +648,7 @@ impl EgressControl for EgressStub {
                 expires_at_instant: Instant::now() + job_ttl,
                 revoked_at: None,
                 final_usage: None,
+                weight_rev,
                 usage: TokenUsage::default(),
                 weighted_tokens: 0,
                 capped: false,
@@ -942,6 +985,61 @@ impl EgressControl for EgressStub {
         ))
     }
 
+    async fn close_call(
+        &self,
+        svc_token_id: &SvcTokenId,
+        call_id: &CallId,
+        ctx: &ActorCtx,
+    ) -> Result<CallClosed, EgressError> {
+        let mut state = self.lock();
+        state.record_job_call(EgressCall::CloseCall {
+            svc_token_id: svc_token_id.clone(),
+            call_id: *call_id,
+            ctx: ctx.clone(),
+        });
+        if !state.svc_issued.contains(svc_token_id) {
+            return Err(EgressError::NotFound);
+        }
+        if let Some(terminal) = stored_terminal(&state, call_id) {
+            return Ok(CloseCallResponse {
+                call_id: *call_id,
+                terminal,
+            });
+        }
+        let records = call_records(&state.usage, call_id);
+        let associated = records.iter().any(|record| {
+            matches!(
+                &record.caller,
+                UsageCaller::Svc { svc_token_id: id, .. } if id == svc_token_id
+            )
+        });
+        if !records.is_empty() && !associated {
+            return Err(EgressError::Conflict {
+                message: "conflict: call has accepted requests only on other svc tokens".into(),
+            });
+        }
+        let terminal =
+            CallTerminal::from_records(&records, now()).map_err(|error| EgressError::Rejected {
+                code: "internal".into(),
+                message: error.to_string(),
+            })?;
+        state.closed_calls.insert(*call_id, terminal.clone());
+        Ok(CloseCallResponse {
+            call_id: *call_id,
+            terminal,
+        })
+    }
+
+    async fn call_terminal(&self, call_id: &CallId) -> Result<CallStatement, EgressError> {
+        let mut state = self.lock();
+        state.record_job_call(EgressCall::CallTerminal { call_id: *call_id });
+        Ok(CallStatement {
+            call_id: *call_id,
+            items: call_records(&state.usage, call_id),
+            terminal: stored_terminal(&state, call_id),
+        })
+    }
+
     async fn status(&self) -> Result<EgressStatus, EgressError> {
         let mut state = self.lock();
         state.record_job_call(EgressCall::Status);
@@ -976,6 +1074,27 @@ impl EgressControl for EgressStub {
     }
 }
 
+fn is_call_record(record: &UsageRecord, call_id: &CallId) -> bool {
+    matches!(&record.caller, UsageCaller::Svc { call_id: recorded, .. } if recorded == call_id)
+}
+
+fn call_records(records: &[UsageRecord], call_id: &CallId) -> Vec<UsageRecord> {
+    records
+        .iter()
+        .filter(|record| is_call_record(record, call_id))
+        .cloned()
+        .collect()
+}
+
+/// 已关闭调用的证明；过了保留期仍返回同一份，只把 `incomplete` 置真（§5）。
+fn stored_terminal(state: &State, call_id: &CallId) -> Option<CallTerminal> {
+    let mut terminal = state.closed_calls.get(call_id)?.clone();
+    if state.expired_calls.contains(call_id) {
+        terminal.incomplete = true;
+    }
+    Some(terminal)
+}
+
 fn issue_svc(state: &mut State) -> Result<SvcTokenGrant, EgressError> {
     if state.config.is_none() {
         return Err(not_configured());
@@ -1008,6 +1127,7 @@ fn issue_svc(state: &mut State) -> Result<SvcTokenGrant, EgressError> {
         }
     }
     let svc_expires_at = Instant::now() + state.svc_ttl;
+    state.svc_issued.insert(id.clone());
     state.svc = Some(SvcEntry {
         id: id.clone(),
         token: svc_token_text,
@@ -1036,7 +1156,11 @@ fn page_usage(records: &[UsageRecord], cursor: &UsageCursor, limit: u32) -> Usag
         .map(|record| record.seq.to_string())
         .or_else(|| records.last().map(|record| record.seq.to_string()))
         .unwrap_or_else(|| "0".into());
-    UsagePage { items, next_cursor }
+    UsagePage {
+        items,
+        next_cursor,
+        terminal: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,7 +1332,7 @@ fn handle_job(
     let body = state.response_body.clone();
     let request_usage = TokenUsage::new(request.body.len() as u64, body.len() as u64, 0, 0, 1);
     let model = model_from_body(&request.body);
-    let (project_id, ledger, tier, weighted) = {
+    let (project_id, ledger, tier, weighted, weight_rev) = {
         let Some(entry) = state.jobs.get_mut(&job_id) else {
             return HttpResponse::error(403, "token_invalid");
         };
@@ -1250,6 +1374,7 @@ fn handle_job(
             entry.ledger.clone(),
             job_tier(&entry.request),
             weighted,
+            entry.weight_rev,
         )
     };
     let record = UsageRecord {
@@ -1263,6 +1388,7 @@ fn handle_job(
         model,
         usage: request_usage,
         weighted_tokens: weighted,
+        weight_rev,
         incomplete: false,
     };
     state.usage.push(record);
@@ -1339,6 +1465,14 @@ fn handle_svc(
     let Ok(call_id) = call_header.parse::<CallId>() else {
         return HttpResponse::error(400, "ledger_header_invalid");
     };
+    if state.closed_calls.contains_key(&call_id) {
+        state.calls.push(EgressCall::DataPlaneRejected {
+            kind: "svc",
+            status: 403,
+            code: "token_invalid".into(),
+        });
+        return HttpResponse::error(403, "token_invalid");
+    }
 
     let body = state.response_body.clone();
     let request_usage = TokenUsage::new(request.body.len() as u64, body.len() as u64, 0, 0, 1);
@@ -1348,6 +1482,7 @@ fn handle_svc(
         .map(|config| config.token_weights)
         .unwrap_or_default();
     let weighted = weights.weighted(&request_usage);
+    let weight_rev = state.applied_rev.unwrap_or(0);
     let record = UsageRecord {
         seq: next_usage_seq(&mut state),
         at: now(),
@@ -1362,6 +1497,7 @@ fn handle_svc(
         model: model_from_body(&request.body),
         usage: request_usage,
         weighted_tokens: weighted,
+        weight_rev,
         incomplete: false,
     };
     state.usage.push(record);

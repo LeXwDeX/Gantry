@@ -143,6 +143,13 @@ pub trait EgressControl: Send + Sync {
     /// 某枚 svc_token 的全部用量记录（吊销 / 轮换后对账，P-74）。
     async fn svc_token_usage(&self, id: &SvcTokenId, cursor: Option<UsageCursor>) -> Result<UsagePage, EgressError>;
 
+    // ---- 调用级终结（B-01，interfaces/egress-call-terminal.md）----
+    /// 按全局 call_id 关闭一次直接调用：置 draining、等全部 inflight 结束、计量落盘后返回 terminal 证明。
+    /// 幂等；路径 token 须对该调用有已接受请求（零接收除外），否则 Conflict。
+    async fn close_call(&self, svc_token_id: &SvcTokenId, call_id: &CallId, ctx: &ActorCtx) -> Result<CallClosed, EgressError>;
+    /// 只读：该调用的全部记录与 terminal（未关闭为 None）；可重复读取。
+    async fn call_terminal(&self, call_id: &CallId) -> Result<CallStatement, EgressError>;
+
     async fn status(&self) -> Result<EgressStatus, EgressError>;
 }
 
@@ -194,7 +201,7 @@ pub struct EgressStatus { pub applied_rev: Seq, pub health: Health /* ok | degra
 | `x-gantry-tier: utility\|planner` | 计量归属的 tier（必填） |
 | `x-gantry-call-id: <ULID>` | 调用 ID（必填）；`call_usage` 与 `usage_since` 以它为键 |
 
-`svc_token` 与 `job_token` 同一计量口径（同一 `UsageParser`、同一加权），区别只在归属：前者按 `call_id` 与上述头归集到交付台账或会话台账（头来自服务端，视为可信，P-74），后者按尝试归集。缺任一必填头或格式不符 → `400 ledger_header_invalid`，不转发、不计量。这些头在转发给上游之前**全部剥离**。沙盒侧监听器收到的任何 `x-gantry-*` 头一律忽略并剥离；`svc_token` 在沙盒侧监听器上无效（只认回环监听），`job_token` 在 `svc_model` 上无效。Egress 在响应里回显 `x-gantry-call-id`。计量交接：Egress 每个请求完成即写用量记录；`models` 在调用结束后用 `call_usage(call_id)` 取权威用量再记账 `budget.charged`，并周期性 `usage_since(cursor)` 对账；`svc_token` 被吊销（进程重启或轮换）后，`gantryd` 用 `svc_token_usage` 取该令牌的全部记录对账、补记遗漏——用量的事实源只有 Egress（P-22、P-74）。
+`svc_token` 与 `job_token` 同一计量口径（同一 `UsageParser`、同一加权），区别只在归属：前者按 `call_id` 与上述头归集到交付台账或会话台账（头来自服务端，视为可信，P-74），后者按尝试归集。缺任一必填头或格式不符 → `400 ledger_header_invalid`，不转发、不计量。这些头在转发给上游之前**全部剥离**。沙盒侧监听器收到的任何 `x-gantry-*` 头一律忽略并剥离；`svc_token` 在沙盒侧监听器上无效（只认回环监听），`job_token` 在 `svc_model` 上无效。Egress 在响应里回显 `x-gantry-call-id`。计量交接：Egress 每个请求完成即写用量记录（带 `weight_rev`）；`models` 在调用结束后先 `close_call` 关闭该 `call_id`（之后同一 `call_id` 的请求一律 `403 token_invalid`），再用 `call_terminal(call_id)` 取终结证明，校验通过且 `incomplete = false` 才记账 `budget.charged`（interfaces/egress-call-terminal.md），并周期性 `usage_since(cursor)` 对账；`svc_token` 被吊销（进程重启或轮换）后，`gantryd` 用 `svc_token_usage` 取该令牌的全部记录对账、补记遗漏——用量的事实源只有 Egress（P-22、P-74）。
 
 ### 6.4 沙盒侧可见的约定
 
@@ -411,7 +418,7 @@ struct JobState {
 
 ## 11. 可观测性
 
-`egress` **不写事件日志**；`gantryd` 经控制面拉取：`sandbox` 在 `collect` 后取 `FinalUsage`（`revoke_job_token`），`engine` 据此写 `attempt.finished.usage` 与 `budget.charged` / `budget.exhausted`；`models` 经 `call_usage` 记自己的 `budget.charged`（交付台账或会话台账）；`api` 经 `status()` 提供 `GET /v1/settings/status` 的 `modules.egress`。数据模型事件目录无需新增。
+`egress` **不写事件日志**；`gantryd` 经控制面拉取：`sandbox` 在 `collect` 后取 `FinalUsage`（`revoke_job_token`），`engine` 据此写 `attempt.finished.usage` 与 `budget.charged` / `budget.exhausted`；`models` 经 `close_call` + `call_terminal` 记自己的 `budget.charged`（交付台账或会话台账）；`api` 经 `status()` 提供 `GET /v1/settings/status` 的 `modules.egress`。数据模型事件目录无需新增。
 
 日志（结构化，字段 `job_id`、`kind`、`rule`、`status`）：不含头值与体；拒绝与异常带规则 id；密钥操作只记 `ref` 与 `version`。
 
@@ -456,7 +463,7 @@ struct JobState {
 - [ ] 封顶：累计恰为 `tokens_total - 1` 时下一个请求放行，达到 `tokens_total` 后的**后续**请求 403 `budget_exhausted`、`capped = true`，在途请求完成；按 `levels.token_weights` 的非 1 权重时按加权值封顶，`weighted_tokens` 与手算一致（P-70）。
 - [ ] 用量不可解析 / 流被截断 → 按保守估计计入并 `incomplete = true`（不会因此绕过封顶）。
 - [ ] 沙盒伪造 `x-gantry-usage` 之类的头或 stdout 事件，不影响计量（计量只来自上游响应）。
-- [ ] `svc_model` 回环监听：路径无有效 `svc_token` → 403 `token_invalid`；缺 `X-Gantry-Ledger` / `x-gantry-tier` / `x-gantry-call-id` → 400 `ledger_header_invalid` 且无用量记录；非回环来源不可达；`X-Gantry-Ledger`（`dlv_…`、`cnv_…:YYYY-MM-DD`、`unattributed`）原样进入 `CallUsage` 归属（P-74）；签发第二枚 `svc_token` 后第一枚 403，`svc_token_usage` 返回第一枚的全部记录；`call_usage(call_id)` 与 mock 数字一致；控制面 `egress.sock` 对端 uid 不是 `gantry` → 拒绝；`usage_since(cursor)` 翻页无遗漏、无重复；同一 `call_id` 重复调用不重复计量（幂等）。
+- [ ] `svc_model` 回环监听：路径无有效 `svc_token` → 403 `token_invalid`；缺 `X-Gantry-Ledger` / `x-gantry-tier` / `x-gantry-call-id` → 400 `ledger_header_invalid` 且无用量记录；非回环来源不可达；`X-Gantry-Ledger`（`dlv_…`、`cnv_…:YYYY-MM-DD`、`unattributed`）原样进入 `CallUsage` 归属（P-74）；签发第二枚 `svc_token` 后第一枚 403，`svc_token_usage` 返回第一枚的全部记录；`call_usage(call_id)` 与 mock 数字一致；`close_call` 之后同一 `call_id` 的请求 403、无新记录，重复关闭返回同一 `terminal`，`call_terminal` 可重复读取且 `terminal.verify(call_id, &items)` 通过；控制面 `egress.sock` 对端 uid 不是 `gantry` → 拒绝；`usage_since(cursor)` 翻页无遗漏、无重复；同一 `call_id` 重复调用不重复计量（幂等）。
 - [ ] 崩溃一致：在"响应完成"与"用量提交"之间 `kill -9`，重启后该请求要么已计入、要么使 job `incomplete`，**绝不静默丢失**。
 
 ### D. `CONNECT` 白名单与硬性拒绝（M1）

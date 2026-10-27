@@ -14,8 +14,9 @@ use std::net::IpAddr;
 use async_trait::async_trait;
 
 use crate::egress::{
-    ConfigApplyResponse, ConfigView, ConnectProxyUrl, FinalUsage as WireFinalUsage,
-    IssueSvcTokenResponse, JobToken, ModelBaseUrls, StagedSecretItem, UsagePage,
+    CallTerminal, CloseCallResponse, ConfigApplyResponse, ConfigView, ConnectProxyUrl,
+    FinalUsage as WireFinalUsage, IssueSvcTokenResponse, JobToken, ModelBaseUrls, StagedSecretItem,
+    SvcTokenId, UsagePage, UsageRecord,
 };
 use crate::entities::{Seq, TokenUsage, TokenWeights};
 use crate::ids::{AttemptId, ConversationId, DeliveryId, ProjectId, SandboxId};
@@ -188,6 +189,34 @@ pub struct CallUsage {
     pub incomplete: bool,
 }
 
+/// 调用级关闭的结果：`{call_id, terminal}`（`egress-call-terminal.md` §2）。
+pub type CallClosed = CloseCallResponse;
+
+/// `GET usage?call_id=` 的端口视图（`egress-call-terminal.md` §4）。
+///
+/// - `terminal: None`：调用尚未关闭，不得结算、不得零判定；
+/// - `terminal: Some(t)` 且 `t.incomplete`：已关闭但证明不完整（中断请求或已过保留期）；
+/// - 其余：已关闭，`t.verify(call_id, &items)` 通过后可以结算。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallStatement {
+    pub call_id: CallId,
+    pub items: Vec<UsageRecord>,
+    pub terminal: Option<CallTerminal>,
+}
+
+impl CallStatement {
+    pub fn is_closed(&self) -> bool {
+        self.terminal.is_some()
+    }
+
+    /// 已关闭、证明完整且与 `items` 一致时返回证明；其余情况一律 `None`（不得结算）。
+    pub fn settleable_terminal(&self) -> Option<&CallTerminal> {
+        let terminal = self.terminal.as_ref()?;
+        (terminal.settleable() && terminal.verify(self.call_id, &self.items).is_ok())
+            .then_some(terminal)
+    }
+}
+
 /// 不透明用量游标。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct UsageCursor(String);
@@ -300,6 +329,19 @@ pub trait EgressControl: Send + Sync {
         id: &crate::egress::SvcTokenId,
         cursor: Option<UsageCursor>,
     ) -> Result<UsagePage, EgressError>;
+
+    /// 按全局 `call_id` 关闭一次直接调用（`POST …/svc-tokens/{id}/revoke`，`scope: "call"`）。
+    /// 幂等，返回同一份 `terminal`；路径 token 对该调用没有已接受请求而别的 token 有 →
+    /// `Conflict`；路径 token 从未签发 → `NotFound`。
+    async fn close_call(
+        &self,
+        svc_token_id: &SvcTokenId,
+        call_id: &CallId,
+        ctx: &ActorCtx,
+    ) -> Result<CallClosed, EgressError>;
+
+    /// 只读：该调用的全部记录与终结证明（`GET usage?call_id=`）；可重复读取，不改变状态。
+    async fn call_terminal(&self, call_id: &CallId) -> Result<CallStatement, EgressError>;
 
     async fn status(&self) -> Result<EgressStatus, EgressError>;
 }

@@ -11,6 +11,7 @@
       "model": "example-utility-model",
       "usage": { "input_tokens": 3201, "output_tokens": 410, "cache_read_tokens": 2800, "cache_write_tokens": 0, "requests": 1 },
       "weighted_tokens": 5531,
+      "weight_rev": 7,
       "incomplete": false
     },
     {
@@ -24,6 +25,7 @@
       "model": "example-worker-model",
       "usage": { "input_tokens": 18200, "output_tokens": 2400, "cache_read_tokens": 9000, "cache_write_tokens": 1200, "requests": 1 },
       "weighted_tokens": 32600,
+      "weight_rev": 6,
       "incomplete": false
     }
   ],
