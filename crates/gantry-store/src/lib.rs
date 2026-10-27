@@ -25,11 +25,11 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use gantry_core::canon::IdempotencyKey;
+use gantry_core::canon::{IdempotencyKey, RepoSlug};
 use gantry_core::entities::{
     Actor, ActorKind, Device, ForgeActionKind, GithubRef, InboxItem, InboxKind, InboxStatus,
-    OutboxAction, OutboxError, OutboxStatus, Priority, Seq, SettingsResource, SettingsScope,
-    Severity,
+    IssueRef, OutboxAction, OutboxError, OutboxStatus, Priority, PullRequestRef, Seq,
+    SettingsResource, SettingsScope, Severity,
 };
 use gantry_core::events::{
     Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NewEvent,
@@ -46,9 +46,11 @@ use serde_json::Value;
 mod devices;
 use module::{ModuleRegistry, ModuleTables};
 
+pub mod github;
 pub mod module;
 pub mod projection;
 
+pub use github::{GithubSnapshots, IssueSnapshotRow, PrSnapshotRow};
 pub use module::{ModuleConn, ModuleReader, ModuleRow, ModuleSpec, MODULE_SCAN_MAX};
 pub use projection::{DeliveryRow, FoldError, StageEntered};
 
@@ -349,6 +351,8 @@ struct Inner {
     inbox: BTreeMap<InboxId, InboxItem>,
     /// 内置 `devices` 投影（store.md §7.2）。
     devices: devices::DeviceTable,
+    /// GitHub 快照投影（#150，store.md §7.2 `pr_snapshots` / `issue_snapshots`）。
+    github: GithubSnapshots,
     /// 模块私有表（§7.10）；不是投影，重建投影时不动。
     module_tables: ModuleTables,
     unprojected: Vec<UnprojectedEvent>,
@@ -376,6 +380,7 @@ impl Clone for Inner {
             deliveries: self.deliveries.clone(),
             inbox: self.inbox.clone(),
             devices: self.devices.clone(),
+            github: self.github.clone(),
             module_tables: self.module_tables.clone(),
             unprojected: self.unprojected.clone(),
             #[cfg(feature = "testing")]
@@ -892,6 +897,10 @@ impl WriteTx {
                 row.action.lease_until = None;
                 row.action.updated_at = event.ts;
             }
+            ty if GithubSnapshots::folds(ty) => {
+                // `apply` 失败时不改动自身，因此直接在快照上折叠。
+                self.snapshot.github.apply(event).map_err(fold_error)?;
+            }
             EventType::InboxRaised => {
                 let data =
                     decode_data::<InboxRaisedData>(event).map_err(StoreError::InvalidEvent)?;
@@ -1266,6 +1275,24 @@ impl TxReader<'_> {
         self.inner.devices.list(p)
     }
 
+    // GitHub 快照（store.md §6.2）。PR 的列全部同步过才返回。
+
+    pub async fn pr_snapshot(
+        &mut self,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Option<PullRequestRef>, StoreError> {
+        Ok(self.inner.github.pr_snapshot(repo, number))
+    }
+
+    pub async fn issue_snapshot(
+        &mut self,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Option<IssueRef>, StoreError> {
+        Ok(self.inner.github.issue_snapshot(repo, number))
+    }
+
     fn settings_at(
         &self,
         scope: &SettingsScope,
@@ -1432,6 +1459,22 @@ impl ReadSnapshot {
 
     pub async fn devices(&mut self, p: &Page) -> Result<Paged<Device>, StoreError> {
         self.inner.devices.list(p)
+    }
+
+    pub async fn pr_snapshot(
+        &mut self,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Option<PullRequestRef>, StoreError> {
+        Ok(self.inner.github.pr_snapshot(repo, number))
+    }
+
+    pub async fn issue_snapshot(
+        &mut self,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Option<IssueRef>, StoreError> {
+        Ok(self.inner.github.issue_snapshot(repo, number))
     }
 }
 
