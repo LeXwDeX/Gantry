@@ -242,7 +242,15 @@ async fn add_labels_idempotency_uses_canonical_target_and_label_set() {
     let first = forge.enqueue(request.clone(), &ctx).await.unwrap();
     assert!(first.created);
     assert_eq!(first.action.idempotency_key, expected_key);
-    assert_eq!(first.action.payload, request.payload);
+    // payload 与 intent 的 labels 都按规范形式存（排序去重），outbox.enqueued 校验要求二者相同。
+    assert_eq!(
+        first.action.payload,
+        ActionPayload::AddLabels(AddLabelsPayload {
+            repo: slug(),
+            number: 7,
+            labels: vec!["bug".into(), "ui".into()],
+        })
+    );
 
     let mut reordered = add_labels_request(0);
     if let ActionPayload::AddLabels(payload) = &mut reordered.payload {
