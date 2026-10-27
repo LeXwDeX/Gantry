@@ -4,7 +4,7 @@
 //! 同一 `SecretName` 在不同使用方下是不同的条目（P-81）。
 //!
 //! 本模块只定义类型与 trait，不读写文件。`SecretValue` 不可 `Clone` /
-//! `Serialize`，`Debug` 脱敏，`Drop` 零化内存。
+//! `Serialize` / `Display`，`Debug` 脱敏，丢弃时由 `zeroize` 零化内存。
 
 use std::fmt;
 use std::path::PathBuf;
@@ -12,14 +12,18 @@ use std::path::PathBuf;
 use crate::secret::{Consumer, SecretName, SecretString};
 use crate::time::Timestamp;
 
+use zeroize::Zeroizing;
+
 use super::context::ActorCtx;
 
 /// 密钥明文。唯一的取值入口是 [`SecretValue::expose`]。
-pub struct SecretValue(Vec<u8>);
+///
+/// 刻意不实现 `Clone` / `Serialize` / `Display`（secrets.md §6、§7.8）。
+pub struct SecretValue(Zeroizing<Vec<u8>>);
 
 impl SecretValue {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(Zeroizing::new(bytes))
     }
 
     pub fn expose(&self) -> &[u8] {
@@ -33,17 +37,11 @@ impl SecretValue {
 
 impl From<SecretString> for SecretValue {
     fn from(value: SecretString) -> Self {
-        Self(value.into_secret().into_bytes())
+        Self::from_bytes(value.into_secret().into_bytes())
     }
 }
 
 impl fmt::Debug for SecretValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SecretValue(***)")
-    }
-}
-
-impl fmt::Display for SecretValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SecretValue(***)")
     }
@@ -64,12 +62,6 @@ impl PartialEq for SecretValue {
 }
 
 impl Eq for SecretValue {}
-
-impl Drop for SecretValue {
-    fn drop(&mut self) {
-        self.0.fill(0);
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SecretVersion(u64);
@@ -153,6 +145,9 @@ pub enum SecretsError {
     UnsupportedFormat { found: u8 },
     #[error("secret value exceeds {limit} bytes")]
     TooLarge { limit: usize },
+    /// 空值不允许写入（secrets.md OQ-6，#97 拍板）；任意二进制字节照常接受。
+    #[error("secret value is empty")]
+    EmptyValue,
     #[error("secret is not staged")]
     NotStaged,
     #[error("secret is already staged")]
