@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use serde_json::{json, Value};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::approval::Signer;
+use crate::approval::{self, Signer};
 use crate::events::{self, ConnState, EventsConfig, FrameSink, Phase, StreamHandle};
 use crate::http::{HttpClient, Origin};
 use crate::ipc::{ShellError, ShellErrorCode};
@@ -395,6 +395,215 @@ impl Shell {
         self.set_phase(Phase::Revoked, sink);
     }
 
+    // ---- 审批签名（§7.4.1）----
+
+    /// `GET /v1/me`：顺带校正时钟偏差（本地 − 服务端）并比对纪元号。
+    async fn me(&self, c: &Connected) -> Result<Value, ShellError> {
+        let resp = c
+            .client
+            .send("GET", "/v1/me", None, &[])
+            .await
+            .map_err(|_| not_connected())?;
+        if let Some(epoch) = resp.log_epoch() {
+            self.observe_log_epoch(epoch)?;
+        }
+        if resp.status != 200 {
+            return Err(not_connected());
+        }
+        let me: Value = serde_json::from_slice(&resp.body).map_err(|_| not_connected())?;
+        if let Some(server_ms) = me["server"]["time"]
+            .as_str()
+            .and_then(|t| t.parse::<gantry_core::time::Timestamp>().ok())
+            .map(|t| t.as_millis())
+        {
+            self.conn.lock().unwrap().clock_skew_ms = Some(self.now_ms() - server_ms);
+        }
+        Ok(me)
+    }
+
+    /// 用服务端时间校正后的"现在"（审批倒计时与过期比较都用它）。
+    fn server_now_ms(&self) -> i64 {
+        self.now_ms() - self.conn.lock().unwrap().clock_skew_ms.unwrap_or(0)
+    }
+
+    async fn get_json(&self, c: &Connected, path: &str) -> Result<(u16, Value), ShellError> {
+        let resp = c
+            .client
+            .send("GET", path, None, &[])
+            .await
+            .map_err(|_| not_connected())?;
+        if let Some(epoch) = resp.log_epoch() {
+            self.observe_log_epoch(epoch)?;
+        }
+        Ok((
+            resp.status,
+            serde_json::from_slice(&resp.body).unwrap_or(Value::Null),
+        ))
+    }
+
+    /// `approval_prepare`（§7.4.1 第 1–5 步）。
+    pub async fn approval_prepare(&self, approval_id: &str) -> Result<Value, ShellError> {
+        approval_id
+            .parse::<gantry_core::ids::ApprovalId>()
+            .map_err(|_| ShellError::bad_argument("approval_id"))?;
+        let c = self.connected()?;
+        let (status, approval) = self
+            .get_json(&c, &format!("/v1/approvals/{approval_id}"))
+            .await?;
+        if status != 200 {
+            return Err(ShellError::bad_argument("approval_id"));
+        }
+        let me = self.me(&c).await?;
+        let device_name = me["device"]["name"]
+            .as_str()
+            .unwrap_or(&c.identity.device_name)
+            .to_string();
+        let offset = -self.conn.lock().unwrap().clock_skew_ms.unwrap_or(0);
+        let unsigned = self.unsigned_context(&c, &approval).await;
+
+        if approval["status"] != "pending" {
+            return Ok(approval::readonly_model(
+                &approval,
+                &c.identity.device_id,
+                &device_name,
+                "not_pending",
+                offset,
+                unsigned,
+            ));
+        }
+        // 非 approver 或非桌面档案：只读展示，不取 challenge（§7.4.1 第 2 步）。
+        if me["device"]["role"] != "approver"
+            || me["profile"].as_str().is_some_and(|p| p != "desktop")
+        {
+            return Ok(approval::readonly_model(
+                &approval,
+                &c.identity.device_id,
+                &device_name,
+                "not_approver",
+                offset,
+                unsigned,
+            ));
+        }
+        let (status, challenge) = self
+            .get_json(&c, &format!("/v1/approvals/{approval_id}/challenge"))
+            .await?;
+        if status != 200 {
+            return Err(ShellError::new(
+                ShellErrorCode::NotConnected,
+                "取不到签名 challenge",
+            ));
+        }
+        let internal_digest = approval::cross_device_internal_digest(&approval);
+        let checked = approval::self_check(
+            approval_id,
+            &challenge,
+            &approval,
+            &c.identity.device_id,
+            self.server_now_ms(),
+            internal_digest.as_deref(),
+        )?;
+        let prepared_id = self.signer.insert(checked.clone(), self.server_now_ms())?;
+        Ok(approval::sheet_model(
+            &prepared_id,
+            &checked,
+            &device_name,
+            json!({ "ok": true }),
+            offset,
+            unsigned,
+        ))
+    }
+
+    /// 未签名区：只放展示用的上下文，标注不可信（§6.3、api.md §6.5 规则 2）。
+    async fn unsigned_context(&self, c: &Connected, approval: &Value) -> Value {
+        let mut title = Value::Null;
+        if let Some(dlv) = approval["delivery_id"].as_str() {
+            if dlv.parse::<gantry_core::ids::DeliveryId>().is_ok() {
+                if let Ok((200, d)) = self.get_json(c, &format!("/v1/deliveries/{dlv}")).await {
+                    if let Some(t) = d["title"].as_str() {
+                        title =
+                            json!({ "text": t, "source": "delivery.title", "truncated": false });
+                    }
+                }
+            }
+        }
+        json!({
+            "delivery_title": title,
+            "pr": Value::Null,
+            "changes": Value::Null,
+            "note": "服务端未提供改动明细（OQ-S9），请在 GitHub 核对该提交。",
+        })
+    }
+
+    /// `approval_sign`（§7.4.1）：重检 → 用户在场 → 签名 → `grant`。不接受任何待签内容。
+    pub async fn approval_sign(&self, prepared_id: &str) -> Result<Value, ShellError> {
+        let now = self.server_now_ms();
+        let prepared = self
+            .signer
+            .get(prepared_id, now)
+            .ok_or_else(|| ShellError::new(ShellErrorCode::PreparedExpired, "签名句柄已过期"))?;
+        // 连接中断时不弹确认框。
+        if self.conn.lock().unwrap().phase != Phase::Live {
+            return Err(not_connected());
+        }
+        let c = self.connected()?;
+        let approval_id = prepared.approval_id();
+        let (status, approval) = self
+            .get_json(&c, &format!("/v1/approvals/{approval_id}"))
+            .await?;
+        let raw = &prepared.checked.raw;
+        let unchanged = status == 200
+            && approval["status"] == "pending"
+            && ["action", "target", "subject_digest"]
+                .iter()
+                .all(|k| approval[*k] == raw[*k]);
+        if !unchanged {
+            self.signer.discard(prepared_id);
+            return Err(ShellError {
+                reason: Some(
+                    if approval["status"] != "pending" {
+                        "not_pending"
+                    } else {
+                        "approval_data_mismatch"
+                    }
+                    .into(),
+                ),
+                ..ShellError::new(ShellErrorCode::SelfCheckFailed, "审批已变化，请重新载入")
+            });
+        }
+        // 用户在场会阻塞（Touch ID / Windows Hello），放到阻塞线程。
+        let (signer, keys, id) = (self.signer.clone(), c.keys.clone(), prepared_id.to_string());
+        let grant =
+            tokio::task::spawn_blocking(move || signer.sign(&id, keys.as_ref(), now, |_| Ok(())))
+                .await
+                .map_err(|_| ShellError::new(ShellErrorCode::PresenceFailed, "签名中断"))??;
+        let body = serde_json::to_vec(&grant.body).expect("grant 体可序列化");
+        let request = routes::PreparedRequest {
+            operation_id: "grantApproval",
+            method: "POST",
+            path_and_query: format!("/v1/approvals/{}/grant", grant.approval_id),
+            body: Some(body),
+            idempotency_key: Some(grant.idempotency_key),
+        };
+        match c.client.send_prepared(&request).await {
+            Ok(resp) => {
+                if let Some(epoch) = resp.log_epoch() {
+                    self.observe_log_epoch(epoch)?;
+                }
+                // 界面只按响应里的 `Approval.status` 更新，不做乐观显示（api.md §6.5 规则 5）。
+                Ok(routes::shape_response(
+                    resp.status,
+                    &resp.headers,
+                    &resp.body,
+                ))
+            }
+            Err(e) => Ok(routes::network_failure(e.as_str())),
+        }
+    }
+
+    pub fn approval_discard(&self, prepared_id: &str) {
+        self.signer.discard(prepared_id);
+    }
+
     // ---- API ----
 
     /// `api_request`（§7.1）。本地校验不通过的请求不会发出。
@@ -422,6 +631,10 @@ impl Shell {
             Err(e) => Ok(routes::network_failure(e.as_str())),
         }
     }
+}
+
+fn not_connected() -> ShellError {
+    ShellError::new(ShellErrorCode::NotConnected, "连接中断")
 }
 
 fn unpaired() -> Value {

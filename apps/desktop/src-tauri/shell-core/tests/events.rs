@@ -37,6 +37,12 @@ enum Reply {
         chunks: Vec<String>,
         hold: bool,
     },
+    /// 同上，但写完后只保持 `linger_ms` 毫秒就关闭。
+    StreamThenClose {
+        epoch: u64,
+        chunks: Vec<String>,
+        linger_ms: u64,
+    },
 }
 
 type Script = Arc<dyn Fn(usize, Option<String>) -> Reply + Send + Sync>;
@@ -89,6 +95,26 @@ async fn sse_server(pki: &Pki, script: Script) -> Server {
                                 )));
                                 drop(tx);
                                 Response::builder().status(status).body(body).unwrap()
+                            }
+                            Reply::StreamThenClose {
+                                epoch,
+                                chunks,
+                                linger_ms,
+                            } => {
+                                tokio::spawn(async move {
+                                    for c in chunks {
+                                        if tx.send(Bytes::from(c)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(linger_ms)).await;
+                                });
+                                Response::builder()
+                                    .status(200)
+                                    .header("content-type", "text/event-stream")
+                                    .header("x-log-epoch", epoch.to_string())
+                                    .body(body)
+                                    .unwrap()
                             }
                             Reply::Stream {
                                 epoch,
@@ -248,14 +274,21 @@ async fn wait_until(mut cond: impl FnMut() -> bool) {
 #[tokio::test]
 async fn reconnect_resumes_from_acked_cursor_without_loss_or_duplicates() {
     let pki = Pki::new();
-    // 每条连接都从游标之后补发到 head = 5，然后断开。
+    // 第一条连接发到 3 后停留 300 ms 再断开（给 UI ack 的时间）；之后的连接从游标补发到 5。
     let script: Script = Arc::new(|i, last| {
         let after: u64 = last.and_then(|l| l.parse().ok()).unwrap_or(0);
-        let head = if i == 0 { 3 } else { 5 };
-        Reply::Stream {
-            epoch: 1,
-            chunks: (after + 1..=head).map(ev).collect(),
-            hold: i >= 1,
+        if i == 0 {
+            Reply::StreamThenClose {
+                epoch: 1,
+                chunks: (1..=3).map(ev).collect(),
+                linger_ms: 300,
+            }
+        } else {
+            Reply::Stream {
+                epoch: 1,
+                chunks: (after + 1..=5).map(ev).collect(),
+                hold: true,
+            }
         }
     });
     let server = sse_server(&pki, script).await;
