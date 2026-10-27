@@ -41,6 +41,8 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 pem = "3"
 base64 = "0.22"
 gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-conversation = { path = "../gantry-conversation" }
+gantry-models = { path = "../gantry-models" }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util", "net", "io-util", "rt-multi-thread"] }

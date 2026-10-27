@@ -5,14 +5,21 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gantry_api::{ApiConfig, ApiCore};
+use gantry_conversation::{ConversationDeps, DeliveryHandle, EngineApi, Limits, ModelsPort};
+use gantry_core::entities::Ref;
 use gantry_core::entities::{Conversation, DevicePlatform, DeviceRole, Message};
-use gantry_core::ids::{ConversationId, MessageId, ProjectId, Ulid};
+use gantry_core::events::EventType;
+use gantry_core::ids::{ConversationId, DeliveryId, MessageId, ProjectId, Ulid};
 use gantry_core::ports::context::{ActorCtx, PageOrder, PageQuery, PageWithSeq, StoreError};
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
+use gantry_core::ports::engine::{CreateDelivery, EngineError};
 use gantry_core::testing::builders;
 use gantry_fakes::conversation::ConversationCall;
+use gantry_models::{DirectCall, DirectOutcome, ModelsError};
 use http::Method;
+use serde_json::json;
 use support::*;
+use tokio::sync::Notify;
 
 fn ctx() -> ActorCtx {
     ActorCtx {
@@ -343,5 +350,374 @@ async fn downstream_errors_are_not_swallowed() {
             .handle(req(Method::GET, &path(id), &d), bytes::Bytes::new())
             .await;
         assert_problem(&resp, status, code);
+    }
+}
+
+// 同步发消息和读取不调用引擎或模型；任何意外调用都使测试失败。
+struct UnusedDependencies;
+
+#[async_trait]
+impl EngineApi for UnusedDependencies {
+    async fn create_delivery(&self, _: CreateDelivery) -> Result<DeliveryHandle, EngineError> {
+        panic!("message reads must not call the engine")
+    }
+    async fn locate_deliveries(
+        &self,
+        _: &ProjectId,
+        _: &[Ref],
+    ) -> Result<Vec<DeliveryHandle>, EngineError> {
+        panic!("message reads must not call the engine")
+    }
+}
+
+#[async_trait]
+impl ModelsPort for UnusedDependencies {
+    async fn configured(&self, _: &ProjectId) -> Result<bool, ModelsError> {
+        panic!("message reads must not call models")
+    }
+    async fn invoke_direct(&self, _: DirectCall) -> Result<DirectOutcome, ModelsError> {
+        panic!("message reads must not call models")
+    }
+}
+
+fn real_conversation(h: &Harness) -> Arc<gantry_conversation::Conversation> {
+    Arc::new(gantry_conversation::Conversation::new(ConversationDeps {
+        store: h.store.clone(),
+        ids: h.core.services().ids.clone(),
+        engine: Arc::new(UnusedDependencies),
+        models: Arc::new(UnusedDependencies),
+        limits: Limits::default(),
+    }))
+}
+
+fn api_with_conversation(h: &Harness, conversation: Arc<dyn ConversationService>) -> ApiCore {
+    let mut services = h.core.services().clone();
+    services.conversation = conversation;
+    ApiCore::new(ApiConfig::default(), services)
+}
+
+async fn real_project(
+    h: &Harness,
+    conversation: &gantry_conversation::Conversation,
+    n: u128,
+) -> (ProjectId, ConversationId) {
+    let project = ProjectId::from_parts(T0 as u64, n).unwrap();
+    let mut data = doubles::fixture_data("project.added");
+    data["id"] = json!(project);
+    doubles::record(
+        &h.store,
+        EventType::ProjectAdded,
+        &project.to_string(),
+        Some(project),
+        data,
+        None,
+    )
+    .await;
+    let cnv = conversation
+        .ensure_conversation(&project, &ctx())
+        .await
+        .unwrap();
+    (project, cnv)
+}
+
+async fn real_post(
+    conversation: &gantry_conversation::Conversation,
+    cnv: ConversationId,
+    text: &str,
+) -> Message {
+    conversation
+        .post_user_message(
+            ctx(),
+            cnv,
+            NewUserMessage {
+                text: text.into(),
+                level_cap: None,
+                refs: vec![],
+            },
+        )
+        .await
+        .unwrap()
+}
+
+async fn api_get(
+    core: &ApiCore,
+    viewer: &gantry_core::entities::Device,
+    url: &str,
+) -> gantry_api::ApiResponse {
+    core.handle(req(Method::GET, url, viewer), bytes::Bytes::new())
+        .await
+}
+
+#[tokio::test]
+async fn real_service_api_paginates_and_rejects_foreign_cursors() {
+    let h = harness(None);
+    let viewer = device(10, DevicePlatform::Ios, DeviceRole::Viewer);
+    h.devices.insert(viewer.clone());
+    let real = real_conversation(&h);
+    let (_, cnv) = real_project(&h, &real, 10).await;
+    let (_, other) = real_project(&h, &real, 11).await;
+    let core = api_with_conversation(&h, real.clone());
+    let empty = api_get(&core, &viewer, &path(other)).await;
+    assert_eq!(empty.status(), 200);
+    assert!(ids(&empty).is_empty());
+    let mut expected = Vec::new();
+    for text in ["one", "two", "three"] {
+        expected.push(real_post(&real, cnv, text).await.id.to_string());
+    }
+    expected.sort();
+    let other_message = real_post(&real, other, "other project").await;
+    let base = path(cnv);
+    let first = api_get(&core, &viewer, &format!("{base}?limit=2")).await;
+    assert_eq!(first.status(), 200);
+    validate("MessageList", &body(&first));
+    assert_eq!(ids(&first), vec![expected[2].clone(), expected[1].clone()]);
+    assert_eq!(
+        header(&first, "x-event-seq").unwrap(),
+        h.store.events().head().await.unwrap().as_u64().to_string()
+    );
+    let cursor = body(&first)["next_cursor"].as_str().unwrap().to_owned();
+    let second = api_get(
+        &core,
+        &viewer,
+        &format!("{base}?limit=2&order=desc&cursor={cursor}"),
+    )
+    .await;
+    assert_eq!(ids(&second), vec![expected[0].clone()]);
+    assert!(body(&second)["next_cursor"].is_null());
+    let asc = api_get(&core, &viewer, &format!("{base}?limit=2&order=asc")).await;
+    assert_eq!(ids(&asc), expected[..2]);
+    let asc_cursor = body(&asc)["next_cursor"].as_str().unwrap().to_owned();
+    let last = api_get(
+        &core,
+        &viewer,
+        &format!("{base}?order=asc&cursor={asc_cursor}"),
+    )
+    .await;
+    assert_eq!(ids(&last), vec![expected[2].clone()]);
+    assert_eq!(
+        ids(&api_get(&core, &viewer, &path(other)).await),
+        vec![other_message.id.to_string()]
+    );
+    for url in [
+        format!("{base}?order=asc&cursor={cursor}"),
+        format!("{}?cursor={cursor}", path(other)),
+        format!("{base}?cursor=seq:1"),
+        format!("{base}?cursor=!!"),
+        format!(
+            "{base}?cursor={}",
+            gantry_api::reads::wrap_cursor(&format!("v1:messages:{cnv}:desc"), "invalid")
+        ),
+        format!(
+            "{base}?cursor={}",
+            gantry_api::reads::wrap_cursor(&format!("v1:messages:{cnv}:desc"), "seq:1")
+        ),
+    ] {
+        assert_problem(&api_get(&core, &viewer, &url).await, 400, "invalid_cursor");
+    }
+    let missing = ConversationId::from_parts(T0 as u64, 9999).unwrap();
+    assert_problem(
+        &api_get(&core, &viewer, &path(missing)).await,
+        404,
+        "not_found",
+    );
+    // 外层无效在 API 被拒；外层合法但内层无效由真实服务先判不存在。
+    assert_problem(
+        &api_get(&core, &viewer, &format!("{}?cursor=!!", path(missing))).await,
+        400,
+        "invalid_cursor",
+    );
+    let inner_bad =
+        gantry_api::reads::wrap_cursor(&format!("v1:messages:{missing}:desc"), "invalid");
+    assert_problem(
+        &api_get(
+            &core,
+            &viewer,
+            &format!("{}?cursor={inner_bad}", path(missing)),
+        )
+        .await,
+        404,
+        "not_found",
+    );
+}
+
+/// 在真实服务完成读取后暂停 HTTP 响应，确保后续写入发生在同一请求进行中。
+struct PauseAfterRead {
+    real: Arc<gantry_conversation::Conversation>,
+    read: Notify,
+    resume: Notify,
+}
+
+#[async_trait]
+impl ConversationService for PauseAfterRead {
+    async fn ensure_conversation(
+        &self,
+        project: &ProjectId,
+        ctx: &ActorCtx,
+    ) -> Result<ConversationId, ConvError> {
+        self.real.ensure_conversation(project, ctx).await
+    }
+    async fn post_user_message(
+        &self,
+        ctx: ActorCtx,
+        cnv: ConversationId,
+        msg: NewUserMessage,
+    ) -> Result<Message, ConvError> {
+        self.real.post_user_message(ctx, cnv, msg).await
+    }
+    async fn list_conversations(
+        &self,
+        project: &ProjectId,
+        page: PageQuery,
+    ) -> Result<PageWithSeq<Conversation>, ConvError> {
+        self.real.list_conversations(project, page).await
+    }
+    async fn list_messages(
+        &self,
+        cnv: &ConversationId,
+        page: PageQuery,
+    ) -> Result<PageWithSeq<Message>, ConvError> {
+        let result = self.real.list_messages(cnv, page).await;
+        self.read.notify_one();
+        self.resume.notified().await;
+        result
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_service_response_keeps_snapshot_when_writes_commit_before_response() {
+    let h = harness(None);
+    let viewer = device(12, DevicePlatform::Macos, DeviceRole::Viewer);
+    h.devices.insert(viewer.clone());
+    let real = real_conversation(&h);
+    let (project, cnv) = real_project(&h, &real, 12).await;
+    let initial = real_post(&real, cnv, "before").await;
+    let old_head = h.store.events().head().await.unwrap();
+    let pause = Arc::new(PauseAfterRead {
+        real: real.clone(),
+        read: Notify::new(),
+        resume: Notify::new(),
+    });
+    let core = Arc::new(api_with_conversation(&h, pause.clone()));
+    let request = {
+        let core = core.clone();
+        let viewer = viewer.clone();
+        tokio::spawn(async move { api_get(&core, &viewer, &path(cnv)).await })
+    };
+    pause.read.notified().await;
+    let new_message = real_post(&real, cnv, "after").await;
+    // 直接追加真实 store 事件，验证 delivery_id 回填也受同一水位约束。
+    let delivery = DeliveryId::from_parts(T0 as u64, 999).unwrap();
+    let mut data = doubles::fixture_data("delivery.created");
+    data["source_message_id"] = json!(initial.id);
+    doubles::record(
+        &h.store,
+        EventType::DeliveryCreated,
+        &delivery.to_string(),
+        Some(project),
+        data,
+        None,
+    )
+    .await;
+    let new_head = h.store.events().head().await.unwrap();
+    assert!(new_head > old_head);
+    pause.resume.notify_one();
+    let before = request.await.unwrap();
+    assert_eq!(before.status(), 200);
+    assert_eq!(
+        header(&before, "x-event-seq").unwrap(),
+        old_head.as_u64().to_string()
+    );
+    assert_eq!(ids(&before), vec![initial.id.to_string()]);
+    assert!(body(&before)["items"][0]["delivery_id"].is_null());
+    let after = api_get(&api_with_conversation(&h, real), &viewer, &path(cnv)).await;
+    assert_eq!(
+        header(&after, "x-event-seq").unwrap(),
+        new_head.as_u64().to_string()
+    );
+    let items = body(&after)["items"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 2);
+    assert!(items
+        .iter()
+        .any(|item| item["id"] == initial.id.to_string()
+            && item["delivery_id"] == delivery.to_string()));
+    assert!(items
+        .iter()
+        .any(|item| item["id"] == new_message.id.to_string() && item["delivery_id"].is_null()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_service_concurrent_responses_match_their_log_watermarks() {
+    let h = harness(None);
+    let viewer = device(13, DevicePlatform::Macos, DeviceRole::Viewer);
+    h.devices.insert(viewer.clone());
+    let real = real_conversation(&h);
+    let (project, cnv) = real_project(&h, &real, 13).await;
+    let first = real_post(&real, cnv, "initial").await;
+    let first_seq = h.store.events().head().await.unwrap().as_u64();
+    let core = Arc::new(api_with_conversation(&h, real.clone()));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let store = h.store.clone();
+    let writer = {
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            let mut messages = vec![(first.id, first_seq)];
+            let delivery = DeliveryId::from_parts(T0 as u64, 1000).unwrap();
+            let mut link_seq = 0;
+            for n in 0..24 {
+                let message = real_post(&real, cnv, &format!("concurrent {n}")).await;
+                let seq = store.events().head().await.unwrap().as_u64();
+                messages.push((message.id, seq));
+                if n == 12 {
+                    let mut data = doubles::fixture_data("delivery.created");
+                    data["source_message_id"] = json!(first.id);
+                    link_seq = doubles::record(
+                        &store,
+                        EventType::DeliveryCreated,
+                        &delivery.to_string(),
+                        Some(project),
+                        data,
+                        None,
+                    )
+                    .await
+                    .as_u64();
+                }
+                tokio::task::yield_now().await;
+            }
+            (messages, delivery, link_seq)
+        })
+    };
+    barrier.wait().await;
+    let mut responses = Vec::new();
+    for _ in 0..100 {
+        let response = api_get(&core, &viewer, &path(cnv)).await;
+        assert_eq!(response.status(), 200);
+        let seq = header(&response, "x-event-seq")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        responses.push((seq, body(&response)["items"].as_array().unwrap().clone()));
+        tokio::task::yield_now().await;
+    }
+    let (messages, delivery, link_seq) = writer.await.unwrap();
+    assert!(link_seq > first_seq);
+    for (seq, items) in responses {
+        let expected = messages.iter().filter(|(_, posted)| *posted <= seq).count();
+        assert_eq!(items.len(), expected, "response at seq {seq}");
+        for (id, posted) in &messages {
+            let actual = items.iter().find(|item| item["id"] == id.to_string());
+            assert_eq!(
+                actual.is_some(),
+                *posted <= seq,
+                "message {id} at seq {seq}"
+            );
+            if let Some(item) = actual {
+                if *id == first.id && seq >= link_seq {
+                    assert_eq!(item["delivery_id"], delivery.to_string());
+                } else {
+                    assert!(item["delivery_id"].is_null(), "message {id} at seq {seq}");
+                }
+            }
+        }
     }
 }
