@@ -3,6 +3,7 @@
 pub(crate) mod executor;
 pub(crate) mod key;
 pub(crate) mod marker;
+pub(crate) mod sanitize;
 
 use std::sync::Arc;
 
