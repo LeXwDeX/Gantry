@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod doubles;
+pub mod pki_env;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,15 +12,19 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use gantry_api::idempotency::MemoryIdempotency;
 use gantry_api::server::{HandlerRequest, Reply, RouteHandler};
-use gantry_api::{
-    ApiConfig, ApiCore, ApiResponse, DeviceLookup, LookupError, PeerCert, Problem, RequestHead,
-    Services,
-};
+use gantry_api::{ApiConfig, ApiCore, ApiResponse, PeerCert, Problem, RequestHead, Services};
+use gantry_core::entities::Actor;
 use gantry_core::entities::{Device, DevicePlatform, DeviceRole, DeviceStatus, Seq};
 use gantry_core::ids::{DeviceId, IdGen};
 use gantry_core::testing::builders;
 use gantry_core::testing::{FakeClock, SeqEntropy};
 use gantry_core::time::Timestamp;
+use gantry_pki::admin::{
+    DeviceAdmin, DeviceError, RenewError, RenewRequest, RenewResponse, ReplayReport, RevokeOutcome,
+};
+use gantry_pki::directory::DeviceDirectory;
+use gantry_pki::{CertSerial, PkiError};
+use gantry_store::WriteTx;
 use gantry_store::{Store, StoreDeps};
 use http::{Method, StatusCode};
 use serde_json::{json, Value};
@@ -52,17 +57,18 @@ impl Devices {
     }
 }
 
+/// 管线测试只需要目录的读取；其余方法在这些测试里不会被调用。
 #[async_trait]
-impl DeviceLookup for Devices {
-    async fn by_cert_serial(&self, serial: &str) -> Result<Option<Device>, LookupError> {
+impl DeviceDirectory for Devices {
+    async fn by_cert_serial(&self, serial: &CertSerial) -> Result<Option<Device>, PkiError> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
         if *self.fail.lock().unwrap() {
-            return Err(LookupError);
+            return Err(PkiError::Store("unavailable".into()));
         }
-        Ok(self.by_serial.lock().unwrap().get(serial).cloned())
+        Ok(self.by_serial.lock().unwrap().get(serial.as_str()).cloned())
     }
 
-    async fn get(&self, id: &DeviceId) -> Result<Option<Device>, LookupError> {
+    async fn get(&self, id: &DeviceId) -> Result<Option<Device>, PkiError> {
         Ok(self
             .by_serial
             .lock()
@@ -70,6 +76,64 @@ impl DeviceLookup for Devices {
             .values()
             .find(|d| &d.id == id)
             .cloned())
+    }
+
+    async fn list(
+        &self,
+        _page: &gantry_store::Page,
+    ) -> Result<gantry_store::Paged<Device>, PkiError> {
+        unimplemented!("pipeline tests do not list devices")
+    }
+
+    async fn verifying_key(
+        &self,
+        _id: &DeviceId,
+    ) -> Result<Option<p256::ecdsa::VerifyingKey>, PkiError> {
+        Ok(None)
+    }
+
+    async fn bootstrap_period(&self) -> Result<bool, PkiError> {
+        Ok(false)
+    }
+
+    async fn touch_last_seen(&self, _id: &DeviceId) {}
+}
+
+/// 管线测试不经设备管理；调用即说明测试走错了路径。
+pub struct NoAdmin;
+
+#[async_trait]
+impl DeviceAdmin for NoAdmin {
+    async fn rename(&self, _: &DeviceId, _: &str, _: &Actor) -> Result<Device, DeviceError> {
+        unimplemented!("NoAdmin")
+    }
+    async fn set_role(
+        &self,
+        _: &mut WriteTx,
+        _: &DeviceId,
+        _: DeviceRole,
+        _: &Actor,
+    ) -> Result<Device, DeviceError> {
+        unimplemented!("NoAdmin")
+    }
+    async fn revoke(
+        &self,
+        _: &mut WriteTx,
+        _: &DeviceId,
+        _: &Actor,
+    ) -> Result<RevokeOutcome, DeviceError> {
+        unimplemented!("NoAdmin")
+    }
+    async fn renew(
+        &self,
+        _: &DeviceId,
+        _: &CertSerial,
+        _: RenewRequest,
+    ) -> Result<RenewResponse, RenewError> {
+        unimplemented!("NoAdmin")
+    }
+    async fn replay_revocations(&self, _: Timestamp) -> Result<ReplayReport, PkiError> {
+        unimplemented!("NoAdmin")
     }
 }
 
@@ -143,6 +207,7 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
         ids,
         store: store.clone(),
         devices: devices.clone(),
+        admin: Arc::new(NoAdmin),
         engine: engine.clone(),
         conversation: conversation.clone(),
         idempotency: idempotency.clone(),
