@@ -267,6 +267,8 @@ export interface EscalationPayload {
   node_id?: string | null;
   attempt_id?: string | null;
   target_level?: Level;
+  /** `reason_code = outbox_failed:<code>` 时为终态失败的 Outbox 动作（#67）。 */
+  action_id?: string | null;
   evidence?: Array<Ref | { kind: "result"; ref: string }>;
   options?: InboxOption[];
 }
