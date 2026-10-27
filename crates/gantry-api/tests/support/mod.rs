@@ -1,12 +1,15 @@
 //! 管线测试的共用替身：计数的设备目录、内存 store、可脚本化的处理程序。
 #![allow(dead_code)]
 
+pub mod doubles;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use gantry_api::idempotency::MemoryIdempotency;
 use gantry_api::server::{HandlerRequest, Reply, RouteHandler};
 use gantry_api::{
     ApiConfig, ApiCore, ApiResponse, DeviceLookup, LookupError, PeerCert, Problem, RequestHead,
@@ -107,6 +110,9 @@ pub struct Harness {
     pub clock: Arc<FakeClock>,
     pub devices: Arc<Devices>,
     pub store: Store,
+    pub engine: Arc<doubles::StoreEngine>,
+    pub conversation: Arc<doubles::StoreConversation>,
+    pub idempotency: Arc<MemoryIdempotency>,
 }
 
 pub fn device(n: u128, platform: DevicePlatform, role: DeviceRole) -> Device {
@@ -129,11 +135,22 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
     })
     .unwrap();
     let devices = Arc::new(Devices::default());
+    let engine = Arc::new(doubles::StoreEngine::new(store.clone()));
+    let conversation = Arc::new(doubles::StoreConversation {
+        store: store.clone(),
+        ids: ids.clone(),
+        known: Mutex::default(),
+        calls: Mutex::default(),
+    });
+    let idempotency = Arc::new(MemoryIdempotency::new(clock.clone()));
     let svc = Services {
         clock: clock.clone(),
         ids,
         store: store.clone(),
         devices: devices.clone(),
+        engine: engine.clone(),
+        conversation: conversation.clone(),
+        idempotency: idempotency.clone(),
     };
     let core = match handler {
         Some(h) => ApiCore::with_handler(ApiConfig::default(), svc, h),
@@ -144,6 +161,9 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
         clock,
         devices,
         store,
+        engine,
+        conversation,
+        idempotency,
     }
 }
 
