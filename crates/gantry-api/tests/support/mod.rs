@@ -3,6 +3,7 @@
 
 pub mod doubles;
 pub mod pki_env;
+pub mod settings_ctx;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -214,6 +215,9 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
             policy_approvals(&store, clock.clone(), ids_for_policy.clone(), forge).1
         },
         forge: Arc::new(gantry_fakes::forge::FakeForge::new_in(store.clone())),
+        settings_ctx: Arc::new(settings_ctx::FakeSettingsContext::default()),
+        forge_secrets: forge_secrets(clock.as_ref()),
+        egress: Arc::new(gantry_fakes::egress::EgressStub::new()),
         engine: engine.clone(),
         conversation: conversation.clone(),
         idempotency: idempotency.clone(),
@@ -336,4 +340,11 @@ pub fn policy_approvals(
         Arc::new(SeqEntropy::new(99)),
     ));
     (engine, approvals)
+}
+
+/// Forge 使用方的内存密钥存储（`gantry-fakes` 的 `MemorySecrets`）。
+pub fn forge_secrets(clock: &FakeClock) -> Arc<gantry_fakes::secrets::MemorySecrets> {
+    let store = gantry_fakes::secrets::MemorySecretStore::new(clock.now_timestamp());
+    store.allow(gantry_core::secret::Consumer::Forge);
+    Arc::new(store.scoped(gantry_core::secret::Consumer::Forge).unwrap())
 }
