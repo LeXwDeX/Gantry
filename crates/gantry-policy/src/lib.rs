@@ -6,8 +6,8 @@
 //! `core::ports::PolicyPort`：动作判定、审批的创建 / 作废 / 消费、补丁规则判定与
 //! proposals 判定；规则内核（硬底线、通配符、路径规则集、密钥扫描）在各自模块。
 //! `invalidation` 提供事件驱动的失效与过期清扫的单步处理。
-//! `signing` 提供验签与待签载荷组装；`ApprovalService`（challenge / grant）在后续
-//! 切片落地（#89）。
+//! `signing` 提供验签与待签载荷组装；`service` 提供 `ApprovalService`（challenge /
+//! grant / deny / 内部动作的创建与消费），`Store` 打开时需注册 [`POLICY_MODULE`]。
 
 mod approvals;
 mod audit;
@@ -18,6 +18,7 @@ pub mod patch;
 pub mod paths;
 pub mod rules;
 pub mod secrets;
+pub mod service;
 pub mod signing;
 
 pub use engine::{resolve_action_id, PolicyDeps, PolicyEngine};
@@ -25,3 +26,4 @@ pub use glob::{Glob, GlobError, GlobSet};
 pub use paths::{snapshot as path_rules_snapshot, RulePaths};
 pub use rules::{FloorViolation, PathRule, PolicyBuild, PolicyRules, SettingsSource};
 pub use secrets::{scan_line, scan_text};
+pub use service::{ApprovalService, PolicyApprovals, POLICY_MODULE};

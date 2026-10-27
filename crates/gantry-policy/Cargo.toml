@@ -12,6 +12,7 @@ gantry-store = { path = "../gantry-store" }
 async-trait.workspace = true
 base64 = "0.22"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
