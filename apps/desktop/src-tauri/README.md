@@ -32,6 +32,7 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
   - `guarded_write_prepare` / `guarded_write_submit` / `guarded_write_discard`（settings 先 dry_run、设备动作本地组装 signing；核对内部摘要后发起审批 → 签名 → 带 `Gantry-Approval` 重发；请求体用 `Zeroizing` 保存，提交或丢弃后清零）；
   - `prefs_*`、`ui_state_*`、`open_external`、`open_github`。
   - 其余命令（诊断）返回 `shell.not_paired` 或 `shell.unavailable`，不伪造成功。
+- 证书自动续期：后台每 10 分钟检查，到 `renew_after`（`/v1/me` 给出，缺省按剩余 1/3）时用现有 mTLS 密钥签新 CSR、`POST /v1/devices/self/renew`，新链根指纹与叶子公钥校验通过才原子替换；失败保留旧证书，距到期不足 7 天时 `cert_expiring`。
 - 硬件密钥库不可用时用 `UnavailableKeyStore`：配对失败并给出 `shell.key_unavailable`，不降级为软件密钥。
 - 导航只放行应用自己的来源（`tauri://localhost`、`http(s)://tauri.localhost`），新窗口一律拒绝。
 

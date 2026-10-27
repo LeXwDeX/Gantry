@@ -278,11 +278,39 @@ pub fn verify_response(
     if resp.ca_fingerprint != pinned_fingerprint {
         return Err(pairing_failed("ca_fingerprint_mismatch"));
     }
-    if resp.certificate_chain.len() != 3 {
+    let tls = keys.tls_public_key();
+    verify_chain(&resp.certificate_chain, pinned_fingerprint, &tls, now_s)?;
+    if resp.device.pubkey_fpr != tls.fingerprint() {
+        return Err(pairing_failed("pubkey_fpr_mismatch"));
+    }
+    if resp.device.approval_pubkey_fpr.as_deref() != Some(&keys.approval_public_key().fingerprint())
+    {
+        return Err(pairing_failed("approval_pubkey_fpr_mismatch"));
+    }
+    if !resp.api_base_url.starts_with("https://") || !resp.device.id.starts_with("dev_") {
+        return Err(pairing_failed("response_shape"));
+    }
+    if resp.confirmation_code.len() != 6
+        || !resp.confirmation_code.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(pairing_failed("response_shape"));
+    }
+    Ok(())
+}
+
+/// 设备证书链 `[叶子, 中间 CA, 根]` 的校验（配对与续期共用，§7.2 第 5 步、"自动续期"）：
+/// 根证书 DER 的 SHA-256 等于固定指纹；逐级签名有效、中间与根是 CA；全部在有效期内；
+/// 叶子的公钥等于本机 mTLS 客户端公钥。
+pub fn verify_chain(
+    chain: &[String],
+    pinned_fingerprint: &str,
+    tls: &P256PublicKey,
+    now_s: i64,
+) -> Result<(), ShellError> {
+    if chain.len() != 3 {
         return Err(pairing_failed("chain_shape"));
     }
-    let ders = resp
-        .certificate_chain
+    let ders = chain
         .iter()
         .map(|p| pem_to_der(p))
         .collect::<Option<Vec<_>>>()
@@ -314,24 +342,8 @@ pub fn verify_response(
     if !certs.iter().all(valid_now) {
         return Err(pairing_failed("chain_expired"));
     }
-    let tls = keys.tls_public_key();
     if leaf.public_key().raw != tls.spki_der().as_slice() {
         return Err(pairing_failed("leaf_key_mismatch"));
-    }
-    if resp.device.pubkey_fpr != tls.fingerprint() {
-        return Err(pairing_failed("pubkey_fpr_mismatch"));
-    }
-    if resp.device.approval_pubkey_fpr.as_deref() != Some(&keys.approval_public_key().fingerprint())
-    {
-        return Err(pairing_failed("approval_pubkey_fpr_mismatch"));
-    }
-    if !resp.api_base_url.starts_with("https://") || !resp.device.id.starts_with("dev_") {
-        return Err(pairing_failed("response_shape"));
-    }
-    if resp.confirmation_code.len() != 6
-        || !resp.confirmation_code.bytes().all(|b| b.is_ascii_digit())
-    {
-        return Err(pairing_failed("response_shape"));
     }
     Ok(())
 }
