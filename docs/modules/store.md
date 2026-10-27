@@ -530,7 +530,7 @@ LIMIT 1;
 - 隔离区（被拒产物）用 `kind = Quarantine`，`quarantined = 1`，不进入常规引用；保留期未定（OQ-3、OQ-5），`gc` 默认不删。
 - 清单（`core::worker::ResultBundle`，worker-protocol §5.2）用 `core::jcs` 规范化后存入；清单里的 `collected_at` 是确定性时间（沙盒停止时间，截到秒），所以对同一已停止沙盒的 `out/` 重复 `collect` 得到同一个 `result_ref`。
 
-**M1 已落地（#88 CAS 切片）**：`Store::cas()` 的接口与语义已落地，后端暂为内存（`open_in_memory`）；磁盘后端（上面的文件布局与 `cas_objects` 行）随 SQLite 切片落地，复用同一组测试（`tests/cas.rs`）。补充约定：`kind` 由首次写入决定；任何一次以 `Quarantine` 写入都会把对象标为隔离，且不会撤销，被拒产物不能经"再以 `Artifact` 写一次"洗白。`CasReader` 先实现 `std::io::Read`。错误新增 `CasTooLarge { bytes, max }`（对象超过 `store.cas.max_object_bytes`，或超过 `get_bytes` 的 `max`）；`Io`、`Corrupt` 暂以字符串承载。
+**M1 已落地（#88）**：`Store::cas()` 的接口与语义已落地，两个后端共用 `tests/cas.rs`：`open_in_memory` 用内存后端；`Store::open` 用磁盘后端，按上面的文件布局与写入顺序（临时文件 → fsync → rename → 插行），元数据在 `cas_objects` 表（迁移 2）。补充约定：`kind` 由首次写入决定；任何一次以 `Quarantine` 写入都会把对象标为隔离，且不会撤销，被拒产物不能经"再以 `Artifact` 写一次"洗白。`has` / `open` / `get_bytes` 以文件为准，`stat` 以行为准（孤儿在补行前 `stat` 为 `None`）。`Cas::verify()` 遍历对象文件、重算摘要，为孤儿补行（类别记为 `Artifact`、创建时间取当前时钟）并报告损坏对象，不删除也不修复。`CasReader` 实现 `std::io::Read`。错误：`CasTooLarge { bytes, max }`（超过 `store.cas.max_object_bytes` 或 `get_bytes` 的 `max`）、`Corrupt`、`DiskFull`（ENOSPC）、`Io`。
 
 ### 7.8 备份、恢复、完整性
 
