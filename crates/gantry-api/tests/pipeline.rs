@@ -209,12 +209,16 @@ async fn rate_limit_runs_before_the_body_is_read() {
     let b = device(2, DevicePlatform::Macos, DeviceRole::Operator);
     h.devices.insert(a.clone());
     h.devices.insert(b.clone());
-    let head = |d| json_req(Method::POST, &messages(), d).header("idempotency-key", KEY);
-    for _ in 0..30 {
-        assert_eq!(send(&h, head(&a), "{}").await.status(), 200);
+    // 每次用新键：同键会被幂等重放，处理程序只调一次
+    let head = |d, n: u32| {
+        json_req(Method::POST, &messages(), d)
+            .header("idempotency-key", &format!("rate-limit-key-{n:06}"))
+    };
+    for n in 0..30 {
+        assert_eq!(send(&h, head(&a, n), "{}").await.status(), 200);
     }
     // 第 31 条：admit 就拒绝，不读请求体
-    match h.core.admit(head(&a)).await {
+    match h.core.admit(head(&a, 30)).await {
         Admission::Respond(resp) => {
             assert_problem(&resp, 429, "rate_limited");
             assert_eq!(header(&resp, "retry-after"), Some("2"));
@@ -224,14 +228,14 @@ async fn rate_limit_runs_before_the_body_is_read() {
         Admission::Proceed(_) => panic!("rate limit must reject before the body"),
     }
     // 其他设备、其他类不受影响
-    assert_eq!(send(&h, head(&b), "{}").await.status(), 200);
+    assert_eq!(send(&h, head(&b, 31), "{}").await.status(), 200);
     assert_eq!(
         send(&h, req(Method::GET, "/v1/me", &a), "").await.status(),
         200
     );
     // 时间推进后恢复
     h.clock.advance_secs(2);
-    assert_eq!(send(&h, head(&a), "{}").await.status(), 200);
+    assert_eq!(send(&h, head(&a, 32), "{}").await.status(), 200);
     assert_eq!(echo.ops().len(), 33);
 }
 
