@@ -428,7 +428,11 @@ test("settings use ETags, strict bodies and never return secret values", async (
   const writtenBody = JSON.parse(writtenText);
   assert.equal(writtenBody.value.providers.anthropic.credential.value, undefined);
   assert.equal(writtenBody.value.providers.anthropic.credential.present, true);
-  assert.equal(written.headers.get("etag"), '"18201"');
+  // rev = 最近一次 settings.updated 的 seq；写响应的 X-Event-Seq 等于新 rev（config.md §2.7）。
+  const newRev = written.headers.get("x-event-seq");
+  assert.equal(written.headers.get("etag"), `"${newRev}"`);
+  assert.equal(writtenBody.rev, Number(newRev));
+  assert.ok(Number(newRev) > 18200);
 
   const fetched = await json(await request(path));
   assert.equal(JSON.stringify(fetched).includes(secretValue), false);
