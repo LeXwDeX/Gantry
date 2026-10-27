@@ -663,7 +663,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - **持久化**：引擎没有自己的表。游标按低水位推进、落后于实际处理进度（§7.14.1）；"事件已处理"靠决策幂等而不是游标精确一次。
 - **启动恢复**：
   1. 读所有非终结交付单元，以及仍有未清理资源的 `abandoned` / `closed` 交付单元（排队中的 Outbox、未终结尝试、活跃审批、未移除的工作树）的投影，折叠游标之后的事件，重建 `DeliveryState`；
-  2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`（worker-protocol §3.5）：仍在运行 → 继续监督；已退出 → 直接 `collect` 并走终结管线；已不存在 → 终结为 `infra_error`（`infra.lost`）并按 §7.8 重试；`direct` 尝试没有沙盒，按 `infra.lost` 重试；终结后 `release`；再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
+  2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`（worker-protocol §3.5）：仍在运行（`Running`）→ 继续监督；已退出（`Exited`）→ 直接 `collect` 并走终结管线；受理后丢失（`Lost`）→ 终结为 `infra_error`（`infra.lost`）并按 §7.8 重试；从未受理（`Unknown`）→ 以同一 `job_id` / `sandbox_id` 重新 `submit`，不计为失败（E4）；`direct` 尝试没有沙盒，按 `infra.lost` 重试；终结后 `release`；再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
   3. 终结管线内的补丁提交幂等：先查 `attempt.finished` 是否已存在 `result_tree`，再由 `repo` 按 `refs/gantry/attempt/<job_id>` 查已有提交，已存在则不重复提交；
   4. 对每个交付单元补一次 `decide(Tick)`：应有未建的 Workflow / 悬空的上报项（`dedup_key` 相同则 `Deduped`）都会被补齐（阶段事件与入队之间的崩溃窗口由 §7.14.1 的期望动作集合补齐；同一幂等键不会重复）；
   5. 锁租约过期的工作树由 `repo` 回收；引擎重新 `acquire_lock` 取得新的 `LockToken`。
@@ -1005,9 +1005,9 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E3 | `PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报（policy.md 未规定何时省略 `report`） | 二选一：policy.md 规定对 `engine` 发起的动作 `Deny` 必带 `ReportHint`；或 data-model 词表增加通用码 | M1（`merge_pr` 以外的动作） |
 | E5 | `open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态；§7.12 要求 `create_pr` 的 `title` / `body` 取自它 | `attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），执行器据 `result_ref` 从 CAS 取原文填入意图（内容寻址，恢复后一致） | M1（体验；未落地时用模板标题与正文，不阻塞） |
 | E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
-| E4 | `SandboxService::recover` 需区分"job 从未被受理"与"受理后丢失"，`RunAttempt { resume: true }` 才能避免把未起沙盒的尝试判成 `infra.lost` | sandbox.md §6.1 的 `recover` 结果增加"未知 job"一类 | M1（"重启一致"） |
+| E4 | **已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`），区分"job 从未被受理"与"受理后丢失"；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`，不把未起沙盒的尝试判成 `infra.lost` | 见 sandbox.md §6.1、§7.10；`FakeSandboxService` 按受理集合分类 | M1（"重启一致"） |
 
-E1、E4 批准前，M1 实现可在测试里用 `FakeRepo` 的确定性 `commit_oid`（= f(`job_id`, `tree`)）与 `FakeSandboxService` 的受理记录推进，但 §12.2"重启一致"在 E1、E4 落地前不能宣布通过。
+E1 批准前，M1 实现可在测试里用 `FakeRepo` 的确定性 `commit_oid`（= f(`job_id`, `tree`)）推进，但 §12.2"重启一致"在 E1 落地前不能宣布通过。E4 已落地，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果。
 
 #### 7.14.7 `GraphTemplate` 的 `TemplateCx` 与 `ExitRule`
 

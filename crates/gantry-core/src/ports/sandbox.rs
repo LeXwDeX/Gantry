@@ -280,6 +280,34 @@ pub struct UnfinishedAttempt {
     pub project_id: ProjectId,
 }
 
+/// `recover` 对单个未终结尝试的判定（engine.md §7.14.6 E4）。
+///
+/// 区分"从未受理"与"受理后丢失"：前者由引擎以同一 `SandboxSpec` 重新
+/// `submit`，不计为失败；后者终结为 `infra.lost`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveredJob {
+    /// 已受理且仍在推进（运行中，或尚未启动、由 sandbox 重新走排队 / 创建 /
+    /// 注入阶段）；引擎继续 `wait`。
+    Running(JobHandle),
+    /// 已受理且已停止，产物可提取；`wait` 直接返回 `JobOutcome`（容器已不在
+    /// 但 `out/` 完整时 `terminal.cause = Lost`）。
+    Exited(JobHandle),
+    /// 受理后丢失：容器不在且产物不可提取；`wait` 返回 `Infra { Lost }`，
+    /// 引擎终结为 `infra.lost`。
+    Lost(JobHandle),
+    /// 未知 job：没有任何受理记录（从未受理）；引擎应重新 `submit`。
+    Unknown { job_id: AttemptId },
+}
+
+impl RecoveredJob {
+    pub fn job_id(&self) -> AttemptId {
+        match self {
+            Self::Running(handle) | Self::Exited(handle) | Self::Lost(handle) => handle.job_id,
+            Self::Unknown { job_id } => *job_id,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
     pub destroyed: u32,
@@ -325,7 +353,8 @@ pub enum InfraDetail {
 /// 引擎面的沙盒服务。`engine` 只依赖它，不接触容器驱动。
 #[async_trait]
 pub trait SandboxService: Send + Sync {
-    /// 受理一个 job（按 `job_id` 幂等）。
+    /// 受理一个 job（按 `job_id` 幂等）。返回 `Ok` 之前受理记录已持久化，
+    /// 重启后 `recover` 不会把它判为 [`RecoveredJob::Unknown`]。
     async fn submit(&self, ctx: &ActorCtx, spec: SandboxSpec) -> Result<JobHandle, SandboxError>;
 
     /// 等待终态；可重复调用，同一 job 恒返回同一结果。
@@ -338,11 +367,13 @@ pub trait SandboxService: Send + Sync {
 
     async fn release(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError>;
 
+    /// `gantryd` 重启后接管未终结的尝试。按输入顺序为每个
+    /// `UnfinishedAttempt` 恰好返回一项（E4）。
     async fn recover(
         &self,
         ctx: &ActorCtx,
         unfinished: &[UnfinishedAttempt],
-    ) -> Result<Vec<JobHandle>, SandboxError>;
+    ) -> Result<Vec<RecoveredJob>, SandboxError>;
 
     async fn sweep_orphans(
         &self,

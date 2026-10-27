@@ -456,13 +456,105 @@ async fn fake_sandbox_service_replays_and_is_idempotent() {
         )
         .await
         .expect("recover");
-    assert_eq!(recovered, vec![first]);
+    assert_eq!(
+        recovered,
+        vec![gantry_core::ports::sandbox::RecoveredJob::Exited(first)]
+    );
     let report = fake
         .sweep_orphans(&ctx, &std::collections::BTreeSet::new())
         .await
         .expect("sweep");
     assert_eq!(report.destroyed, 0);
     assert_eq!(fake.capacity().await.running, 0);
+}
+
+#[tokio::test]
+async fn fake_sandbox_service_recover_distinguishes_unaccepted_from_lost() {
+    use gantry_core::ports::sandbox::{
+        InfraDetail, JobHandle, RecoveredJob, SandboxError, UnfinishedAttempt,
+    };
+    use gantry_fakes::sandbox::FakeRuntime;
+
+    let fake = FakeSandboxService::new();
+    let ctx = ctx();
+    let project_id = id::<gantry_core::ids::Prj>(80);
+    let mut unfinished = Vec::new();
+    let mut handles = Vec::new();
+    // 81 运行中、82 已退出、83 受理后丢失、84 只脚本化未受理、85 完全未知。
+    for n in 81..=85u128 {
+        let job_id = id::<gantry_core::ids::Att>(n);
+        let sandbox_id = id::<gantry_core::ids::Sbx>(n + 100);
+        unfinished.push(UnfinishedAttempt {
+            job_id,
+            sandbox_id,
+            project_id,
+        });
+        handles.push(JobHandle { job_id, sandbox_id });
+        if n == 85 {
+            continue;
+        }
+        let spec = sandbox_spec(job_id, sandbox_id);
+        fake.script(
+            spec.clone(),
+            FakeSandboxService::success_outcome(job_id, sandbox_id),
+        );
+        if n <= 83 {
+            fake.submit(&ctx, spec).await.expect("submit");
+        }
+    }
+    fake.set_runtime(handles[0].job_id, FakeRuntime::Running);
+    fake.set_runtime(handles[2].job_id, FakeRuntime::Lost);
+    // 未受理的 job 即使脚本标记为丢失，也仍判为未知。
+    fake.set_runtime(handles[3].job_id, FakeRuntime::Lost);
+
+    let recovered = fake.recover(&ctx, &unfinished).await.expect("recover");
+    assert_eq!(
+        recovered,
+        vec![
+            RecoveredJob::Running(handles[0]),
+            RecoveredJob::Exited(handles[1]),
+            RecoveredJob::Lost(handles[2]),
+            RecoveredJob::Unknown {
+                job_id: handles[3].job_id
+            },
+            RecoveredJob::Unknown {
+                job_id: handles[4].job_id
+            },
+        ]
+    );
+    assert_eq!(
+        recovered
+            .iter()
+            .map(RecoveredJob::job_id)
+            .collect::<Vec<_>>(),
+        handles
+            .iter()
+            .map(|handle| handle.job_id)
+            .collect::<Vec<_>>()
+    );
+
+    assert!(fake.wait(&handles[0].job_id).await.is_ok());
+    assert!(fake.wait(&handles[1].job_id).await.is_ok());
+    assert!(matches!(
+        fake.wait(&handles[2].job_id).await,
+        Err(SandboxError::Infra {
+            detail: InfraDetail::Lost,
+            ..
+        })
+    ));
+
+    // 未受理的 job 重新 submit 后进入受理集合。
+    let resubmit = sandbox_spec(handles[3].job_id, handles[3].sandbox_id);
+    assert_eq!(
+        fake.submit(&ctx, resubmit).await.expect("resubmit"),
+        handles[3]
+    );
+    assert_eq!(
+        fake.recover(&ctx, &unfinished[3..4])
+            .await
+            .expect("recover again"),
+        vec![RecoveredJob::Lost(handles[3])]
+    );
 }
 
 #[tokio::test]

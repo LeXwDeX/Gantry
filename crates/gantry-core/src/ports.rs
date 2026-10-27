@@ -92,8 +92,8 @@ pub use repo::{
 pub use sandbox::{
     ArtifactName, CapacitySnapshot, CasObject, DriverKind, EgressFlags, EgressRequest, ExecSpec,
     GroupName, InfraDetail, IoLimits, JobHandle, JobOutcome, JobSpecTrusted, ProfileName,
-    ProgressSample, ProgressStats, RawMaterial, SandboxError, SandboxService, SandboxSpec,
-    SweepReport, TerminalCause, TerminalFacts, TimerKind, Timers, TokenEnvSpec, Trust,
+    ProgressSample, ProgressStats, RawMaterial, RecoveredJob, SandboxError, SandboxService,
+    SandboxSpec, SweepReport, TerminalCause, TerminalFacts, TimerKind, Timers, TokenEnvSpec, Trust,
     UnexpectedArtifact, UnfinishedAttempt, UpstreamInput, WorkspaceMode, WorkspaceRequest,
 };
 
