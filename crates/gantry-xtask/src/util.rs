@@ -83,7 +83,8 @@ impl fmt::Display for Report {
 /// 规范化用于结构比较的 schema 片段：展开 `$ref`、忽略 `description` / `title`、
 /// 把 `anyOf: [T, null]` 与 `type: [T, "null"]` 统一。
 pub fn canonical<'a>(value: &'a Value, defs: &Defs<'a>, depth: usize) -> Value {
-    if depth > 16 {
+    // 只防递归 `$ref` 死循环；深度按 JSON 层数计，Ref 嵌在 InboxPayload 里要到 20 层以上。
+    if depth > 64 {
         return Value::String("$depth".to_owned());
     }
     match value {

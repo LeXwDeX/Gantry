@@ -63,7 +63,7 @@
 - store 拒绝重复 `delivery.created`，比对 `settings.updated.base_rev` 并在失败时回滚，补充项目级 settings 读取；新增对应测试。
 - 未验证夹具改为显式 `unverified.json`：只允许 `example` 与 `contract-undefined`；没有 `implementation-gap` 类别，实现漏项必须修复。统计按完整验证 / 部分验证 / skip 分开报告。
 
-仍未完成（不声称完整 M0 冻结）：未定事件数据形状（`core` §7.5，14 个，含 `outbox.enqueued` 的 `data`）、`ConfigView.injection` 的非空形状、forge drift 的其余 8 种形状，以及两处原文示意错误（egress 25 位 request_id、Message 示例 id）。入队信封（G-06）与 config 聚合示例（G-07）已按真实字段/资源验证，但 `outbox.enqueued` 事件 `data` 仍未冻结。OpenAPI 与 core 实体仍存在视图级差异：OpenAPI 可省略部分 core 可选字段，`required` 与 `additionalProperties` 不完全相同；`xtask` 将这些列为人工核对信息，未把它们宣称为完全一致。
+仍未完成（不声称完整 M0 冻结）：未定事件数据形状（`core` §7.5，14 个，含 `outbox.enqueued` 的 `data`）、`ConfigView.injection` 的非空形状、forge drift 的其余 8 种形状，以及两处原文示意错误（egress 25 位 request_id、Message 示例 id）。入队信封（G-06）与 config 聚合示例（G-07）已按真实字段/资源验证，但 `outbox.enqueued` 事件 `data` 仍未冻结。OpenAPI 与 core 实体的差异已逐项判定（#83）：`xtask` 规范化纯表示差异后逐关键字比对，剩余差异要么命中通用视图规则（API 封闭对象；API `required` 多出的只能是 core 可空字段），要么登记在 `crates/gantry-xtask/src/viewdiff.rs` 的白名单并写明理由，否则判为漂移直接失败；另有回归测试把 core 实例序列化后直接用 OpenAPI 组件校验。
 
 ## 契约一致性修复（第三轮，2026-10-25）
 

@@ -10,6 +10,7 @@ mod openapi;
 mod rust;
 mod schema;
 mod util;
+mod viewdiff;
 
 use std::collections::BTreeSet;
 use std::fs;
