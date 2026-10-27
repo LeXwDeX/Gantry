@@ -273,10 +273,10 @@ export function ApprovalSheet({
     import.meta.env.MODE !== "production" && isScenarioAdapter(controller.ipc);
   const simulation = simulationFor(controller);
   const approvalDelivery = findApprovalDelivery(state, approval);
-  // 闸门以较新的 GitHub 同步结果为准：forge.synced 刷新交付后，不必重新载入审批单即可启用（E2E-07）。
-  const unsignedGates = sheet
-    ? unsignedGateIssues(newerPr(sheet.unsigned.pr, approvalDelivery?.pr ?? null))
-    : [];
+  // 未签名区的 PR 信息与闸门以较新的 GitHub 同步结果为准：forge.synced 刷新交付后，
+  // 展示与签名可用性一起更新，不必重新载入审批单（E2E-07）。
+  const unsignedPr = sheet ? newerPr(sheet.unsigned.pr, approvalDelivery?.pr ?? null) : null;
+  const unsignedGates = unsignedGateIssues(unsignedPr);
   const liveHead =
     !approval ||
     approval.target.kind !== "pr" ||
@@ -630,30 +630,30 @@ export function ApprovalSheet({
                   <UntrustedText value={sheet.unsigned.delivery_title} />
                 </p>
               ) : null}
-              {sheet.unsigned.pr ? (
+              {unsignedPr ? (
                 <div className="ov-approval__snapshot">
                   <p className="ov-approval__line">
                     <span className="ov-settings__meta">PR 标题：</span>
-                    <UntrustedText value={sheet.unsigned.pr.title} />
+                    <UntrustedText value={unsignedPr.title} />
                   </p>
                   <p className="ov-approval__line">
                     <span className="ov-settings__meta">检查：</span>
-                    {checksText(sheet.unsigned.pr.checks)}
+                    {checksText(unsignedPr.checks)}
                   </p>
                   <p className="ov-approval__line">
                     <span className="ov-settings__meta">GitHub review：</span>
-                    {reviewText(sheet.unsigned.pr.review_state)}
+                    {reviewText(unsignedPr.review_state)}
                   </p>
                   <p className="ov-approval__line">
                     <span className="ov-settings__meta">合并状态：</span>
-                    {sheet.unsigned.pr.mergeable_state}
-                    {sheet.unsigned.pr.in_merge_queue
+                    {unsignedPr.mergeable_state}
+                    {unsignedPr.in_merge_queue
                       ? " · 已在 merge queue"
                       : " · 不在 merge queue"}
                   </p>
                   <p className="ov-approval__line">
                     <span className="ov-settings__meta">快照：</span>
-                    {formatDateTime(sheet.unsigned.pr.synced_at)}
+                    {formatDateTime(unsignedPr.synced_at)}
                   </p>
                 </div>
               ) : (
@@ -693,7 +693,7 @@ export function ApprovalSheet({
                     在 GitHub 上查看 PR ↗
                   </button>
                 ) : null}
-                {sheet.unsigned.pr?.review_state !== "approved" &&
+                {unsignedPr?.review_state !== "approved" &&
                 prOfTarget(sheet.signed.target) ? (
                   <button
                     type="button"
@@ -708,37 +708,37 @@ export function ApprovalSheet({
 
             <section className="ov-approval__gates" aria-label="合并闸门（未签名快照）">
               <h3 className="ov-settings__h3">合并闸门（未签名快照）</h3>
-              {sheet.unsigned.pr ? (
+              {unsignedPr ? (
                 <ul className="ov-gates">
                   <li>
                     <span
                       className={`tone-dot ${
-                        sheet.unsigned.pr.checks.required_ok ? "tone-ok" : "tone-warn"
+                        unsignedPr.checks.required_ok ? "tone-ok" : "tone-warn"
                       }`}
                       aria-hidden="true"
                     />
                     必需 checks @{shortSha(sheet.signed.subject_digest)}：
-                    {checksText(sheet.unsigned.pr.checks)}
+                    {checksText(unsignedPr.checks)}
                   </li>
                   <li>
                     <span
                       className={`tone-dot ${
-                        sheet.unsigned.pr.review_state === "approved"
+                        unsignedPr.review_state === "approved"
                           ? "tone-ok"
                           : "tone-warn"
                       }`}
                       aria-hidden="true"
                     />
-                    GitHub review：{reviewText(sheet.unsigned.pr.review_state)}
+                    GitHub review：{reviewText(unsignedPr.review_state)}
                   </li>
                   <li>
                     <span
                       className={`tone-dot ${
-                        sheet.unsigned.pr.in_merge_queue ? "tone-run" : "tone-idle"
+                        unsignedPr.in_merge_queue ? "tone-run" : "tone-idle"
                       }`}
                       aria-hidden="true"
                     />
-                    merge queue：{sheet.unsigned.pr.in_merge_queue ? "已排队" : "未排队"}
+                    merge queue：{unsignedPr.in_merge_queue ? "已排队" : "未排队"}
                   </li>
                   <li>
                     <span
@@ -929,10 +929,8 @@ function prOfTarget(
 }
 
 
-type GatePr = Pick<
-  PullRequestRef,
-  "checks" | "mergeable_state" | "review_state" | "synced_at"
->;
+/** 未签名区展示与闸门判断共用的 PR 视图：审批单快照与交付缓存的 PR 都满足这个形状。 */
+type GatePr = NonNullable<ApprovalSheetModel["unsigned"]["pr"]>;
 
 /** 审批单快照与交付缓存里的 PR 取同步时间较新者；同样新时保守地沿用快照。 */
 function newerPr(snapshot: GatePr | null | undefined, live: GatePr | null): GatePr | null {

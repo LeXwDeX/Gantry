@@ -49,10 +49,15 @@ describe("审批单随 GitHub 同步与连接恢复更新可签状态", () => {
     const sign = within(sheet).getByRole("button", { name: /签名批准/ });
     expect(sign).toBeDisabled();
     expect(sign).toHaveAttribute("title", expect.stringMatching(/必需 checks 未通过/));
+    expect(within(sheet).getAllByText(/必需 checks 未满足/).length).toBeGreaterThan(0);
     await satisfyGates(m, true);
     await waitFor(() => expect(within(sheet).getByRole("button", { name: /签名批准/ })).toBeEnabled(), {
       timeout: 10_000,
     });
+    // 未签名区的 PR 信息与闸门清单随同一份较新快照更新，不与按钮状态矛盾。
+    expect(within(sheet).queryByText(/必需 checks 未满足/)).toBeNull();
+    expect(within(sheet).getAllByText(/必需 checks 已满足/).length).toBeGreaterThan(0);
+    expect(within(sheet).getAllByText(/已 approve/).length).toBeGreaterThan(0);
   });
 
   it("E2E-04：事件流重连期间打开的审批单在连接恢复后自动重新准备，签名可用", async () => {
