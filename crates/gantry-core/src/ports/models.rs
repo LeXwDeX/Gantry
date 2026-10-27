@@ -151,6 +151,13 @@ pub enum ProviderError {
     RateLimited { retry_after: Option<Duration> },
     #[error("provider unavailable: {message}")]
     Unavailable { message: String },
+    /// Egress 拒绝 `svc_token`（`403 token_invalid`）：调用方换新令牌后重试一次，
+    /// 不计入 `max_attempts`（models.md §7.5）。
+    #[error("egress rejected the service token")]
+    EgressTokenInvalid,
+    /// 模型不存在（404）：不在当前候选上重试；M2 起换下一个降级候选（models.md §7.6）。
+    #[error("model not found")]
+    ModelNotFound,
     #[error("provider protocol error: {message}")]
     Protocol { message: String },
     #[error(transparent)]
