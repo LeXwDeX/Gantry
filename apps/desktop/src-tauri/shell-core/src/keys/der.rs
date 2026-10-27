@@ -25,6 +25,31 @@ pub fn der_to_p1363(der: &[u8]) -> Result<P1363Sig, DerError> {
     Ok(P1363Sig::from_bytes(out))
 }
 
+/// IEEE P1363 `r ‖ s` → DER（CNG 的 ECDSA 签名是 P1363，rustls 的 `Signer` 要 DER）。
+pub fn p1363_to_der(sig: &[u8; 64]) -> Vec<u8> {
+    fn int(scalar: &[u8]) -> Vec<u8> {
+        let start = scalar
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(scalar.len() - 1);
+        let digits = &scalar[start..];
+        let mut out = vec![0x02];
+        if digits[0] & 0x80 != 0 {
+            out.push(digits.len() as u8 + 1);
+            out.push(0);
+        } else {
+            out.push(digits.len() as u8);
+        }
+        out.extend_from_slice(digits);
+        out
+    }
+    let mut body = int(&sig[..32]);
+    body.extend(int(&sig[32..]));
+    let mut out = vec![0x30, body.len() as u8];
+    out.extend(body);
+    out
+}
+
 /// 读一个短 / 长形式长度的 TLV，返回（内容，剩余）。P-256 签名最长 72 字节，长度不超过 1 字节。
 fn read_tlv(input: &[u8], tag: u8) -> Result<(&[u8], &[u8]), DerError> {
     let (&t, input) = input.split_first().ok_or(DerError("意外结束"))?;
@@ -146,6 +171,19 @@ mod tests {
         ];
         for case in cases {
             assert!(der_to_p1363(&case).is_err(), "{case:02x?}");
+        }
+    }
+
+    #[test]
+    fn p1363_to_der_round_trips() {
+        let mut cases = vec![[0x11u8; 64], [0xffu8; 64]];
+        let mut short = [0u8; 64];
+        short[31] = 1;
+        short[63] = 0x80;
+        cases.push(short);
+        for sig in cases {
+            let der = p1363_to_der(&sig);
+            assert_eq!(der_to_p1363(&der).unwrap().as_bytes(), &sig);
         }
     }
 
