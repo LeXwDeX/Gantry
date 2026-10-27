@@ -1,0 +1,6 @@
+diff --git a/.gitmodules b/.gitmodules
+new file mode 100644
+--- /dev/null
++++ b/.gitmodules
+@@ -0,0 +1 @@
++[submodule "x"]

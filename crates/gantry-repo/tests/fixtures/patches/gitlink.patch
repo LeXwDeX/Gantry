@@ -1,0 +1,7 @@
+diff --git a/vendor/lib b/vendor/lib
+new file mode 160000
+index 0000000..3333333
+--- /dev/null
++++ b/vendor/lib
+@@ -0,0 +1 @@
++Subproject commit 3333333333333333333333333333333333333333
