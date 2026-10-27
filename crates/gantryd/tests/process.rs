@@ -8,11 +8,12 @@
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -41,6 +42,7 @@ fn fake_gantryd(scratch: &Scratch, control_uid: u32) -> Command {
             support::CHILD_ENV,
             format!("{}\n{control_uid}", scratch.config().display()),
         )
+        .env_remove(support::CHILD_SQLITE_ENV)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     command
@@ -51,17 +53,25 @@ const MESSAGE: &str = "msg_01JB7N3R5T8X2V6M9Q4K1W7YZD";
 /// 每个测试一个临时目录（放配置和套接字），drop 时清理。
 struct Scratch {
     dir: PathBuf,
+    owner: Arc<ScratchOwner>,
 }
+
+struct ScratchOwner(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "gtd-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = loop {
+            let mut random = [0u8; 16];
+            getrandom::fill(&mut random).unwrap();
+            let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+            let dir = std::env::temp_dir().join(format!("gtd-{name}"));
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => break dir,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create scratch: {error}"),
+            }
+        };
+        let owner = Arc::new(ScratchOwner(dir.clone()));
         let config = format!(
             r#"
 [server]
@@ -81,7 +91,7 @@ journal_target = "/srv/gantry-test/revocations.journal"
             dir.join("control.sock").display()
         );
         std::fs::write(dir.join("gantry.toml"), config).unwrap();
-        Self { dir }
+        Self { dir, owner }
     }
 
     fn config(&self) -> PathBuf {
@@ -92,28 +102,113 @@ journal_target = "/srv/gantry-test/revocations.journal"
         self.dir.join("control.sock")
     }
 
+    fn sqlite(&self) -> PathBuf {
+        self.dir.join("sqlite")
+    }
+
     /// 当前进程的 uid（测试不以 root 运行，只能把它放行）。
     fn uid(&self) -> u32 {
         std::fs::metadata(self.config()).unwrap().uid()
     }
 }
 
-impl Drop for Scratch {
+impl Drop for ScratchOwner {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
 struct Daemon {
     child: Child,
+    owner: Option<Arc<ScratchOwner>>,
 }
 
 impl Daemon {
     fn spawn(scratch: &Scratch, control_uid: u32) -> Self {
-        let child = fake_gantryd(scratch, control_uid).spawn().unwrap();
-        let daemon = Self { child };
-        wait_for_socket(&scratch.socket());
+        Self::start(fake_gantryd(scratch, control_uid), scratch)
+    }
+
+    fn spawn_sqlite(scratch: &Scratch) -> Self {
+        let mut command = fake_gantryd(scratch, scratch.uid());
+        let fd = rustix::fs::open(
+            scratch.sqlite(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        command
+            .env(support::CHILD_SQLITE_ENV, scratch.sqlite())
+            .stdin(Stdio::from(std::fs::File::from(fd)));
+        Self::start(command, scratch)
+    }
+
+    fn start(mut command: Command, scratch: &Scratch) -> Self {
+        let child = command.spawn().unwrap();
+        let mut daemon = Self {
+            child,
+            owner: Some(scratch.owner.clone()),
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = daemon.child.try_wait().unwrap() {
+                let mut stderr = String::new();
+                std::io::Read::read_to_string(daemon.child.stderr.as_mut().unwrap(), &mut stderr)
+                    .unwrap();
+                panic!("gantryd exited before binding: {status:?}: {stderr}");
+            }
+            if UnixStream::connect(scratch.socket()).is_ok() {
+                if let Some(status) = daemon.child.try_wait().unwrap() {
+                    let mut stderr = String::new();
+                    std::io::Read::read_to_string(
+                        daemon.child.stderr.as_mut().unwrap(),
+                        &mut stderr,
+                    )
+                    .unwrap();
+                    panic!("gantryd exited during startup: {status:?}: {stderr}");
+                }
+                break;
+            }
+            assert!(Instant::now() < deadline, "control socket never came up");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         daemon
+    }
+
+    fn crash(mut self) -> std::process::ExitStatus {
+        if let Some(status) = self.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(self.child.stderr.as_mut().unwrap(), &mut stderr)
+                .unwrap();
+            panic!("gantryd exited before SIGKILL: {status:?}: {stderr}");
+        }
+        if let Err(error) = self.child.kill() {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let status = loop {
+                match self.child.try_wait() {
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    result => break result,
+                }
+            };
+            let mut stderr = String::new();
+            if matches!(status, Ok(Some(_))) {
+                let _ =
+                    std::io::Read::read_to_string(self.child.stderr.as_mut().unwrap(), &mut stderr);
+            }
+            panic!("failed to send SIGKILL: {error}; status: {status:?}; stderr: {stderr}");
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.child.try_wait().unwrap().is_some() {
+                return self.child.wait().unwrap();
+            }
+            assert!(Instant::now() < deadline, "gantryd ignored SIGKILL");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn terminate(mut self) -> std::process::ExitStatus {
@@ -136,7 +231,22 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                _ => {
+                    // 不确定子进程已停止时保留目录，避免删除其正在使用的数据。
+                    if let Some(owner) = self.owner.take() {
+                        std::mem::forget(owner);
+                    }
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -322,7 +432,16 @@ fn concurrent_starts_leave_exactly_one_owner() {
 
     let a = fake_gantryd(&scratch, scratch.uid()).spawn().unwrap();
     let b = fake_gantryd(&scratch, scratch.uid()).spawn().unwrap();
-    let (mut a, mut b) = (Daemon { child: a }, Daemon { child: b });
+    let (mut a, mut b) = (
+        Daemon {
+            child: a,
+            owner: Some(scratch.owner.clone()),
+        },
+        Daemon {
+            child: b,
+            owner: Some(scratch.owner.clone()),
+        },
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     let loser = loop {
         if let Some(status) = a.child.try_wait().unwrap() {
@@ -419,6 +538,456 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
 
     // 停机：引擎主循环随控制通道一起退出，进程以 0 退出。
     assert!(daemon.terminate().success());
+}
+
+#[test]
+fn sqlite_child_rejects_a_directory_outside_its_scratch() {
+    let scratch = Scratch::new();
+    let other = Scratch::new();
+    std::fs::create_dir(other.sqlite()).unwrap();
+    std::os::unix::fs::symlink(other.sqlite(), scratch.sqlite()).unwrap();
+
+    for dir in [other.sqlite(), scratch.sqlite()] {
+        let mut command = fake_gantryd(&scratch, scratch.uid());
+        command
+            .env(support::CHILD_SQLITE_ENV, &dir)
+            .stdin(Stdio::from(std::fs::File::open(&dir).unwrap()));
+        let mut daemon = Daemon {
+            child: command.spawn().unwrap(),
+            owner: Some(scratch.owner.clone()),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = daemon.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "invalid SQLite path started gantryd"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!status.success());
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(daemon.child.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+        assert!(stderr.contains("assertion"), "{stderr}");
+        assert!(!other.sqlite().join("gantry.db").exists());
+        assert!(!scratch.socket().exists());
+    }
+}
+
+#[test]
+fn sqlite_child_rejects_a_mismatched_parent_handle() {
+    let scratch = Scratch::new();
+    let other = Scratch::new();
+    std::fs::create_dir(scratch.sqlite()).unwrap();
+    std::fs::create_dir(other.sqlite()).unwrap();
+    let mut command = fake_gantryd(&scratch, scratch.uid());
+    command
+        .env(support::CHILD_SQLITE_ENV, scratch.sqlite())
+        .stdin(Stdio::from(std::fs::File::open(other.sqlite()).unwrap()));
+    let mut daemon = Daemon {
+        child: command.spawn().unwrap(),
+        owner: Some(scratch.owner.clone()),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = daemon.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "mismatched handle started gantryd"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success());
+    assert!(!scratch.sqlite().join("gantry.db").exists());
+    assert!(!other.sqlite().join("gantry.db").exists());
+}
+
+#[test]
+fn sqlite_child_rejects_symlinks_in_the_store() {
+    for name in [
+        "gantry.db",
+        "gantry.db-wal",
+        "gantry.db-shm",
+        "gantry.lock",
+        "cas",
+        "cas/nested",
+    ] {
+        let scratch = Scratch::new();
+        let other = Scratch::new();
+        std::fs::create_dir(scratch.sqlite()).unwrap();
+        if name.starts_with("cas/") {
+            std::fs::create_dir(scratch.sqlite().join("cas")).unwrap();
+        }
+        let target = other.dir.join("sentinel");
+        std::fs::write(&target, b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&target, scratch.sqlite().join(name)).unwrap();
+        let mut command = fake_gantryd(&scratch, scratch.uid());
+        command
+            .env(support::CHILD_SQLITE_ENV, scratch.sqlite())
+            .stdin(Stdio::from(std::fs::File::open(scratch.sqlite()).unwrap()));
+        let mut daemon = Daemon {
+            child: command.spawn().unwrap(),
+            owner: Some(scratch.owner.clone()),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = daemon.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "symlink {name} started gantryd");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!status.success(), "{name}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged", "{name}");
+        assert!(!scratch.socket().exists());
+    }
+}
+
+#[test]
+fn sqlite_child_rejects_hard_links_in_the_store() {
+    for name in [
+        "gantry.db",
+        "gantry.db-wal",
+        "gantry.db-shm",
+        "gantry.lock",
+        "cas/nested",
+    ] {
+        let scratch = Scratch::new();
+        let other = Scratch::new();
+        std::fs::create_dir(scratch.sqlite()).unwrap();
+        if name.starts_with("cas/") {
+            std::fs::create_dir(scratch.sqlite().join("cas")).unwrap();
+        }
+        let target = other.dir.join("sentinel");
+        std::fs::write(&target, b"unchanged").unwrap();
+        std::fs::hard_link(&target, scratch.sqlite().join(name)).unwrap();
+        let mut command = fake_gantryd(&scratch, scratch.uid());
+        command
+            .env(support::CHILD_SQLITE_ENV, scratch.sqlite())
+            .stdin(Stdio::from(std::fs::File::open(scratch.sqlite()).unwrap()));
+        let mut daemon = Daemon {
+            child: command.spawn().unwrap(),
+            owner: Some(scratch.owner.clone()),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = daemon.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hard link {name} started gantryd"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!status.success(), "{name}");
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(daemon.child.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+        assert!(
+            stderr.contains("SQLite directory contains a hard link"),
+            "{name}: {stderr}"
+        );
+        assert!(!scratch.socket().exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged", "{name}");
+        drop(daemon);
+        drop(scratch);
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged", "{name}");
+        assert_eq!(std::fs::metadata(&target).unwrap().nlink(), 1, "{name}");
+    }
+}
+
+/// 在工作树清理和游标追平后杀死测试进程，以同一 SQLite 目录重启。
+#[test]
+fn sqlite_store_survives_process_crash_and_restart() {
+    let scratch = Scratch::new();
+    std::fs::create_dir(scratch.sqlite()).unwrap();
+    let daemon = Daemon::spawn_sqlite(&scratch);
+    let mut client = Client::connect(&scratch);
+
+    let status = client.ok(json!({"cmd": "status"}));
+    assert_eq!(status["profile"], "fakes");
+    let modules = status["modules"].as_array().unwrap();
+    for (name, provider) in [
+        ("store", "real"),
+        ("engine", "real"),
+        ("notify", "real"),
+        ("forge", "fake"),
+        ("repo", "fake"),
+        ("policy", "fake"),
+        ("sandbox", "fake"),
+    ] {
+        let module = modules
+            .iter()
+            .find(|module| module["module"] == name)
+            .unwrap();
+        assert_eq!(module["provider"], provider, "{name}");
+    }
+    assert_eq!(status["engine"]["degraded"], json!({}));
+    let runtime = client.ok(json!({"cmd": "fake.runtime_status"}));
+    assert_eq!(runtime["startup_cursor"], 0);
+
+    let create = json!({
+        "cmd": "fake.create_delivery",
+        "args": {"project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login",
+                 "user_text": "修复登录超时"},
+    });
+    let delivery = client.ok(create.clone())["delivery_id"].clone();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        if step["done"] == true {
+            break;
+        }
+        assert!(Instant::now() < deadline, "stuck at {}", step["stage"]);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (before_head, before, before_cursor) = caught_up_log(&mut client);
+    let created: Vec<_> = before
+        .iter()
+        .filter(|event| event["type"] == "delivery.created")
+        .collect();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0]["subject"], delivery);
+    assert_eq!(created[0]["data"]["source_message_id"], MESSAGE);
+    let transitions: Vec<_> = before
+        .iter()
+        .filter(|event| event["type"] == "delivery.stage_changed" && event["subject"] == delivery)
+        .collect();
+    let order: Vec<_> = transitions
+        .iter()
+        .map(|event| {
+            (
+                event["data"]["from"].as_str().unwrap(),
+                event["data"]["to"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("spec", "implement"),
+            ("implement", "propose"),
+            ("propose", "review"),
+            ("review", "merge"),
+            ("merge", "closed"),
+        ]
+    );
+    assert_eq!(transitions[0]["data"]["reason"], "admission_skipped");
+    assert_eq!(
+        before
+            .iter()
+            .filter(
+                |event| event["type"] == "worktree.removed" && event["correlation_id"] == delivery
+            )
+            .count(),
+        1
+    );
+
+    // 由入队事件定位动作：succeeded 的信封没有 delivery correlation_id。
+    let actions: Vec<_> = before
+        .iter()
+        .filter(|event| event["type"] == "outbox.enqueued" && event["correlation_id"] == delivery)
+        .map(|event| {
+            (
+                event["subject"].clone(),
+                event["data"]["action"]["kind"].clone(),
+            )
+        })
+        .collect();
+    for kind in ["push_branch", "create_pr", "merge_pr"] {
+        assert!(
+            actions.iter().any(|(_, action_kind)| action_kind == kind),
+            "{actions:?}"
+        );
+    }
+    for (id, _) in &actions {
+        for ty in ["outbox.executing", "outbox.succeeded"] {
+            assert_eq!(
+                before
+                    .iter()
+                    .filter(|event| event["type"] == ty && event["subject"] == *id)
+                    .count(),
+                1,
+                "{id}: {ty}"
+            );
+        }
+    }
+    let rows: Vec<_> = actions
+        .iter()
+        .map(|(id, kind)| {
+            let row = client.ok(json!({"cmd": "fake.outbox_action", "args": {"id": id}}));
+            assert_eq!(row["id"], *id);
+            assert_eq!(row["kind"], *kind);
+            assert_eq!(row["delivery_id"], delivery);
+            assert_eq!(row["status"], "succeeded");
+            assert!(row["idempotency_key"]
+                .as_str()
+                .is_some_and(|key| !key.is_empty()));
+            let enqueued = before
+                .iter()
+                .find(|event| event["type"] == "outbox.enqueued" && event["subject"] == *id)
+                .unwrap();
+            assert_eq!(
+                row["idempotency_key"],
+                enqueued["data"]["action"]["idempotency_key"]
+            );
+            row
+        })
+        .collect();
+    assert!(before_cursor >= before_head && before_head > 0);
+
+    drop(client);
+    let status = daemon.crash();
+    assert_eq!(status.signal(), Some(9), "expected SIGKILL, got {status:?}");
+    let db = std::fs::read(scratch.sqlite().join("gantry.db")).unwrap();
+    assert!(db.starts_with(b"SQLite format 3\0"));
+
+    let daemon = Daemon::spawn_sqlite(&scratch);
+    let mut client = Client::connect(&scratch);
+    let status = client.ok(json!({"cmd": "status"}));
+    assert_eq!(status["profile"], "fakes");
+    assert!(status["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|module| module["module"] == "store" && module["provider"] == "real"));
+    assert_eq!(status["engine"]["degraded"], json!({}));
+    let runtime = client.ok(json!({"cmd": "fake.runtime_status"}));
+    assert!(runtime["startup_cursor"].as_u64().unwrap() >= before_cursor);
+    assert!(runtime["cursor"].as_u64().unwrap() >= before_cursor);
+    assert_eq!(runtime["degraded"], json!({}));
+
+    let (_, reopened, _) = caught_up_log(&mut client);
+    assert!(reopened.len() >= before.len());
+    assert_eq!(&reopened[..before.len()], before.as_slice());
+    assert_eq!(client.ok(create)["delivery_id"], delivery);
+    for _ in 0..3 {
+        let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        assert_eq!(step["stage"], "closed");
+        assert_eq!(step["done"], true);
+    }
+    let (_, after, after_cursor) = caught_up_log(&mut client);
+    assert!(after_cursor >= before_cursor);
+    assert_eq!(after, reopened, "retry or fake executor appended events");
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| event["type"] == "delivery.created")
+            .count(),
+        1
+    );
+    let after_transitions: Vec<_> = after
+        .iter()
+        .filter(|event| event["type"] == "delivery.stage_changed" && event["subject"] == delivery)
+        .collect();
+    assert_eq!(after_transitions, transitions);
+    assert_eq!(
+        after
+            .iter()
+            .filter(
+                |event| event["type"] == "worktree.removed" && event["correlation_id"] == delivery
+            )
+            .count(),
+        1
+    );
+    let after_actions: Vec<_> = after
+        .iter()
+        .filter(|event| event["type"] == "outbox.enqueued" && event["correlation_id"] == delivery)
+        .map(|event| {
+            (
+                event["subject"].clone(),
+                event["data"]["action"]["kind"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(after_actions, actions);
+    for ((id, _), row) in actions.iter().zip(&rows) {
+        assert_eq!(
+            client.ok(json!({"cmd": "fake.outbox_action", "args": {"id": id}})),
+            *row
+        );
+    }
+    for (id, _) in &actions {
+        for ty in ["outbox.executing", "outbox.succeeded"] {
+            assert_eq!(
+                after
+                    .iter()
+                    .filter(|event| event["type"] == ty && event["subject"] == *id)
+                    .count(),
+                1,
+                "{id}: {ty}"
+            );
+        }
+    }
+    assert_eq!(
+        client.ok(json!({"cmd": "status"}))["engine"]["degraded"],
+        json!({})
+    );
+    let old_head = after.last().unwrap()["seq"].as_u64().unwrap();
+    assert!(old_head >= before_head);
+    let new_delivery = client.ok(json!({
+        "cmd": "fake.create_delivery",
+        "args": {"project_id": PROJECT, "source_message_id": "msg_01JB7N3R5T8X2V6M9Q4K1W7YZE", "title": "another delivery", "user_text": "独立请求"}
+    }))["delivery_id"].clone();
+    assert_ne!(new_delivery, delivery);
+    let (_, extended) = read_log(&mut client);
+    assert_eq!(&extended[..after.len()], after.as_slice());
+    let created = extended
+        .iter()
+        .find(|event| event["type"] == "delivery.created" && event["subject"] == new_delivery)
+        .unwrap();
+    assert_eq!(created["seq"], old_head + 1);
+    assert!(daemon.terminate().success());
+}
+
+/// 分页读取一次日志前缀，再等持久游标追上该前缀。
+fn caught_up_log(client: &mut Client) -> (u64, Vec<Value>, u64) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (head, events) = read_log(client);
+        let runtime = client.ok(json!({"cmd": "fake.runtime_status"}));
+        assert_eq!(runtime["degraded"], json!({}), "{runtime}");
+        let cursor = runtime["cursor"].as_u64().unwrap();
+        if cursor >= head {
+            return (head, events, cursor);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "engine cursor {cursor} behind {head}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn read_log(client: &mut Client) -> (u64, Vec<Value>) {
+    let mut after = 0;
+    let mut head = None;
+    let mut events = Vec::new();
+    loop {
+        let page = client.ok(json!({"cmd": "fake.events", "args": {"after": after}}));
+        let target = *head.get_or_insert(page["head"].as_u64().unwrap());
+        let page_events = page["events"].as_array().unwrap();
+        assert!(
+            after >= target || !page_events.is_empty(),
+            "incomplete event replay at {after}/{target}"
+        );
+        for event in page_events {
+            let seq = event["seq"].as_u64().unwrap();
+            assert_eq!(seq, after + 1, "non-contiguous event log");
+            after = seq;
+            if seq <= target {
+                events.push(event.clone());
+            }
+        }
+        if after >= target {
+            return (target, events);
+        }
+    }
 }
 
 /// 交付单元的阶段迁移 `(to, reason)`，按日志顺序。

@@ -4,7 +4,7 @@
 //! 测试进程里，服务端二进制里没有。
 
 use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, SettingsResource};
-use gantry_core::ids::{DeliveryId, MessageId, ProjectId};
+use gantry_core::ids::{ActionId, DeliveryId, MessageId, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::settings::defaults::builtin_resolved;
 use gantry_core::settings::resource::ResolvedSettings;
@@ -46,6 +46,7 @@ const FAKE_ACTOR: &str = "gantryd_fake";
 pub struct FakeCommands {
     pub assembly: Arc<Assembly>,
     fakes: FakeHandles,
+    startup_cursor: Seq,
     setup: Mutex<SetupState>,
     drive: Mutex<DriveState>,
 }
@@ -61,10 +62,18 @@ struct SetupState {
 }
 
 impl FakeCommands {
-    pub fn new(assembly: Arc<Assembly>, fakes: FakeHandles) -> Self {
+    pub async fn new(assembly: Arc<Assembly>, fakes: FakeHandles) -> Self {
+        // 在运行时主循环启动前读取，避免重放后重新推进游标掩盖持久化丢失。
+        let startup_cursor = assembly
+            .engine
+            .status()
+            .await
+            .expect("runtime status")
+            .cursor;
         Self {
             assembly,
             fakes,
+            startup_cursor,
             setup: Mutex::new(SetupState::default()),
             drive: Mutex::new(DriveState::default()),
         }
@@ -168,6 +177,27 @@ impl CommandSet for FakeCommands {
         Some(match cmd {
             "fake.create_delivery" => create_delivery(&self.assembly, args).await,
             "fake.events" => events(&self.assembly, args).await,
+            "fake.outbox_action" => {
+                match args
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::parse::<ActionId>)
+                {
+                    Some(Ok(id)) => match self.assembly.store.snapshot().await {
+                        Ok(snapshot) => Response::ok(json!(snapshot.outbox_action(&id))),
+                        Err(error) => Response::err("store", error.to_string()),
+                    },
+                    _ => Response::err("bad_request", "expected action id"),
+                }
+            }
+            "fake.runtime_status" => match self.assembly.engine.status().await {
+                Ok(status) => {
+                    let mut result = json!(status);
+                    result["startup_cursor"] = json!(self.startup_cursor);
+                    Response::ok(result)
+                }
+                Err(error) => Response::err("engine", error.to_string()),
+            },
             "fake.drive" => self.drive(args).await,
             "fake.end_bootstrap" => {
                 self.setup().bootstrap_over = true;
@@ -296,7 +326,14 @@ impl FakeCommands {
             .map(|record| record.commit_oid);
         let granted = self.drive_state().granted;
         if let Some(head) = head {
+            let tx = match store.begin_write().await {
+                Ok(tx) => tx,
+                Err(error) => return Response::err("store", error.to_string()),
+            };
             script_merge(&self.fakes.policy, delivery, head, granted);
+            if let Err(error) = tx.rollback().await {
+                return Response::err("store", error.to_string());
+            }
         }
         let done = match execute_outbox(store, head).await {
             Ok(done) => done,
@@ -320,8 +357,7 @@ impl FakeCommands {
                 .find(|(_, approval)| approval.status == ApprovalStatus::Pending)
                 .map(|(id, _)| *id);
             if let (Some(id), Some(head)) = (pending, head) {
-                script_merge(&self.fakes.policy, delivery, head, Some(id));
-                if let Err(error) = self.grant(delivery, id).await {
+                if let Err(error) = self.grant(delivery, id, head).await {
                     return Response::err("policy", error);
                 }
                 self.drive_state().granted = Some(id);
@@ -353,11 +389,24 @@ impl FakeCommands {
     }
 
     /// 设备签名授予：policy 状态置 granted，并写 `approval.granted`（生产里由 policy 在同一事务写）。
-    async fn grant(&self, delivery: DeliveryId, id: ApprovalId) -> Result<(), String> {
+    async fn grant(
+        &self,
+        delivery: DeliveryId,
+        id: ApprovalId,
+        head: GitOid,
+    ) -> Result<(), String> {
+        let gate = self
+            .fakes
+            .store
+            .begin_write()
+            .await
+            .map_err(|error| error.to_string())?;
         self.fakes
             .policy
             .grant(&id)
             .map_err(|error| error.to_string())?;
+        script_merge(&self.fakes.policy, delivery, head, Some(id));
+        gate.rollback().await.map_err(|error| error.to_string())?;
         let digest = sha256(b"approval");
         let data = ApprovalGrantedData {
             approval_id: id,
