@@ -12,10 +12,22 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/ForgeSyncedChange"
-      }
+      },
+      "description": "首次快照时为空，字段全部在 `initial` 里。"
     },
     "synced_at": {
       "$ref": "#/$defs/Timestamp"
+    },
+    "initial": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ForgeSyncedInitial"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "只在首次快照出现；之后的同步一律只发 `changes`。"
     }
   },
   "required": [
@@ -378,6 +390,95 @@
     "Timestamp": {
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "ForgeSyncedInitial": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "pr"
+            },
+            "state": {
+              "$ref": "#/$defs/ForgeSyncedState"
+            },
+            "title": {
+              "$ref": "#/$defs/UntrustedText"
+            },
+            "head_sha": {
+              "$ref": "#/$defs/GitOid"
+            },
+            "base_ref": {
+              "type": "string"
+            },
+            "base_sha": {
+              "$ref": "#/$defs/GitOid"
+            },
+            "draft": {
+              "type": "boolean"
+            },
+            "mergeable_state": {
+              "type": "string"
+            },
+            "in_merge_queue": {
+              "type": "boolean"
+            },
+            "checks": {
+              "$ref": "#/$defs/CheckSummary"
+            },
+            "review_state": {
+              "$ref": "#/$defs/ReviewState"
+            }
+          },
+          "required": [
+            "type",
+            "state",
+            "title",
+            "head_sha",
+            "base_ref",
+            "base_sha",
+            "draft",
+            "mergeable_state",
+            "in_merge_queue",
+            "checks",
+            "review_state"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "issue"
+            },
+            "state": {
+              "$ref": "#/$defs/ForgeSyncedState"
+            },
+            "state_reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IssueStateReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": {
+              "$ref": "#/$defs/UntrustedText"
+            }
+          },
+          "required": [
+            "type",
+            "state",
+            "title"
+          ]
+        }
+      ],
+      "description": "首次快照的完整字段（event-data §2.2.5.1「首次快照」）：本地第一次看到该 PR / Issue 时\n没有 `from` 可比，改为一次给出该 target 适用的全部白名单字段。"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
