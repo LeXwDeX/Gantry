@@ -9,18 +9,24 @@
 //! - [`server`]：请求处理管线（本文 §7.1）与公共响应头；
 //! - [`auth`]：设备映射、角色与档案；`pki` 的设备目录经窄接口 [`auth::DeviceLookup`] 接入；
 //! - [`rate`]：按设备的令牌桶；
-//! - [`query`]：查询参数的严格校验。
+//! - [`query`]：查询参数的严格校验；
+//! - [`validate`]：请求体按契约组件校验（I7：未知字段 → `unknown_field`）；
+//! - [`idempotency`]：`Idempotency-Key` 登记与重放；
+//! - [`control`]：交付单元控制与发消息（`DeliveryControl` / `ConversationService`，收 `ActorCtx`）。
 //!
-//! TLS 监听器、幂等登记、事件流、审批与 settings 在后续切片加入（issue #99）。
+//! TLS 监听器、读路由、事件流、审批与 settings 在后续切片加入（issue #99）。
 
 pub mod auth;
 pub mod consts;
+pub mod control;
 pub mod handlers;
+pub mod idempotency;
 pub mod problem;
 pub mod query;
 pub mod rate;
 pub mod registry;
 pub mod server;
+pub mod validate;
 
 pub use auth::{AuthContext, DeviceLookup, LookupError, PeerCert};
 pub use problem::{FieldError, Problem, ProblemCode};

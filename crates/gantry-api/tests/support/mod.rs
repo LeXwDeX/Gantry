@@ -1,12 +1,15 @@
 //! 管线测试的共用替身：计数的设备目录、内存 store、可脚本化的处理程序。
 #![allow(dead_code)]
 
+pub mod doubles;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use gantry_api::idempotency::MemoryIdempotency;
 use gantry_api::server::{HandlerRequest, Reply, RouteHandler};
 use gantry_api::{
     ApiConfig, ApiCore, ApiResponse, DeviceLookup, LookupError, PeerCert, Problem, RequestHead,
@@ -107,6 +110,9 @@ pub struct Harness {
     pub clock: Arc<FakeClock>,
     pub devices: Arc<Devices>,
     pub store: Store,
+    pub engine: Arc<gantry_fakes::engine::FakeEngine>,
+    pub conversation: Arc<doubles::ConvFaults>,
+    pub idempotency: Arc<MemoryIdempotency>,
 }
 
 pub fn device(n: u128, platform: DevicePlatform, role: DeviceRole) -> Device {
@@ -129,11 +135,17 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
     })
     .unwrap();
     let devices = Arc::new(Devices::default());
+    let engine = Arc::new(gantry_fakes::engine::FakeEngine::new());
+    let conversation = Arc::new(doubles::ConvFaults::new());
+    let idempotency = Arc::new(MemoryIdempotency::new(clock.clone()));
     let svc = Services {
         clock: clock.clone(),
         ids,
         store: store.clone(),
         devices: devices.clone(),
+        engine: engine.clone(),
+        conversation: conversation.clone(),
+        idempotency: idempotency.clone(),
     };
     let core = match handler {
         Some(h) => ApiCore::with_handler(ApiConfig::default(), svc, h),
@@ -144,6 +156,9 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
         clock,
         devices,
         store,
+        engine,
+        conversation,
+        idempotency,
     }
 }
 
@@ -209,4 +224,19 @@ pub fn assert_problem(resp: &ApiResponse, status: u16, code: &str) -> Value {
     assert!(header(resp, "access-control-allow-origin").is_none());
     validate("Problem", &b);
     b
+}
+
+/// 换一个幂等存储重建同一套服务（模拟重启后 `api_idempotency` 的完成记录丢失）。
+pub fn rebuild_with_idempotency(h: &Harness, idempotency: Arc<MemoryIdempotency>) -> Harness {
+    let mut svc = h.core.services().clone();
+    svc.idempotency = idempotency.clone();
+    Harness {
+        core: ApiCore::new(ApiConfig::default(), svc),
+        clock: h.clock.clone(),
+        devices: h.devices.clone(),
+        store: h.store.clone(),
+        engine: h.engine.clone(),
+        conversation: h.conversation.clone(),
+        idempotency,
+    }
 }
