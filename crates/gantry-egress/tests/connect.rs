@@ -135,8 +135,16 @@ fn last_audit(egress: &Egress) -> Value {
     egress.audit.events().last().cloned().unwrap()
 }
 
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(60)).await;
+/// 最近一条拒绝记录。拒绝审计在回应之前写下，所以收到拒绝时它一定已在；而先前放行的
+/// 隧道会在关闭时补写 allow 记录，可能与之并发，因此不能取"最后一条"。
+fn last_denial(egress: &Egress) -> Value {
+    egress
+        .audit
+        .events()
+        .into_iter()
+        .rev()
+        .find(|event| event["decision"] == "deny")
+        .expect("a deny record")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -154,8 +162,10 @@ async fn allowed_hosts_get_a_tunnel_and_an_audit_record() {
     let mut buf = [0u8; 4];
     stream.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"ping");
-    drop(stream);
-    settle().await;
+    // 关闭上行并读到 EOF：Egress 在关闭到调用方的连接之前写好审计。
+    stream.shutdown().await.unwrap();
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).await.unwrap();
     let event = last_audit(&t.egress);
     assert_eq!(event["kind"], "connect");
     assert_eq!(event["decision"], "allow");
@@ -194,8 +204,7 @@ async fn github_is_hard_denied_with_an_audited_job_id() {
     ] {
         let (status, _, _) = connect(t.addr, target, Some(&auth)).await;
         assert!(status.starts_with("HTTP/1.1 403"), "{target}: {status}");
-        settle().await;
-        let event = last_audit(&t.egress);
+        let event = last_denial(&t.egress);
         assert_eq!(event["rule"], "hard.github", "{target}");
         assert_eq!(event["caller"]["type"], "job", "{target}");
     }
@@ -222,8 +231,7 @@ async fn ip_literals_and_other_ports_are_denied() {
     ] {
         let (status, _, _) = connect(t.addr, target, Some(&auth)).await;
         assert!(status.starts_with("HTTP/1.1 403"), "{target}: {status}");
-        settle().await;
-        assert_eq!(last_audit(&t.egress)["rule"], rule, "{target}");
+        assert_eq!(last_denial(&t.egress)["rule"], rule, "{target}");
     }
     assert!(t.dialer.dialed.lock().unwrap().is_empty());
 }
@@ -255,8 +263,7 @@ async fn proxy_credentials_are_required_and_checked() {
     )
     .await;
     assert!(status.starts_with("HTTP/1.1 403"), "revoked: {status}");
-    settle().await;
-    assert_eq!(last_audit(&t.egress)["rule"], "token.revoked");
+    assert_eq!(last_denial(&t.egress)["rule"], "token.revoked");
     assert!(t.dialer.dialed.lock().unwrap().is_empty());
 }
 
@@ -280,8 +287,7 @@ async fn hosts_outside_the_effective_groups_are_denied() {
     let auth = basic("job", &token);
     let (status, _, _) = connect(t.addr, "pypi.org:443", Some(&auth)).await;
     assert!(status.starts_with("HTTP/1.1 403"));
-    settle().await;
-    assert_eq!(last_audit(&t.egress)["rule"], "profile.not_in_groups");
+    assert_eq!(last_denial(&t.egress)["rule"], "profile.not_in_groups");
     // 一层通配：index.crates.io 放行，a.b.crates.io 不放行（OQ-E8 取更严）。
     let (status, _, _) = connect(t.addr, "index.crates.io:443", Some(&auth)).await;
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
@@ -326,8 +332,7 @@ async fn dns_answers_are_checked_and_pinned() {
     );
     let (status, _, _) = connect(t.addr, "registry.npmjs.org:443", Some(&auth)).await;
     assert!(status.starts_with("HTTP/1.1 403"), "{status}");
-    settle().await;
-    assert_eq!(last_audit(&t.egress)["rule"], "hard.private_ip");
+    assert_eq!(last_denial(&t.egress)["rule"], "hard.private_ip");
 
     for answers in [
         vec![PUBLIC_IP, "10.1.2.3"],
@@ -379,7 +384,6 @@ async fn tunnel_limits_are_enforced() {
         matches!(read, Ok(Ok(0)) | Ok(Err(_))),
         "idle tunnel must close"
     );
-    settle().await;
 
     // 字节上限：回显 4 字节两次之后超过 8 字节。
     let (status, _, mut stream) = connect(t.addr, "registry.npmjs.org:443", Some(&auth)).await;

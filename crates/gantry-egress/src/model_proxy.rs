@@ -66,6 +66,9 @@ const STRIP_RESPONSE_HEADERS: &[&str] = &[
     "set-cookie2",
     "authorization",
     "x-api-key",
+    // 响应体由本进程重新分帧（chunked）：调用方只在用量记账与审计完成之后才看到流结束，
+    // 不会因为读满上游的 `content-length` 而先于记账结束。
+    "content-length",
 ];
 
 /// 限量与超时（§7.3 步 4–5、§10 [建议值，待调优]）。
@@ -616,6 +619,7 @@ impl ModelProxy {
             let mut body = upstream_body;
             let mut completed = false;
             let mut caller_gone = false;
+            let mut interrupted = false;
             loop {
                 match tokio::time::timeout(idle, body.frame()).await {
                     Ok(Some(Ok(frame))) => {
@@ -636,9 +640,7 @@ impl ModelProxy {
                         break;
                     }
                     Ok(Some(Err(_))) | Err(_) => {
-                        let _ = tx
-                            .send(Err(io::Error::other("upstream stream interrupted")))
-                            .await;
+                        interrupted = true;
                         break;
                     }
                 }
@@ -666,6 +668,15 @@ impl ModelProxy {
                 event.error = Some("stream interrupted".into());
             }
             proxy.write_audit(event);
+            // 先记账、写审计、释放限速名额，再让调用方看到流结束（正常结束或截断）：
+            // 调用方观察到结束时，这些副作用已经确定发生。
+            drop(_slot);
+            if interrupted {
+                let _ = tx
+                    .send(Err(io::Error::other("upstream stream interrupted")))
+                    .await;
+            }
+            drop(tx);
         });
 
         let body = ChannelBody { rx };

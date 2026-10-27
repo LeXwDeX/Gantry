@@ -37,7 +37,7 @@ pub(crate) fn reason_code(reason: &DenyReason) -> PolicyReasonCode {
     }
 }
 
-/// 动作判定的拒绝记录。`target` 为 `None` 时不记事件（见 `PolicyEngine::decide_action`）。
+/// 动作判定的拒绝记录。
 pub(crate) struct ActionDenial {
     pub project_id: ProjectId,
     pub subject: Subject,

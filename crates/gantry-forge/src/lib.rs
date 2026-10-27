@@ -13,6 +13,8 @@
 //! - App 鉴权：[`AppTokenProvider`]（App JWT、安装令牌缓存与 single-flight 刷新、权限自检，
 //!   forge.md §7.12）。
 //!
+//! - 读取：[`Reader`] 实现 `ForgeReader::discussion`（P-59）；快照类读取随对账切片补齐。
+//!
 //! webhook、归一化、对账在后续切片。
 //!
 //! 已知限制（M1 切片内）：
@@ -25,6 +27,7 @@ mod config;
 mod git;
 mod github;
 mod outbox;
+mod reader;
 
 pub use auth::app::{AppAuthDeps, AppAuthOptions, AppTokenProvider, PermissionReport};
 pub use auth::{AuthError, StaticTokenProvider, TokenProvider, TokenPurpose};
@@ -35,3 +38,4 @@ pub use outbox::executor::{
 };
 pub use outbox::key::{derive_target_intent, KeyError, TargetIntent};
 pub use outbox::{Forge, M1_ACTIONS};
+pub use reader::{Reader, ReaderDeps};

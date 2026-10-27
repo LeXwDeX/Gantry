@@ -13,7 +13,11 @@ use gantry_store::EventFilter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use gantry_core::ids::{Clock, Entropy};
+use gantry_deploy::manifest::Stage;
+use gantryd::assembly::{OsEntropy, SystemClock};
 
 use gantryd::assembly::Assembly;
 use gantryd::control::{CommandSet, Response};
@@ -23,6 +27,116 @@ const FAKE_ACTOR: &str = "gantryd_fake";
 
 pub struct FakeCommands {
     pub assembly: Arc<Assembly>,
+    setup: Mutex<SetupState>,
+}
+
+/// `github.setup.*` 与 `settings.bootstrap_set` 的替身状态（deploy/README.md
+/// 「与 gantry CLI 的接线」）。真实实现分别归 forge（forge.md §7.14）与设置模块。
+#[derive(Default)]
+struct SetupState {
+    /// 第一台设备配对后为 `true`（P-66）；`fake.end_bootstrap` 置位。
+    bootstrap_over: bool,
+    /// 进行中的会话：`state` 与已轮询次数。
+    session: Option<(String, u32)>,
+}
+
+impl FakeCommands {
+    pub fn new(assembly: Arc<Assembly>) -> Self {
+        Self {
+            assembly,
+            setup: Mutex::new(SetupState::default()),
+        }
+    }
+
+    fn setup(&self) -> std::sync::MutexGuard<'_, SetupState> {
+        self.setup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn setup_begin(&self, args: Value) -> Response {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Begin {
+            webhook_url: String,
+            redirect_url: String,
+            ttl_secs: u64,
+        }
+        let begin: Begin = match serde_json::from_value(args) {
+            Ok(begin) => begin,
+            Err(error) => return Response::err("bad_request", error.to_string()),
+        };
+        let mut setup = self.setup();
+        if setup.bootstrap_over {
+            return not_bootstrap_period();
+        }
+        if setup.session.is_some() {
+            return Response::err("setup_in_progress", "a setup session is already open");
+        }
+        let mut bytes = [0u8; 16];
+        OsEntropy.fill(&mut bytes);
+        let state: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let expires_at = SystemClock
+            .now()
+            .checked_add_secs(begin.ttl_secs)
+            .map(|at| at.to_canonical_string());
+        setup.session = Some((state.clone(), 0));
+        Response::ok(json!({ "state": state, "expires_at": expires_at }))
+    }
+
+    /// 第一次轮询 `pending`，之后 `completed`；App 的权限与事件取 M1 Manifest。
+    fn setup_status(&self, args: &Value) -> Response {
+        let state = args.get("state").and_then(Value::as_str);
+        let mut setup = self.setup();
+        let Some((open, polls)) = setup.session.as_mut() else {
+            return Response::ok(json!({ "status": "expired" }));
+        };
+        if state != Some(open.as_str()) {
+            return Response::ok(json!({ "status": "expired" }));
+        }
+        *polls += 1;
+        if *polls == 1 {
+            return Response::ok(json!({ "status": "pending" }));
+        }
+        let permissions: serde_json::Map<String, Value> = Stage::M1
+            .permissions()
+            .into_iter()
+            .map(|(key, level)| (key.to_owned(), Value::from(level)))
+            .collect();
+        Response::ok(json!({
+            "status": "completed",
+            "app": {
+                "app_id": 4242,
+                "slug": "gantry-test",
+                "html_url": "https://github.com/apps/gantry-test",
+                "permissions": permissions,
+                "events": Stage::M1.events(),
+            },
+        }))
+    }
+
+    fn bootstrap_set(&self, args: &Value) -> Response {
+        if self.setup().bootstrap_over {
+            return not_bootstrap_period();
+        }
+        let resource = args.get("resource").and_then(Value::as_str);
+        let values = args.get("values").and_then(Value::as_object);
+        match (resource, values) {
+            (Some(resource), Some(values)) => Response::ok(json!({
+                "resource": resource,
+                "applied": values.keys().collect::<Vec<_>>(),
+            })),
+            _ => Response::err("bad_request", "expected {resource, values}"),
+        }
+    }
+}
+
+fn not_bootstrap_period() -> Response {
+    Response::err(
+        "not_bootstrap_period",
+        "a device has been paired; use the desktop settings page",
+    )
 }
 
 #[async_trait::async_trait]
@@ -32,6 +146,13 @@ impl CommandSet for FakeCommands {
         Some(match cmd {
             "fake.create_delivery" => create_delivery(&self.assembly, args).await,
             "fake.events" => events(&self.assembly, args).await,
+            "fake.end_bootstrap" => {
+                self.setup().bootstrap_over = true;
+                Response::ok(json!({}))
+            }
+            "github.setup.begin" => self.setup_begin(args),
+            "github.setup.status" => self.setup_status(&args),
+            "settings.bootstrap_set" => self.bootstrap_set(&args),
             _ => return None,
         })
     }

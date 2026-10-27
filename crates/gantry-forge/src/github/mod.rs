@@ -258,6 +258,46 @@ impl GithubClient {
         .await
     }
 
+    /// Issue 或 PR 的原始 JSON（取标题与正文，forge.md P-59）。
+    pub async fn issue_or_pull(
+        &self,
+        token: &SecretString,
+        repo: &RepoSlug,
+        number: u64,
+        pull: bool,
+    ) -> Result<Value, ApiError> {
+        let kind = if pull { "pulls" } else { "issues" };
+        self.json(
+            token,
+            "GET",
+            &format!("/repos/{repo}/{kind}/{number}"),
+            None,
+        )
+        .await
+    }
+
+    /// 对话区评论的一页（Issue 与 PR 共用 `issues/{n}/comments`）。
+    pub async fn list_comments(
+        &self,
+        token: &SecretString,
+        repo: &RepoSlug,
+        number: u64,
+        since: Option<&str>,
+        page: u32,
+        per_page: u32,
+    ) -> Result<Vec<Value>, ApiError> {
+        let mut path =
+            format!("/repos/{repo}/issues/{number}/comments?per_page={per_page}&page={page}");
+        if let Some(since) = since {
+            path.push_str("&since=");
+            path.push_str(since);
+        }
+        match self.json(token, "GET", &path, None).await? {
+            Value::Array(items) => Ok(items),
+            _ => Err(ApiError::Decode("comments is not an array".into())),
+        }
+    }
+
     /// 远端分支 head；分支不存在返回 `None`。
     pub async fn branch_head(
         &self,

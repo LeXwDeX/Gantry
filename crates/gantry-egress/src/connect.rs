@@ -145,11 +145,12 @@ impl ConnectProxy {
         match self.clone().open(&mut client, &mut trace).await {
             Ok(tunnel) => self.run(client, tunnel, trace).await,
             Err(refusal) => {
-                let _ = respond(&mut client, &refusal).await;
+                // 先写审计再回应：调用方收到拒绝时，审计记录已经落下。
                 let mut event = self.event(&trace, Decision::Deny);
                 event.rule = Some(refusal.rule);
                 event.status = Some(refusal.status);
                 self.write_audit(event);
+                let _ = respond(&mut client, &refusal).await;
             }
         }
     }
@@ -284,16 +285,36 @@ impl ConnectProxy {
             return;
         }
         event.status = Some(200);
-        let outcome = self.pump(client, tunnel.upstream, tunnel.job_id).await;
+        let Tunnel {
+            job_id,
+            upstream,
+            _slot: slot,
+            ..
+        } = tunnel;
+        let (outcome, client_r, mut client_w) = self.pump(client, upstream, job_id).await;
+        // 先释放连接名额、写审计，再关闭到调用方的连接：调用方看到隧道结束时，
+        // 这两件事已经确定发生。
+        drop(slot);
         event.bytes_in = outcome.up;
         event.bytes_out = outcome.down;
         event.duration_ms = trace.started.elapsed().as_millis() as u64;
         event.error = outcome.ended_by.map(str::to_owned);
         self.write_audit(event);
+        let _ = client_w.shutdown().await;
+        drop(client_r);
     }
 
-    /// 双向拼接；返回 (上行, 下行, 结束原因)。
-    async fn pump(&self, client: TcpStream, upstream: TcpStream, job_id: AttemptId) -> Pumped {
+    /// 双向拼接，结束时关闭上游；返回计数与到调用方的两半连接（由调用方收尾后关闭）。
+    async fn pump(
+        &self,
+        client: TcpStream,
+        upstream: TcpStream,
+        job_id: AttemptId,
+    ) -> (
+        Pumped,
+        tokio::net::tcp::OwnedReadHalf,
+        tokio::net::tcp::OwnedWriteHalf,
+    ) {
         let (mut client_r, mut client_w) = client.into_split();
         let (mut up_r, mut up_w) = upstream.into_split();
         let mut up_buf = vec![0u8; 16 * 1024];
@@ -328,8 +349,7 @@ impl ConnectProxy {
             }
         }
         let _ = up_w.shutdown().await;
-        let _ = client_w.shutdown().await;
-        out
+        (out, client_r, client_w)
     }
 
     /// 记字节；超过单隧道或单 job 上限返回 `false`。
