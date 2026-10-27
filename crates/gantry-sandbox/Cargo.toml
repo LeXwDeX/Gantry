@@ -6,13 +6,24 @@ rust-version.workspace = true
 license.workspace = true
 description = "Gantry 沙盒管理：引擎面 SandboxService 与容器面 SandboxDriver（rootless Podman）（sandbox.md）"
 
+[features]
+# FakeDriver：只供本模块与下游测试使用。
+testing = []
+
 [dependencies]
 gantry-core = { path = "../gantry-core" }
+async-trait.workspace = true
+futures-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "fs", "io-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-sandbox = { path = ".", features = ["testing"] }
 libc = "0.2"
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

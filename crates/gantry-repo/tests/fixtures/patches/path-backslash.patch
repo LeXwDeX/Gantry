@@ -1,0 +1,6 @@
+diff --git a/dir\evil.txt b/dir\evil.txt
+new file mode 100644
+--- /dev/null
++++ b/dir\evil.txt
+@@ -0,0 +1 @@
++x

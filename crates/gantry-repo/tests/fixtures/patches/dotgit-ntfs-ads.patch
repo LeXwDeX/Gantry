@@ -1,0 +1,6 @@
+diff --git a/.git::$INDEX_ALLOCATION/config b/.git::$INDEX_ALLOCATION/config
+new file mode 100644
+--- /dev/null
++++ b/.git::$INDEX_ALLOCATION/config
+@@ -0,0 +1 @@
++x

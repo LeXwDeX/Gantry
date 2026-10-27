@@ -633,7 +633,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 - `choose` 由 `notify` 校验并写 `inbox.resolved`（`resolution = chosen`、`option_id`），**不调用引擎**；引擎订阅该事件后执行：`abandon` → `abandon`；`replan` → T7；`upgrade` → `set_level_cap(target_level)`；`narrow` → 保持上限、`level_effective = level_cap` 继续；`done` → 解除阻塞并按 GitHub 快照重新求值当前阶段；`continue` → 解除阻塞并重新求值；`raise_cap` → 按 D-19 给耗尽维度追加一份该档模板原值后继续（记录追加的事件见 #129）；`fix`（守护的 `review_dispute`）→ T9；`keep` → 不动作。失败节点的重试走 `POST /v1/nodes/{id}/retry`，不是选项。执行失败是引擎的错误（再上报），不回滚选择。
 - 自动关闭：`notify` 内置 R1（审批 `granted` / `denied` / `invalidated` / `expired` / `consumed` 关闭对应 `approval_needed`）、R2（交付单元 `abandoned` / `closed` 关闭其全部 open 项）；其余由引擎显式 `InboxPort::resolve`（R4，如节点重试成功、GitHub 上已处理、`supersedes`）。自由文本答复 `spec_needed` 由 `conversation` 在 `supply_spec` 成功后 `resolve(Answered)`。
-- `dismiss` 只表示"不再提醒"：**不改变交付单元状态，引擎不得依赖收件箱状态推进**（notify.md I3）。引擎用自己事件日志里的"未决阻塞项"集合（`DeliveryState.open_inbox`，由引擎创建时加入、由 `inbox.resolved` 移出，不看 `dismissed`）判断 `waiting_human`，所以 dismiss 一个阻塞项不会解除暂停（OQ-13）。
+- `dismiss` 只表示"不再提醒"：**不改变交付单元状态，引擎不得依赖收件箱状态推进**（notify.md I3）。引擎用自己事件日志里的"未决阻塞项"集合（`DeliveryState.open_inbox`，由引擎创建时加入；由 `inbox.resolved` 移出，或被新项 `inbox.raised.data.supersedes` 列出时移出（被取代的旧项不会另发 `inbox.resolved`，notify.md §7.2）；不看 `dismissed`）判断 `waiting_human`，所以 dismiss 一个阻塞项不会解除暂停（OQ-13）。
 - **`open_inbox` 与 store 的 `inbox_items` 投影是两回事，不要合并**：store 的 `inbox_items`（store.md §6.2）跟踪每一项的 `open` / `resolved` / `dismissed` 状态，供展示与计数，dismiss 后该项就不再是 open。引擎的 `open_inbox` 只由 `inbox.raised` 加入、由 `inbox.resolved`（及 `supersedes`）移出，dismiss 不影响它。两者对同一批 `inbox.*` 事件各自折叠，但语义不同，不属于 M1 收尾评审 A1 所说的重复投影。如果改为从 store 的 open 项读取，dismiss 就会解除阻塞，违反上一条（测试 `dismiss_does_not_unblock` 锁定这一点）。
 
 ### 7.12 Outbox 入队与审批流程
