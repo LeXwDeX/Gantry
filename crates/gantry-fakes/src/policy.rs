@@ -599,6 +599,15 @@ impl PolicyPort for FakePolicy {
     ) -> Result<ActionDecision, PolicyError> {
         let state = self.state();
         if let Some(decision) = state.decisions.get(&req.kind) {
+            // policy.md §6.1（#66）：engine 发起的动作，Deny 必带 ReportHint。
+            if req.requested_by.kind == ActorKind::Engine
+                && matches!(decision, ActionDecision::Deny { report: None, .. })
+            {
+                panic!(
+                    "FakePolicy: Deny for engine-requested {:?} must carry a ReportHint (policy.md §6.1)",
+                    req.kind
+                );
+            }
             return Ok(decision.clone());
         }
         Ok(ActionDecision::Allow {
