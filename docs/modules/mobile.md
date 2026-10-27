@@ -109,7 +109,7 @@ struct PostMessage: Encodable { let text: String; let refs: [Ref]? }            
 - **证书**：配对响应的 `certificate_chain`（`[叶子, 中间 CA, 根]`，P-64）存钥匙串并与 mTLS 密钥组成 `SecIdentity`，供 `URLSession` 的客户端证书挑战使用。
 - **自动续期**（P-64）：前台运行且证书剩余 1/3 有效期（以 `/v1/me` 的 `certificate.renew_after` 为准）时，用同一把（或新生成的）mTLS 密钥生成 CSR，`POST /v1/devices/self/renew`，校验新链根指纹等于固定值后替换 `SecIdentity`；失败退避重试，临近到期才提示。
 - **服务端校验**：`URLSessionDelegate` 的服务端信任挑战里不使用系统信任库，只接受"链 `[叶子, 中间 CA, 根]` 的根证书 SHA-256 等于已固定的离线根 CA 指纹，且链内签名与有效期有效、叶子主机匹配"（P-64；中间 CA 轮换不影响已配对设备）。TLS 1.3 only。
-- **配对流程**：与桌面一致（desktop-shell §7.2）——解析 → 生成 mTLS 密钥 → CSR（不带 `approval_pubkey`，P-76）→ `POST /v1/pair` → 校验链（根指纹）与公钥指纹 → 暂存 → 展示确认码 → 用户核对 → 落盘。手机档案设备的角色至多 `operator`，即使是第一台（P-76；此时系统没有 approver 的处理待决，decisions Q-10）；界面按手机档案裁剪，没有任何审批入口。配对界面（扫码取景框、手动粘贴、确认码页）原型未覆盖，按系统规范设计。
+- **配对流程**：与桌面一致（desktop-shell §7.2）——解析 → 生成 mTLS 密钥 → CSR（不带 `approval_pubkey`，P-76）→ `POST /v1/pair` → 校验链（根指纹）与公钥指纹 → 暂存 → 展示确认码 → 用户核对 → 落盘。手机档案设备的角色至多 `operator`，即使是第一台（P-76；此时安装引导期持续到第一台桌面设备配对，由它成为 approver，decisions D-18）；界面按手机档案裁剪，没有任何审批入口。配对界面（扫码取景框、手动粘贴、确认码页）原型未覆盖，按系统规范设计。
 - **吊销 / 过期**：`close(device_revoked)` 或 `401 device_revoked` → 停止请求、删除钥匙串中的密钥与证书、回到配对页；`close(cert_expired)` / 握手连续失败 → 提示重新配对（长期未打开应用、错过自动续期窗口时会发生）。
 
 ### 7.3 数据流

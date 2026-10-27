@@ -164,7 +164,7 @@ erDiagram
 | `approval_needed` | `{approval_id}` |
 | `decision_needed` | `{kind, reason_code, options[]: {id, label, primary?}, node_id?, patch?}`。`kind`：`gate_reject`（gate `REJECT`）/ `manual_action`（需要用户在 Gantry 之外手动完成，如 workflow 补丁，P-48；`patch = {ref: "sha256:…", paths[]}` 指向结果库里的补丁）/ `review_dispute`（评审争议：是否交回前台改代码，P-79）/ `other`（新增值只追加）。`reason_code` 与 `options[]` 取下文词表 |
 | `spec_needed` | `{missing[]: {aspect, question}}`（来自准入 `REVISE` 或计划的 `blocking_questions`）；**无选项**，用户以自由文本答复（发消息，`refs` 指向该交付单元），由会话服务处理后关闭（P-79） |
-| `budget_exhausted` | `{dimension, limit, used, options[]}`；`options[]` 固定为 `raise_cap`（仅桌面，追加额度见 Q-11）/ `abandon`（P-79） |
+| `budget_exhausted` | `{dimension, limit, used, options[]}`；`options[]` 固定为 `raise_cap`（仅桌面，追加额度见 decisions D-19）/ `abandon`（P-79） |
 | `escalation` | `{reason_code, node_id?, attempt_id?, target_level?, evidence[]: Ref 或 {kind: "result", ref: "sha256:…"}, options[]?}`（gate `BLOCKED` 时附证据）。**升档一律用 `escalation`**（`reason_code = level_cap_exceeded`，`target_level` 为规则要求的档位，选项见下文词表），手机档案不可对它 `choose`（P-35、P-63）；其余 `reason_code` 无选项 |
 | `security_finding` | `{source: Ref, finding: {severity, category, title: UntrustedText}, attempt_id?}` |
 
@@ -180,7 +180,7 @@ erDiagram
 | `decision_needed` | `kind = review_dispute`，`reason_code` ∈ `guardian.human_feedback` / `guardian.scope_expanding_fix` / `guardian.design_or_api_change` | `fix`（**primary**）/ `keep` | `guardian` | `fix`：交回前台改代码（`review → implement`，[engine §7.6](modules/engine.md#76-阶段推进条件) T9）；`keep`：保持现状，只关闭该项 |
 | `decision_needed` | `kind = other`，`reason_code` ∈ `github_state_changed` / `approval_denied` [提议，裁决未覆盖] | `continue` / `abandon` | `engine` | `continue`：解除阻塞并重新求值；`abandon`：放弃 |
 | `spec_needed` | — | 无（自由文本答复，走发消息） | `engine` | `conversation` 调 `supply_spec` 后关闭该项 |
-| `budget_exhausted` | — | `raise_cap`（仅桌面，Q-11）/ `abandon` | `engine`、`guardian`（T-07 补写） | `raise_cap`：按 Q-11 追加额度后继续；`abandon`：放弃 |
+| `budget_exhausted` | — | `raise_cap`（仅桌面，D-19）/ `abandon` | `engine`、`guardian`（T-07 补写） | `raise_cap`：按 D-19 追加额度后继续；`abandon`：放弃 |
 | `approval_needed` | — | 无（只能经审批路由处理，`choose` 返回 `409`） | `engine` / `guardian` | — |
 | `security_finding` | — | 无 | `guardian` | — |
 | `escalation` | `gate_blocked`、`arbiter_escalate`、`attempt_failed`、`no_progress`、`no_change`、`merge_denied_by_policy`、`approval_shape_undefined`、`app_permission_missing`、`models_not_configured`、`outbox_failed:<code>`、`policy.path_protected:<规则 id>`（M1 依赖清单 / lockfile）；`guardian.*`（[guardian §7.9](modules/guardian.md#79-上报) 的词表，评审争议三码除外） | 无 | `engine`、`guardian`、`forge`（`app_permission_missing`） | — |
@@ -228,7 +228,7 @@ Workflow 文件改动不在表中：它不能经任何审批放行（P-48）。
 
 | 实体 | 字段 | 说明 |
 | --- | --- | --- |
-| Device | name, platform, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr, role, status, last_seen | `pubkey_fpr` 是 mTLS 客户端密钥的指纹；`approval_pubkey` 是配对时登记的审批签名公钥（P-47，P-256 未压缩点，base64url），`approval_pubkey_fpr` 是其 `sha256:` 指纹；手机档案（`ios`）配对时可省略，此时两者为空（P-76）；`platform`：`windows` / `macos` / `ios`；`role`：`viewer` / `operator` / `approver`，第一台配对设备为 approver，之后默认 operator，改角色与吊销需要 approver 签名；`ios` 设备永远不能是 approver（P-76，第一台设备是手机时见 Q-10）；`status`：`active` / `revoked` |
+| Device | name, platform, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr, role, status, last_seen | `pubkey_fpr` 是 mTLS 客户端密钥的指纹；`approval_pubkey` 是配对时登记的审批签名公钥（P-47，P-256 未压缩点，base64url），`approval_pubkey_fpr` 是其 `sha256:` 指纹；手机档案（`ios`）配对时可省略，此时两者为空（P-76）；`platform`：`windows` / `macos` / `ios`；`role`：`viewer` / `operator` / `approver`，第一台配对设备为 approver，之后默认 operator，改角色与吊销需要 approver 签名；`ios` 设备永远不能是 approver（P-76，第一台设备是手机时见 decisions D-18）；`status`：`active` / `revoked` |
 | BudgetLedger | subject, delivery_id?, conversation_id?, project_id, day?, template?, limits, used | `subject`：`delivery`（交付台账，每个交付单元一个，`template` 与 `limits` 在创建时按 `level_cap` 固定，P-57）/ `conversation`（会话台账，P-58：每个项目会话每个 UTC 日一个，`day` 为日期，`limits` 只有 `tokens` = `levels.none.daily_tokens`，`template` 为空）。**台账 ID**（Egress 计量归属用，P-74）：交付台账为其交付单元 ID `dlv_…`，会话台账为 `cnv_…:YYYY-MM-DD`（UTC 日）；它是台账的业务键，不是行 ID `bdg_…`（会话台账在当日首笔记账时才建行）。交付台账 `limits`：tokens_by_tier、nodes、rounds、wall_time、forge_writes、concurrency；`used`：tokens_by_tier、nodes、attempts、rounds、wall_time、forge_writes。会话台账 `used`：tokens_by_tier。单位见下 |
 
 BudgetLedger 的计数口径：

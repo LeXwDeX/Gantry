@@ -535,7 +535,7 @@ pub enum FreezeReason { GantryApprovalGranted(ApprovalId), GithubApproved, Stage
 | class | InboxItem `kind` | `severity` | payload（data-model 形状） | 去重键 |
 | --- | --- | --- | --- | --- |
 | `security_finding` | `security_finding` | `blocker` | `{source: Ref(pr), finding: {severity, category: "security", title: UntrustedText}, attempt_id?}` | `(delivery, class, fingerprint)` |
-| `budget_exhausted` | `budget_exhausted` | `blocker` | `{dimension, limit, used, options: [raise_cap, abandon]}`（P-79；`raise_cap` 仅桌面，追加方式待决 Q-11） | `(delivery, kind, dimension)` |
+| `budget_exhausted` | `budget_exhausted` | `blocker` | `{dimension, limit, used, options: [raise_cap, abandon]}`（P-79；`raise_cap` 仅桌面，追加方式见 decisions D-19） | `(delivery, kind, dimension)` |
 | `approval_needed`（K-04） | `escalation` | `blocker` | `{reason_code, evidence: [Ref(pr)]}` | `(delivery, reason_code, check_suite)` |
 | `touches_protected_path`（workflow 补丁，P-48） | `decision_needed` | `warn` | `{kind: "manual_action", reason_code: "policy.path_protected:workflows", patch: {kind:"result", ref:"sha256:…"}, options: [done（primary）, abandon]}`（P-79） | `(delivery, manual_action, patch_sha256)` |
 | 评审争议：`reason_code` ∈ `guardian.human_feedback`、`guardian.scope_expanding_fix`、`guardian.design_or_api_change`（需要用户决定是否交回前台改代码） | `decision_needed` | `warn` | `{kind: "review_dispute", reason_code, node_id?, evidence: [Ref(pr) \| {kind:"result", ref:"sha256:…"}], options: [fix（primary）, keep]}`（P-60、P-79；`fix` → `engine` 走 T9 `review → implement`，`keep` → 只关闭该项） | `decision:{delivery_id}:review_dispute:{reason_code}:{target}` |

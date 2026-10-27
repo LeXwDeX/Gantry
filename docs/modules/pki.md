@@ -126,7 +126,7 @@ pub trait DeviceDirectory: Send + Sync {
     async fn verifying_key(&self, id: &DeviceId) -> Result<Option<VerifyingKey>, PkiError>;
     /// 引导期（P-66）：库里从未有过任何设备（含已吊销）时为 true。主机命令据此决定能否不经签名
     /// 写入 core::bootstrap_writable 允许的"仅 approver"键；第一台设备配对后恒为 false。
-    async fn bootstrap_period(&self) -> Result<bool, PkiError>;   // 第一台设备是手机时引导期是否延续，待决（decisions Q-10）
+    async fn bootstrap_period(&self) -> Result<bool, PkiError>;   // 第一台设备是手机时引导期延续到第一台桌面设备配对（decisions D-18）
     /// 节流写入（≤ 每设备每 60 s 一次），不产生事件
     async fn touch_last_seen(&self, id: &DeviceId);
 }
@@ -337,7 +337,7 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 4. **设备字段**：`name` 1–64 字符、不含控制字符与换行；`platform ∈ {windows, macos, ios}`（`ios` 在 M4 前也接受并如实记录）→ 否则 `Validation`。
 5. **CSR**：见 §7.4.4。→ 否则 `Validation`（指针 `/csr`）。令牌在 CSR 校验失败时**不**被消耗（令牌只在签发成功后失效），但失败计入第 2 步之外的限流（`api` 按源 IP，5/min）。
 6. **单一写事务**：
-   1. 角色：同一写事务里 `tx.read().devices(limit 1)` 为空（**含已吊销的设备也算存在**）→ `approver`，否则 `operator`（P-23）；但 `platform = ios` 恒为 `operator`（P-76，即使是第一台；此时系统没有 approver 的处理待决，decisions Q-10）。单写者串行化保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。该口径对"唯一 approver 被吊销后重新配对"的后果见 OQ-K11。
+   1. 角色：同一写事务里 `tx.read().devices(limit 1)` 为空（**含已吊销的设备也算存在**）→ `approver`，否则 `operator`（P-23）；但 `platform = ios` 恒为 `operator`（P-76，即使是第一台；此时安装引导期持续到第一台桌面设备配对，由它成为 approver，decisions D-18）。单写者串行化保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。该口径对"唯一 approver 被吊销后重新配对"的后果见 OQ-K11。
    2. 生成 `dev_<ULID>`、序列号；用中间 CA 私钥签发设备叶子（§7.1）。
    3. 追加 `device.paired`：`data = {device_id, name, platform, role, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr}`（`store` 的 `devices` 投影据此落库，`status = active`）；`actor = {kind: "system", id: "pki"}`；`project_id = null`。
    4. 同一事务经 `module_conn("pki")` 写 `pki_device_certs`（`active`）、`pki_device_state`（`pubkey_spki`）；会话置 `redeemed`，写入 `redeemed_device_id` 与 `confirmation_code`。
