@@ -8,8 +8,8 @@
 //! - 确认码：6 位十进制、均匀分布；
 //! - 首台设备角色与安装引导期（D-18）。
 //!
-//! 会话表的持久化（`pki_pairing_sessions`）随 `store` 的模块表接入；表本身可克隆，
-//! 便于放进写事务的快照里整体提交或回滚。
+//! 会话表整体存为 `pki_pairing_sessions` 的一个文档（[`crate::store_schema`]），
+//! 由 [`crate::pairing_service`] 在写事务里读出、修改、写回。
 
 use std::fmt;
 use std::time::Duration;
@@ -20,6 +20,7 @@ use gantry_core::entities::{DevicePlatform, DeviceRole};
 use gantry_core::ids::{DeviceId, Entropy};
 use gantry_core::secret::SecretString;
 use gantry_core::time::Timestamp;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// 令牌前缀（api.md 示例形态 `gp1_…`）。
@@ -90,7 +91,8 @@ pub fn bootstrap_period(desktop_ever_paired: bool) -> bool {
 }
 
 /// 配对会话标识。会话表内单调递增，随表持久化。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct PairingSessionId(u64);
 
 impl PairingSessionId {
@@ -105,7 +107,8 @@ impl fmt::Display for PairingSessionId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Open,
     Redeemed,
@@ -114,7 +117,8 @@ pub enum SessionState {
 }
 
 /// `pki_pairing_sessions` 的一行。明文令牌永不出现在这里。
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairingSession {
     pub id: PairingSessionId,
     pub token_sha256: [u8; 32],
@@ -186,7 +190,8 @@ pub enum SessionError {
 }
 
 /// 配对会话表。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionTable {
     sessions: Vec<PairingSession>,
     next_id: u64,
