@@ -681,7 +681,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 执行体对每个输入：
 
-0. **预取提议原文**（#125）：开事务前，按最近一次折叠出的状态（启动后首次决策前先只读折叠一次）补齐 `env.proposals`，规则见 7.14.2 末"提议原文预取"。这是 `decide` 之外唯一一处读 CAS 的地方。
+0. **预取提议原文**（#125）：开事务前，按最近一次折叠出的状态（启动后首次决策前先只读折叠一次）补齐 `env.proposals`，规则见 7.14.2 末"提议原文预取"。这是 `decide` 之外唯一一处读 CAS 的地方。实现方式（#277）：每轮拿租约折叠后，若状态里有表中尚无的 `ProposalRef`，先回滚、放开租约，在租约外从 CAS 预取，再重开本轮；同一轮内每个键只取一次，瞬时错误不登记、本轮照常求值（`create_pr` 不进期望集合），下一个输入再取。这样无论尝试刚在上一轮终结还是重启后首次决策，都不会滞后一轮。
 1. 打开 `WriteTx`（拿到单写者租约）后读取并折叠得到 `DeliveryState`；调 `decide(state, input, env)`。读取的做法（#71）：不扩展 `TxReader`，而是在持有写租约期间，按 §7.14.2 路由表从**已提交日志**折叠。租约期间没有别的写者能提交，读到的就是本事务开始时的状态，与"`tx.read()` 读到本事务尚未追加任何内容时的状态"等价；每一轮 Settle 都开一个新事务。SQLite 实现在 `BEGIN IMMEDIATE` 期间读到的已提交状态同理。测试 `external_writes_wait_while_the_lease_is_held` 锁定"持租约期间外部写者必须等待"。
 2. 按序执行事务内决策；任何一步失败整笔回滚、不发副作用、不回 `Reply`。成功则提交。
 3. 提交后：把 `Reply` 交给调用方；对每个 `Effect` 先把它的 `EffectKey` 记入执行体内存里的**在途集合**（`env.inflight`），再发起。该副作用的 `Report`（含 `Done` 与 `EffectFailed`）到达时从在途集合移除；`ScheduleTimer` 的键在对应 `Tick(Timer)` 到达时移除。
@@ -1116,6 +1116,64 @@ pub enum HeadBinding {
 #### 7.14.8 M1 必须实现的子集
 
 M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`EffectReport` 全部；`Effect` 除补丁审批路径的 `InvalidateApproval` 外全部；`PatchResult` 除 `Held` 外全部；`OutputSignals` 恒为默认值；`ExitRule::PatchCommitted`。§12.2"上报幂等"列出的 `upgrade` / `narrow` / `fix` 选项在 M1 不由引擎产生对应上报项，测试以注入的 `inbox.raised` / `inbox.resolved` 事件覆盖其执行路径。其余变体在 M2 / M3 启用前收到时：命令返回 `Reply(Err(NotSupportedYet))`，其他输入返回空并记日志（失败闭合，W8）。
+
+### 7.15 运行时入口：`EngineRuntime`（#277）
+
+`gantryd` 只做两件事：组好端口后调 `EngineRuntime::new(store, ports, settings)`，再 `run(shutdown)`。引擎内部的路由器、执行体池、副作用执行器都由运行时自己组装，`gantryd` 不碰它们。
+
+```rust
+pub struct EnginePorts {
+    pub inbox: Arc<dyn InboxPort>,
+    pub outbox: Arc<dyn OutboxPort>,
+    pub policy: Arc<dyn PolicyPort>,
+    pub forge: Arc<dyn ForgeReader>,
+    pub repo: Arc<dyn RepoService>,
+    pub sandbox: Arc<dyn SandboxService>,
+    pub worker: Arc<dyn WorkerAdapter>,
+    pub cas: Arc<dyn ResultCas>,               // gantry_store::Cas 已实现
+    pub clock: Arc<dyn Clock>,
+    pub entropy: Arc<dyn Entropy>,
+    pub snapshots: Option<Arc<dyn PrSnapshots>>, // None = 读 store 的 PR 快照投影（#150）
+}
+
+pub struct RuntimeSettings {
+    pub actor: ActorConfig,      // EngineSettings、ModelTable、模板、预留策略、沙盒容量、常量
+    pub runner: RunnerConfig,    // 组装 SandboxSpec 用的设置快照（含 config_rev）
+    pub poll_interval: Duration, // 事件流无新事件时的轮询间隔
+    pub cleanup_lease: Duration, // RemoveWorktree 在锁已释放时以 engine 身份取锁的租约
+}
+
+impl EngineRuntime {
+    pub async fn new(store: Store, ports: EnginePorts, settings: RuntimeSettings)
+        -> Result<Arc<Self>, RuntimeError>;
+    pub async fn run(self: Arc<Self>, shutdown: impl Future<Output = ()> + Send)
+        -> Result<(), RuntimeError>;
+    pub fn engine(&self) -> &Engine;                       // 现有写入口（create_delivery 等）
+    pub async fn reconfigure(&self, settings: RuntimeSettings); // settings.updated 热加载
+    pub async fn degraded(&self) -> BTreeMap<DeliveryId, String>; // status 报 degraded
+    pub fn mailbox(&self) -> Deliver;                      // 外部定时器等投递到同一邮箱
+}
+```
+
+`run` 的主循环：
+
+1. **启动恢复**（§7.13）：对仍需处理的交付单元（非 `closed`，或 `closed` 但工作树未移除）各发一次 `Tick(Recover)`。在途集合与提议原文表在新进程里为空，未完成的副作用由此重发（各端口按键幂等）。
+2. **循环**：先处理邮箱里的副作用回报与定时器；再从持久游标 `engine` 读一页事件，按路由表投给执行体；读到新的 `delivery.created` 时为它建执行体并发 `Tick(Settle)`；按低水位推进游标（§7.14.1）。没有进展时在 `shutdown`、`poll_interval`、新邮件三者之间等待。
+3. **停机**：`shutdown` 完成后不再读新事件，处理完已在邮箱里的回报即返回 `Ok`。在途尝试留在沙盒里，下次启动由第 1 步以 `resume` 接管。
+
+M1 的执行体在主循环里串行处理（交付单元之间也串行），分发顺序与 `seq` 一致；正确性不依赖并行。
+
+**错误边界**：存储错误（`ActorError::Store`）不是某个交付单元的问题，`run` 返回 `Err`，由 `gantryd` 重启后按第 1 步恢复。其他执行体错误都是引擎缺陷（收敛超过 `MAX_SETTLE`、端口拒绝事务内决策，例如 `OutboxPort` 以 `ApprovalRequired` 拒绝不带审批的 `merge_pr`）：只让该交付单元进入 degraded、停止为它决策，原因记入 `degraded()`，其他交付单元照常推进（§7.14.1 第 4 步）。不写事件、不上报（P-79）。
+
+**PR 快照**：`snapshots = None` 时读 store 的 GitHub 快照投影。快照变化在生产里随 `forge.*` 事件路由进来；测试替身直接给快照时，用 `mailbox()` 投 `Tick(Settle)`。
+
+**测试**（`tests/runtime.rs`）：只经 `new` + `run` 驱动，测试扮演 forge 执行器、GitHub 快照来源与审批设备，不直接调用执行体。
+
+- `low_delivery_reaches_closed_with_new_and_run_only`：§12.2「端到端（替身）」与「合并需要审批」主路径。`FakeSandboxService` 按派发的 job 回放 `single` 黄金结果（补丁 + `open_pr` 提议）→ `FakeRepo` 判 `allow` → 入队 `push_branch` / `create_pr` → PR 绑定 → CI 通过 → `merge_pr` 得 `NeedsApproval`、授予后带审批 ID 入队 → 合并。断言阶段序列恰为 `implement → propose → review → merge → closed`、首段 `reason = admission_skipped`、只派发一次尝试、停机后游标追上日志头。
+- `restart_resumes_from_the_cursor_without_redispatching`：跑到 `propose` 停机，同一 store 起新运行时，走完全程且不重新派发尝试。
+- `a_rejected_enqueue_degrades_only_that_delivery`：上面的错误边界。
+
+`FakeRepo` 不写事件，测试外包一层，按真实 repo 的口径写 `worktree.created` / `worktree.locked`（围栏 = 事件 `seq`）/ `worktree.unlocked` / `worktree.removed` / `patch.validated`。
 
 ## 8. 不变式与安全要求
 

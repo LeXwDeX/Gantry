@@ -10,6 +10,9 @@
 //!
 //! 执行体内存（不持久化，重启后为空，由 `Tick(Recover)` 补齐）：在途集合、本进程判过 `Deny`
 //! 的意图、`lock_owner`、提议原文表。
+//!
+//! 提议原文预取（§7.14.1 第 0 步、§7.14.2）：每轮折叠后若状态里有表中尚无的 `ProposalRef`，
+//! 先回滚、放开租约，从 CAS 预取后再重开本轮；`decide` 本身不读 CAS。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -23,10 +26,11 @@ use gantry_core::ports::inbox::{InboxPort, RaiseError, ResolveError};
 use gantry_core::ports::policy::{ActionDecision, DenyReason};
 use gantry_store::{Store, StoreError};
 
+use crate::attempt::{fetch_proposal_text, ResultCas};
 use crate::decide::{
     CommandRejection, DecideEnv, DecideSeed, Decision, Effect, EffectKey, EffectReport,
-    EngineConsts, EngineSettings, Input, InputIdentity, ModelTable, ObservedData, ProposalTexts,
-    ReservationPolicy, TemplateRegistry, TickReason,
+    EngineConsts, EngineSettings, Input, InputIdentity, ModelTable, ObservedData, ProposalRef,
+    ProposalTexts, ReservationPolicy, TemplateRegistry, TickReason,
 };
 use crate::decider::decide;
 use crate::engine::{load_delivery_state, EngineError};
@@ -68,7 +72,12 @@ pub struct ActorDeps {
     pub outbox: Arc<dyn OutboxPort>,
     pub effects: Arc<dyn EffectRunner>,
     pub snapshots: Arc<dyn PrSnapshots>,
+    /// 提议原文预取读的结果对象存储（§7.14.2）。
+    pub cas: Arc<dyn ResultCas>,
 }
+
+/// 预取时单个 CAS 对象（结果清单或提议原文）的读取上限。
+pub const PROPOSAL_FETCH_MAX_BYTES: usize = 4 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActorError {
@@ -137,13 +146,18 @@ impl DeliveryActor {
         self.degraded
     }
 
+    /// 运行时判定该交付单元遇到引擎缺陷（如入队被端口拒绝）：停止为它决策（§7.14.1）。
+    pub fn degrade(&mut self) {
+        self.degraded = true;
+    }
+
     /// 两次决策之间整体切换配置（§7.13）；设置变化后清空本进程的 `Deny` 记录（§7.14.1）。
     pub fn reconfigure(&mut self, config: ActorConfig) {
         self.config = config;
         self.denied.clear();
     }
 
-    /// 执行体预取的提议原文（#125）；预取本身归 #72。
+    /// 执行体预取的提议原文（#125）。
     pub fn proposals_mut(&mut self) -> &mut ProposalTexts {
         &mut self.proposals
     }
@@ -239,10 +253,36 @@ impl DeliveryActor {
         identity: &InputIdentity,
     ) -> Result<Round, ActorError> {
         let store = self.deps.store.clone();
-        let mut tx = store.begin_write().await?;
-        let Some(mut state) = load_delivery_state(&store, &self.id).await? else {
+        let mut tried = BTreeSet::new();
+        let (mut tx, mut state) = loop {
+            let tx = store.begin_write().await?;
+            let Some(state) = load_delivery_state(&store, &self.id).await? else {
+                tx.rollback().await?;
+                return Err(ActorError::NotFound);
+            };
+            let missing: Vec<ProposalRef> = state
+                .workflows
+                .values()
+                .flat_map(|w| w.nodes.values())
+                .flat_map(|n| n.attempts.iter())
+                .filter_map(ProposalRef::of)
+                .filter(|key| !self.proposals.contains(key) && !tried.contains(key))
+                .collect();
+            if missing.is_empty() {
+                break (tx, state);
+            }
+            // 第 0 步：不在租约内读 CAS。瞬时错误不登记，本轮 create_pr 不进期望集合，
+            // 下一个输入再取（§7.14.2）。
             tx.rollback().await?;
-            return Err(ActorError::NotFound);
+            for key in missing {
+                let fetched =
+                    fetch_proposal_text(self.deps.cas.as_ref(), &key, PROPOSAL_FETCH_MAX_BYTES)
+                        .await;
+                if let Ok(text) = fetched {
+                    self.proposals.insert(key.clone(), text);
+                }
+                tried.insert(key);
+            }
         };
         state.lock_owner = self.lock_owner.clone();
         if let Some(pr) = &state.pr {

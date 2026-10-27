@@ -50,6 +50,8 @@ pub struct EventRouter {
     read_to: Seq,
     /// 每个执行体已投递、尚未回报处理完的 seq（升序）。
     backlog: BTreeMap<DeliveryId, VecDeque<Seq>>,
+    /// 本轮读到的 `delivery.created`：只折叠、不投递，由运行时据此启动新执行体。
+    created: Vec<DeliveryId>,
 }
 
 impl EventRouter {
@@ -76,6 +78,7 @@ impl EventRouter {
             router,
             read_to: cursor,
             backlog: BTreeMap::new(),
+            created: Vec::new(),
         })
     }
 
@@ -95,6 +98,11 @@ impl EventRouter {
             .await?;
         let mut out = Vec::new();
         for event in &page.events {
+            if event.ty == EventType::DeliveryCreated {
+                if let Ok(id) = event.subject.as_str().parse::<DeliveryId>() {
+                    self.created.push(id);
+                }
+            }
             match self.router.route(event)? {
                 Route::Delivery { id, input: true } => {
                     if let Some(dispatch) = dispatch(id, event) {
@@ -118,6 +126,11 @@ impl EventRouter {
             self.read_to = self.read_to.max(page.scanned_to);
         }
         Ok(out)
+    }
+
+    /// 取走自上次调用以来读到的新建交付单元。
+    pub fn take_created(&mut self) -> Vec<DeliveryId> {
+        std::mem::take(&mut self.created)
     }
 
     /// 执行体处理完 `seq`（含）之前投给它的事件后回报。
