@@ -1,0 +1,19 @@
+[package]
+name = "gantry-models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 模型路由：三类模型配置解析、经 Egress 的直接调用与用量记账（models.md）"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+async-trait.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
