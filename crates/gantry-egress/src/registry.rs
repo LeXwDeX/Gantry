@@ -1346,6 +1346,17 @@ impl Registry {
         }
     }
 
+    /// job 的 tier（审计用）。
+    pub fn job_tier(&self, job_id: &AttemptId) -> Option<Tier> {
+        self.lock()
+            .jobs
+            .get(job_id)
+            .map(|row| match row.request.tier {
+                SandboxTier::Planner => Tier::Planner,
+                SandboxTier::Worker => Tier::Worker,
+            })
+    }
+
     /// `CONNECT` 目标是否在该 job 的有效分组（签发快照 ∩ 当前配置）内。
     pub fn host_allowed(&self, job_id: &AttemptId, host: &Host) -> bool {
         let state = self.lock();
