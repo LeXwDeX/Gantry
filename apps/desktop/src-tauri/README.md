@@ -5,7 +5,7 @@
 | 目录 | 内容 | 谁来检查 |
 | --- | --- | --- |
 | `shell-core/`（crate `gantry-desktop-shell`） | 可信逻辑：设备双密钥、命令白名单与错误码、本机存储，以后的配对、mTLS、事件流、审批签名也放这里。不依赖 Tauri | 根 workspace 成员，CI 的 fmt / clippy / test / MSRV 都覆盖 |
-| 本目录（crate `gantry-desktop`） | Tauri 2 应用：注册 §6.1 的白名单命令，配置 CSP、导航限制、单实例锁 | 有独立的 `Cargo.lock` 与 `target/`，不在根 workspace 里（Linux 上需要系统 WebView 开发包）；本机构建 |
+| 本目录（crate `gantry-desktop`） | Tauri 2 应用：注册 §6.1 的白名单命令，配置 CSP、导航限制、单实例锁；dialog / opener 插件只给 Rust 侧用，不授予 JS 权限 | 有独立的 `Cargo.lock` 与 `target/`，不在根 workspace 里（Linux 上需要系统 WebView 开发包）；本机构建 |
 | `probe/` | Secure Enclave 探针与手动 Touch ID 步骤 | 见 [probe/README.md](probe/README.md) |
 
 ## 构建与运行
@@ -24,7 +24,7 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 ## 当前进度（#102）
 
-- 命令都已注册。已有实际行为的命令：`identity_status`、`connection_state`（目前都返回 `unpaired`）；`prefs_get` / `prefs_set`、`ui_state_get` / `ui_state_set` / `ui_state_list`（`shell-core::storage`，原子写，目录 0700、文件 0600，严格校验）；三个 `*_discard` 和 `events_close`。其余命令返回 `shell.not_paired`（需要已配对的路径）或 `shell.unavailable`（尚未实现的本地能力），不伪造成功。
+- 命令都已注册。已有实际行为的命令：`identity_status`、`connection_state`（目前都返回 `unpaired`）；`prefs_get` / `prefs_set`、`ui_state_get` / `ui_state_set` / `ui_state_list`（`shell-core::storage`，原子写，目录 0700、文件 0600，严格校验）；`open_external`（只放行 https、无用户信息，非 `github.com` 主机先弹原生确认框，国际化域名同时显示 punycode）和 `open_github`（URL 由外壳拼出）；三个 `*_discard` 和 `events_close`。其余命令返回 `shell.not_paired`（需要已配对的路径）或 `shell.unavailable`（尚未实现的本地能力），不伪造成功。
 - `identity.json` 的读写与校验已在 `shell-core::storage` 里实现，留给配对切片接入。
 - 导航只放行应用自己的来源（`tauri://localhost`、`http(s)://tauri.localhost`），新窗口一律拒绝。
 
