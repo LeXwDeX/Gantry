@@ -29,6 +29,7 @@ rustix = { version = "1", features = ["fs", "process"] }
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
+trybuild = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [[test]]
