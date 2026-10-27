@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+# 桌面外壳的可信逻辑在 apps/ 下，显式列为成员（Tauri 应用本身仍在 exclude 里，需系统 WebView 依赖）。
+members = ["crates/*", "apps/desktop/src-tauri/shell-core"]
 exclude = ["apps"]
 
 [workspace.package]

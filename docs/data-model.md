@@ -184,7 +184,7 @@ erDiagram
 | `approval_needed` | — | 无（只能经审批路由处理，`choose` 返回 `409`） | `engine` / `guardian` | — |
 | `security_finding` | — | 无 | `guardian` | — |
 | `escalation` | `outbox_failed:<code>`（Outbox 动作终态失败，`payload.action_id` 为该动作；`<code>` 取 forge-actions 的失败码，映射见 [engine §9](modules/engine.md#9-错误与恢复)） | `retry`（**primary**）/ `abandon`（#67） | `engine` | `retry`：对 `action_id` 那个动作的期望意图以 `epoch + 1` 重新判定并入队（新幂等键）；需要审批的动作同时需要新审批（P-54），已消费的旧审批不复用；意图已不在当前阶段的期望动作集合里时不入队，只关闭该项；`abandon`：放弃 |
-| `escalation` | `gate_blocked`、`arbiter_escalate`、`attempt_failed`、`no_progress`、`no_change`、`merge_denied_by_policy`、`approval_shape_undefined`、`app_permission_missing`、`models_not_configured`、`policy.path_protected:<规则 id>`（M1 依赖清单 / lockfile）；`guardian.*`（[guardian §7.9](modules/guardian.md#79-上报) 的词表，评审争议三码除外） | 无 | `engine`、`guardian`、`forge`（`app_permission_missing`） | — |
+| `escalation` | `gate_blocked`、`arbiter_escalate`、`attempt_failed`、`no_progress`、`no_change`、`merge_denied_by_policy`、`approval_shape_undefined`、`policy.action_denied:<deny_reason>`（`engine` 发起的动作被 `policy` 拒绝；`<deny_reason>` ∈ `action_denied`（`merge_pr` 以外）/ `approval_denied` / `approval_consumed` / `no_validated_patch` / `patch_denied` / `multiple_approvals_required` / `approval_chain_unavailable`，映射见 [policy §6.1](modules/policy.md#61-动作判定入队方engineguardian)，#133）、`app_permission_missing`、`models_not_configured`、`policy.path_protected:<规则 id>`（M1 依赖清单 / lockfile）；`guardian.*`（[guardian §7.9](modules/guardian.md#79-上报) 的词表，评审争议三码除外） | 无 | `engine`、`guardian`、`forge`（`app_permission_missing`） | — |
 
 新增 `reason_code` 或选项 id 须经契约 PR 回写本表；未列出的 `option_id` 由 `notify` 拒绝（`422`）。
 

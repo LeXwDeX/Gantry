@@ -13,16 +13,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gantry_core::canon::GitOid;
+use gantry_core::canon::{GitOid, RepoSlug};
 use gantry_core::entities::{
     ActorKind, ExpectedEffect, GithubPrRef, GithubRef, OutboxAction, OutboxError,
 };
 use gantry_core::forge::{
     ActionPayload, CloseIssuePayload, CreatePrPayload, IssueStateReason, MergePrPayload, PrState,
-    UpdatePrPayload,
+    PushBranchPayload, UpdatePrPayload,
 };
 use gantry_core::ids::{ActionId, IdGen};
-use gantry_core::ports::{ActorCtx, ExecutionCheck, ExecutionPermit, GateError, PolicyPort};
+use gantry_core::ports::{
+    ActorCtx, ExecutionCheck, ExecutionPermit, ForgeError, GateError, MirrorMode, MirrorWant,
+    PolicyPort, RepoService, RevSpec,
+};
 use gantry_core::secret::SecretString;
 use gantry_core::time::Timestamp;
 use gantry_store::{AfterFailure, CancelReason, ClaimOpts, Store, StoreError};
@@ -36,6 +39,7 @@ const TITLE_MAX_CHARS: usize = 256;
 const BODY_MAX_CHARS: usize = 60_000;
 use crate::auth::{TokenProvider, TokenPurpose};
 use crate::config::{ForgeConfig, Permission, ProjectBinding};
+use crate::git::{ls_remote_sha, GitRunner};
 use crate::github::{ApiError, GithubClient, PullView};
 
 /// 执行器参数（forge.md §10 `forge.outbox.*`、`forge.http.timeout`）。
@@ -48,6 +52,8 @@ pub struct ExecutorOptions {
     pub http_timeout: Duration,
     /// 二级限流没有给出等待时间时的最短等待（FA §10.3：至少 60 秒）。
     pub min_rate_limit_wait: Duration,
+    /// git 子进程超时（forge.md §10 `forge.git.timeout`）。
+    pub git_timeout: Duration,
 }
 
 impl Default for ExecutorOptions {
@@ -59,6 +65,7 @@ impl Default for ExecutorOptions {
             backoff_cap: Duration::from_secs(300),
             http_timeout: Duration::from_secs(30),
             min_rate_limit_wait: Duration::from_secs(60),
+            git_timeout: Duration::from_secs(300),
         }
     }
 }
@@ -117,6 +124,10 @@ pub struct ExecutorDeps {
     pub ids: Arc<IdGen>,
     pub options: ExecutorOptions,
     pub faults: Option<Arc<dyn FaultInjector>>,
+    /// 镜像仓、提交溯源与 `mirror_access`（forge.md §3 `repo` 依赖）。
+    pub repo: Arc<dyn RepoService>,
+    /// git 远端根地址，拼成 `{git_base}/{owner}/{repo}.git`；生产为 `https://github.com`。
+    pub git_base: String,
 }
 
 pub struct Executor {
@@ -128,6 +139,9 @@ pub struct Executor {
     ids: Arc<IdGen>,
     opts: ExecutorOptions,
     faults: Option<Arc<dyn FaultInjector>>,
+    repo: Arc<dyn RepoService>,
+    git: GitRunner,
+    git_base: String,
 }
 
 /// 一次执行的结论，由 `finish` 在一个事务里落库。
@@ -162,8 +176,13 @@ enum Probe {
 }
 
 impl Executor {
-    pub(crate) fn new(store: Store, config: Arc<ForgeConfig>, deps: ExecutorDeps) -> Self {
-        Self {
+    pub(crate) fn new(
+        store: Store,
+        config: Arc<ForgeConfig>,
+        deps: ExecutorDeps,
+    ) -> std::io::Result<Self> {
+        let git = GitRunner::new(deps.options.git_timeout)?;
+        Ok(Self {
             store,
             config,
             policy: deps.policy,
@@ -172,7 +191,74 @@ impl Executor {
             ids: deps.ids,
             opts: deps.options,
             faults: deps.faults,
+            git,
+            repo: deps.repo,
+            git_base: deps.git_base.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    fn remote_url(&self, repo: &RepoSlug) -> String {
+        format!("{}/{repo}.git", self.git_base)
+    }
+
+    /// 把镜像仓拉到最新（forge.md §7.10"镜像仓拉取"；`ForgeReader::sync_mirror` 的实现体）。
+    ///
+    /// `ensure_mirror` → `mirror_access(Fetch)` → `git fetch --prune <url> <refspecs>`。
+    /// 本地工作在 `refs/gantry/*`，上游快照在 `refs/mirror/*`，`--prune` 不会删未推送的提交。
+    pub async fn sync_mirror(
+        &self,
+        project: &gantry_core::ids::ProjectId,
+        want: &MirrorWant,
+    ) -> Result<(), ForgeError> {
+        let binding =
+            self.config
+                .projects
+                .get(project)
+                .ok_or_else(|| ForgeError::InvalidTarget {
+                    message: "project is not bound to forge".into(),
+                })?;
+        let ctx = self.ctx();
+        let unavailable = |message: String| ForgeError::Unavailable { message };
+        self.repo
+            .ensure_mirror(&ctx, project, &binding.project.repo)
+            .await
+            .map_err(|error| unavailable(format!("ensure_mirror: {error}")))?;
+        // 守卫持有镜像仓共享锁（#193），活到本函数结束：fetch 全程挡住 gc / 重建。
+        let guard = self
+            .repo
+            .mirror_access(&ctx, project, MirrorMode::Fetch)
+            .await
+            .map_err(|error| unavailable(format!("mirror_access: {error}")))?;
+        let token = self
+            .tokens
+            .token(project, TokenPurpose::Read)
+            .await
+            .map_err(|error| unavailable(format!("token: {error}")))?;
+        let url = self.remote_url(&binding.project.repo);
+        let mut args = vec!["fetch", "--prune", "--no-tags", url.as_str()];
+        args.extend(guard.fetch_refspecs.iter().map(String::as_str));
+        let output = self
+            .git
+            .run(&guard.git_dir, &args, Some(&token))
+            .await
+            .map_err(|error| unavailable(error.to_string()))?;
+        if !output.success {
+            return Err(unavailable(format!(
+                "git fetch failed: {}",
+                first_line(&output.stderr)
+            )));
         }
+        if let MirrorWant::Oid(oid) = want {
+            let present = self
+                .repo
+                .has_commit(project, oid)
+                .await
+                .map_err(|error| unavailable(error.to_string()))?;
+            if !present {
+                return Err(ForgeError::NotFound);
+            }
+        }
+        Ok(())
     }
 
     /// 领取并执行一行；没有可执行的行时返回 `None`。
@@ -260,7 +346,8 @@ impl Executor {
             ActionPayload::UpdatePr(payload) => run.update_pr(payload).await,
             ActionPayload::CloseIssue(payload) => run.close_issue(payload).await,
             ActionPayload::MergePr(payload) => run.merge_pr(payload).await,
-            // shortcut: push_branch 在推送切片实现（需要镜像仓与 git 传输）。
+            ActionPayload::PushBranch(payload) => run.push_branch(payload).await,
+            // 入队面只放行 M1 动作；其余动作出现在行里说明数据被改过，延后而不是执行。
             _ => Ok(Disposition::Defer {
                 wait: Duration::from_secs(300),
             }),
@@ -489,6 +576,35 @@ impl Run<'_> {
         self.exec.policy.scan_text(&text).is_empty().then_some(text)
     }
 
+    /// 执行前消费审批（P-54）。返回 `Some` 表示不得继续。
+    async fn consume(
+        &self,
+        approval: &gantry_core::ids::ApprovalId,
+        check: &ExecutionCheck,
+    ) -> Option<Disposition> {
+        match self
+            .exec
+            .policy
+            .consume_for_execution(approval, check, &self.action.id, &self.exec.ctx())
+            .await
+        {
+            Ok(ExecutionPermit::Consumed | ExecutionPermit::AlreadyConsumedBySameAction) => None,
+            Err(GateError::HeadChanged { .. }) => {
+                Some(terminal("precondition_failed", "head_changed"))
+            }
+            Err(GateError::ApprovalInvalid { reason }) => Some(Disposition::Cancel {
+                detail: format!("approval_invalid: {reason:?}"),
+            }),
+            Err(GateError::ConsumedByOther { by }) => Some(Disposition::Cancel {
+                detail: format!("approval consumed by {by}"),
+            }),
+            Err(GateError::Store(error)) => Some(Disposition::Retry {
+                detail: format!("policy store: {error}"),
+                immediate: false,
+            }),
+        }
+    }
+
     fn is_ours(&self, pr: &PullView) -> bool {
         // 标记只是索引：必须叠加作者 == bot（FA §2.4，I5）。
         pr.user_id == Some(self.bot_id()) && marker::carries_act(&pr.body, &self.action.id)
@@ -595,6 +711,163 @@ impl Run<'_> {
             },
             Err(error) => Err(error.into()),
         }
+    }
+
+    // ---- push_branch --------------------------------------------------------
+
+    async fn push_branch(&self, p: &PushBranchPayload) -> Result<Disposition, Flow> {
+        let exec = self.exec;
+        let project = self.action.project_id;
+        let retry = |detail: String| Disposition::Retry {
+            detail,
+            immediate: false,
+        };
+        // 分支名先过 git 的 ref 规则，避免拼进 refspec 时被当成选项或多段 refspec。
+        if p.branch.starts_with('-') || p.branch.contains(':') {
+            return Ok(terminal("validation_failed", "invalid branch name"));
+        }
+
+        // I8 机械复核：推送的必须是 repo 在补丁校验后生成的那个提交（forge.md §7.8）。
+        let record = match exec.repo.provenance(&project, &p.local_head_oid).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return Ok(terminal("precondition_failed", "provenance_missing")),
+            Err(error) => return Ok(retry(format!("provenance: {error}"))),
+        };
+        if record.tree_oid != p.expected_tree_oid {
+            return Ok(terminal("precondition_failed", "tree_mismatch"));
+        }
+        if record.patch_sha256 != p.validation_ref {
+            return Ok(terminal("precondition_failed", "validation_ref_mismatch"));
+        }
+        let base = match p.expected_remote_oid {
+            Some(expected) => expected,
+            // 首次推送：父提交必须是镜像仓里的分支基线。
+            None => {
+                let rev = RevSpec::new(format!("refs/mirror/heads/{}", p.base_ref));
+                match exec.repo.resolve(&project, &rev).await {
+                    Ok(oid) => oid,
+                    Err(error) => return Ok(retry(format!("resolve base: {error}"))),
+                }
+            }
+        };
+        if !p.force && record.parent != base {
+            return Ok(terminal("precondition_failed", "parent_mismatch"));
+        }
+
+        // 守卫持有镜像仓共享锁（#193），活到本函数结束：diff / ls-remote / push 全程挡住 gc / 重建。
+        let guard = match exec
+            .repo
+            .mirror_access(&exec.ctx(), &project, MirrorMode::Push)
+            .await
+        {
+            Ok(guard) => guard,
+            Err(error) => return Ok(retry(format!("mirror_access: {error}"))),
+        };
+        let git = |args: Vec<String>| {
+            let git_dir = guard.git_dir.clone();
+            async move {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                exec.git.run(&git_dir, &args, Some(self.token)).await
+            }
+        };
+        let full_ref = format!("refs/heads/{}", p.branch);
+        match git(vec!["check-ref-format".into(), full_ref.clone()]).await {
+            Ok(output) if output.success => {}
+            Ok(_) => return Ok(terminal("validation_failed", "invalid branch name")),
+            Err(error) => return Ok(retry(error.to_string())),
+        }
+
+        // workflow 路径的机械拒绝（P-48，第二道防线）。
+        let diff = match git(vec![
+            "diff".into(),
+            "--name-only".into(),
+            "--no-renames".into(),
+            base.to_string(),
+            p.local_head_oid.to_string(),
+        ])
+        .await
+        {
+            Ok(output) if output.success => output.stdout,
+            Ok(output) => return Ok(retry(format!("git diff: {}", first_line(&output.stderr)))),
+            Err(error) => return Ok(retry(error.to_string())),
+        };
+        if diff
+            .lines()
+            .any(|path| path.starts_with(".github/workflows/"))
+        {
+            return Ok(terminal("validation_failed", "workflows_path"));
+        }
+
+        if let Some(approval) = &self.action.requires_approval {
+            let check = ExecutionCheck::PushBranch {
+                repo: p.repo.clone(),
+                branch: p.branch.clone(),
+                force: p.force,
+                local_head_oid: p.local_head_oid,
+                expected_remote_oid: p.expected_remote_oid,
+                validation_ref: Some(p.validation_ref),
+            };
+            if let Some(stop) = self.consume(approval, &check).await {
+                return Ok(stop);
+            }
+            exec.crash(self.action, CrashPoint::AfterConsume)?;
+        }
+
+        // probe：读远端 ref（FA §3.2）。
+        let url = exec.remote_url(&p.repo);
+        let remote = match git(vec!["ls-remote".into(), url.clone(), full_ref.clone()]).await {
+            Ok(output) if output.success => ls_remote_sha(&output.stdout, &full_ref),
+            Ok(output) => return Ok(retry(format!("ls-remote: {}", first_line(&output.stderr)))),
+            Err(error) => return Ok(retry(error.to_string())),
+        };
+        let local = p.local_head_oid.to_string();
+        let expected = p.expected_remote_oid.map(|oid| oid.to_string());
+        match remote.as_deref() {
+            Some(sha) if sha == local => {
+                return Ok(Disposition::Done(exec.github_ref(self.action, None)))
+            }
+            current if current.map(str::to_owned) == expected => {}
+            // 强推只核对审批里的 expected_remote_oid；不一致同样是 remote_diverged。
+            _ => return Ok(terminal("precondition_failed", "remote_diverged")),
+        }
+
+        let effects = vec![effect(
+            "pull_request.synchronize",
+            [("branch", json!(p.branch)), ("head_sha", json!(local))],
+        )];
+        exec.record_effects(self.action, effects).await?;
+
+        let mut args = vec!["push".to_owned(), "--porcelain".to_owned()];
+        if p.force {
+            let lease = expected.clone().unwrap_or_default();
+            args.push(format!("--force-with-lease={full_ref}:{lease}"));
+        }
+        args.push(url);
+        args.push(format!("{local}:{full_ref}"));
+        let output = match git(args).await {
+            Ok(output) => output,
+            // 超时是未知结局：transient，重放时先 probe。
+            Err(error) => return Ok(retry(error.to_string())),
+        };
+        if !output.success {
+            let stderr = output.stderr.to_ascii_lowercase();
+            if stderr.contains("non-fast-forward")
+                || stderr.contains("stale info")
+                || stderr.contains("fetch first")
+            {
+                return Ok(terminal("precondition_failed", "remote_diverged"));
+            }
+            if stderr.contains("signed") || stderr.contains("signature") {
+                // M2 才有 api 传输的降级；M1 记为终态（FA §8）。
+                return Ok(terminal(
+                    "signature_required",
+                    "push rejected by signed-commit rule",
+                ));
+            }
+            return Ok(retry(format!("git push: {}", first_line(&output.stderr))));
+        }
+        exec.crash(self.action, CrashPoint::AfterApply)?;
+        Ok(Disposition::Done(exec.github_ref(self.action, None)))
     }
 
     // ---- update_pr ----------------------------------------------------------
@@ -759,32 +1032,8 @@ impl Run<'_> {
             expected_head_sha: p.expected_head_sha,
             live_head_sha: live_head,
         };
-        match self
-            .exec
-            .policy
-            .consume_for_execution(approval, &check, &self.action.id, &self.exec.ctx())
-            .await
-        {
-            Ok(ExecutionPermit::Consumed | ExecutionPermit::AlreadyConsumedBySameAction) => {}
-            Err(GateError::HeadChanged { .. }) => {
-                return Ok(terminal("precondition_failed", "head_changed"))
-            }
-            Err(GateError::ApprovalInvalid { reason }) => {
-                return Ok(Disposition::Cancel {
-                    detail: format!("approval_invalid: {reason:?}"),
-                })
-            }
-            Err(GateError::ConsumedByOther { by }) => {
-                return Ok(Disposition::Cancel {
-                    detail: format!("approval consumed by {by}"),
-                })
-            }
-            Err(GateError::Store(error)) => {
-                return Ok(Disposition::Retry {
-                    detail: format!("policy store: {error}"),
-                    immediate: false,
-                })
-            }
+        if let Some(stop) = self.consume(approval, &check).await {
+            return Ok(stop);
         }
         self.exec.crash(self.action, CrashPoint::AfterConsume)?;
 
@@ -811,6 +1060,17 @@ impl Run<'_> {
             self.exec.github_ref(self.action, Some(&live)),
         ))
     }
+}
+
+/// 只取 stderr 的第一行写进 `last_error`：git 的输出里不会有令牌（只经 askpass 注入），
+/// 但仍不整段转存。
+fn first_line(text: &str) -> String {
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect()
 }
 
 fn settle(probe: Probe) -> Option<Disposition> {
