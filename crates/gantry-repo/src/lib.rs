@@ -45,7 +45,7 @@ use tokio::sync::Semaphore;
 
 use crate::cas::PatchCas;
 use crate::git::{GitCmd, GitEnv, GitOutput};
-use crate::mirror::{io, io_error, MirrorEntry, MirrorLock};
+use crate::mirror::{io, io_error, MirrorEntry};
 use crate::worktree::{check_token, lease_until, ActiveLock, WorktreeTable, HUMAN_LEASE_MAX};
 
 pub use crate::mirror::FETCH_REFSPEC;
@@ -114,16 +114,6 @@ pub struct RepoDeps {
     pub policy: Arc<dyn PolicyPort>,
     /// 补丁字节与校验记录（见 [`cas`]）。
     pub cas: Arc<dyn PatchCas>,
-}
-
-/// 持有共享 / 独占 flock 的镜像仓访问守卫。
-///
-/// `core::ports::MirrorGuard` 只承载字段、不能持锁；需要在 `git fetch` / `push`
-/// 期间挡住 gc 的调用方用 [`GitRepo::lease_mirror`] 取得本类型。
-#[derive(Debug)]
-pub struct MirrorLease {
-    pub guard: MirrorGuard,
-    _lock: MirrorLock,
 }
 
 #[derive(Clone)]
@@ -215,21 +205,6 @@ impl GitRepo {
 
     pub fn config(&self) -> &RepoConfig {
         &self.inner.cfg
-    }
-
-    /// 取镜像仓的 flock 守卫：`Fetch` / `Push` / `Read` 共享；gc / 重建独占。
-    pub async fn lease_mirror(
-        &self,
-        project: &ProjectId,
-        mode: MirrorMode,
-    ) -> Result<MirrorLease, RepoError> {
-        let entry = self.mirror_entry(project)?;
-        let _ = mode; // 三种模式都是共享锁（repo.md §6.1）
-        let lock = mirror::lock(&entry.git_dir, false).await?;
-        Ok(MirrorLease {
-            guard: entry.guard(),
-            _lock: lock,
-        })
     }
 
     /// 独占锁下的 `git gc`（repo.md §7.2：`gc.auto=0`，由本模块定时执行）。
@@ -684,8 +659,8 @@ impl RepoService for GitRepo {
         Ok(info)
     }
 
-    /// 返回路径与 refspec。`core::ports::MirrorGuard` 不能持锁；需要挡住 gc 的
-    /// 调用方改用 [`GitRepo::lease_mirror`]。
+    /// 守卫持镜像仓的共享 flock（`Fetch` / `Push` / `Read` 都是共享锁），drop 即释放；
+    /// gc / 重建持独占锁，期间在这里等待。
     async fn mirror_access(
         &self,
         _ctx: &ActorCtx,
@@ -698,7 +673,8 @@ impl RepoService for GitRepo {
                 return Err(RepoError::MirrorNeedsRebuild);
             }
         }
-        Ok(entry.guard())
+        let lock = mirror::lock(&entry.git_dir, false).await?;
+        Ok(entry.guard(lock))
     }
 
     async fn commit_info(
