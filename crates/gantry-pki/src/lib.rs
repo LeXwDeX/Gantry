@@ -12,10 +12,12 @@
 //! - [`pairing`]：配对令牌、会话表、确认码、首台角色与安装引导期（§7.4，D-18）；
 //! - [`store_schema`]：本模块在 `store` 里的私有表（§7.2）；
 //! - [`directory`]：设备目录 `DeviceDirectory` 与握手在册查询（§6.2、§7.3 第 4 步）；
-//! - [`pairing_service`]：配对会话的开关与 `redeem` 单一写事务（§6.3、§7.4.3）。
+//! - [`pairing_service`]：配对会话的开关与 `redeem` 单一写事务（§6.3、§7.4.3）；
+//! - [`admin`]：改名、改角色、吊销（含吊销日志）、设备证书续期与恢复后重放（§6.2、§7.5–§7.7）。
 //!
-//! 设备管理（改名、改角色、吊销、续期、重放）、`Pki::open` 与应急命令在后续切片中加入。
+//! `Pki::open`、服务端证书续签与应急命令在后续切片中加入。
 
+pub mod admin;
 pub mod bootstrap;
 pub mod ca;
 pub mod config;
@@ -57,6 +59,8 @@ pub enum PkiError {
     Store(String),
     #[error("not found")]
     NotFound,
+    #[error("revocation journal: {0}")]
+    Journal(String),
 }
 
 impl From<rcgen::Error> for PkiError {

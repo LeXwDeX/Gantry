@@ -86,10 +86,7 @@ impl StoreDirectory {
         let Some(row) = row else {
             return Ok(None);
         };
-        let device = snapshot
-            .device(&row.device_id)
-            .await
-            .map_err(store_error)?;
+        let device = snapshot.device(&row.device_id).await.map_err(store_error)?;
         Ok(device.map(|device| (row, device)))
     }
 
@@ -204,9 +201,10 @@ impl DeviceDirectory for StoreDirectory {
                 .last_written
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if written.get(id).is_some_and(|last| {
-                now.as_millis().saturating_sub(last.as_millis()) < throttle_ms
-            }) {
+            if written
+                .get(id)
+                .is_some_and(|last| now.as_millis().saturating_sub(last.as_millis()) < throttle_ms)
+            {
                 return;
             }
             written.insert(*id, now);

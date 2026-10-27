@@ -2,240 +2,19 @@
 //! 首台角色与引导期（D-18）、令牌规则、不可信字段、配对窗口，以及设备目录
 //! （`by_cert_serial`、`verifying_key`、`last_seen` 节流、握手在册查询）。
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+mod common;
 
-use gantry_core::entities::{Actor, ActorKind, DevicePlatform, DeviceRole, DeviceStatus};
-use gantry_core::events::{DeviceRevokedData, EventType, NewEvent, Subject};
-use gantry_core::ids::{DeviceId, IdGen};
-use gantry_core::secret::SecretString;
-use gantry_core::testing::{FakeClock, SeqEntropy};
+use common::{fixture, Env, Keys, API, MIN_MS};
+use gantry_core::entities::{DevicePlatform, DeviceRole, DeviceStatus};
+use gantry_core::ids::DeviceId;
 use gantry_core::time::Timestamp;
-use gantry_pki::bootstrap::{self, BootstrapParams, MemoryFsProbe};
 use gantry_pki::csr::encode_approval_pubkey;
-use gantry_pki::directory::{DeviceDirectory, StoreDirectory};
-use gantry_pki::pairing::{SessionState, SessionTable, TokenInvalidReason};
-use gantry_pki::pairing_service::{
-    FieldError, Issuer, NewDevice, PairError, PairRequest, PairResponse, PairingConfig,
-    PairingService,
-};
-use gantry_pki::store_schema::{
-    self, CertRowStatus, DeviceCertRow, DeviceStateRow, DEVICE_CERTS, DEVICE_STATE, MODULE,
-    PAIRING_SESSIONS, SESSIONS_KEY,
-};
+use gantry_pki::directory::DeviceDirectory;
+use gantry_pki::pairing::{SessionState, TokenInvalidReason};
+use gantry_pki::pairing_service::{FieldError, PairError, PairResponse};
+use gantry_pki::store_schema::{CertRowStatus, DeviceStateRow, DEVICE_CERTS, DEVICE_STATE, MODULE};
 use gantry_pki::verifier::{CertStatusLookup, DeviceCertStatus};
-use gantry_pki::{fingerprint, Authority, CertPolicy, CertSerial, IssuedCert, P256PublicKey};
-use gantry_store::{Store, StoreDeps};
-use p256::pkcs8::EncodePublicKey;
-use rcgen::{CertificateParams, KeyPair};
-
-const NOW_MS: i64 = 1_798_761_600_000; // 2027-01-01T00:00:00Z
-const MIN_MS: i64 = 60_000;
-const DAY_MS: i64 = 86_400_000;
-const API: &str = "https://gantry.example.test:8443";
-
-struct AlwaysMemory;
-
-impl MemoryFsProbe for AlwaysMemory {
-    fn is_memory_fs(&self, _dir: &Path) -> io::Result<bool> {
-        Ok(true)
-    }
-}
-
-fn temp_dir() -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "pki-registry-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn fixture(name: &str) -> String {
-    fs::read_to_string(format!(
-        "{}/tests/fixtures/csr/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
-}
-
-struct Env {
-    store: Store,
-    clock: Arc<FakeClock>,
-    pairing: PairingService,
-    directory: StoreDirectory,
-    root: IssuedCert,
-}
-
-impl Env {
-    async fn new() -> Self {
-        let dir = temp_dir();
-        bootstrap::run_with(
-            BootstrapParams {
-                server_names: vec!["gantry.example.test".into()],
-                root_passphrase: SecretString::new("pw".into()),
-                install_id: "registry".into(),
-                out_dir: dir.clone(),
-                policy: CertPolicy::default(),
-            },
-            &FakeClock::new(NOW_MS - DAY_MS),
-            &SeqEntropy::new(1),
-            &AlwaysMemory,
-        )
-        .unwrap();
-        let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
-        let intermediate =
-            Authority::load(&read("intermediate.crt"), &read("intermediate.key")).unwrap();
-        let root =
-            IssuedCert::from_der(pem::parse(read("root.crt")).unwrap().into_contents()).unwrap();
-        let _ = fs::remove_dir_all(&dir);
-
-        let clock = Arc::new(FakeClock::new(NOW_MS));
-        let entropy = Arc::new(SeqEntropy::new(42));
-        let store = Store::open_in_memory(
-            StoreDeps {
-                clock: clock.clone(),
-                ids: Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7)))),
-            },
-            &[store_schema::module_spec()],
-        )
-        .await
-        .unwrap();
-        let pairing = PairingService::new(
-            store.clone(),
-            clock.clone(),
-            entropy,
-            Arc::new(Issuer::new(intermediate, root.clone())),
-            PairingConfig::new(API),
-        );
-        let directory = StoreDirectory::new(store.clone(), clock.clone());
-        Self {
-            store,
-            clock,
-            pairing,
-            directory,
-            root,
-        }
-    }
-
-    fn advance(&self, ms: i64) {
-        let now = self.clock.now_timestamp().as_millis();
-        self.clock.set(Timestamp::from_millis(now + ms));
-    }
-
-    async fn token(&self) -> String {
-        self.pairing
-            .open_session(0)
-            .await
-            .unwrap()
-            .token
-            .expose_secret()
-            .to_owned()
-    }
-
-    async fn pair(&self, platform: DevicePlatform) -> PairResponse {
-        let token = self.token().await;
-        self.pairing
-            .redeem(Keys::new().request(&token, platform))
-            .await
-            .unwrap()
-    }
-
-    async fn sessions(&self) -> SessionTable {
-        self.store
-            .snapshot()
-            .await
-            .unwrap()
-            .module_conn(MODULE)
-            .get(PAIRING_SESSIONS, SESSIONS_KEY)
-            .unwrap()
-            .unwrap()
-    }
-
-    async fn cert_row(&self, serial: &str) -> Option<DeviceCertRow> {
-        self.store
-            .snapshot()
-            .await
-            .unwrap()
-            .module_conn(MODULE)
-            .get(DEVICE_CERTS, serial)
-            .unwrap()
-    }
-
-    async fn revoke_event(&self, device: &PairResponse) {
-        let id = device.device.id;
-        let mut tx = self.store.begin_write().await.unwrap();
-        tx.append(NewEvent {
-            ty: EventType::DeviceRevoked,
-            subject: Subject::parse(&id.to_string()).unwrap(),
-            project_id: None,
-            actor: Actor::new(ActorKind::System, "pki"),
-            causation_id: None,
-            correlation_id: None,
-            data: serde_json::to_value(DeviceRevokedData {
-                device_id: id,
-                cert_serials: vec![device.device.cert_serial.clone()],
-                remaining_approvers: 0,
-                via: None,
-            })
-            .unwrap(),
-            dedup_key: None,
-        })
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-    }
-}
-
-/// 设备端的两把密钥：mTLS 客户端密钥（出 CSR）与审批签名密钥。
-struct Keys {
-    client: KeyPair,
-    approval: P256PublicKey,
-}
-
-impl Keys {
-    fn new() -> Self {
-        let secret = p256::SecretKey::random(&mut rand_core::OsRng);
-        let approval = P256PublicKey::from_spki_der(
-            secret.public_key().to_public_key_der().unwrap().as_bytes(),
-        )
-        .unwrap();
-        Self {
-            client: KeyPair::generate().unwrap(),
-            approval,
-        }
-    }
-
-    fn csr(&self) -> String {
-        CertificateParams::default()
-            .serialize_request(&self.client)
-            .unwrap()
-            .pem()
-            .unwrap()
-    }
-
-    fn client_public(&self) -> P256PublicKey {
-        P256PublicKey::from_spki_der(&self.client.public_key_der()).unwrap()
-    }
-
-    fn request(&self, token: &str, platform: DevicePlatform) -> PairRequest {
-        PairRequest {
-            token: token.to_owned(),
-            csr_pem: self.csr(),
-            approval_pubkey: Some(encode_approval_pubkey(&self.approval)),
-            device: NewDevice {
-                name: "Lex 的 MacBook".into(),
-                platform,
-            },
-        }
-    }
-}
+use gantry_pki::{fingerprint, CertSerial, IssuedCert};
 
 fn field_errors(result: Result<PairResponse, PairError>) -> Vec<FieldError> {
     match result {
@@ -295,13 +74,19 @@ async fn redeem_issues_chain_and_writes_device_rows_in_one_transaction() {
     assert_eq!(device.status, DeviceStatus::Active);
     assert_eq!(device.platform, DevicePlatform::Macos);
     assert_eq!(device.pubkey_fpr, keys.client_public().fingerprint());
-    assert_eq!(device.approval_pubkey_fpr, Some(keys.approval.fingerprint()));
+    assert_eq!(
+        device.approval_pubkey_fpr,
+        Some(keys.approval.fingerprint())
+    );
     assert!(device.id.to_string().starts_with("dev_"));
 
     // 恰好一条 device.paired（开会话不产生事件）。
     let mut snapshot = env.store.snapshot().await.unwrap();
     assert_eq!(snapshot.head_seq().as_u64(), 1);
-    assert_eq!(snapshot.device(&device.id).await.unwrap().as_ref(), Some(device));
+    assert_eq!(
+        snapshot.device(&device.id).await.unwrap().as_ref(),
+        Some(device)
+    );
 
     // 模块表：证书行 active、状态行带 SPKI；会话 redeemed 且确认码一致。
     let cert = env.cert_row(&device.cert_serial).await.unwrap();
@@ -314,12 +99,15 @@ async fn redeem_issues_chain_and_writes_device_rows_in_one_transaction() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        fingerprint(
-            &base64_decode(&state.pubkey_spki)
-        ),
+        fingerprint(&base64_decode(&state.pubkey_spki)),
         device.pubkey_fpr
     );
-    let session = env.sessions().await.get(ticket.session_id).cloned().unwrap();
+    let session = env
+        .sessions()
+        .await
+        .get(ticket.session_id)
+        .cloned()
+        .unwrap();
     assert_eq!(session.state, SessionState::Redeemed);
     assert_eq!(session.redeemed_device_id, Some(device.id));
     assert_eq!(
@@ -684,7 +472,12 @@ async fn directory_maps_serials_and_returns_the_approval_key() {
         .unwrap();
     let serial: CertSerial = paired.device.cert_serial.parse().unwrap();
 
-    let found = env.directory.by_cert_serial(&serial).await.unwrap().unwrap();
+    let found = env
+        .directory
+        .by_cert_serial(&serial)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(found.id, paired.device.id);
     let unknown: CertSerial = "7f".parse().unwrap();
     assert_eq!(env.directory.by_cert_serial(&unknown).await.unwrap(), None);
@@ -704,7 +497,10 @@ async fn directory_maps_serials_and_returns_the_approval_key() {
     // 吊销后：verifying_key 为 None；by_cert_serial 仍返回设备（status = revoked）。
     env.revoke_event(&paired).await;
     assert_eq!(
-        env.directory.verifying_key(&paired.device.id).await.unwrap(),
+        env.directory
+            .verifying_key(&paired.device.id)
+            .await
+            .unwrap(),
         None
     );
     assert_eq!(
@@ -733,10 +529,7 @@ async fn handshake_lookup_reads_the_cert_table_without_caching() {
     assert_eq!(record.device_id, paired.device.id);
     assert_eq!(record.status, DeviceCertStatus::Active);
     assert!(record.device_active);
-    assert_eq!(
-        env.directory.lookup(&"7f".parse().unwrap()).unwrap(),
-        None
-    );
+    assert_eq!(env.directory.lookup(&"7f".parse().unwrap()).unwrap(), None);
 
     // 证书被取代：握手查询照实返回，by_cert_serial 在原 notAfter 之后不再映射。
     let mut row = env.cert_row(serial.as_str()).await.unwrap();
@@ -750,13 +543,24 @@ async fn handshake_lookup_reads_the_cert_table_without_caching() {
         env.directory.lookup(&serial).unwrap().unwrap().status,
         DeviceCertStatus::Superseded
     );
-    assert!(env.directory.by_cert_serial(&serial).await.unwrap().is_some());
+    assert!(env
+        .directory
+        .by_cert_serial(&serial)
+        .await
+        .unwrap()
+        .is_some());
     env.clock.set(row.not_after);
     assert_eq!(env.directory.by_cert_serial(&serial).await.unwrap(), None);
 
     // 设备吊销对下一次查询立即可见。
     env.revoke_event(&paired).await;
-    assert!(!env.directory.lookup(&serial).unwrap().unwrap().device_active);
+    assert!(
+        !env.directory
+            .lookup(&serial)
+            .unwrap()
+            .unwrap()
+            .device_active
+    );
 }
 
 #[tokio::test]
@@ -776,7 +580,8 @@ async fn last_seen_is_throttled_to_once_per_minute() {
     let seen = env.directory.get(&id).await.unwrap().unwrap().last_seen;
     assert_eq!(seen, Some(t0));
 
-    env.clock.set(Timestamp::from_millis(t0.as_millis() + 61_000));
+    env.clock
+        .set(Timestamp::from_millis(t0.as_millis() + 61_000));
     env.directory.touch_last_seen(&id).await;
     let seen = env.directory.get(&id).await.unwrap().unwrap().last_seen;
     assert_eq!(seen, Some(Timestamp::from_millis(t0.as_millis() + 61_000)));

@@ -8,22 +8,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gantry_core::entities::{Actor, ActorKind, Device, DevicePlatform, DeviceStatus};
+use gantry_core::entities::{Actor, ActorKind, Device, DevicePlatform};
 use gantry_core::events::{DevicePairedData, EventType, NewEvent, Subject};
 use gantry_core::ids::{Clock, Dev, Entropy, IdGen};
 use gantry_core::secret::SecretString;
 use gantry_core::time::Timestamp;
-use gantry_store::{Page, Store, WriteTx};
+use gantry_store::{Store, WriteTx};
 use tokio::sync::watch;
 
+use crate::admin::active_devices;
 use crate::ca::{Authority, IssuedCert};
 use crate::config::CertPolicy;
 use crate::csr::{parse_approval_pubkey, validate_csr};
 use crate::directory::{desktop_ever_paired, encode_spki, is_desktop, store_error};
 use crate::keys::{CertSerial, P256PublicKey};
 use crate::pairing::{
-    confirmation_code, initial_role, PairingSession, PairingSessionId, PairingWindow,
-    SessionError, SessionTable, TokenInvalidReason,
+    confirmation_code, initial_role, PairingSession, PairingSessionId, PairingWindow, SessionError,
+    SessionTable, TokenInvalidReason,
 };
 use crate::store_schema::{
     CertRowStatus, DeviceCertRow, DeviceStateRow, DEVICE_CERTS, DEVICE_STATE, MODULE,
@@ -275,7 +276,10 @@ impl PairingService {
             now,
             &self.config.cert_policy,
         )?;
-        let approval_pubkey_fpr = validated.approval_key.as_ref().map(P256PublicKey::fingerprint);
+        let approval_pubkey_fpr = validated
+            .approval_key
+            .as_ref()
+            .map(P256PublicKey::fingerprint);
         let data = DevicePairedData {
             device_id,
             name: req.device.name.clone(),
@@ -397,7 +401,10 @@ impl PairingService {
         }
         if let Some(approval) = &approval_key {
             let fpr = Some(approval.fingerprint());
-            if active.iter().any(|device| device.approval_pubkey_fpr == fpr) {
+            if active
+                .iter()
+                .any(|device| device.approval_pubkey_fpr == fpr)
+            {
                 errors.push(field("/approval_pubkey", "duplicate_key"));
             }
         }
@@ -470,29 +477,4 @@ fn save_sessions(tx: &mut WriteTx, table: &SessionTable) -> Result<(), PkiError>
         .put(PAIRING_SESSIONS, SESSIONS_KEY, table)
         .map_err(store_error)?;
     Ok(())
-}
-
-async fn active_devices(tx: &mut WriteTx) -> Result<Vec<Device>, PkiError> {
-    let mut reader = tx.read();
-    let mut out = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = reader
-            .devices(&Page {
-                limit: 200,
-                cursor,
-                ..Page::default()
-            })
-            .await
-            .map_err(store_error)?;
-        out.extend(
-            page.items
-                .into_iter()
-                .filter(|device| device.status == DeviceStatus::Active),
-        );
-        match page.next_cursor {
-            Some(next) => cursor = Some(next),
-            None => return Ok(out),
-        }
-    }
 }

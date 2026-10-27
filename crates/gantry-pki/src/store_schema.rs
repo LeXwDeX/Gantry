@@ -30,7 +30,13 @@ pub const SERVER_CERT: &str = "pki_server_cert";
 pub fn module_spec() -> ModuleSpec {
     ModuleSpec::new(
         MODULE,
-        &[DEVICE_CERTS, DEVICE_STATE, PAIRING_SESSIONS, CA, SERVER_CERT],
+        &[
+            DEVICE_CERTS,
+            DEVICE_STATE,
+            PAIRING_SESSIONS,
+            CA,
+            SERVER_CERT,
+        ],
     )
 }
 
