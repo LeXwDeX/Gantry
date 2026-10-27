@@ -680,15 +680,16 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 
 执行体对每个输入：
 
+0. **预取提议原文**（#125）：开事务前，按最近一次折叠出的状态（启动后首次决策前先只读折叠一次）补齐 `env.proposals`，规则见 7.14.2 末"提议原文预取"。这是 `decide` 之外唯一一处读 CAS 的地方。
 1. 打开 `WriteTx`，`tx.read()` 折叠得到 `DeliveryState`；调 `decide(state, input, env)`。
 2. 按序执行事务内决策；任何一步失败整笔回滚、不发副作用、不回 `Reply`。成功则提交。
 3. 提交后：把 `Reply` 交给调用方；对每个 `Effect` 先把它的 `EffectKey` 记入执行体内存里的**在途集合**（`env.inflight`），再发起。该副作用的 `Report`（含 `Done` 与 `EffectFailed`）到达时从在途集合移除；`ScheduleTimer` 的键在对应 `Tick(Timer)` 到达时移除。
-4. **收敛**：只要上一步产出过事务内决策，就对新状态再调用 `decide(state', Tick(Settle), env')`；某一轮不再产出事务内决策即停（此轮产出的副作用照常发起）。上限 `MAX_SETTLE = 16` 轮，超过视为引擎缺陷：记错误日志、`status` 报 `degraded`、停止为该交付单元决策；不写事件、不上报（词表里没有此码，P-79）。
+4. **收敛**：只要上一步产出过事务内决策，或提交后的状态里出现了 `env.proposals` 尚未收录的提议引用（预取后需要再求值一次），就先做第 0 步，再对新状态调用 `decide(state', Tick(Settle), env')`；某一轮不再产出事务内决策、也没有新的提议引用即停（此轮产出的副作用照常发起）。上限 `MAX_SETTLE = 16` 轮，超过视为引擎缺陷：记错误日志、`status` 报 `degraded`、停止为该交付单元决策；不写事件、不上报（词表里没有此码，P-79）。
 
 保证收敛与幂等的三条规则：
 
 - **一切前置条件写在 `decide` 里**（7.14.5 表）。每个 `Effect` 的前置条件都包含"其 `EffectKey` 不在 `env.inflight`"；在途集合不持久化，崩溃后为空，于是 `Tick(Recover)` 恰好把未完成的副作用重新发一遍，而副作用本身幂等（`submit` 按 `job_id`、`release` / `cancel`、`create_worktree`、`acquire_lock` 同持有者重入均幂等，sandbox.md §6.1、repo.md §7.6）。
-- **期望动作集合**：Outbox 动作不靠"刚才发生了什么"决定，而由纯函数 `expected_actions(state) -> BTreeMap<ActionKey, ActionIntent>` 从状态推出（例如阶段为 `propose` 且有 `candidate_head` → 期望一条 `push_branch`）。`JudgeAction` 只为"期望中、`outbox` 里没有、未在途、未被本进程判过 `Deny`"的意图产出；`Enqueue` 回流时再核对该意图仍在期望集合中（用户中途放弃则不入队）。
+- **期望动作集合**：Outbox 动作不靠"刚才发生了什么"决定，而由纯函数 `expected_actions(state, env.proposals) -> BTreeMap<ActionKey, ActionIntent>` 从状态推出（`proposals` 只用于 `create_pr` 的提议原文，7.14.4）（例如阶段为 `propose` 且有 `candidate_head` → 期望一条 `push_branch`）。`JudgeAction` 只为"期望中、`outbox` 里没有、未在途、未被本进程判过 `Deny`"的意图产出；`Enqueue` 回流时再核对该意图仍在期望集合中（用户中途放弃则不入队）。
 - **判定是两段式的**：`PolicyPort::decide_action` / `request_approval` 没有事务参数且自身写事件（`policy.denied`、`approval.requested`），不能在引擎的单写者事务里调用。所以 `decide` 先产出 `Effect::JudgeAction`，判定作为 `Report::ActionJudged` 回流后再产出 `Enqueue`、`Effect::RequestApproval` 或 `Raise`。因此"入队与决策同事务"（§1 第 9 条、§7.1、§7.12）在本节之后的含义是：**入队与"决定入队的那次决策"同事务**；阶段事件（如 T6 的 `stage_changed`）与入队之间存在一个崩溃窗口，由期望动作集合在 `Tick(Recover)` 时补齐，幂等键保证不重复（§7.13 第 4 步"不会悬空"指的是这一点）。`Deny` 的意图记入执行体内存的 `env.denied`，本进程内不再重判，收到 `settings.updated` 时清空（策略可能已改）；重启后至多重判一次（`policy.denied` 由 `policy` 去重）。
 
 **事件游标**：§7.1 第 4 步改为由 `EventRouter` 推进。各执行体按 `seq` 顺序处理各自的输入并在提交后向路由器回报已处理到的 `seq`。低水位 = 仍有"已投递未处理完"事件的执行体中最小的未处理 `seq` − 1；没有积压时取路由器已读到的最大 `seq`（含不投给任何执行体的事件）。路由器以低水位推进持久游标 `engine`，空闲执行体不拖住游标。崩溃后从低水位重放，重复投递由前置条件消化。执行体自己的事务不再 `advance_cursor`。
@@ -819,6 +820,13 @@ pub struct OutputSignals {
 
 `Finalized` 由 `decide` 写成 `attempt.finished`、`budget.charged`、`node.finished`（§7.8"终结"行）。字段来源都已在 worker-protocol §5–§9 与 `core::ports` 定义；`decide` 不读 CAS 原文。
 
+**提议原文预取**（#125）：`create_pr` 的 `title` / `body` / `draft` 来自 `open_pr` 提议原文，而 `ActionKey` 要对它们做摘要（forge-actions §2.2，7.14.4）。`decide` 仍然不读 CAS，原文由执行体预取进只读的 `env.proposals`（7.14.3）：
+
+- **取哪些**：状态中每个带 `accepted_open_pr` 的 `AttemptState`，键为 `(result_ref, accepted_open_pr)`；已在表中的键不再取。
+- **怎么取**：从 CAS 读 `result_ref` 指向的结果对象，找出 `id = proposal_id` 的提议。是 `open_pr` 且 `params` 能解码为 `OpenPrParams` → `Found`；对象不存在、没有该 `id`、`kind` 不是 `open_pr` 或解码失败 → 对应的 `Missing(_)`，并记错误日志。
+- **瞬时失败**：读 CAS 遇 IO 错误时不写表项（不记成 `Missing`），执行体退避后重做第 0 步并再求值一次；这期间 `create_pr` 不进入期望动作集合（7.14.4）。
+- **生命周期**：表在执行体内存里，不持久化。CAS 按内容寻址、M1 不删除对象（store.md OQ-5），同一键取到的结果恒定，所以表项写入后不失效；重启后表为空，第 0 步按状态重新取，得到的值与崩溃前相同。
+
 #### 7.14.3 `DecideEnv`
 
 ```rust
@@ -833,12 +841,34 @@ pub struct DecideEnv<'a> {
     pub sandbox_capacity: u32,                // SandboxService::capacity() 的快照，用于并发闸 2
     pub inflight: &'a BTreeSet<EffectKey>,    // 在途副作用（执行体内存，7.14.1）
     pub denied: &'a BTreeSet<ActionKey>,      // 本进程内已判 Deny 的意图（7.14.1）
+    pub proposals: &'a ProposalTexts,         // open_pr 提议原文，执行体开事务前预取（7.14.2）；只读
     pub consts: EngineConsts,                 // MAX_ATTEMPTS_PER_NODE、退避、租约余量、MAX_SETTLE（§10）
 }
 impl DecideEnv<'_> {
     /// 确定性 ID：时间部分 = now，随机 80 位 = sha256(seed ‖ 计数器) 截断。
     /// 每次 decide 只在入口调用一次，所得 IdMint 在本次决策内按可变引用传递，计数器单调。
     pub fn mint(&self) -> IdMint;
+}
+
+/// open_pr 提议原文表（#125）。执行体内存，不持久化；同一键的值恒定（CAS 内容寻址）。
+pub struct ProposalTexts(BTreeMap<ProposalRef, ProposalText>);
+impl ProposalTexts {
+    /// None = 尚未预取（或预取遇瞬时 IO 错误）；与 Some(Missing) 含义不同，见下表。
+    pub fn get(&self, key: &ProposalRef) -> Option<&ProposalText>;
+}
+/// 取自 AttemptState 的 result_ref 与 accepted_open_pr。
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProposalRef { pub result_ref: Sha256Digest, pub proposal_id: String }
+pub enum ProposalText {
+    /// core::worker::OpenPrParams { title, body, draft }，原样保存；模型产出，作数据交 forge 执行时净化（I5）。
+    Found(OpenPrParams),
+    /// 确定性缺失：已读过 CAS，但取不到可用的该提议。
+    Missing(ProposalMissing),
+}
+pub enum ProposalMissing {
+    ObjectAbsent,                             // CAS 中没有 result_ref 指向的对象
+    NotInResult,                              // 结果对象里没有该 proposal_id
+    Malformed,                                // 有该 id，但 kind ≠ open_pr 或 params 解码失败
 }
 
 /// 副作用的身份：用于在途去重、DecideSeed 与 EffectFailed 回报。
@@ -850,6 +880,16 @@ pub enum EffectKey {
 ```
 
 "输入身份"取值：`Command` 用 `ctx.request_id`；`Event` 用事件 ID；`Report` 用其 `EffectKey`；`Tick` 用 `TickReason` 的规范化编码。`EngineSettings` 在两次决策之间整体切换（§7.13 热加载），一次决策只看一份；`models` 中缺所需表项（`NotConfigured`）时，`decide` 不派发并走 §9 的 `models_not_configured` 上报。
+
+`proposals` 查询结果的处理（只影响 `create_pr`，见 7.14.4）：
+
+| `proposals.get(key)` | `create_pr` 意图 | 理由 |
+| --- | --- | --- |
+| `Some(Found(p))` | `title` / `body` / `draft` 取 `p` | 拍板方案 1 |
+| `Some(Missing(_))` | 退回模板：与"没有被接受的提议"相同（交付单元标题 + 模板正文） | 缺失是确定的，退回后键仍稳定；预取时已记错误日志，不上报（词表无此码，P-79） |
+| `None` | 不进入期望动作集合（本轮不产出它的 `JudgeAction` / `Enqueue`） | 不能退回模板：预取成功后意图字段会变，`ActionKey` 随之改变，可能重复开 PR |
+
+`Missing` 能退回模板，前提是缺失永久不变：CAS 在 M1 不删除对象（store.md OQ-5）。将来引入 CAS 保留期时，必须保留非终态交付单元的 `attempt.finished.result_ref` 所指对象，否则同一意图在恢复前后会得到不同的键。
 
 #### 7.14.4 `DeliveryState` 的补全字段
 
@@ -909,7 +949,7 @@ pub struct FindingFingerprint(Sha256Digest);
 
 `Evidence` 补 `candidate_tree: Option<GitOid>`（`push_branch.expected_tree_oid`）与 `stage_verdicts: BTreeMap<WorkflowId, Verdict>`（按 `VerdictRule` 折叠后的阶段结论）。
 
-**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，M1 内不自增：Outbox 终态失败后的上报 `escalation(outbox_failed:*)` 在 P-79 词表里没有选项，用户"决定重试"（§9）目前没有入口，见 7.14.6 E6；在此之前终态失败的动作只能以放弃收场。`create_pr` 的 `open_pr` 提议标题 / 正文经 E5 落盘为 `attempt.finished.accepted_open_pr`（`proposal_id`）+ `result_ref`，由执行器从 CAS 取原文填入意图；CAS 按内容寻址，崩溃恢复后取到的原文相同，幂等键一致。`decide` 不读 CAS（§7.14.2），`expected_actions` 如何在不持有原文的情况下得到含 `title` / `body` 摘要的 `ActionKey`，尚未规定（见 7.14.6 E5 的待决说明）；在此之前实现仍只用状态里已有的确定字段（交付单元标题、模板正文、绑定 Issue）。
+**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，M1 内不自增：Outbox 终态失败后的上报 `escalation(outbox_failed:*)` 在 P-79 词表里没有选项，用户"决定重试"（§9）目前没有入口，见 7.14.6 E6；在此之前终态失败的动作只能以放弃收场。`create_pr` 的 `open_pr` 提议标题 / 正文经 E5 落盘为 `attempt.finished.accepted_open_pr`（`proposal_id`）+ `result_ref`。`expected_actions` 签名相应为 `expected_actions(state, env.proposals)`，仍是纯函数（#125）：对产出补丁那次尝试（`result_commit = Evidence.candidate_head`）取键 `ProposalRef { result_ref, proposal_id: accepted_open_pr }`，按 7.14.3 末的表填写 `create_pr` 的 `title` / `body` / `draft`——`Found` 取原文，`Missing` 或该尝试没有 `accepted_open_pr` 时用交付单元标题与模板正文，表中尚无该键时本轮不期望 `create_pr`。其余字段（`head`、`base`、`closes`、`expected_head_oid`）照旧取自状态。CAS 按内容寻址，崩溃恢复后预取到的原文相同，`ActionKey` 一致；forge-actions §2.2 不变。
 
 #### 7.14.5 `Decision`
 
@@ -985,7 +1025,8 @@ pub struct AttemptPlan {
 | `Resolve`（`escalation(models_not_configured)`） | 收到 `settings.updated` 后 `env.models` 已有所需表项 | `Observed(SettingsUpdated)` |
 | `Append(budget.charged(forge_writes))` | `outbox.succeeded` 的动作属于本交付单元且尚未记账 | `Observed(OutboxSucceeded)` |
 | `Append(budget.exhausted)` + `Raise(budget_exhausted)` | 某维度 `used ≥ limit`，**或**下一步必须的动作只因该维度不足而无法产出（例如进入阶段要建的图需要 `k` 个节点而 `used.nodes + k > limit.nodes`；追加一轮时 `rounds` / `nodes` 不够；预留结果为零）；且本阶段尚无同维度 `budget.exhausted`。`data` 仍为 `{dimension, limit, used}`，与"已用尽"共用同一形状；不出现"追加一半的图"（§7.5） | 记账后或前置条件因预算不满足时的 `Tick(Settle)` |
-| `Effect(JudgeAction)` | 意图 ∈ `expected_actions(state)`；`outbox` 无该 `ActionKey`；不在 `env.denied`；需审批的动作在 `approvals` 中无同主体 `pending` | `Tick(Settle)` |
+| `Effect(JudgeAction)` | 意图 ∈ `expected_actions(state, env.proposals)`；`outbox` 无该 `ActionKey`；不在 `env.denied`；需审批的动作在 `approvals` 中无同主体 `pending` | `Tick(Settle)` |
+| `create_pr` 的 `JudgeAction` / `Enqueue` 另需 | 产出补丁的尝试没有 `accepted_open_pr`，或 `env.proposals` 中已有其 `ProposalRef`（`Found` 或 `Missing`）。正例：`Found` → 意图的 `title` / `body` / `draft` 等于原文；`Missing` → 意图等于模板。反例：键不在表中 → 不产出，预取完成后的 `Tick(Settle)` 才产出 | `Tick(Settle)`、`Tick(Recover)` |
 | `Enqueue` | `Report::ActionJudged` 为 `Allow`；意图仍 ∈ `expected_actions`；`outbox` 仍无该键；`depends_on` 指向的动作已在 `outbox` | `Report::ActionJudged` |
 | `Effect(RequestApproval)` | 判定为 `NeedsApproval` 且 `pending = None` | `Report::ActionJudged` |
 | `Raise(approval_needed)` | 阶段为 `merge`；`approvals` 中有本交付单元 `pending` 的审批，且 `open_inbox` 中没有带该 `approval_id` 的项（覆盖崩溃窗口与 T11 后回到 `merge`） | `Report::ApprovalRequested`、`Observed(ApprovalRequested)`、`Tick(Settle)` |
@@ -1004,7 +1045,7 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E1 | **已落地（#64）**：`attempt.finished` 增加可选 `result_commit`，`core` 校验 `status = succeeded` 且有 `result_tree` 时必填、有 `result_commit` 时必须有 `result_tree`。原缺口：本地提交的 `commit_oid` 不在任何事件里（repo.md OQ-R2），T6 的 `push_branch.local_head_oid` = `Evidence.candidate_head` 无法从日志重建 | 引擎投影把它读入 `AttemptState.result_commit`（阶段 2 切片 1） | **M1（阻塞端到端与"重启一致"）** |
 | E2 | 无进展检测的 finding 指纹没有落盘处 | 判定节点的 `node.finished` 增加可选 `fingerprints[]`（`FindingFingerprint` 十六进制，≤ 64 条，只在 `REVISE` / `REJECT` 时出现） | M2 / M3（M1 无轮次，`round_history` 恒空） |
 | E3 | `PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报（policy.md 未规定何时省略 `report`） | 二选一：policy.md 规定对 `engine` 发起的动作 `Deny` 必带 `ReportHint`；或 data-model 词表增加通用码 | M1（`merge_pr` 以外的动作） |
-| E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。执行器据 `result_ref` 从 CAS 取原文填入 `create_pr` 意图（内容寻址，恢复后一致）。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**待决**：`ActionKey` 含 `title` / `body` 摘要（forge-actions §2.2），而 `expected_actions` 在 `decide` 内纯计算、不读 CAS，二者如何衔接未规定 | 引擎投影读入 `AttemptState.accepted_open_pr`；`ActionKey` 衔接方式待定 | M1（体验；衔接方式定下前用模板标题与正文，不阻塞） |
+| E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**`ActionKey` 衔接已定（#125，方案 1）**：执行体开事务前按 `(result_ref, proposal_id)` 从 CAS 预取原文进只读的 `DecideEnv.proposals`（7.14.2、7.14.3），`expected_actions` 用它算 `create_pr` 的完整意图与 `ActionKey`，`decide` 仍纯、不读 CAS；forge-actions §2.2 不改 | 引擎投影读入 `AttemptState.accepted_open_pr`；`DecideEnv` 增加 `proposals`（#69），`create_pr` 路径使用它（#70） | M1（体验；不阻塞） |
 | E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
 | E4 | **已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`），区分"job 从未被受理"与"受理后丢失"；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`，不把未起沙盒的尝试判成 `infra.lost` | 见 sandbox.md §6.1、§7.10；`FakeSandboxService` 按受理集合分类 | M1（"重启一致"） |
 
@@ -1185,7 +1226,8 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 - [ ] **上报幂等**：重放同一决策，`InboxPort::raise` 因 `dedup_key` 相同返回 `Deduped`，收件箱只有一项；`dismiss` 一个阻塞项后 `stage_status` 不变、引擎不推进；`choose` 产生的 `inbox.resolved(option_id)` 驱动 `abandon` / `replan` / `upgrade` / `narrow` / `done` / `fix`；`raise_cap` 在 Q-11 定案后补用例。
 - [ ] **release**：每个 `attempt.finished` 落库后调用 `SandboxService::release`：进程不重启时恰一次，跨重启至少一次且幂等（sandbox.md §12 的 `release` 幂等），未终结的尝试从不被 `release`；重启后对存活 `job_id` 调 `sweep_orphans`。
 - [ ] **重启一致**：在每个崩溃点（`delivery.created` 后、`attempt.started` 后、`collect` 后提交前、提交后 `attempt.finished` 前、入队后、`outbox.succeeded` 后）杀掉引擎并重建，最终状态与不崩溃一致；`outbox` 表中同一幂等键只有一行；同一 `job_id` 只有一个本地提交；没有重复的 `attempt.started`。
-- [ ] **不重复创建 PR**：重放 T6 的决策得到相同的 `create_pr` 幂等键（与 `FakeForge` 联测：崩溃发生在"GitHub 已创建、本地未记录"时不新增 PR）。
+- [ ] **不重复创建 PR**：重放 T6 的决策得到相同的 `create_pr` 幂等键（与 `FakeForge` 联测：崩溃发生在"GitHub 已创建、本地未记录"时不新增 PR）。黄金结果带 `open_pr` 提议时，重启（`env.proposals` 清空后重新预取）前后的幂等键相同。
+- [ ] **提议原文**（#125）：`env.proposals` 中为 `Found` → `create_pr` 的 `title` / `body` / `draft` 等于提议原文；为 `Missing`（结果对象无该 `proposal_id`）→ 用交付单元标题与模板正文，并记错误日志、不上报；键不在表中 → 不产出 `create_pr` 的 `JudgeAction`，预取完成后的 `Tick(Settle)` 才产出；预取遇 CAS 瞬时错误 → 不记成 `Missing`，重试成功后意图取原文。`decide` 在测试中不访问 CAS（测试替身的 CAS 只被执行体调用）。
 - [ ] **受保护路径**：`FakeRepo` 对 `.github/workflows/x.yml` 补丁返回 `deny(policy.path_protected:workflows)` → 尝试 `failed(policy_denied, policy.path_protected:workflows)`；写 `decision_needed`（`payload.kind = manual_action`）且附补丁引用；对 `Cargo.lock` 补丁写 `escalation`（`policy.path_protected:lockfiles`）且 `payload.evidence` 含 `patch.rejected` 引用；两者都无任何 Outbox 行、不自动重试、`stage_status = waiting_human`（P-48）。
 - [ ] **材料来源**：Issue 正文与评论经 `ForgeReader::discussion` 取得，只出现在 `raw_materials`；快照与事件日志里没有正文（P-59）。
 - [ ] **暂停 / 继续 / 重试**（P-56）：`pause` 写 `delivery.paused`、停止派发、运行中尝试跑完；`resume` 写 `delivery.resumed` 并恢复暂停前的 `stage_status`；对 `failed` 节点 `retry_node` 写 `node.retry_requested`、节点 `failed → queued` 并新建 Attempt；对非 `failed` 节点 → `InvalidState`；重复调用幂等。
