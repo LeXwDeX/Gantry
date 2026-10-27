@@ -1,0 +1,17 @@
+[package]
+name = "gantry-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry Worker 适配：服务端侧 WorkerAdapter 声明与沙盒内执行者 gantry-worker（worker.md）"
+
+# 二进制只依赖 core 与少量通用库，不得引入 store / sqlx / axum / secrets 等服务端 crate（worker.md §3、§12.J）。
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+serde_json.workspace = true
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+# 只用于核对挂载约定与 sandbox 的常量一致。
+gantry-sandbox = { path = "../gantry-sandbox" }
