@@ -1,6 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
+
+// findBy* / waitFor 默认只等 1 秒；高负载下整页渲染常超过它而误报“找不到元素”。
+configure({ asyncUtilTimeout: 5000 });
 
 afterEach(() => {
   cleanup();

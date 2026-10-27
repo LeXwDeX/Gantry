@@ -5,10 +5,9 @@
 //! §7.14.2 路由表归属本交付单元后折叠进来（路由见 [`crate::route`]）。
 //!
 //! 未从事件折叠的字段（规格里有、事件里还没有）：
-//! - `pr` 只记 `create_pr` 的 `outbox.succeeded.github_ref.pr` 绑定；完整快照属于
-//!   store 的 GitHub 快照投影，尚未实现；
+//! - `pr_snapshot` 不折叠，由加载方从 store 的 GitHub 快照投影读取（§7.14.4，#150）；
 //! - `Evidence.judged_head`、`stage_verdicts`、`round_history` 在 M1 恒空（无判定节点、无轮次）；
-//! - `lock_owner` 是执行体内存，不进本结构。
+//! - `lock_owner` 是执行体内存：本结构有该字段，但折叠不写它，由执行体维护。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,8 +15,8 @@ use gantry_core::canon::{sha256, GitOid, IdempotencyKey, Sha256Digest, SubjectDi
 use gantry_core::entities::{
     role_profile, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, BudgetDimension,
     BudgetUsed, Exec, FailureClass, FailureDetail, ForgeActionKind, GithubPrRef, InboxKind,
-    InboxPayload, LockHolder, NodeStatus, ReasonCode, Role, Seq, Severity, Stage, StageStatus,
-    Tier, Verdict, WorkflowStatus,
+    InboxPayload, LockHolder, NodeStatus, PullRequestRef, ReasonCode, Role, Seq, Severity, Stage,
+    StageStatus, Tier, Verdict, WorkflowStatus,
 };
 use gantry_core::events::{
     AttemptFinishedData, AttemptStartedData, BudgetChargeSource, BudgetChargedData,
@@ -61,7 +60,10 @@ pub enum StateError {
 pub struct DeliveryState {
     /// `delivery.*` 的折叠结果；与 store 投影同源。
     pub delivery: DeliveryRow,
+    /// `create_pr` 的 `outbox.succeeded.github_ref.pr` 折叠出的绑定。
     pub pr: Option<GithubPrRef>,
+    /// PR 的 GitHub 快照（I4）。**只读，不由引擎折叠**：加载方从 store 的快照投影读取（#150、#71）。
+    pub pr_snapshot: Option<PullRequestRef>,
     pub worktree: Option<WorktreeInfo>,
     pub ledger: LedgerState,
     pub workflows: BTreeMap<WorkflowId, WorkflowState>,
@@ -70,6 +72,9 @@ pub struct DeliveryState {
     pub outbox: BTreeMap<ActionKey, OutboxState>,
     pub approvals: BTreeMap<ApprovalId, ApprovalLite>,
     pub locks: BTreeMap<WorktreeId, LockLite>,
+    /// **内存**：锁是为哪个节点取的（`Report::LockAcquired` 时由执行体记下，§7.14.4）。
+    /// 折叠不写它，重启后为空，由 `Tick(Recover)` 重新认领。
+    pub lock_owner: BTreeMap<WorktreeId, NodeId>,
     pub round_history: Vec<RoundRecord>,
     pub last_seq: Seq,
 }
@@ -288,6 +293,7 @@ impl DeliveryState {
         Ok(Self {
             delivery: DeliveryRow::created(event)?,
             pr: None,
+            pr_snapshot: None,
             worktree: None,
             ledger: LedgerState::default(),
             workflows: BTreeMap::new(),
@@ -296,6 +302,7 @@ impl DeliveryState {
             outbox: BTreeMap::new(),
             approvals: BTreeMap::new(),
             locks: BTreeMap::new(),
+            lock_owner: BTreeMap::new(),
             round_history: Vec::new(),
             last_seq: event.seq,
         })

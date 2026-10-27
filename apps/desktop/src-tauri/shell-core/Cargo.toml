@@ -12,6 +12,7 @@ test-software-keys = ["dep:p256", "dep:rand_core"]
 
 [dependencies]
 thiserror.workspace = true
+serde.workspace = true
 sha2.workspace = true
 base64 = "0.22"
 getrandom = "0.2"
@@ -27,4 +28,5 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext"] }
 
 [dev-dependencies]
+serde_json.workspace = true
 p256 = { version = "0.13", features = ["ecdsa"] }

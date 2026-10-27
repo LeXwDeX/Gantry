@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "主窗口只获得 desktop-shell.md §6.1 的应用命令；不授予任何核心插件的 JS 侧权限（S-5）。",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "allow-identity-status",
+    "allow-pairing-begin",
+    "allow-pairing-confirm",
+    "allow-identity-reset",
+    "allow-connection-state",
+    "allow-api-request",
+    "allow-events-open",
+    "allow-events-ack",
+    "allow-events-close",
+    "allow-approval-prepare",
+    "allow-approval-sign",
+    "allow-approval-discard",
+    "allow-guarded-write-prepare",
+    "allow-guarded-write-submit",
+    "allow-guarded-write-discard",
+    "allow-prefs-get",
+    "allow-prefs-set",
+    "allow-ui-state-get",
+    "allow-ui-state-set",
+    "allow-ui-state-list",
+    "allow-open-external",
+    "allow-open-github",
+    "allow-diagnostics-snapshot"
+  ]
+}

@@ -1,5 +1,7 @@
-//! sandbox.md §12.A 第 5 条、§12.D、§12.E 末条、§12.F「先停后取」、§12.G：`SandboxManager`
-//! 跑在 `FakeDriver`、`FakeRepo`、`EgressStub`、`Store::open_in_memory` 之上。
+//! sandbox.md §12.A 第 5 条、§12.D、§12.E 末条、§12.F「先停后取」、§12.G、§12.H：
+//! `SandboxManager` 跑在 `FakeDriver`、`FakeRepo`、`EgressStub`、`Store::open_in_memory` 之上。
+//! 崩溃用 `SandboxManager::crash` 模拟（中止全部任务、不清理），再在同一根目录、驱动、
+//! store 与 Egress 上新建服务并 `recover`。
 
 mod common;
 
@@ -11,7 +13,7 @@ use async_trait::async_trait;
 use common::TempRoot;
 use gantry_core::canon::{sha256, GitOid, RepoSlug};
 use gantry_core::entities::{Actor, ActorKind, SandboxLimits, SandboxTrust, TokenWeights};
-use gantry_core::ids::{AttemptId, Id, IdGen, SandboxId};
+use gantry_core::ids::{AttemptId, Clock, Id, IdGen, SandboxId};
 use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::egress::{
     AppliedConfig, CallClosed, CallStatement, CallUsage, EgressConfigView, EgressControl,
@@ -21,15 +23,16 @@ use gantry_core::ports::egress::{
 use gantry_core::ports::models::CallId;
 use gantry_core::ports::repo::CommitInfo;
 use gantry_core::ports::sandbox::{
-    EgressRequest, ExecSpec, GroupName, InfraDetail, JobOutcome, ProfileName, SandboxError,
-    SandboxService, SandboxSpec, TerminalCause, TimerKind, Timers, TokenEnvSpec, WorkspaceMode,
-    WorkspaceRequest,
+    EgressRequest, ExecSpec, GroupName, InfraDetail, JobOutcome, ProfileName, RecoveredJob,
+    SandboxError, SandboxService, SandboxSpec, TerminalCause, TimerKind, Timers, TokenEnvSpec,
+    UnfinishedAttempt, WorkspaceMode, WorkspaceRequest,
 };
 use gantry_core::secret::SecretName;
 use gantry_core::settings::resource::{
     ArtifactIo, MaterialIo, ProgressIo, SandboxDriver, SandboxIo,
 };
-use gantry_core::testing::{FakeClock, SeqEntropy};
+use gantry_core::testing::SeqEntropy;
+use gantry_core::time::Timestamp;
 use gantry_core::worker::JobSpec;
 use gantry_fakes::egress::EgressStub;
 use gantry_fakes::repo::FakeRepo;
@@ -156,6 +159,7 @@ struct RecordingEgress {
     inner: EgressStub,
     log: std::sync::Mutex<Vec<String>>,
     fail_issue: std::sync::atomic::AtomicBool,
+    fail_revoke: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingEgress {
@@ -194,6 +198,11 @@ impl EgressControl for RecordingEgress {
         ctx: &ActorCtx,
     ) -> Result<FinalUsage, EgressError> {
         self.log.lock().unwrap().push(format!("revoke {job_id}"));
+        if self.fail_revoke.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(EgressError::Unavailable {
+                message: "egress restarting".into(),
+            });
+        }
         self.inner.revoke_job_token(job_id, ctx).await
     }
     async fn forget_job(&self, job_id: &AttemptId, ctx: &ActorCtx) -> Result<(), EgressError> {
@@ -276,24 +285,78 @@ impl EgressControl for RecordingEgress {
     }
 }
 
+/// 与 tokio（可暂停的）时间一致的服务端时钟：deadline 按 UTC 持久化、重启后按它重建，
+/// 测试里两者必须走同一条时间线。
+struct TokioClock {
+    base: tokio::time::Instant,
+}
+
+impl Clock for TokioClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::from_millis(MS + self.base.elapsed().as_millis() as i64)
+    }
+}
+
 struct Harness {
     root: TempRoot,
     driver: Arc<FakeDriver>,
     egress: Arc<RecordingEgress>,
     store: Store,
+    clock: Arc<TokioClock>,
+    max_concurrent: usize,
+    orphan_grace: Duration,
     service: SandboxManager<FakeDriver>,
 }
 
 fn harness(max_concurrent: usize) -> Harness {
     let root = TempRoot::new();
     let driver = Arc::new(FakeDriver::new(root.path()));
-    let clock = Arc::new(FakeClock::new(MS));
+    let clock = Arc::new(TokioClock {
+        base: tokio::time::Instant::now(),
+    });
     let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(9))));
     let store = Store::open_in_memory_sync(StoreDeps {
         clock: clock.clone(),
         ids,
     })
     .unwrap();
+    let egress = Arc::new(RecordingEgress {
+        inner: EgressStub::with_default_config(),
+        log: Default::default(),
+        fail_issue: Default::default(),
+        fail_revoke: Default::default(),
+    });
+    let orphan_grace = Duration::ZERO;
+    let service = manager(
+        &root,
+        &driver,
+        &egress,
+        &store,
+        &clock,
+        max_concurrent,
+        orphan_grace,
+    );
+    Harness {
+        root,
+        driver,
+        egress,
+        store,
+        clock,
+        max_concurrent,
+        orphan_grace,
+        service,
+    }
+}
+
+fn manager(
+    root: &TempRoot,
+    driver: &Arc<FakeDriver>,
+    egress: &Arc<RecordingEgress>,
+    store: &Store,
+    clock: &Arc<TokioClock>,
+    max_concurrent: usize,
+    orphan_grace: Duration,
+) -> SandboxManager<FakeDriver> {
     let repo = FakeRepo::new(gantry_core::time::Timestamp::from_millis(MS));
     let job = base_job();
     repo.insert_commit(
@@ -305,20 +368,15 @@ fn harness(max_concurrent: usize) -> Harness {
             trailers: Vec::new(),
         },
     );
-    let egress = Arc::new(RecordingEgress {
-        inner: EgressStub::with_default_config(),
-        log: Default::default(),
-        fail_issue: Default::default(),
-    });
     let mut schemas = BTreeMap::new();
     schemas.insert(job.output.structured_schema.id.clone(), SCHEMA.to_vec());
-    let service = SandboxManager::new(
+    SandboxManager::new(
         SandboxDeps {
-            driver: Arc::clone(&driver),
+            driver: Arc::clone(driver),
             repo: Arc::new(repo),
             egress: egress.clone(),
             store: store.clone(),
-            clock,
+            clock: clock.clone(),
             artifacts: Arc::new(MemoryArtifacts::default()),
             schemas: Arc::new(StaticSchemas(schemas)),
         },
@@ -336,14 +394,24 @@ fn harness(max_concurrent: usize) -> Harness {
             tmpfs_tmp_mb: 512,
             progress_sample: Duration::from_secs(1),
             log_drain_timeout: Duration::from_secs(5),
+            orphan_grace,
         },
-    );
-    Harness {
-        root,
-        driver,
-        egress,
-        store,
-        service,
+    )
+}
+
+impl Harness {
+    /// `gantryd` 崩溃并重启：旧服务的任务全部中止，新服务接手同一份宿主状态。
+    fn restart(&mut self) {
+        self.service.crash();
+        self.service = manager(
+            &self.root,
+            &self.driver,
+            &self.egress,
+            &self.store,
+            &self.clock,
+            self.max_concurrent,
+            self.orphan_grace,
+        );
     }
 }
 
@@ -857,17 +925,6 @@ async fn shared_conformance_fake_service() {
     assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
 }
 
-#[tokio::test(start_paused = true)]
-async fn recover_and_sweep_fail_closed_in_this_slice() {
-    let h = harness(1);
-    assert!(h.service.recover(&ctx(), &[]).await.is_err());
-    assert!(h
-        .service
-        .sweep_orphans(&ctx(), &BTreeSet::new())
-        .await
-        .is_err());
-}
-
 fn heartbeat(at: u64, seq: u64) -> (Duration, LogStream, Vec<u8>) {
     (
         Duration::from_secs(at),
@@ -960,4 +1017,429 @@ async fn concurrent_submits_of_one_job_accept_once() {
             .count(),
         1
     );
+}
+
+// ---- §12.H 崩溃恢复与孤儿巡检 ----
+
+fn unfinished(n: u128) -> UnfinishedAttempt {
+    UnfinishedAttempt {
+        job_id: att(n),
+        sandbox_id: sbx(n),
+        project_id: base_job().project_id,
+    }
+}
+
+fn handle(n: u128) -> gantry_core::ports::sandbox::JobHandle {
+    gantry_core::ports::sandbox::JobHandle {
+        job_id: att(n),
+        sandbox_id: sbx(n),
+    }
+}
+
+/// 一直运行、每 60 秒一次心跳（空闲计时器不会触发）。
+fn long_running() -> FakeScript {
+    FakeScript {
+        behavior: FakeBehavior::Forever { honor_term: true },
+        log: (1..=15).map(|k| heartbeat(k * 60, k)).collect(),
+        out: vec![(
+            "result.json".into(),
+            FakeOutEntry::File(br#"{"status":"failed"}"#.to_vec()),
+        )],
+    }
+}
+
+fn creates(h: &Harness) -> usize {
+    h.driver
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, DriverCall::Create { .. }))
+        .count()
+}
+
+fn spool_seqs(h: &Harness, n: u128) -> Vec<u64> {
+    let bytes = std::fs::read(
+        h.root
+            .path()
+            .join(sbx(n).to_string())
+            .join("progress.spool.jsonl"),
+    )
+    .unwrap_or_default();
+    bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_slice(line).unwrap();
+            value["event"]["seq"].as_u64().unwrap()
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn recover_running_keeps_deadline_and_dedups_log_reread() {
+    let mut h = harness(2);
+    h.driver.script(sbx(40), long_running());
+    h.service.submit(&ctx(), spec(40)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(150)).await;
+    h.restart();
+    // 崩溃留下半条 spool 记录：恢复先截掉它，重读到的事件接在完整记录后面。
+    {
+        use std::io::Write as _;
+        let path = h
+            .root
+            .path()
+            .join(sbx(40).to_string())
+            .join("progress.spool.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(br#"{"received_at":"2023-"#).unwrap();
+    }
+    let recovered = h.service.recover(&ctx(), &[unfinished(40)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Running(handle(40))]);
+    let outcome = h.service.wait(&att(40)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledTimer);
+    assert_eq!(outcome.terminal.timer, Some(TimerKind::Wall));
+    // deadline 按持久化时刻重建：仍是启动后第 600 秒，不因重启而延长。
+    let signals = h.driver.signals(&container_id(&h));
+    assert_eq!(
+        (signals[0].signal, signals[0].at),
+        (SIGTERM, Duration::from_secs(600))
+    );
+    // 没有重复沙盒；重读日志不重复写 spool。
+    assert_eq!(creates(&h), 1);
+    let seqs = spool_seqs(&h, 40);
+    assert_eq!(seqs, (1..=10).collect::<Vec<_>>());
+    assert_eq!(
+        h.egress.log(),
+        vec![format!("issue {}", att(40)), format!("revoke {}", att(40))]
+    );
+    // 同一服务上再次 recover：按已知状态作答。
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(40)]).await.unwrap(),
+        vec![RecoveredJob::Exited(handle(40))]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn recover_after_exit_collects_with_same_hashes() {
+    let baseline = {
+        let h = harness(1);
+        h.driver.script(sbx(41), golden_script());
+        h.service.submit(&ctx(), spec(41)).await.unwrap();
+        h.service.wait(&att(41)).await.unwrap()
+    };
+    let mut h = harness(1);
+    h.driver.script(sbx(41), golden_script());
+    h.service.submit(&ctx(), spec(41)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    h.restart();
+    // 无人监督期间容器自己退出（第 30 秒）。
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let recovered = h.service.recover(&ctx(), &[unfinished(41)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Exited(handle(41))]);
+    let outcome = h.service.wait(&att(41)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert_eq!(outcome.terminal.exit_code, Some(0));
+    assert_eq!(outcome.files, baseline.files);
+    assert_eq!(outcome.stdout_tail, baseline.stdout_tail);
+    assert_eq!(outcome.stderr_tail, baseline.stderr_tail);
+    assert_eq!(spool_seqs(&h, 41), vec![1, 2]);
+    assert_eq!(creates(&h), 1);
+    assert_eq!(h.driver.container_count(), 0);
+    let revokes = h
+        .egress
+        .log()
+        .iter()
+        .filter(|l| l.starts_with("revoke"))
+        .count();
+    assert_eq!(revokes, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn persisted_reason_is_resignalled_after_restart() {
+    use gantry_sandbox::service::meta::{Meta, Phase, TerminalReason};
+    let mut h = harness(1);
+    h.driver.script(sbx(42), long_running());
+    h.service.submit(&ctx(), spec(42)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(50)).await;
+    h.restart();
+    // 原因已写盘（fsync）但信号尚未发出时崩溃。
+    let path = h.root.path().join(sbx(42).to_string()).join("meta.json");
+    let mut meta = Meta::load(&path).unwrap().unwrap();
+    meta.terminal_reason = Some(TerminalReason::Cancel);
+    meta.cancel_requested = true;
+    meta.phase = Phase::Stopping;
+    meta.save(&path).unwrap();
+    let recovered = h.service.recover(&ctx(), &[unfinished(42)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Running(handle(42))]);
+    let outcome = h.service.wait(&att(42)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+    assert!(outcome.terminal.cancel_requested);
+    let signals = h.driver.signals(&container_id(&h));
+    assert_eq!(
+        (signals[0].signal, signals[0].at),
+        (SIGTERM, Duration::from_secs(50))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn vanished_container_with_readable_out_collects_as_lost() {
+    let mut h = harness(1);
+    h.driver.script(sbx(43), golden_script());
+    h.service.submit(&ctx(), spec(43)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    h.restart();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    h.driver.vanish(&container_id(&h));
+    let recovered = h.service.recover(&ctx(), &[unfinished(43)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Exited(handle(43))]);
+    let outcome = h.service.wait(&att(43)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Lost);
+    assert!(outcome.partial);
+    assert_eq!(outcome.files.len(), 4);
+    assert!(h.egress.log().contains(&format!("revoke {}", att(43))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn container_and_staging_gone_is_lost() {
+    let mut h = harness(1);
+    h.driver.script(sbx(44), long_running());
+    h.service.submit(&ctx(), spec(44)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    h.restart();
+    h.driver.vanish(&container_id(&h));
+    {
+        use gantry_sandbox::driver::SandboxDriver as _;
+        let layout = gantry_sandbox::spec::StagingLayout::new(h.root.path(), sbx(44)).unwrap();
+        h.driver.purge_staging(&layout).await.unwrap();
+    }
+    let recovered = h.service.recover(&ctx(), &[unfinished(44)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Lost(handle(44))]);
+    let err = h.service.wait(&att(44)).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SandboxError::Infra {
+                detail: InfraDetail::Lost,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(h.egress.log().contains(&format!("revoke {}", att(44))));
+    let types = event_types(&h.store).await;
+    assert_eq!(types.last().map(String::as_str), Some("sandbox.destroyed"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn never_accepted_is_unknown_and_builds_nothing() {
+    let h = harness(1);
+    let recovered = h.service.recover(&ctx(), &[unfinished(45)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Unknown { job_id: att(45) }]);
+    assert_eq!(creates(&h), 0);
+    assert!(!h.root.path().join(sbx(45).to_string()).exists());
+    assert!(matches!(
+        h.service.wait(&att(45)).await,
+        Err(SandboxError::NotFound)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn not_started_is_unknown_and_resubmit_runs_once() {
+    let mut h = harness(1);
+    h.driver.script(sbx(46), long_running());
+    h.driver.script(sbx(47), golden_script());
+    h.service.submit(&ctx(), spec(46)).await.unwrap();
+    h.service.submit(&ctx(), spec(47)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    h.restart();
+    let recovered = h
+        .service
+        .recover(&ctx(), &[unfinished(46), unfinished(47)])
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered,
+        vec![
+            RecoveredJob::Running(handle(46)),
+            RecoveredJob::Unknown { job_id: att(47) }
+        ]
+    );
+    // engine 以同一 spec 重新提交；它排在恢复出的 46 后面。
+    h.service.submit(&ctx(), spec(47)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(creates(&h), 1);
+    h.service.cancel(&ctx(), &att(46)).await.unwrap();
+    h.service.wait(&att(46)).await.unwrap();
+    let outcome = h.service.wait(&att(47)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert_eq!(creates(&h), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sweep_orphans_spares_live_and_recent_then_revokes_and_removes() {
+    let mut h = harness(1);
+    h.driver.script(sbx(48), long_running());
+    h.service.submit(&ctx(), spec(48)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    h.orphan_grace = Duration::from_secs(3600);
+    h.restart();
+    // 有对应未终结 Attempt 的不误杀；未过宽限的也不动。
+    let live: BTreeSet<AttemptId> = [att(48)].into_iter().collect();
+    let report = h.service.sweep_orphans(&ctx(), &live).await.unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (0, 0));
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (0, 0));
+    assert_eq!(h.driver.container_count(), 1);
+
+    h.orphan_grace = Duration::ZERO;
+    h.restart();
+    // 另一个没有 meta.json 的残留目录。
+    std::fs::create_dir_all(h.root.path().join(sbx(49).to_string())).unwrap();
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (1, 2));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(h.driver.container_count(), 0);
+    assert!(!h.root.path().join(sbx(48).to_string()).exists());
+    assert!(!h.root.path().join(sbx(49).to_string()).exists());
+    let log = h.egress.log();
+    let revoke = log.iter().position(|l| *l == format!("revoke {}", att(48)));
+    assert!(revoke.is_some(), "{log:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn finished_but_unrecorded_job_replays_the_same_outcome() {
+    let mut h = harness(1);
+    h.driver.script(sbx(50), golden_script());
+    h.service.submit(&ctx(), spec(50)).await.unwrap();
+    let before = h.service.wait(&att(50)).await.unwrap();
+    // engine 写 attempt.finished 之前崩溃：沙盒已销毁，out/ 仍在（release 尚未调用）。
+    h.restart();
+    let recovered = h.service.recover(&ctx(), &[unfinished(50)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Exited(handle(50))]);
+    let after = h.service.wait(&att(50)).await.unwrap();
+    assert_eq!(after.terminal, before.terminal);
+    assert_eq!(after.files, before.files);
+    assert_eq!(after.stdout_tail, before.stdout_tail);
+    assert_eq!(after.stderr_tail, before.stderr_tail);
+    assert!(!after.partial);
+    assert_eq!(creates(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn exited_past_deadline_is_not_a_timer_kill() {
+    let mut h = harness(1);
+    h.driver.script(sbx(51), golden_script());
+    h.service.submit(&ctx(), spec(51)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    h.restart();
+    // 停机期间容器正常退出，恢复时已过持久化的 deadline（第 600 秒）。
+    tokio::time::sleep(Duration::from_secs(700)).await;
+    let recovered = h.service.recover(&ctx(), &[unfinished(51)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Exited(handle(51))]);
+    let outcome = h.service.wait(&att(51)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert!(!outcome.partial);
+    assert!(h.driver.signals(&container_id(&h)).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovered_overdraft_counts_against_capacity() {
+    let mut h = harness(2);
+    for n in [52, 53] {
+        h.driver.script(sbx(n), long_running());
+        h.service.submit(&ctx(), spec(n)).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // 重启后上限降为 1：两个容器都还在跑。
+    h.max_concurrent = 1;
+    h.restart();
+    let recovered = h
+        .service
+        .recover(&ctx(), &[unfinished(52), unfinished(53)])
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered,
+        vec![
+            RecoveredJob::Running(handle(52)),
+            RecoveredJob::Running(handle(53))
+        ]
+    );
+    h.driver.script(sbx(54), golden_script());
+    h.service.submit(&ctx(), spec(54)).await.unwrap();
+    h.service.cancel(&ctx(), &att(52)).await.unwrap();
+    h.service.wait(&att(52)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    // 53 仍在运行，实际容器数没有降到上限以下：54 不能启动。
+    assert_eq!(creates(&h), 2);
+    h.service.cancel(&ctx(), &att(53)).await.unwrap();
+    h.service.wait(&att(53)).await.unwrap();
+    let outcome = h.service.wait(&att(54)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert_eq!(creates(&h), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sweep_keeps_orphans_whose_revoke_failed() {
+    let mut h = harness(1);
+    h.driver.script(sbx(55), long_running());
+    h.service.submit(&ctx(), spec(55)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    h.restart();
+    h.egress
+        .fail_revoke
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (0, 0));
+    assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+    assert_eq!(h.driver.container_count(), 1);
+    assert!(h.root.path().join(sbx(55).to_string()).exists());
+    // 下一轮 Egress 恢复：照常吊销并清理。
+    h.egress
+        .fail_revoke
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (1, 1));
+    assert_eq!(h.driver.container_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sweep_cleans_leftovers_of_released_jobs() {
+    let h = harness(1);
+    h.driver.script(sbx(56), golden_script());
+    // 销毁失败：留给孤儿巡检（§9）。
+    h.driver.fail_next(FailPoint::Remove);
+    h.service.submit(&ctx(), spec(56)).await.unwrap();
+    h.service.wait(&att(56)).await.unwrap();
+    assert_eq!(h.driver.container_count(), 1);
+    // 未 release：结果还要保留，不清理。
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!(report.destroyed, 0);
+    h.service.release(&ctx(), &att(56)).await.unwrap();
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!(report.destroyed, 1);
+    assert_eq!(h.driver.container_count(), 0);
 }

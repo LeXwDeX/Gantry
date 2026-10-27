@@ -26,6 +26,8 @@ export default defineConfig(({ mode }) => ({
     environment: "jsdom",
     setupFiles: ["./tests/unit/setup.ts"],
     globalSetup: ["./tests/unit/globalSetup.ts"],
+    // 整页 jsdom 渲染（设置页、工作区）在多会话并行编译的高负载机器上会超过默认 5 秒。
+    testTimeout: 20_000,
     include: ["tests/unit/**/*.test.{ts,tsx}"],
     css: false,
   },

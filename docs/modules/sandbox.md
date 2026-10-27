@@ -415,10 +415,10 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 | 已退出 | 直接 `collect`（若 `meta.json` 记录了取消 / 计时器原因则沿用，否则按 `Exited`） |
 | 容器已不存在但 staging 在 | 若 `out/` 完整可读则 `collect`（`cause = Lost`），否则 `Infra{Lost}`；Sandbox `lost` |
 | 容器与 staging 都不在 | `Infra{Lost}` |
-| 相位在 `Creating` / `Staging`（尚未启动） | 重新走该阶段（`create` 以 `--replace` / 先 `remove` 保证幂等）；或销毁后以新沙盒重试，由 `engine` 决定 |
+| 相位在 `Accepted` … `Staged`，或 `Starting` 但容器从未进入运行（尚未启动） | M1：`recover` 拿不到 `SandboxSpec`，无法重走该阶段——删除残留容器与 staging（**不**吊销令牌，以便同一 job 重新签发），把 `meta.json` 重写为 `Accepted`，返回 `Unknown`，由 `engine` 以同一 `SandboxSpec` 重新 `submit`（#95 缺口 10）。启动前已请求取消的，直接重出取消结果（`Exited`） |
 | 没有任何受理痕迹（无 `meta.json`、无带该 `gantry.job_id` 标签的容器、无 staging），且 `store` 中没有该沙盒的 `sandbox.created` | 未知 job（从未受理，例如 `attempt.started` 落库后、`submit` 返回前崩溃）；不建任何东西 |
 
-每行对应的 `RecoveredJob`（§6.1，E4）：仍在运行、`Accepted` / `Queued` / `Creating` / `Staging` 相位 → `Running`；已退出、容器不在但 `out/` 可提取 → `Exited`；`Infra{Lost}` 的两行 → `Lost`；没有任何受理痕迹 → `Unknown`。"容器与 staging 都不在"与"从未受理"靠 `sandbox.created` 区分：有该事件即为受理后丢失（`Lost`）。`Accepted` / `Queued` 阶段 staging 被整体删除而尚无 `sandbox.created` 时判为 `Unknown`，此时容器还没创建，重新 `submit` 不会重复执行。
+每行对应的 `RecoveredJob`（§6.1，E4）：仍在运行 → `Running`；尚未启动的相位 → `Unknown`（见上表，M1 的做法；`Unknown` 的语义——engine 重新 `submit`、不计为失败——与「从未受理」一致）；已退出、容器不在但 `out/` 可提取 → `Exited`；`Infra{Lost}` 的两行 → `Lost`；没有任何受理痕迹 → `Unknown`。"容器与 staging 都不在"与"从未受理"靠 `sandbox.created` 区分：有该事件即为受理后丢失（`Lost`）。`Accepted` / `Queued` 阶段 staging 被整体删除而尚无 `sandbox.created` 时判为 `Unknown`，此时容器还没创建，重新 `submit` 不会重复执行。
 
 `sweep_orphans(live)`：列出带 `gantry.managed=1` 的容器与 `<workspaces_dir>/*`，对不在 `live` 且超过宽限（默认 5 min [建议值，待调优]）的，先 `revoke_job_token` 再 `remove` 与 `purge`。巡检周期默认 10 min [建议值，待调优]。`gantryd` 优雅退出时**不**杀运行中的容器，留给重启后的 `recover` 接管（deadline 已持久化）。
 
