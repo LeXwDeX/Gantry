@@ -128,6 +128,19 @@ impl Daemon {
         Self::start(fake_gantryd(scratch, control_uid), scratch)
     }
 
+    fn spawn_real_policy(scratch: &Scratch) -> Self {
+        let mut command = fake_gantryd(scratch, scratch.uid());
+        command.env(
+            support::CHILD_ENV,
+            format!(
+                "{}\n{}\nreal-policy",
+                scratch.config().display(),
+                scratch.uid()
+            ),
+        );
+        Self::start(command, scratch)
+    }
+
     fn spawn_sqlite(scratch: &Scratch) -> Self {
         let mut command = fake_gantryd(scratch, scratch.uid());
         let fd = rustix::fs::open(
@@ -537,6 +550,170 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
     assert_eq!(status["engine"]["degraded"], json!({}), "{status}");
 
     // 停机：引擎主循环随控制通道一起退出，进程以 0 退出。
+    assert!(daemon.terminate().success());
+}
+
+#[test]
+fn real_policy_verifies_signed_approval_before_merge_enqueue() {
+    real_policy_approval(false);
+}
+
+#[test]
+fn real_policy_rejects_wrong_signature_without_grant_or_merge() {
+    real_policy_approval(true);
+}
+
+#[tokio::test]
+async fn fake_forge_snapshot_update_waits_for_store_transaction() {
+    use gantry_core::canon::GitOid;
+    use gantry_core::ports::ForgeReader;
+
+    let (_assembly, handles) = support::assemble_fakes(None, true).await;
+    let store = handles.store.clone();
+    let forge = handles.forge.clone();
+    let transaction = store.begin_write().await.unwrap();
+    let head = GitOid::parse(support::engine_cfg::BASE).unwrap();
+    let pr = support::engine_cfg::snapshot("open", head);
+    let (started, entered) = tokio::sync::oneshot::channel();
+    let update_store = store.clone();
+    let update_forge = forge.clone();
+    let mut update = tokio::spawn(async move {
+        started.send(()).unwrap();
+        support::fake_cmds::upsert_pr(&update_store, &update_forge, pr).await
+    });
+    entered.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut update)
+            .await
+            .is_err(),
+        "snapshot update bypassed the write lease"
+    );
+    assert!(forge
+        .pull_request(&support::project_id(), support::engine_cfg::PR_NUMBER)
+        .await
+        .unwrap()
+        .is_none());
+    // 同一写门保证已有事务在直接写更新版本前成功提交。
+    transaction
+        .commit()
+        .await
+        .expect("transaction must not conflict with snapshot update");
+    tokio::time::timeout(Duration::from_secs(5), update)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        forge
+            .pull_request(&support::project_id(), support::engine_cfg::PR_NUMBER)
+            .await
+            .unwrap()
+            .unwrap()
+            .head_sha,
+        head
+    );
+}
+
+fn real_policy_approval(invalid: bool) {
+    let scratch = Scratch::new();
+    let daemon = Daemon::spawn_real_policy(&scratch);
+    let mut client = Client::connect(&scratch);
+    let status = client.ok(json!({"cmd": "status"}));
+    assert_eq!(status["profile"], "fakes");
+    for (name, expected) in [
+        ("policy", "real"),
+        ("engine", "real"),
+        ("notify", "real"),
+        ("store", "fake"),
+        ("forge", "fake"),
+        ("repo", "fake"),
+        ("sandbox", "fake"),
+        ("worker", "fake"),
+        ("models", "fake"),
+        ("egress", "fake"),
+        ("conversation", "fake"),
+        ("api", "absent"),
+        ("pki", "absent"),
+    ] {
+        assert!(
+            status["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["module"] == name && m["provider"] == expected),
+            "{status}"
+        );
+    }
+    let delivery = client.ok(json!({"cmd": "fake.create_delivery", "args": {
+        "project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login", "user_text": "修复登录超时"
+    }}))["delivery_id"].clone();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let requested = loop {
+        let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        let (_, events) = read_log(&mut client);
+        if let Some(event) = events
+            .iter()
+            .find(|e| e["type"] == "approval.requested" && e["correlation_id"] == delivery)
+        {
+            break event.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no approval at {}: {events:?}",
+            step["stage"]
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(requested["data"]["action"], "merge_pr");
+    assert_eq!(
+        requested["data"]["target"],
+        json!({"kind": "pr", "repo": "acme/web", "number": 12})
+    );
+    let approval = &requested["subject"];
+    let response = client
+        .call(json!({"cmd": "fake.real_grant", "args": {"id": approval, "invalid": invalid}}));
+    if invalid {
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(response["error"]["message"], "signature invalid");
+    } else {
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["result"]["status"], "granted");
+    }
+    let deadline = Instant::now() + Duration::from_secs(if invalid { 1 } else { 30 });
+    loop {
+        client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        let (_, events) = read_log(&mut client);
+        let granted = events
+            .iter()
+            .find(|e| e["type"] == "approval.granted" && e["subject"] == *approval);
+        let merge = events.iter().find(|e| {
+            e["type"] == "outbox.enqueued"
+                && e["correlation_id"] == delivery
+                && e["data"]["action"]["kind"] == "merge_pr"
+        });
+        if invalid {
+            assert!(granted.is_none() && merge.is_none(), "{events:?}");
+            if Instant::now() >= deadline {
+                break;
+            }
+        } else if let (Some(granted), Some(merge)) = (granted, merge) {
+            assert!(requested["seq"].as_u64() < granted["seq"].as_u64());
+            assert!(granted["seq"].as_u64() < merge["seq"].as_u64());
+            assert_eq!(merge["data"]["action"]["requires_approval"], *approval);
+            assert_eq!(
+                merge["data"]["action"]["payload"]["expected_head_sha"],
+                requested["data"]["subject_digest"]
+            );
+            break;
+        } else {
+            assert!(Instant::now() < deadline, "no merge: {events:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        client.ok(json!({"cmd": "status"}))["engine"]["degraded"],
+        json!({})
+    );
     assert!(daemon.terminate().success());
 }
 

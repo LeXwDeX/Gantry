@@ -1131,6 +1131,7 @@ name = "gantryd"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "gantry-core",
  "gantry-deploy",
  "gantry-engine",
@@ -1139,6 +1140,7 @@ dependencies = [
  "gantry-policy",
  "gantry-store",
  "getrandom 0.3.4",
+ "p256",
  "rustix",
  "serde",
  "serde_json",
