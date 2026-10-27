@@ -1,15 +1,32 @@
 //! 交付台账与预算检查（engine.md §7.9）。
 //!
 //! 只实现已定语义：创建时固化 limits / used 全零、按维度检查“达到上限即耗尽”、
-//! 按维度累加已用。预留策略依赖 OQ-9 / worker-protocol OQ-14，尚未实现；
+//! 按维度累加已用，以及根据台账计算同批次的平分预留。
 //! `concurrency` 没有已用计数，由调度器用在途数比较 `limits.concurrency`。
 
 use gantry_core::entities::{
-    BudgetDimension, BudgetLedger, BudgetLimits, BudgetSubject, BudgetUsed,
+    BudgetDimension, BudgetLedger, BudgetLimits, BudgetSubject, BudgetUsed, Tier,
 };
 use gantry_core::events::DeliveryCreatedData;
 use gantry_core::ids::{BudgetId, DeliveryId, ProjectId};
 use gantry_core::time::Timestamp;
+
+use crate::decide::ReservationPolicy;
+
+/// 根据台账的剩余额度平分同批次尝试；不记录在途预留。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EqualShareReservation;
+
+impl ReservationPolicy for EqualShareReservation {
+    fn reserve(&self, ledger: &BudgetLedger, tier: Tier, concurrent_in_batch: usize) -> u64 {
+        u64::try_from(concurrent_in_batch)
+            .ok()
+            .and_then(|count| {
+                remaining(ledger, BudgetDimension::TokensByTier(tier)).checked_div(count)
+            })
+            .unwrap_or(0)
+    }
+}
 
 /// 从 `delivery.created` 固化交付台账（P-57）。
 pub fn ledger_for_delivery(

@@ -15,7 +15,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gantry_core::entities::{Delivery, Node};
+use gantry_core::canon::RepoSlug;
+use gantry_core::entities::{Delivery, Node, Seq};
 use gantry_core::events::{EventType, Subject};
 use gantry_core::ids::{Clock, DeliveryId, Entropy, NodeId};
 use gantry_core::level::Level;
@@ -36,7 +37,7 @@ use crate::attempt::{AttemptPorts, ResultCas, RunnerConfig};
 use crate::decide::{Command, CommandRejection, Input, InputIdentity, TickReason};
 use crate::effects::{Deliver, PortEffects};
 use crate::engine::{load_delivery_state, scan_events, Engine, EngineError};
-use crate::event_router::{EventRouter, RouterError};
+use crate::event_router::{EventRouter, RouterError, CURSOR};
 
 /// 运行时需要的全部端口（gantryd 的装配里已有同名字段）。
 pub struct EnginePorts {
@@ -78,6 +79,18 @@ pub enum RuntimeError {
         #[source]
         source: ActorError,
     },
+    #[error("runtime configuration inconsistent: {reason}")]
+    ConfigurationInconsistent { reason: &'static str },
+}
+
+/// 运行时状态；游标是读取时的持久低水位，并非路由器的已读位置。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RuntimeStatus {
+    pub degraded: BTreeMap<DeliveryId, String>,
+    pub applied_rev: Seq,
+    pub cursor: Seq,
+    /// 已创建且尚未移除的执行体数，包括已停止决策的执行体。
+    pub actor_count: usize,
 }
 
 /// 执行体邮箱里的一条输入（副作用回报、定时器到期）。
@@ -114,6 +127,8 @@ pub struct EngineRuntime {
     engine: Engine,
     deps: ActorDeps,
     effects: Arc<PortEffects>,
+    bound_repo: RepoSlug,
+    bound_cleanup_lease: Duration,
     settings: Mutex<RuntimeSettings>,
     actors: Mutex<BTreeMap<DeliveryId, DeliveryActor>>,
     /// 停止决策的交付单元及原因（供 `status` 报 `degraded`）。
@@ -175,6 +190,8 @@ impl EngineRuntime {
             store,
             deps,
             effects,
+            bound_repo: settings.actor.settings.project.repo.clone(),
+            bound_cleanup_lease: settings.cleanup_lease,
             settings: Mutex::new(settings),
             actors: Mutex::new(BTreeMap::new()),
             degraded: Mutex::new(BTreeMap::new()),
@@ -191,11 +208,13 @@ impl EngineRuntime {
 
     /// `settings.updated` 热加载：两次决策之间整体切换（§7.13）。
     pub async fn reconfigure(&self, settings: RuntimeSettings) {
+        let mut actors = self.actors.lock().await;
+        let mut current = self.settings.lock().await;
         self.effects.reconfigure(settings.runner.clone());
-        for actor in self.actors.lock().await.values_mut() {
+        for actor in actors.values_mut() {
             actor.reconfigure(settings.actor.clone());
         }
-        *self.settings.lock().await = settings;
+        *current = settings;
     }
 
     /// 主循环；`shutdown` 完成后处理完已入队的回报即返回。
@@ -327,8 +346,8 @@ impl EngineRuntime {
         input: Input,
         identity: InputIdentity,
     ) -> Result<Vec<Result<(), CommandRejection>>, ActorError> {
-        let config = self.settings.lock().await.actor.clone();
         let mut actors = self.actors.lock().await;
+        let config = self.settings.lock().await.actor.clone();
         let actor = actors
             .entry(delivery)
             .or_insert_with(|| DeliveryActor::new(delivery, self.deps.clone(), config));
@@ -461,6 +480,49 @@ impl EngineRuntime {
             (Some(first), Some(last)) => Ok((first.ts, last.ts)),
             _ => Err(ModuleError::NotFound),
         }
+    }
+
+    /// 执行体、配置与降级原因在同一锁序下读取；游标单独从持久存储读取。
+    pub async fn status(&self) -> Result<RuntimeStatus, RuntimeError> {
+        let (actor_count, applied_rev, degraded) = {
+            let actors = self.actors.lock().await;
+            let settings = self.settings.lock().await;
+            // 仅阻止错误上报，不代替 #318 的原子、可失败配置安装。
+            if settings.actor.settings.config_rev != settings.runner.config_rev {
+                return Err(RuntimeError::ConfigurationInconsistent {
+                    reason: "actor and runner revisions differ",
+                });
+            }
+            if settings.actor.settings.project.repo != settings.runner.repo {
+                return Err(RuntimeError::ConfigurationInconsistent {
+                    reason: "actor and runner repositories differ",
+                });
+            }
+            if settings.actor.settings.project.repo != self.bound_repo {
+                return Err(RuntimeError::ConfigurationInconsistent {
+                    reason: "repository differs from runtime binding",
+                });
+            }
+            if settings.cleanup_lease != self.bound_cleanup_lease {
+                return Err(RuntimeError::ConfigurationInconsistent {
+                    reason: "cleanup lease differs from runtime binding",
+                });
+            }
+            let degraded = self.degraded.lock().await.clone();
+            (actors.len(), settings.actor.settings.config_rev, degraded)
+        };
+        let cursor = self
+            .store
+            .cursors()
+            .load(CURSOR)
+            .await
+            .map_err(RouterError::from)?;
+        Ok(RuntimeStatus {
+            degraded,
+            applied_rev,
+            cursor,
+            actor_count,
+        })
     }
 
     /// 已停止决策的交付单元及原因（`status` 报 `degraded`）。
