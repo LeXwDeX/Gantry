@@ -37,7 +37,7 @@ async fn store_with_clock(start_ms: i64) -> (Store, Arc<FakeClock>) {
     let clock = Arc::new(FakeClock::new(start_ms));
     let entropy = Arc::new(SeqEntropy::new(11));
     let ids = Arc::new(IdGen::new(clock.clone(), entropy));
-    let store = Store::open_in_memory(
+    let store = gantry_store::testing::open_for_tests(
         StoreDeps {
             clock: clock.clone(),
             ids,
@@ -281,7 +281,7 @@ async fn timestamps_never_go_backwards() {
         clock.clone(),
         Arc::new(SeqEntropy::new(3)) as Arc<dyn gantry_core::ids::Entropy>,
     ));
-    let store = Store::open_in_memory(
+    let store = gantry_store::testing::open_for_tests(
         StoreDeps {
             clock: clock.clone(),
             ids,
@@ -826,7 +826,7 @@ async fn write_tx_now_is_fixed_and_monotonic() {
         clock.clone(),
         Arc::new(SeqEntropy::new(5)) as Arc<dyn gantry_core::ids::Entropy>,
     ));
-    let store = Store::open_in_memory(
+    let store = gantry_store::testing::open_for_tests(
         StoreDeps {
             clock: clock.clone(),
             ids,

@@ -343,6 +343,8 @@ pub enum StoreError {
 
 **连接模型（单写者多读者）**：一个写连接，由 `tokio::sync::Mutex`（FIFO 公平）保护，事务一律 `BEGIN IMMEDIATE`；`read_connections` 个读连接组成池，每个读事务是一个 WAL 快照。写事务持有期间读者照常读旧快照。
 
+**M1 已落地（#88 SQLite 切片）**：`Store::open(StoreConfig::new(dir), deps, modules)` 与 testing 的 `Store::open_temp`。按 #88 评论里的方案，SQLite 只持久化事实源与非投影状态：`meta`、`events`（列与触发器同 §7.2）、`consumer_cursors`、`outbox`、各模块私有表；**投影不落表**，`open` 时按 `seq` 用同一套纯折叠函数重放（`Outbox` 是主表，重放时 `outbox.*` 事件不再改行），之后由 `append` 增量维护。`WriteTx::commit` 先在一个 `BEGIN IMMEDIATE` 事务里写入增量，SQLite 成功后才替换内存状态。与上表的差异：`outbox` 先存 `(id, idempotency_key, status, enqueued_seq, action JSON)`，其余列随投影落表时展开；读连接池、`snapshot_max_age_s`、`write_tx_max_hold_ms` 暂不需要（读走内存快照）。单实例用 `locking_mode = EXCLUSIVE` 实现，第二个 `open` 得到 `AlreadyRunning`，未引入 `gantry.lock` 文件。`GANTRY_STORE_BACKEND=sqlite` 让 store 的全部用例改用 `open_temp` 再跑一遍（`testing::open_for_tests`）。
+
 ### 7.2 表结构草案
 
 SQLite `STRICT` 表。主键、唯一约束、触发器是正确性的一部分；其余索引随查询调整。

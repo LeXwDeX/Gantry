@@ -839,19 +839,24 @@ dependencies = [
  "core-foundation",
  "core-foundation-sys",
  "gantry-core",
+ "gantry-fakes",
+ "gantry-pki",
  "getrandom 0.2.17",
  "idna",
  "objc2",
  "objc2-foundation",
  "objc2-local-authentication",
  "p256",
+ "pem",
  "rand_core",
+ "rcgen",
  "security-framework-sys",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
  "url",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1054,6 +1059,7 @@ name = "gantry-store"
 version = "0.1.0"
 dependencies = [
  "gantry-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
