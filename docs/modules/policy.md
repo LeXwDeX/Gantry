@@ -145,8 +145,8 @@ pub enum ActionFacts {
         expected_tree_oid: Option<GitOid>,                          // = ValidatedPatch.result_tree（forge-actions §3.3）
         validation_ref: Option<Sha256Digest>,                    // = ValidatedPatch.sha256
     },
-    ResolveReviewThread { repo: RepoSlug, thread_has_human_comment: bool },
-    Other { repo: RepoSlug },                                     // 其余动作无需额外事实
+    ResolveReviewThread { repo: RepoSlug, number: u64, thread_node_id: String, thread_has_human_comment: bool },
+    Other { target: PolicyTarget },   // 其余动作：入队方从待入队载荷投影出的目标身份，与 policy.denied.target 同形（#89 Q1）
 }
 
 pub enum ActionDecision {
