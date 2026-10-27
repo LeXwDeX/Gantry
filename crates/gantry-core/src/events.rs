@@ -2007,12 +2007,19 @@ impl EventData for WorktreeCreatedData {
 pub struct WorktreeLockedData {
     pub worktree_id: WorktreeId,
     pub holder: crate::entities::LockHolder,
-    pub delivery_id: DeliveryId,
+    /// 与 `WorktreeLock.delivery_id` 同一规则：engine / guardian 必填，human 为 `null`（#122）。
+    #[serde(default)]
+    pub delivery_id: Option<DeliveryId>,
     pub lease_until: Timestamp,
 }
 
 impl EventData for WorktreeLockedData {
     const TYPES: &'static [EventType] = &[EventType::WorktreeLocked];
+    fn validate(&self) -> Result<(), SchemaError> {
+        self.holder
+            .check_delivery(self.delivery_id.as_ref())
+            .map_err(|error| SchemaError::consistency("/delivery_id", error.to_string()))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -133,7 +133,7 @@ fn deterministic_oid(parts: &[&str]) -> GitOid {
 fn worktree_lock(lock: &ActiveLock) -> WorktreeLock {
     WorktreeLock {
         holder: lock.holder,
-        delivery_id: lock.delivery_id,
+        delivery_id: lock.holder.bound_delivery(lock.delivery_id),
         acquired_at: lock.acquired_at,
         lease_until: lock.lease_until,
     }

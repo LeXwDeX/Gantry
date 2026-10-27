@@ -204,6 +204,8 @@ async fn human_cannot_preempt_engine_and_engine_cannot_write_under_human() {
         .await
         .unwrap();
     assert_eq!(held.lock.as_ref().unwrap().holder, LockHolder::Human);
+    // #122：人工锁不绑定交付单元。
+    assert_eq!(held.lock.as_ref().unwrap().delivery_id, None);
     // 人工持锁时 engine 用旧令牌写入（这里是移除工作树）得到 WorktreeLocked。
     assert!(matches!(
         fx.repo.remove_worktree(&fx.ctx(), &wt.id, &engine).await,
