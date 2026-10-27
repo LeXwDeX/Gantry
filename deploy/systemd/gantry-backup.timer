@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Gantry backup
+Documentation=https://github.com/LeXwDeX/gantry/blob/main/docs/modules/deploy.md
+
+[Timer]
+# 每日 03:17 本地时间 [提议]；关机期间错过的会在开机后补做（Persistent=true，§12）。
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=gantry-backup.service
+
+[Install]
+WantedBy=timers.target

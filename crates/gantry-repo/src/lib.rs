@@ -131,6 +131,8 @@ struct Inner {
     /// 工作树投影；写路径在 store 事务的整个生命周期内持有它。
     worktrees: tokio::sync::Mutex<WorktreeTable>,
     git_slots: Mutex<BTreeMap<ProjectId, Arc<Semaphore>>>,
+    /// 每个镜像仓的 worktree 管理锁（见 `patch::add_scratch`）。
+    worktree_admin: Mutex<BTreeMap<ProjectId, Arc<tokio::sync::Mutex<()>>>>,
     /// 按 job_id 的校验结论（由 `patch.*` 事件重建）。
     patches: tokio::sync::Mutex<BTreeMap<AttemptId, gate::PatchRecord>>,
     /// 同一 job_id 的校验串行化。
@@ -186,6 +188,7 @@ impl GitRepo {
                 mirror_create: tokio::sync::Mutex::new(()),
                 worktrees: tokio::sync::Mutex::new(table),
                 git_slots: Mutex::new(BTreeMap::new()),
+                worktree_admin: Mutex::new(BTreeMap::new()),
                 patches: tokio::sync::Mutex::new(BTreeMap::new()),
                 job_locks: Mutex::new(BTreeMap::new()),
                 commits: Mutex::new(BTreeMap::new()),
@@ -341,6 +344,16 @@ impl GitRepo {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .entry(*project)
             .or_insert_with(|| Arc::new(Semaphore::new(self.inner.cfg.git_parallelism.max(1))))
+            .clone()
+    }
+
+    pub(crate) fn worktree_admin(&self, project: &ProjectId) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner
+            .worktree_admin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(*project)
+            .or_default()
             .clone()
     }
 

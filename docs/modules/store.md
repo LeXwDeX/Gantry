@@ -537,6 +537,24 @@ LIMIT 1;
 
 - `Store::open` 接收各模块的 `ModuleSpec { module, migrations, projector }`。迁移在核心迁移之后依次应用，版本记在 `meta` 的 `module.<name>.version`；表名必须以 `<module>_` 开头，启动时扫描迁移 SQL 里的 `CREATE TABLE` 名称做前缀检查。
 - 模块通过 `WriteTx::module_conn(module)` 在**同一事务**里读写自己的表（例如 `device.paired` 事件与 `pki_devices` 行一起提交），事务外读取经 `ReadSnapshot::module_conn`。`ModuleConn` 只暴露参数化查询接口，不暴露原始连接字符串。
+
+**M1 已落地的最小形状（#88）**：上面的 `migrations` / `projector` 尚未实现，`ModuleSpec` 先只有 `ModuleSpec::new(module, tables)`（`#[non_exhaustive]`，后续加字段不破坏调用方）。每张模块表是"有序键值表"：`key`（非空、无 NUL 的文本，按字节序）→ JSON 文档；SQLite 实现映射为 `CREATE TABLE <table> (key TEXT PRIMARY KEY, value TEXT NOT NULL CHECK (json_valid(value))) STRICT`，所以不需要模块自带 SQL 迁移，文档形状的演进由模块自己负责（只增字段，与事件 `data` 的兼容规则相同）。
+
+```rust
+impl ModuleSpec { pub const fn new(module: &'static str, tables: &'static [&'static str]) -> Self; }
+// 模块名 [a-z][a-z0-9]*，不得为 core / store / meta / sqlite；表名 <module>_[a-z0-9_]+；重复即 InvalidModuleSpec。
+impl ModuleConn<'_> {   // WriteTx::module_conn(module)：读到本事务未提交的写入，随事务提交 / 回滚
+    pub fn get<T: DeserializeOwned>(&self, table: &str, key: &str) -> Result<Option<T>>;
+    pub fn scan<T: DeserializeOwned>(&self, table: &str, prefix: &str, after: Option<&str>, limit: u32) -> Result<Vec<(String, T)>>; // 键升序；after 不含；limit 1..=200
+    pub fn insert<T: Serialize>(&mut self, table: &'static str, key: &str, v: &T) -> Result<bool>;  // 已存在 → false，不改动
+    pub fn put<T: Serialize>(&mut self, table: &'static str, key: &str, v: &T) -> Result<bool>;     // 覆盖；返回此前是否存在
+    pub fn delete(&mut self, table: &'static str, key: &str) -> Result<bool>;
+}
+// ReadSnapshot::module_conn(module) -> ModuleReader：只有 get / scan。
+// 访问未注册或属于其他模块的表 → PreconditionFailed；文档解码失败 → ModuleValue。
+```
+
+复合主键由模块拼成键（例如 `policy_challenges` 用 `<approval_id>/<device_id>/<nonce>`，各段不含分隔符时前缀扫描即"按前几列查"）；部分唯一索引一类的跨行约束由模块在事务内先 `scan` 后写（单写者下没有竞态）。模块表不是投影：`rebuild_projections` 不动它们。
 - 模块可以注册投影器，在事件追加的同一事务里维护**自己的**派生表（例如 `notify_*`）。内置投影器负责 data-model 全部实体；某个模块若通过 `owns()` 声明接管某个实体（`policy` 的 `approvals`、`notify` 的 `inbox_items`、`pki` 的设备表，它们的规格书各自这样假定），`store` 对该实体停用内置投影器，并去掉对应的 `ProjectionRead` 方法由该模块提供读取。是否接管是 OQ-2，未决前默认由内置投影器负责。
 - 事务内的"先检查后写入"（如 `policy` 对审批的比较并交换）在单写者下天然成立：`tx.read()` 读到的状态在本事务提交前不会被他人改变。
 

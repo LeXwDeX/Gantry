@@ -168,16 +168,19 @@ impl GitRepo {
 
         // 4–9. 一次性检出：成功、失败、超时都删除。
         let dir = self.inner.cfg.scratch_dir().join(req.job_id.to_string());
+        let admin = self.worktree_admin(&req.project_id);
         let permit = slot
             .acquire()
             .await
             .map_err(|_| io_error("git slots closed"))?;
         let result =
-            match patch::add_scratch(&self.inner.env, &entry.git_dir, &dir, &req.base_sha).await {
+            match patch::add_scratch(&self.inner.env, &entry.git_dir, &admin, &dir, &req.base_sha)
+                .await
+            {
                 Ok(()) => self.in_scratch(ctx, &req, &dir, &bytes, digest).await,
                 Err(error) => Err(error),
             };
-        patch::remove_scratch(&self.inner.env, &entry.git_dir, &dir).await;
+        patch::remove_scratch(&self.inner.env, &entry.git_dir, &admin, &dir).await;
         drop(permit);
 
         match result? {

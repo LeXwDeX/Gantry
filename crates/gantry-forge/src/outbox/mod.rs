@@ -45,7 +45,8 @@ impl Forge {
     }
 
     /// 共享本实例的 store 与配置的执行器（forge.md §7.2：每个安装一个写任务）。
-    pub fn executor(&self, deps: executor::ExecutorDeps) -> executor::Executor {
+    /// 失败只可能来自 git 辅助目录（askpass、空 HOME）的创建。
+    pub fn executor(&self, deps: executor::ExecutorDeps) -> std::io::Result<executor::Executor> {
         executor::Executor::new(self.store.clone(), self.config.clone(), deps)
     }
 

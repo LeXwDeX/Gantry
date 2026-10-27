@@ -37,7 +37,9 @@ use gantry_fakes::forge::{outbox_conformance, FakeForge, FakeWebhook};
 use gantry_fakes::inbox::{dedup_conformance, FakeInbox};
 use gantry_fakes::models::FakeModelProvider;
 use gantry_fakes::policy::{action_conformance, execution_conformance, FakePathRules, FakePolicy};
-use gantry_fakes::repo::{lock_conformance, patch_idempotency_conformance, FakeRepo};
+use gantry_fakes::repo::{
+    human_lock_conformance, lock_conformance, patch_idempotency_conformance, FakeRepo,
+};
 use gantry_fakes::sandbox::FakeSandboxService;
 use gantry_fakes::secrets::{secrets_conformance, MemorySecretStore, MemorySecrets};
 use gantry_fakes::worker::StubWorkerAdapter;
@@ -375,6 +377,15 @@ async fn repo_locks_expire_and_patch_commit_is_idempotent() {
     )
     .await
     .expect("lock conformance");
+    human_lock_conformance(
+        &repo,
+        &ctx,
+        &worktree.id,
+        &delivery,
+        Duration::from_secs(60),
+    )
+    .await
+    .expect("human lock conformance");
 
     let engine = repo
         .acquire_lock(
@@ -505,7 +516,12 @@ fn merge_request(requested_by: Actor) -> ActionRequest {
         project_id: project().id,
         delivery_id: None,
         kind: ForgeActionKind::MergePr,
-        facts: ActionFacts::Other { repo: slug() },
+        facts: ActionFacts::Other {
+            target: gantry_core::events::PolicyTarget::Pr {
+                repo: slug(),
+                number: 7,
+            },
+        },
         requested_by,
     }
 }
@@ -517,6 +533,33 @@ async fn policy_engine_deny_without_report_hint_panics() {
     let policy = FakePolicy::new(ts());
     policy.script_decision(ForgeActionKind::MergePr, deny_without_report());
     let _ = policy.decide_action(merge_request(actor()), &ctx()).await;
+}
+
+// #133：HeadMismatch 由 engine 刷新后重判，不需要 ReportHint。
+#[tokio::test]
+async fn policy_engine_head_mismatch_may_omit_report_hint() {
+    let policy = FakePolicy::new(ts());
+    policy.script_decision(
+        ForgeActionKind::MergePr,
+        ActionDecision::Deny {
+            action_id: PolicyActionId::MergePr,
+            reason: DenyReason::HeadMismatch,
+            report: None,
+            config_rev: Seq::ZERO,
+        },
+    );
+    let decision = policy
+        .decide_action(merge_request(actor()), &ctx())
+        .await
+        .expect("decision");
+    assert!(matches!(
+        decision,
+        ActionDecision::Deny {
+            reason: DenyReason::HeadMismatch,
+            report: None,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -547,7 +590,12 @@ async fn policy_decisions_and_approvals_are_single_use() {
         project_id,
         delivery_id: None,
         kind: ForgeActionKind::MergePr,
-        facts: ActionFacts::Other { repo: slug() },
+        facts: ActionFacts::Other {
+            target: gantry_core::events::PolicyTarget::Pr {
+                repo: slug(),
+                number: 7,
+            },
+        },
         requested_by: actor(),
     };
     action_conformance(&policy, action.clone(), &ctx)

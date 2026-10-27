@@ -1,0 +1,4 @@
+# deploy/ 下脚本的 shellcheck 配置：按脚本所在目录解析 source。
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/..
+external-sources=true
