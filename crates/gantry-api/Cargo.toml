@@ -15,21 +15,27 @@ async-trait.workspace = true
 base64 = "0.22"
 bytes = "1"
 http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+x509-parser = "0.16"
 jsonschema = { version = "0.59", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "net"] }
 
 [dev-dependencies]
+hyper = { version = "1", features = ["client", "http1"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto", "x509-parser"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 pem = "3"
 base64 = "0.22"
-x509-parser = "0.16"
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util", "net", "io-util", "rt-multi-thread"] }
