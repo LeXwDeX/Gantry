@@ -141,6 +141,19 @@ impl Daemon {
         Self::start(command, scratch)
     }
 
+    fn spawn_real_executor(scratch: &Scratch) -> Self {
+        let mut command = fake_gantryd(scratch, scratch.uid());
+        command.env(
+            support::CHILD_ENV,
+            format!(
+                "{}\n{}\nreal-executor",
+                scratch.config().display(),
+                scratch.uid()
+            ),
+        );
+        Self::start(command, scratch)
+    }
+
     fn spawn_sqlite(scratch: &Scratch) -> Self {
         let mut command = fake_gantryd(scratch, scratch.uid());
         let fd = rustix::fs::open(
@@ -561,6 +574,162 @@ fn real_policy_verifies_signed_approval_before_merge_enqueue() {
 #[test]
 fn real_policy_rejects_wrong_signature_without_grant_or_merge() {
     real_policy_approval(true);
+}
+
+#[test]
+fn real_executor_consumes_real_signed_approval_before_merge() {
+    real_executor_merge(false);
+}
+
+#[test]
+fn real_executor_rejects_changed_live_head_without_merge() {
+    real_executor_merge(true);
+}
+
+fn real_executor_merge(move_head: bool) {
+    let scratch = Scratch::new();
+    let daemon = Daemon::spawn_real_executor(&scratch);
+    let mut client = Client::connect(&scratch);
+    let status = client.ok(json!({"cmd":"status"}));
+    assert!(status["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["module"] == "forge"
+            && m["provider"] == "fake"
+            && m["note"]
+                .as_str()
+                .is_some_and(|d| d.contains("real merge executor"))));
+    let delivery = client.ok(json!({"cmd": "fake.create_delivery", "args": {
+        "project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login", "user_text": "修复登录超时"
+    }}))["delivery_id"].clone();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let requested = loop {
+        client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        let (_, events) = read_log(&mut client);
+        if let Some(event) = events
+            .iter()
+            .find(|e| e["type"] == "approval.requested" && e["correlation_id"] == delivery)
+        {
+            break event.clone();
+        }
+        assert!(Instant::now() < deadline, "no approval: {events:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let approval = requested["subject"].clone();
+    if !move_head {
+        let invalid =
+            client.call(json!({"cmd":"fake.real_grant", "args":{"id":approval, "invalid":true}}));
+        assert_eq!(invalid["ok"], false);
+        assert_eq!(invalid["error"]["message"], "signature invalid");
+        // 非引擎构造的额外动作仅用于验证执行器拒绝尚未授予的真实审批。
+        let probe = client.ok(json!({"cmd":"fake.enqueue_merge_probe", "args":{"id":approval}}))
+            ["id"]
+            .clone();
+        let result = client.ok(json!({"cmd":"fake.real_execute"}));
+        assert!(
+            result["result"].as_str().unwrap().contains("Cancelled"),
+            "{result}"
+        );
+        assert_eq!(result["merge_calls"], 0);
+        assert_eq!(
+            client.ok(json!({"cmd":"fake.outbox_action", "args":{"id":probe}}))["status"],
+            "cancelled"
+        );
+        assert_eq!(
+            client.ok(json!({"cmd":"fake.real_approval", "args":{"id":approval}}))["status"],
+            "pending"
+        );
+    }
+    assert_eq!(
+        client.ok(json!({"cmd":"fake.real_grant", "args":{"id":approval}}))["status"],
+        "granted"
+    );
+    let action = loop {
+        client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        let (_, events) = read_log(&mut client);
+        if let Some(event) = events.iter().find(|e| {
+            e["type"] == "outbox.enqueued"
+                && e["correlation_id"] == delivery
+                && e["data"]["action"]["kind"] == "merge_pr"
+        }) {
+            assert_eq!(event["data"]["action"]["requires_approval"], approval);
+            break event["subject"].clone();
+        }
+        assert!(Instant::now() < deadline, "no merge: {events:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let first = client.ok(json!({"cmd":"fake.real_execute", "args":{"move_head":move_head}}));
+    assert_eq!(first["merge_calls"], 0, "{first}");
+    let state = client.ok(json!({"cmd":"fake.real_approval", "args":{"id":approval}}));
+    let (_, events) = read_log(&mut client);
+    let consumed: Vec<_> = events
+        .iter()
+        .filter(|e| e["type"] == "approval.consumed" && e["subject"] == approval)
+        .collect();
+    if move_head {
+        assert!(
+            first["result"]
+                .as_str()
+                .unwrap()
+                .contains("precondition_failed"),
+            "{first}"
+        );
+        assert_eq!(state["status"], "granted");
+        assert!(consumed.is_empty());
+    } else {
+        assert!(
+            first["result"]
+                .as_str()
+                .unwrap()
+                .contains("Crashed(AfterConsume)"),
+            "{first}"
+        );
+        assert_eq!(state["status"], "consumed");
+        assert_eq!(state["consumed_by"], action);
+        assert_eq!(consumed.len(), 1);
+        assert_eq!(consumed[0]["data"]["consumed_by"], action);
+        std::thread::sleep(Duration::from_millis(30));
+        let second = client.ok(json!({"cmd":"fake.real_execute"}));
+        assert!(
+            second["result"].as_str().unwrap().contains("Succeeded"),
+            "{second}"
+        );
+        assert_eq!(second["merge_calls"], 1);
+        assert_eq!(second["pull"]["merged"], true);
+        let third = client.ok(json!({"cmd":"fake.real_execute"}));
+        assert_eq!(third["merge_calls"], 1);
+        let (_, events) = read_log(&mut client);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "approval.consumed" && e["subject"] == approval)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["type"] == "outbox.succeeded" && e["subject"] == action)
+                .count(),
+            1
+        );
+        let probe = client
+            .ok(json!({"cmd":"fake.enqueue_merge_probe", "args":{"id":approval, "second":true}}))
+            ["id"]
+            .clone();
+        let rejected = client.ok(json!({"cmd":"fake.real_execute"}));
+        assert!(
+            rejected["result"].as_str().unwrap().contains("Cancelled"),
+            "{rejected}"
+        );
+        assert_eq!(rejected["merge_calls"], 1);
+        assert_eq!(
+            client.ok(json!({"cmd":"fake.outbox_action", "args":{"id":probe}}))["status"],
+            "cancelled"
+        );
+    }
+    assert!(daemon.terminate().success());
 }
 
 #[tokio::test]

@@ -34,6 +34,7 @@ rustix = { version = "1", features = ["fs"] }
 # 替身装配只在进程级测试里（tests/support），不进服务端二进制（AGENTS.md：fakes 只作 dev-dependency）。
 [dev-dependencies]
 gantry-fakes = { path = "../gantry-fakes" }
+gantry-forge = { path = "../gantry-forge" }
 gantry-notify = { path = "../gantry-notify" }
 gantry-policy = { path = "../gantry-policy" }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
