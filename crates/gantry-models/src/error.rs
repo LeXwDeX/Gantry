@@ -20,6 +20,9 @@ pub enum ModelsError {
     /// `schema` 与角色不匹配。
     #[error("schema {schema} does not belong to role {role}")]
     InvalidSchema { role: String, schema: String },
+    /// 材料的 id / source 含标记行不允许的字符（标记行不含自由文本，worker-protocol §4.4）。
+    #[error("material {id} is invalid: {reason}")]
+    InvalidMaterial { id: String, reason: String },
     /// 模型不支持所需推理深度；不降级（fail closed）。
     #[error("model {model} does not support reasoning effort {effort}")]
     EffortUnsupported { model: String, effort: Effort },
@@ -71,6 +74,7 @@ impl ModelsError {
             Self::ConfigInvalid { .. } => "config_invalid",
             Self::InvalidRole { .. } => "invalid_role",
             Self::InvalidSchema { .. } => "invalid_schema",
+            Self::InvalidMaterial { .. } => "invalid_material",
             Self::EffortUnsupported { .. } => "effort_unsupported",
             Self::InvalidRequest { .. } => "invalid_request",
             Self::ContentRefused { .. } => "content_refused",
