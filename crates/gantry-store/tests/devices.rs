@@ -23,7 +23,7 @@ async fn store() -> Store {
         clock.clone(),
         Arc::new(SeqEntropy::new(7)),
     ));
-    Store::open_in_memory(StoreDeps { clock, ids }, &[])
+    gantry_store::testing::open_for_tests(StoreDeps { clock, ids }, &[])
         .await
         .unwrap()
 }
