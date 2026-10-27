@@ -223,7 +223,7 @@ impl Executor {
             .ensure_mirror(&ctx, project, &binding.project.repo)
             .await
             .map_err(|error| unavailable(format!("ensure_mirror: {error}")))?;
-        // shortcut: MirrorGuard 还不持锁（#91 拍板后由 repo 会话改契约）；改完后在 fetch 期间持有它。
+        // 守卫持有镜像仓共享锁（#193），活到本函数结束：fetch 全程挡住 gc / 重建。
         let guard = self
             .repo
             .mirror_access(&ctx, project, MirrorMode::Fetch)
@@ -754,7 +754,7 @@ impl Run<'_> {
             return Ok(terminal("precondition_failed", "parent_mismatch"));
         }
 
-        // shortcut: MirrorGuard 还不持锁（#91 拍板后由 repo 会话改契约）；改完后推送期间持有它。
+        // 守卫持有镜像仓共享锁（#193），活到本函数结束：diff / ls-remote / push 全程挡住 gc / 重建。
         let guard = match exec
             .repo
             .mirror_access(&exec.ctx(), &project, MirrorMode::Push)
