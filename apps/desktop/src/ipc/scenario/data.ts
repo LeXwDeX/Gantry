@@ -115,6 +115,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   const projects: Project[] = [
     {
       id: "prj_gantry",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       repo: "LeXwDeX/gantry",
       installation_id: 48213907,
       bot_user_id: 9988776,
@@ -124,6 +126,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "prj_specgit",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       repo: "LeXwDeX/specgit",
       installation_id: 48213908,
       bot_user_id: 9988776,
@@ -133,6 +137,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "prj_graphagent",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       repo: "LeXwDeX/graphagent",
       installation_id: 48213909,
       bot_user_id: 9988776,
@@ -143,9 +149,24 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   ];
 
   const conversations: Record<string, Conversation> = {
-    prj_gantry: { id: "cnv_gantry", project_id: "prj_gantry" },
-    prj_specgit: { id: "cnv_specgit", project_id: "prj_specgit" },
-    prj_graphagent: { id: "cnv_graphagent", project_id: "prj_graphagent" },
+    prj_gantry: {
+      id: "cnv_gantry",
+      project_id: "prj_gantry",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
+    },
+    prj_specgit: {
+      id: "cnv_specgit",
+      project_id: "prj_specgit",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
+    },
+    prj_graphagent: {
+      id: "cnv_graphagent",
+      project_id: "prj_graphagent",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
+    },
   };
 
   const head = stale ? SCENARIO_PR9_STALE_SHA : SCENARIO_PR9_SHA;
@@ -163,6 +184,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   const deliveries: Delivery[] = [
     {
       id: "dlv_gantry_5",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       title: "沙盒驱动：rootless + gVisor",
       level_cap: "High",
@@ -203,6 +226,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "dlv_gantry_7",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       title: "DAG 状态机与事件投影",
       level_cap: "Max",
@@ -252,6 +277,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "dlv_gantry_9",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       title: "私有 CA 与 mTLS 配对",
       level_cap: "Max",
@@ -292,6 +319,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "dlv_gantry_6",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       title: "桌面端控制台原型",
       level_cap: "Low",
@@ -317,6 +346,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "dlv_gantry_done",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       title: "初始设计文档集",
       level_cap: "Low",
@@ -347,6 +378,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "dlv_specgit_31",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_specgit",
       title: "watch 超时可配置",
       level_cap: "High",
@@ -375,6 +408,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   const worktrees: Worktree[] = [
     {
       id: "wtr_gantry_5",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       branch: "feat/sandbox-driver",
       base_ref: "main",
@@ -388,6 +423,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "wtr_gantry_7",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       branch: "feat/dag-engine",
       base_ref: "main",
@@ -401,6 +438,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "wtr_gantry_9",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       branch: "feat/mtls-pair",
       base_ref: "main",
@@ -409,6 +448,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "wtr_gantry_6",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       branch: "feat/console-proto",
       base_ref: "main",
@@ -422,6 +463,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "wtr_gantry_1",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       branch: "docs/initial-design",
       base_ref: "main",
@@ -433,6 +476,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   const inbox: InboxItem[] = [
     {
       id: "inb_apr9",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       delivery_id: "dlv_gantry_9",
       kind: "approval_needed",
@@ -446,6 +491,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "inb_esc6",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       delivery_id: "dlv_gantry_6",
       kind: "escalation",
@@ -468,6 +515,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "inb_choice7",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_gantry",
       delivery_id: "dlv_gantry_7",
       kind: "decision_needed",
@@ -486,6 +535,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     {
       id: "inb_spec31",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       project_id: "prj_specgit",
       delivery_id: "dlv_specgit_31",
       kind: "spec_needed",
@@ -502,12 +553,15 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   const approvals: Approval[] = [
     {
       id: "apr_gantry_9",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       delivery_id: "dlv_gantry_9",
       action: "merge_pr",
       target: { kind: "pr", repo: "LeXwDeX/gantry", number: 9 },
       subject_digest: SCENARIO_PR9_SHA,
       device_id: null,
       signature: null,
+      consumed_by: null,
       status: "pending",
       expires_at: new Date(sessionNow + 24 * 60 * 60 * 1000).toISOString(),
     },
@@ -516,6 +570,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   const workflows: Record<string, Workflow> = {
     wfl_gantry_5_build: {
       id: "wfl_gantry_5_build",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       delivery_id: "dlv_gantry_5",
       conversation_id: null,
       stage: "implement",
@@ -536,6 +592,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     wfl_gantry_7_review: {
       id: "wfl_gantry_7_review",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       delivery_id: "dlv_gantry_7",
       conversation_id: null,
       stage: "review",
@@ -566,6 +624,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     wfl_gantry_6_build: {
       id: "wfl_gantry_6_build",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       delivery_id: "dlv_gantry_6",
       conversation_id: null,
       stage: "implement",
@@ -576,6 +636,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
     wfl_specgit_31_spec: {
       id: "wfl_specgit_31_spec",
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       delivery_id: "dlv_specgit_31",
       conversation_id: null,
       stage: "spec",
@@ -586,7 +648,7 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
     },
   };
 
-  const messages: Record<string, Message[]> = {
+  const messages: Record<string, DraftMessage[]> = {
     prj_gantry: buildGantryMessages(unsafe),
     prj_specgit: [
       {
@@ -716,19 +778,21 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
   const status: SettingsStatus = {
     latest_rev: 18235,
     modules: {
-      models: { applied_rev: 18235, health: "ok" },
-      engine: { applied_rev: 18102, health: "degraded", detail: "等待应用上级档位预算" },
-      policy: { applied_rev: 18120, health: "ok" },
-      guardian: { applied_rev: 18131, health: "ok" },
-      sandbox: { applied_rev: 18140, health: "ok" },
+      models: { applied_rev: 18235, health: "ok", unresolved_secret_refs: [] },
+      engine: { applied_rev: 18102, health: "degraded", detail: "等待应用上级档位预算", unresolved_secret_refs: [] },
+      policy: { applied_rev: 18120, health: "ok", unresolved_secret_refs: [] },
+      guardian: { applied_rev: 18131, health: "ok", unresolved_secret_refs: [] },
+      sandbox: { applied_rev: 18140, health: "ok", unresolved_secret_refs: [] },
       egress: { applied_rev: 18148, health: "ok", unresolved_secret_refs: [] },
-      notify: { applied_rev: 18153, health: "ok" },
-      forge: { applied_rev: 18160, health: "ok" },
+      notify: { applied_rev: 18153, health: "ok", unresolved_secret_refs: [] },
+      forge: { applied_rev: 18160, health: "ok", unresolved_secret_refs: [] },
     },
   };
 
   const device: Device = {
     id: "dev_scenario_main",
+    created_at: SCENARIO_SERVER_TIME,
+    updated_at: SCENARIO_SERVER_TIME,
     name: "Susan 的 MacBook",
     platform: "macos",
     cert_serial: "5f3a9c01d27be4468a1c",
@@ -742,6 +806,8 @@ export function buildScenarioData(scenario: ScenarioName): ScenarioData {
 
   const second: Device = {
     id: "dev_scenario_second",
+    created_at: SCENARIO_SERVER_TIME,
+    updated_at: SCENARIO_SERVER_TIME,
     name: "书房 Mac",
     platform: "macos",
     cert_serial: "44a19b02e18cf5579b2d",
@@ -851,6 +917,8 @@ function node(
 ): WorkflowNode {
   return {
     id,
+    created_at: SCENARIO_SERVER_TIME,
+    updated_at: SCENARIO_SERVER_TIME,
     workflow_id: workflowId,
     role,
     tier: role.startsWith("review:") ? "worker" : "planner",
@@ -889,22 +957,25 @@ function projectDoc(
   };
 }
 
-function stampMessages(messages: Record<string, Message[]>): Record<string, Message[]> {
+/** 场景里手写的消息草稿：时间戳由 stampMessages 按顺序补齐。 */
+type DraftMessage = Omit<Message, "created_at" | "updated_at"> &
+  Partial<Pick<Message, "created_at" | "updated_at">>;
+
+function stampMessages(messages: Record<string, DraftMessage[]>): Record<string, Message[]> {
   const base = Date.parse("2026-10-24T12:00:00.000Z");
   const result: Record<string, Message[]> = {};
   for (const [projectId, items] of Object.entries(messages)) {
-    result[projectId] = items.map((message, index) => ({
-      ...message,
-      created_at:
+    result[projectId] = items.map((message, index) => {
+      const created_at =
         message.created_at ??
-        new Date(base + index * 60_000 + (projectId === "prj_specgit" ? 300_000 : 0)).toISOString(),
-      updated_at: message.updated_at ?? undefined,
-    }));
+        new Date(base + index * 60_000 + (projectId === "prj_specgit" ? 300_000 : 0)).toISOString();
+      return { ...message, created_at, updated_at: message.updated_at ?? created_at };
+    });
   }
   return result;
 }
 
-function buildGantryMessages(unsafe: boolean): Message[] {
+function buildGantryMessages(unsafe: boolean): DraftMessage[] {
   const suffix = unsafe
     ? "\n<script>alert(1)</script> [点我](https://evil.example/x) ![图](https://evil.example/p.png)"
     : "";
@@ -1651,6 +1722,8 @@ function attempt(
 ): Attempt {
   return {
     id,
+    created_at: SCENARIO_SERVER_TIME,
+    updated_at: SCENARIO_SERVER_TIME,
     node_id: nodeId,
     n,
     sandbox_id: options.sandbox ?? `sbx_${id.slice(4, 18)}`,
@@ -1745,8 +1818,13 @@ function buildBudgets(
     );
     result[delivery.id] = {
       id: `bdg_${delivery.id}`,
-      delivery_id: delivery.id,
+      created_at: SCENARIO_SERVER_TIME,
+      updated_at: SCENARIO_SERVER_TIME,
       subject: "delivery",
+      delivery_id: delivery.id,
+      conversation_id: null,
+      project_id: delivery.project_id,
+      day: null,
       template: budget.template,
       limits: {
         tokens_by_tier: {
@@ -1770,7 +1848,7 @@ function buildBudgets(
         attempts: ownAttempts.length,
         rounds: delivery.stage === "review" ? 1 : 0,
         wall_time: ownAttempts.reduce((sum, entry) => {
-          if (!entry.ended_at) return sum;
+          if (!entry.ended_at || !entry.started_at) return sum;
           return sum + Math.max(0, (Date.parse(entry.ended_at) - Date.parse(entry.started_at)) / 1000);
         }, 0),
         forge_writes: delivery.pr ? 3 : 0,

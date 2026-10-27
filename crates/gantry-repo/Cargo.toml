@@ -23,4 +23,5 @@ libc = "0.2"
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
+gantry-policy = { path = "../gantry-policy" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
