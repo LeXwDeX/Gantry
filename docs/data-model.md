@@ -361,7 +361,7 @@ stateDiagram-v2
 | `workflow.created` / `workflow.revised` / `workflow.finished` | 图创建、改写、结束（含挂在会话上的临时图，此时 `subject` 为 `wfl_…`、`data.conversation_id` 非空）；结束时 `data.status` 取 `Workflow.status` 的终态值 |
 | `node.queued` / `node.started` / `node.finished` / `node.superseded` | 节点 |
 | `node.retry_requested` | 用户请求重试失败节点（P-56）；引擎随后新建尝试 |
-| `attempt.started` / `attempt.finished` | 尝试；`attempt.finished` 有补丁时带 `result_tree` 与本地提交 `result_commit`，两者同时出现，`status = succeeded` 且有 `result_tree` 时 `result_commit` 必填（engine.md §7.14.6 E1） |
+| `attempt.started` / `attempt.finished` | 尝试；`attempt.finished` 有补丁时带 `result_tree` 与本地提交 `result_commit`，两者同时出现，`status = succeeded` 且有 `result_tree` 时 `result_commit` 必填（engine.md §7.14.6 E1）；有被 `policy` 接受的 `open_pr` 提议时带 `accepted_open_pr`（`proposal_id`，原文在 `result_ref` 指向的 CAS 对象里，engine.md §7.14.6 E5） |
 | `attempt.progress` | 尝试进度（worker 自报经采样节流），仅展示，不驱动状态机 |
 | `patch.validated` / `patch.rejected` | 由 `repo` 写：`patch.validated` 含 `result_tree` 与判定（`allow` / `needs_approval`）；`patch.rejected` 含 `reason`，覆盖机械拒绝（不可应用、路径非法、`.git`、二进制、符号链接、子模块）与策略拒绝两种（P-69） |
 | `sandbox.created` / `sandbox.destroyed` | 沙盒 |

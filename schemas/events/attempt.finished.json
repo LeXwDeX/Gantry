@@ -78,6 +78,14 @@
         }
       ],
       "default": null
+    },
+    "accepted_open_pr": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "被 `policy` 接受的 `open_pr` 提议的 `proposal_id`（engine.md §7.14.6 E5）。\n执行器据 `result_ref` 从 CAS 取出提议原文填入 `create_pr` 意图，所以必须有 `result_ref`。",
+      "default": null
     }
   },
   "required": [

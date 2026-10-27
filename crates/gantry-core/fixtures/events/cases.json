@@ -188,7 +188,8 @@
         "provider": "anthropic",
         "model": "claude",
         "effort": "medium"
-      }
+      },
+      "accepted_open_pr": "p1"
     },
     "patch.validated": {
       "job_id": "att_01JB7X4Q9ZK3M8T5V2N7RHC6WY",
@@ -1561,6 +1562,23 @@
         "result_commit": "8d3f1b2a4c6e8f0a1b3c5d7e9f1a2b4c6d8e0f13"
       },
       "pointer_contains": "/result_tree"
+    },
+    {
+      "type": "attempt.finished",
+      "data": {
+        "status": "succeeded",
+        "accepted_open_pr": "p1"
+      },
+      "pointer_contains": "/result_ref"
+    },
+    {
+      "type": "attempt.finished",
+      "data": {
+        "status": "succeeded",
+        "result_ref": "sha256:5c1e0a93b7d24f68e1a0c3d5b79f2e4681a3c5d7e9f0b2a4c6d8e0f1a3b5c7d9",
+        "accepted_open_pr": ""
+      },
+      "pointer_contains": "/accepted_open_pr"
     },
     {
       "type": "guardian.triaged",

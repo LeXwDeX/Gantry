@@ -538,7 +538,7 @@ flowchart LR
 | V4 | `structured_output`：role schema；一致性规则（`ACCEPT` ⇒ 无 blocker；`REVISE` / `REJECT` ⇒ 至少一条 finding；`BLOCKED` ⇒ `blocking_reasons` 非空）；引用完整性（`arbiter` 的 `finding_ref` 必须指向本轮 `upstream` 的 reviewer） | `exec.output_invalid` |
 | V5 | 补丁：`RepoService::validate_patch`（仅当 V1–V4 通过且 `status = succeeded`；幂等于 `job_id`）。`Validated(allow)` → 生成提交说明（utility 辅助调用或模板）后 `commit_patch`（需 `LockToken`；提交身份取 `github.commit_identity`，P-69；`repo` 按 `refs/gantry/attempt/<job_id>` 幂等）；`Validated(needs_approval)` → 补丁挂起，请求 `patch_apply_protected` 审批；授予后 `commit_patch(approval = 该审批)`，`repo` 在提交前消费它（P-54）；`Validated(deny)`（`policy` 规则判定）→ 丢弃；`Rejected{reason}`（`repo` 机械拒绝：`not_applicable` → `exec.output_invalid`；`binary` / `symlink` / `submodule` / `path_invalid` / `dotgit` → `policy_denied` 类，按 worker-protocol §9 映射）；`BaseConflict` → 不自动 rebase，用新的 `base_sha` 重新派发（计一次重试）；`NoChange` → 视为无补丁（OQ-15） | `policy.*` / `exec.output_invalid` |
 | V6 | proposals：`PolicyPort::decide_proposals`；`Accepted` 的由引擎入队（`open_pr` → `create_pr`），`escalate` 写上报项，`NeedsApproval` / `Held` 随补丁挂起，`Denied` 记 `policy.denied`；单条失败不使尝试失败 | 逐条 `rejected` |
-| 终结 | 按 worker-protocol §9 的优先级分类；用 Egress 计量（不是自报）填 `usage`；写 `attempt.finished`（`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`result_commit`）、`budget.charged`、`node.finished`；然后把结果交 `decide` | — |
+| 终结 | 按 worker-protocol §9 的优先级分类；用 Egress 计量（不是自报）填 `usage`；写 `attempt.finished`（`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`result_commit`、`accepted_open_pr`）、`budget.charged`、`node.finished`；然后把结果交 `decide` | — |
 
 V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol §1 的责任表没有逐项写明这几项归属，见 OQ-12。
 
@@ -646,7 +646,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | 时机 | `kind` | 关键 `payload` 来源 | `requires_approval` | `priority` | `depends_on` |
 | --- | --- | --- | --- | --- | --- |
 | T6 / 修正轮后 | `push_branch` | `branch`；`base_ref` = 默认分支；`worktree_id`；`local_head_oid` = `candidate_head`；`expected_tree_oid` / `validation_ref` = `ValidatedPatch.result_tree` / `.sha256`；`expected_remote_oid` = 上次推送的 head（首次 null）；`force = false`；`transport = git` | 取 `decide_action` 结果（补丁审批 `patch_apply_protected` 已由 `repo` 在提交前消费，不在此处，P-54） | high | — |
-| T6 | `create_pr`（首次） | `head`、`base`、`title` / `body`（取 `open_pr` 提议，缺省用交付单元标题与模板正文）、`draft`、`closes`（仅 `base` = 默认分支时填绑定的 Issue 编号）、`expected_head_oid` | 取 `decide_action` 结果 | high | 本次 `push_branch` |
+| T6 | `create_pr`（首次） | `head`、`base`、`title` / `body`（取 `open_pr` 提议：执行器按产出补丁那次尝试的 `attempt.finished.accepted_open_pr` 与 `result_ref` 从 CAS 取原文；没有被接受的提议时用交付单元标题与模板正文，§7.14.6 E5）、`draft`、`closes`（仅 `base` = 默认分支时填绑定的 Issue 编号）、`expected_head_oid` | 取 `decide_action` 结果 | high | 本次 `push_branch` |
 | T3 | `update_issue` | `spec_block_markdown` = `admission.refined_spec`，`expected_block_hash` | 取 `decide_action` 结果 | normal | — |
 | 评审完成 | `create_comment`（或 `upsert_status_comment` 的一个小节，forge-actions OQ-11） | High：`summarize.text`；Max：`arbiter.pr_summary`；文本是不可信数据，`forge` 出站净化 | 取 `decide_action` 结果 | low | — |
 | 合并审批授予 | `merge_pr` | `expected_head_sha` = `approval.subject_digest`；`merge_method`（OQ-14）；`mode = auto`；`commit_title` / `commit_message`（含绑定 Issue 的 `Closes #N`，仅 `forge` 允许的位置） | **必填**，= 审批 ID | high | — |
@@ -864,6 +864,7 @@ pub struct AttemptState {
     pub failure_class: Option<FailureClass>, pub failure_detail: Option<FailureDetail>,
     pub result_ref: Option<Sha256Digest>, pub result_tree: Option<GitOid>,
     pub result_commit: Option<GitOid>,              // 见 7.14.6 契约缺口 E1
+    pub accepted_open_pr: Option<String>,           // 被接受的 open_pr 提议的 proposal_id，原文在 result_ref 指向的 CAS 对象里（7.14.6 E5）
     pub after_retry_request: u32,                   // 自该节点最近一次 node.retry_requested 起的序号（1 起）；自动重试上限按它计
 }
 /// 下一次自动重试的最早时间 = finished_at + 退避(n)；抖动以 sha256(attempt_id) 为种子，确定性推出，不存。
@@ -908,7 +909,7 @@ pub struct FindingFingerprint(Sha256Digest);
 
 `Evidence` 补 `candidate_tree: Option<GitOid>`（`push_branch.expected_tree_oid`）与 `stage_verdicts: BTreeMap<WorkflowId, Verdict>`（按 `VerdictRule` 折叠后的阶段结论）。
 
-**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，M1 内不自增：Outbox 终态失败后的上报 `escalation(outbox_failed:*)` 在 P-79 词表里没有选项，用户"决定重试"（§9）目前没有入口，见 7.14.6 E6；在此之前终态失败的动作只能以放弃收场。`create_pr` 的期望意图只用状态里已有的确定字段（交付单元标题、模板正文、绑定 Issue），`open_pr` 提议的标题 / 正文待 E5 落地后再并入，否则崩溃恢复时推出的意图与崩溃前不同，幂等键对不上。
+**`ActionKey` 与 `epoch`**：`ActionKey` 就是 `core` 按 forge-actions §2.2 派生的幂等键（`target` + 全部 intent 字段的摘要 + `epoch`），由 `expected_actions` 对期望意图调用 `core` 的派生函数得到，不另设更粗的主键。`epoch` 初值 1，M1 内不自增：Outbox 终态失败后的上报 `escalation(outbox_failed:*)` 在 P-79 词表里没有选项，用户"决定重试"（§9）目前没有入口，见 7.14.6 E6；在此之前终态失败的动作只能以放弃收场。`create_pr` 的 `open_pr` 提议标题 / 正文经 E5 落盘为 `attempt.finished.accepted_open_pr`（`proposal_id`）+ `result_ref`，由执行器从 CAS 取原文填入意图；CAS 按内容寻址，崩溃恢复后取到的原文相同，幂等键一致。`decide` 不读 CAS（§7.14.2），`expected_actions` 如何在不持有原文的情况下得到含 `title` / `body` 摘要的 `ActionKey`，尚未规定（见 7.14.6 E5 的待决说明）；在此之前实现仍只用状态里已有的确定字段（交付单元标题、模板正文、绑定 Issue）。
 
 #### 7.14.5 `Decision`
 
@@ -1003,7 +1004,7 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E1 | **已落地（#64）**：`attempt.finished` 增加可选 `result_commit`，`core` 校验 `status = succeeded` 且有 `result_tree` 时必填、有 `result_commit` 时必须有 `result_tree`。原缺口：本地提交的 `commit_oid` 不在任何事件里（repo.md OQ-R2），T6 的 `push_branch.local_head_oid` = `Evidence.candidate_head` 无法从日志重建 | 引擎投影把它读入 `AttemptState.result_commit`（阶段 2 切片 1） | **M1（阻塞端到端与"重启一致"）** |
 | E2 | 无进展检测的 finding 指纹没有落盘处 | 判定节点的 `node.finished` 增加可选 `fingerprints[]`（`FindingFingerprint` 十六进制，≤ 64 条，只在 `REVISE` / `REJECT` 时出现） | M2 / M3（M1 无轮次，`round_history` 恒空） |
 | E3 | `PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报（policy.md 未规定何时省略 `report`） | 二选一：policy.md 规定对 `engine` 发起的动作 `Deny` 必带 `ReportHint`；或 data-model 词表增加通用码 | M1（`merge_pr` 以外的动作） |
-| E5 | `open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态；§7.12 要求 `create_pr` 的 `title` / `body` 取自它 | `attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），执行器据 `result_ref` 从 CAS 取原文填入意图（内容寻址，恢复后一致） | M1（体验；未落地时用模板标题与正文，不阻塞） |
+| E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。执行器据 `result_ref` 从 CAS 取原文填入 `create_pr` 意图（内容寻址，恢复后一致）。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**待决**：`ActionKey` 含 `title` / `body` 摘要（forge-actions §2.2），而 `expected_actions` 在 `decide` 内纯计算、不读 CAS，二者如何衔接未规定 | 引擎投影读入 `AttemptState.accepted_open_pr`；`ActionKey` 衔接方式待定 | M1（体验；衔接方式定下前用模板标题与正文，不阻塞） |
 | E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
 | E4 | **已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`），区分"job 从未被受理"与"受理后丢失"；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`，不把未起沙盒的尝试判成 `infra.lost` | 见 sandbox.md §6.1、§7.10；`FakeSandboxService` 按受理集合分类 | M1（"重启一致"） |
 
@@ -1142,7 +1143,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 | `node.queued` / `started` / `finished` / `superseded` | `node_id`、`status`、`verdict`、`superseded_by` |
 | `node.retry_requested` | `node_id`、`by`（P-56） |
 | `attempt.started` | `attempt_id`、`node_id`、`n`、`provider`、`model`、`reasoning_effort`、`config_rev`、`base_sha`、`tokens_total`、`wall_time_s` |
-| `attempt.finished` | `status`、`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`result_commit`（本地提交 OID，与 `result_tree` 同时出现；`succeeded` 且有补丁时必填，§7.14.6 E1）、`served_by` |
+| `attempt.finished` | `status`、`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`result_commit`（本地提交 OID，与 `result_tree` 同时出现；`succeeded` 且有补丁时必填，§7.14.6 E1）、`served_by`、`accepted_open_pr`（被接受的 `open_pr` 提议的 `proposal_id`，需有 `result_ref`，§7.14.6 E5） |
 | `attempt.progress` | 采样节流后的展示字段 |
 | `budget.charged`（引擎写的部分） | `dimension`、`tier?`、`delta`（含加权值）、`used_after`、`source = {kind, id}`、`delivery_id` 或 `conversation_id`；`direct` 调用的 token 由 `models` 写 |
 | `budget.exhausted` | `dimension`、`limit`、`used` |
