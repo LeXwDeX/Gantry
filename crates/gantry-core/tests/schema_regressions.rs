@@ -969,6 +969,90 @@ fn forge_synced_rejects_cross_target_and_untyped_changes() {
     assert!(validate_event_data(&EventType::ForgeSynced, &invalid).is_err());
 }
 
+#[test]
+fn forge_synced_initial_snapshot_carries_all_fields() {
+    let pr = json!({
+        "target": {"type":"pr","number":57,"node_id":"PR_kwDOabc123_example"},
+        "source": "webhook",
+        "changes": [],
+        "synced_at": "2026-10-24T12:41:03.120Z",
+        "initial": {
+            "type": "pr",
+            "state": "open",
+            "title": {"text":"Fix pagination","source":"github:pr.title","truncated":false},
+            "head_sha": "1a1c743f1c1f1e5faebe1f39feb3ffe2244cfd0b",
+            "base_ref": "main",
+            "base_sha": "f2c03d84a858156b0121130fd1ec2f391aa90865",
+            "draft": false,
+            "mergeable_state": "unknown",
+            "in_merge_queue": false,
+            "checks": {"passed":0,"failed":0,"pending":0,"required_ok":false},
+            "review_state": "none"
+        }
+    });
+    validate_event_data(&EventType::ForgeSynced, &pr).expect("valid initial pr");
+    let typed: ForgeSyncedData = serde_json::from_value(pr.clone()).expect("typed initial");
+    typed.validate().expect("valid initial pr event");
+    assert_eq!(serde_json::to_value(&typed).unwrap(), pr, "round trip");
+
+    let issue = json!({
+        "target": {"type":"issue","number":42,"node_id":"I_kwDOabc"},
+        "source": "reconcile",
+        "changes": [],
+        "synced_at": "2026-10-24T12:41:03.120Z",
+        "initial": {
+            "type": "issue",
+            "state": "open",
+            "state_reason": null,
+            "title": {"text":"Pagination bug","source":"github:issue.title","truncated":false}
+        }
+    });
+    validate_event_data(&EventType::ForgeSynced, &issue).expect("valid initial issue");
+
+    // 非首次同步不带 initial，序列化时省略该键。
+    let regular: ForgeSyncedData = serde_json::from_value(json!({
+        "target": {"type":"pr","number":57,"node_id":"n"},
+        "source": "reconcile",
+        "changes": [{"field":"draft","from":false,"to":true}],
+        "synced_at": "2026-10-24T12:41:03.120Z"
+    }))
+    .unwrap();
+    assert!(serde_json::to_value(&regular)
+        .unwrap()
+        .get("initial")
+        .is_none());
+
+    let reject = |mutate: &dyn Fn(&mut Value)| {
+        let mut value = pr.clone();
+        mutate(&mut value);
+        assert!(
+            validate_event_data(&EventType::ForgeSynced, &value).is_err(),
+            "{value}"
+        );
+    };
+    // initial 与 changes 不能同时出现。
+    reject(&|v| v["changes"] = json!([{"field":"draft","from":false,"to":true}]));
+    // 缺字段、多字段、null。
+    reject(&|v| {
+        v["initial"].as_object_mut().unwrap().remove("checks");
+    });
+    reject(&|v| v["initial"]["body"] = json!("x"));
+    reject(&|v| v["initial"]["head_sha"] = Value::Null);
+    reject(&|v| v["initial"] = Value::Null);
+    // 类型与 target 不符；Issue 字段集不能用在 PR 上。
+    reject(&|v| v["initial"]["type"] = json!("issue"));
+    reject(&|v| v["target"]["type"] = json!("issue"));
+    reject(&|v| v["initial"]["mergeable_state"] = json!(""));
+
+    let mut merged_issue = issue.clone();
+    merged_issue["initial"]["state"] = json!("merged");
+    assert!(validate_event_data(&EventType::ForgeSynced, &merged_issue).is_err());
+    // 首次快照之外，changes 仍然不能为空。
+    let mut empty = issue;
+    empty.as_object_mut().unwrap().remove("initial");
+    assert!(validate_event_data(&EventType::ForgeSynced, &empty).is_err());
+}
+
 fn budget_token_fixture() -> Value {
     json!({
         "ledger": {"subject":"delivery","id":"dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD"},

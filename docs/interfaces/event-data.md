@@ -469,7 +469,7 @@
 | --- | --- | --- | --- |
 | `target` | 是 | `{type:"pr"\|"issue", number:u64, node_id:string}` | `number` 和 `node_id` 都必填；这是 `ForgeEventTarget` 的收窄，不表示 branch/installation 可用。`target` 必须属于信封项目，`node_id` 与回读对象一致。 |
 | `source` | 是 | `webhook` / `reconcile`，复用 `ForgeEventSource` | `webhook` 只用于因该投递而更新快照；patrol、启动全量、投递恢复、强制回读与 `reconcile_now` 都用 `reconcile`。 |
-| `changes` | 是 | `Change[]`，非空 | 每项 `{field, from, to}`；同一 `field` 至多一次；按本节字段表顺序排序。`from` 与 `to` 必须不同。 |
+| `changes` | 是 | `Change[]` | 每项 `{field, from, to}`；同一 `field` 至多一次；按本节字段表顺序排序。`from` 与 `to` 必须不同。不带 `initial` 时必须非空；带 `initial` 时必须为空数组。 |
 | `synced_at` | 是 | `Timestamp`，快照写入时间 | 等于应用本批变更后的快照 `synced_at`；不是 GitHub 时间戳。事件信封的 `ts` 不得早于 `synced_at`。若由入站 forge 事件触发，`synced_at` 不早于该事件 `occurred_at`（允许时钟容差）；reconcile、startup_sweep、recovery 等无入站事件路径不比较 `occurred_at`。 |
 
 **`changes[].field` 白名单与值类型**
@@ -487,6 +487,15 @@
 | `in_merge_queue` | pr | bool | — |
 | `checks` | pr | `CheckSummary` | `{passed, failed, pending: u32, required_ok: bool}`；不复用 check 正文。 |
 | `review_state` | pr | `entities::ReviewState`：`none` / `approved` / `changes_requested` | 不是 `forge::ReviewState`（后者含 `commented`，只用于评审事件）。 |
+
+**首次快照（`initial`，可选；#92 / #150 拍板）**：本地第一次看到某个 PR / Issue 时没有 `from` 可比。此时发一条 `forge.synced`，`changes` 为空数组，`initial` 一次给出该 target 适用的**全部**白名单字段，值类型与上表相同：
+
+| `initial.type` | 必须且只能有的字段 |
+| --- | --- |
+| `pr` | `state` `title` `head_sha` `base_ref` `base_sha` `draft` `mergeable_state` `in_merge_queue` `checks` `review_state` |
+| `issue` | `state` `state_reason`（可为 `null`，表示没有关闭原因） `title` |
+
+`initial.type` 必须等于 `target.type`；除 `state_reason` 外不得为 `null`；`initial` 出现时不得为 `null`，不需要时省略。之后同一 target 的同步只发 `changes`，不再带 `initial`。投影（store.md §7.3 `pr_snapshots` / `issue_snapshots`）用 `initial` 建行，用 `changes` 更新，快照列只从 `forge.synced` 折叠；`forge.<kind>`（如 `pr_opened`）照常同批追加，只驱动业务语义。同批里 `forge.synced` 排在 `forge.<kind>` 之后。
 
 排除项：`repo` / `number` / `node_id` 是身份，不进入 changes；`synced_at` 由顶层承载；`body` / `labels` / `reviewers` 不在 `IssueRef` / `PullRequestRef` 快照，不造字段。`forge.synced` 只覆盖 PR / Issue 快照；branch、installation 与项目级同步不在 M0 范围，分别由 drift 或既有 `forge.<kind>` 事件表达。
 
@@ -508,7 +517,7 @@
 
 | 正例 | 关键负例 |
 | --- | --- |
-| PR 合并状态与 checks 同批变化；Issue `state` 与 `state_reason` 同批变化；webhook 与 reconcile 各一条 | `changes` 为空；`from` 等于 `to`；未知 `field`；同一 `field` 出现两次；Issue 带 `head_sha`；PR 带 `state_reason`；`target` 缺 `node_id`；`type` 为 branch/installation；webhook 已解析交付却把 `correlation_id` 填成其他值；`synced_at` 与快照不一致；`title` 为裸字符串；`checks` 缺 `required_ok`；`review_state=commented`。 |
+| PR 合并状态与 checks 同批变化；Issue `state` 与 `state_reason` 同批变化；webhook 与 reconcile 各一条；PR 与 Issue 的首次快照（`initial`）各一条 | `changes` 为空且无 `initial`；`initial` 与非空 `changes` 同时出现；`initial` 缺字段 / 多字段 / 字段为 `null`（`state_reason` 除外）/ 整体为 `null`；`initial.type` 与 `target.type` 不同；Issue 的 `initial.state=merged`；`from` 等于 `to`；未知 `field`；同一 `field` 出现两次；Issue 带 `head_sha`；PR 带 `state_reason`；`target` 缺 `node_id`；`type` 为 branch/installation；webhook 已解析交付却把 `correlation_id` 填成其他值；`synced_at` 与快照不一致；`title` 为裸字符串；`checks` 缺 `required_ok`；`review_state=commented`。 |
 
 确认者：`F+G+C`。
 

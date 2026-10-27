@@ -145,7 +145,7 @@
 
 | 规则 | 说明 |
 | --- | --- |
-| 字段 | `ledger.subject` ∈ `delivery` / `conversation`；`conversation` 时另带 `day`（UTC 日期，P-58）。`tier` ∈ `planner` / `worker`（沙盒内只用这两类）。`groups` 是创建时固化的分组集合，有效集合 = 此快照 ∩ 当前配置（config §2.6），`effective_groups` 是签发时的有效集合。`tokens_total` 与 `token_weights` 一起决定封顶：加权用量达到 `tokens_total` 即切断后续请求（worker-protocol §2.3 E4）。`connect_proxy_url` 已含 `job:<job_token>@`，`sandbox` 原样写进容器的 `HTTPS_PROXY`（P-72） |
+| 字段 | `ledger.subject` ∈ `delivery` / `conversation`；`conversation` 时另带 `day`（UTC 日期，P-58）。`tier` ∈ `planner` / `worker`（沙盒内只用这两类）。`groups` 是创建时固化的分组集合，有效集合 = 此快照 ∩ 当前配置（config §2.6），`effective_groups` 是签发时的有效集合。`tokens_total` 与 `token_weights` 一起决定封顶：加权用量达到 `tokens_total` 即切断后续请求（worker-protocol §2.3 E4）。`connect_proxy_url` 已含 `job:<job_token>@`，`sandbox` 原样写进容器的 `HTTPS_PROXY`（P-72）。`config_rev` 是 `token_weights` 所属的配置修订：`sandbox` 取自 `SandboxSpec.config_rev`（引擎组装该尝试时 `ConfigView` 的 `rev`），**不是**签发时刻已应用的修订，因此排队期间配置变更不会让权重与 `weight_rev` 错配（#220） |
 | 重放 | 同一 `job_id` 且绑定完全相同、令牌仍有效 → `200`，**签发新令牌**、旧令牌立即作废、已计用量保留，`reissued: true`（用于 `sandbox` 在签发响应丢失后重试；只应发生在容器启动之前） |
 | 冲突 | 同一 `job_id` 绑定不同 → `409 binding_mismatch`；该 `job_id` 已吊销 → `409 job_revoked`（新尝试必须用新的 `job_id`） |
 | 校验 | `groups` 必须是 `profile` 在当前配置中的分组子集；`provider` 必须存在且凭据可解析，否则 `422 validation_failed`（凭据缺失为 `credential_missing`）；没有任何已应用配置 → `503 not_configured` |

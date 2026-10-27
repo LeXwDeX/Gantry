@@ -450,16 +450,6 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             .next()
             .cloned()
             .expect("checked in check_spec");
-        // 契约缺口 11：`SandboxSpec` 不带权重快照所属的配置修订，暂取 Egress 当前已生效的
-        // 修订（`weights` 由同一份配置推出）；Egress 不可达即不启动（失败闭合）。
-        let config_rev = self
-            .inner
-            .deps
-            .egress
-            .status()
-            .await
-            .map_err(|err| infra(InfraDetail::Egress, err.to_string()))?
-            .applied_rev;
         let request = IssueJobToken {
             job_id: spec.job_id,
             sandbox_id: spec.sandbox_id,
@@ -473,7 +463,8 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             tokens_total: spec.egress.tokens_total,
             weights: spec.egress.weights,
             wall_time_s: spec.limits.wall_time_s,
-            config_rev,
+            // 权重快照所属的修订随 spec 从引擎决策时一路传下来（#220）。
+            config_rev: spec.config_rev,
         };
         // 先记「已签发」：签发请求发出后崩溃也会在恢复时吊销（吊销是幂等的）。
         self.meta.token_issued = true;

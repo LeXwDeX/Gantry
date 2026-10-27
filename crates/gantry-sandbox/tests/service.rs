@@ -151,8 +151,12 @@ fn spec(n: u128) -> SandboxSpec {
             tokens_total: 100_000,
             weights: TokenWeights::default(),
         },
+        config_rev: gantry_core::entities::Seq::from_wire(DECIDED_REV).unwrap(),
     }
 }
+
+/// 引擎组装 spec 时的配置修订；故意与 Egress 已应用的修订不同。
+const DECIDED_REV: u64 = 7;
 
 /// 包一层 EgressStub：记录签发 / 吊销的顺序，可让签发失败。
 struct RecordingEgress {
@@ -160,6 +164,7 @@ struct RecordingEgress {
     log: std::sync::Mutex<Vec<String>>,
     fail_issue: std::sync::atomic::AtomicBool,
     fail_revoke: std::sync::atomic::AtomicBool,
+    issued_revs: std::sync::Mutex<Vec<u64>>,
 }
 
 impl RecordingEgress {
@@ -182,6 +187,10 @@ impl EgressControl for RecordingEgress {
             .lock()
             .unwrap()
             .push(format!("issue {}", req.job_id));
+        self.issued_revs
+            .lock()
+            .unwrap()
+            .push(req.config_rev.as_u64());
         if self.fail_issue.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(EgressError::Unavailable {
                 message: "egress health != ok".into(),
@@ -325,6 +334,7 @@ fn harness(max_concurrent: usize) -> Harness {
         log: Default::default(),
         fail_issue: Default::default(),
         fail_revoke: Default::default(),
+        issued_revs: Default::default(),
     });
     let orphan_grace = Duration::ZERO;
     let service = manager(
@@ -1442,4 +1452,16 @@ async fn sweep_cleans_leftovers_of_released_jobs() {
         .unwrap();
     assert_eq!(report.destroyed, 1);
     assert_eq!(h.driver.container_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn issued_token_carries_the_decision_time_config_rev() {
+    let h = harness(1);
+    // 决策之后 Egress 应用了新配置（修订与 spec 里的不同）。
+    let applied = h.egress.status().await.unwrap().applied_rev.as_u64();
+    assert_ne!(applied, DECIDED_REV);
+    h.driver.script(sbx(60), golden_script());
+    h.service.submit(&ctx(), spec(60)).await.unwrap();
+    h.service.wait(&att(60)).await.unwrap();
+    assert_eq!(*h.egress.issued_revs.lock().unwrap(), vec![DECIDED_REV]);
 }
