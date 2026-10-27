@@ -3,6 +3,7 @@ import { waitFor } from "@testing-library/react";
 import { DesktopController } from "@/store/controller";
 import { MockIpcAdapter } from "@/ipc/mock/adapter";
 import { startMockApi, type RunningMockApi } from "./mockApi";
+import { APPROVAL_INBOX, events } from "./mockEvents";
 
 let mock: RunningMockApi;
 let adapter: MockIpcAdapter;
@@ -55,10 +56,9 @@ describe("DesktopController × Mock API", () => {
   it("注入事件后按资源重新拉取，ack 单调推进", async () => {
     await start();
     const before = (await mock.operations()).filter((op) => op === "getInboxSummary").length;
-    await mock.inject("inbox.raised", "inb_01JB7P2K6R9T3X5N8Q1V4W7YZJ", {
-      inbox_id: "inb_01JB7P2K6R9T3X5N8Q1V4W7YZJ",
-      kind: "approval_needed",
-    });
+    const item = await adapter.api("inbox.get", { inboxId: APPROVAL_INBOX });
+    if (!item.ok || !item.body) throw new Error("inbox.get failed");
+    await mock.emit(events.inboxRaised(item.body as unknown as Record<string, unknown> & { id: string }));
     await waitFor(() => expect(adapter.ackedSeq).toBe(18241), { timeout: 5000 });
     await waitFor(
       async () => {

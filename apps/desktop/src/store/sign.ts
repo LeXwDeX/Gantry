@@ -271,14 +271,15 @@ export function approvalStatusLabel(
       };
     }
     case "consumed":
+      // 依次推进：已执行 → 已合并 {sha7} → Issue 已关闭 · 交付完成（desktop-ui §12 E2E-08）。
+      if (options.deliveryStage === "closed") {
+        return { label: "Issue 已关闭 · 交付完成", tone: "ok" };
+      }
       if (options.prState === "merged") {
         return {
           label: `已合并 ${shortSha(options.headSha ?? approval.subject_digest)}`,
           tone: "ok",
         };
-      }
-      if (options.deliveryStage === "closed") {
-        return { label: "Issue 已关闭 · 交付完成", tone: "ok" };
       }
       return { label: "已执行，等待 GitHub 确认", tone: "run" };
     case "invalidated":
