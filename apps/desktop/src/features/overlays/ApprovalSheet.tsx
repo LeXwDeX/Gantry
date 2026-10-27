@@ -58,6 +58,11 @@ export function ApprovalSheet({
   const [approverName, setApproverName] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const preparedRef = useRef<string | null>(null);
+  // 断线期间准备的审批单在恢复后自动重新准备（见下方 effect）。
+  const phaseRef = useRef(state.connection?.phase);
+  phaseRef.current = state.connection?.phase;
+  const preparedOffline = useRef(false);
+  const sawOfflineSheet = useRef(false);
   const signedRef = useRef(false);
   const aliveRef = useRef(true);
   const prepareSeq = useRef(0);
@@ -91,6 +96,7 @@ export function ApprovalSheet({
   }, [controller]);
 
   const prepare = useCallback(async (): Promise<void> => {
+    preparedOffline.current = phaseRef.current !== "live";
     setLoading(true);
     setPrepareError(null);
     setChanged(false);
@@ -160,6 +166,28 @@ export function ApprovalSheet({
     startedRef.current = true;
     void prepare();
   }, [approvalReady, prepare]);
+
+  // 断线期间准备的审批单不含 challenge（can_sign = not_connected）；连接恢复后自动重新准备一次，
+  // 不要求用户手动重新载入（E2E-04）。
+  // 只在“准备时确实断线 → 现在恢复”这一次转换时触发，避免对始终返回 not_connected 的替身反复准备。
+  const connectionLive = state.connection?.phase === "live";
+  useEffect(() => {
+    const offlineSheet =
+      sheet !== null && !sheet.can_sign.ok && sheet.can_sign.reason === "not_connected";
+    if (!offlineSheet) {
+      sawOfflineSheet.current = false;
+      return;
+    }
+    if (!connectionLive) {
+      sawOfflineSheet.current = true;
+      return;
+    }
+    if ((sawOfflineSheet.current || preparedOffline.current) && !loading) {
+      sawOfflineSheet.current = false;
+      preparedOffline.current = false;
+      void prepare();
+    }
+  }, [connectionLive, loading, prepare, sheet]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -239,13 +267,16 @@ export function ApprovalSheet({
     );
   }, [approval, approverName, controller, nowTick, sheet, state.connection, state.me]);
 
-  const unsignedGates = sheet ? unsignedGateIssues(sheet.unsigned.pr) : [];
   // Keep the demo-only approval affordance out of the production bundle. The
   // mode constant is folded by Vite before Rollup tree-shaking.
   const scenario =
     import.meta.env.MODE !== "production" && isScenarioAdapter(controller.ipc);
   const simulation = simulationFor(controller);
   const approvalDelivery = findApprovalDelivery(state, approval);
+  // 闸门以较新的 GitHub 同步结果为准：forge.synced 刷新交付后，不必重新载入审批单即可启用（E2E-07）。
+  const unsignedGates = sheet
+    ? unsignedGateIssues(newerPr(sheet.unsigned.pr, approvalDelivery?.pr ?? null))
+    : [];
   const liveHead =
     !approval ||
     approval.target.kind !== "pr" ||
@@ -898,9 +929,19 @@ function prOfTarget(
 }
 
 
-function unsignedGateIssues(
-  pr: ApprovalSheetModel["unsigned"]["pr"],
-): string[] {
+type GatePr = Pick<
+  PullRequestRef,
+  "checks" | "mergeable_state" | "review_state" | "synced_at"
+>;
+
+/** 审批单快照与交付缓存里的 PR 取同步时间较新者；同样新时保守地沿用快照。 */
+function newerPr(snapshot: GatePr | null | undefined, live: GatePr | null): GatePr | null {
+  if (!snapshot) return live;
+  if (!live) return snapshot;
+  return Date.parse(live.synced_at) > Date.parse(snapshot.synced_at) ? live : snapshot;
+}
+
+function unsignedGateIssues(pr: GatePr | null): string[] {
   if (!pr) return [];
   const issues: string[] = [];
   if (!pr.checks.required_ok) issues.push("必需 checks 未通过");
