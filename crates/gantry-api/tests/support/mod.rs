@@ -183,7 +183,7 @@ pub async fn send(h: &Harness, head: RequestHead, body: &str) -> ApiResponse {
 }
 
 pub fn body(resp: &ApiResponse) -> Value {
-    serde_json::from_slice(resp.body()).expect("response body is JSON")
+    serde_json::from_slice(resp.body().as_bytes()).expect("response body is JSON")
 }
 
 pub fn header<'a>(resp: &'a ApiResponse, name: &str) -> Option<&'a str> {

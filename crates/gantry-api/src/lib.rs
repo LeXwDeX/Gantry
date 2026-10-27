@@ -27,12 +27,13 @@ pub mod rate;
 pub mod reads;
 pub mod registry;
 pub mod server;
+pub mod sse;
 pub mod validate;
 
 pub use auth::{AuthContext, DeviceLookup, LookupError, PeerCert};
 pub use problem::{FieldError, Problem, ProblemCode};
 pub use registry::{Milestone, RouteSpec, ROUTES};
 pub use server::{
-    Admission, Admitted, ApiConfig, ApiCore, ApiResponse, HandlerRequest, Reply, RequestHead,
+    Admission, Admitted, ApiConfig, ApiCore, ApiResponse, Body, HandlerRequest, Reply, RequestHead,
     RouteHandler, Services,
 };

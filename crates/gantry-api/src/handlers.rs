@@ -13,6 +13,7 @@ use crate::control;
 use crate::problem::Problem;
 use crate::reads;
 use crate::server::{ApiCore, HandlerRequest, Reply, RouteHandler};
+use crate::sse;
 
 pub struct Builtin;
 
@@ -29,6 +30,7 @@ impl RouteHandler for Builtin {
             "listInbox" => reads::list_inbox(core, &req).await,
             "getInboxItem" => reads::get_inbox(core, &req).await,
             "getInboxSummary" => reads::inbox_summary(core, &req).await,
+            "streamEvents" => sse::stream_events(core, &req).await,
             _ => Err(Problem::not_found()),
         }
     }
