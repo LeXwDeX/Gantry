@@ -5,7 +5,7 @@
 //! 服务端实现接受。网络层（单向 TLS、固定根）归 mTLS 切片，这里由 `PairTransport` 替身代替。
 #![cfg(feature = "test-software-keys")]
 
-use std::cell::{Cell, RefCell};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gantry_core::ids::DeviceId;
@@ -45,8 +45,8 @@ struct FakeServer {
     ca: TestCA,
     inter: Authority,
     token: String,
-    fault: Cell<Fault>,
-    requests: RefCell<Vec<PairRequestBody>>,
+    fault: Mutex<Fault>,
+    requests: Mutex<Vec<PairRequestBody>>,
     other: TestCA,
 }
 
@@ -59,10 +59,18 @@ impl FakeServer {
             ca,
             inter,
             token: "gp1_4Ww9rX0b2sQ7hYk1".into(),
-            fault: Cell::new(Fault::None),
-            requests: RefCell::new(Vec::new()),
+            fault: Mutex::new(Fault::None),
+            requests: Mutex::new(Vec::new()),
             other: TestCA::new().unwrap(),
         }
+    }
+
+    fn fault(&self) -> Fault {
+        *self.fault.lock().unwrap()
+    }
+
+    fn set_fault(&self, f: Fault) {
+        *self.fault.lock().unwrap() = f;
     }
 
     fn fingerprint(&self) -> String {
@@ -88,19 +96,20 @@ impl FakeServer {
     }
 }
 
+#[async_trait::async_trait]
 impl PairTransport for FakeServer {
-    fn pair(
+    async fn pair(
         &self,
         endpoint: &PairEndpoint,
         body: &PairRequestBody,
     ) -> Result<PairReply, TransportError> {
-        self.requests.borrow_mut().push(body.clone());
+        self.requests.lock().unwrap().push(body.clone());
         assert_eq!(endpoint.ca_fingerprint, self.fingerprint());
         assert_eq!(
             (endpoint.host.as_str(), endpoint.port),
             ("gantry.test", 8444)
         );
-        match self.fault.get() {
+        match self.fault() {
             Fault::Untrusted => return Err(TransportError::Untrusted),
             Fault::Network => return Err(TransportError::Network),
             Fault::TokenInvalid => return Ok(PairReply::TokenInvalid),
@@ -121,7 +130,7 @@ impl PairTransport for FakeServer {
         );
 
         let mut leaf = self.issue(&tls);
-        if self.fault.get() == Fault::LeafForOtherKey {
+        if self.fault() == Fault::LeafForOtherKey {
             leaf = self.issue(&approval);
         }
         let mut chain = vec![
@@ -130,7 +139,7 @@ impl PairTransport for FakeServer {
             self.ca.root_cert_pem().to_string(),
         ];
         let mut ca_fingerprint = self.fingerprint();
-        match self.fault.get() {
+        match self.fault() {
             Fault::WrongCaFingerprintField => {
                 ca_fingerprint = self.other.root_fingerprint().to_string()
             }
@@ -148,7 +157,7 @@ impl PairTransport for FakeServer {
             approval_pubkey_fpr: Some(approval.fingerprint().to_string()),
             role: "approver".into(),
         };
-        match self.fault.get() {
+        match self.fault() {
             Fault::WrongPubkeyFpr => device.pubkey_fpr = approval.fingerprint().to_string(),
             Fault::WrongApprovalFpr => {
                 device.approval_pubkey_fpr = Some(tls.fingerprint().to_string())
@@ -169,8 +178,8 @@ fn keys() -> TestSoftwareKeyStore {
     TestSoftwareKeyStore::new(PresenceDouble::new())
 }
 
-#[test]
-fn full_flow_produces_identity_after_confirmation() {
+#[tokio::test]
+async fn full_flow_produces_identity_after_confirmation() {
     let server = FakeServer::new();
     let store = keys();
     let pending = pairing::begin(
@@ -180,13 +189,14 @@ fn full_flow_produces_identity_after_confirmation() {
         &server,
         now_s(),
     )
+    .await
     .unwrap();
     assert_eq!(pending.confirmation_code(), "482913");
     assert_eq!(pending.device().role, "approver");
     assert_eq!(store.key_count(), 2);
 
     // 请求体：含 csr 与 approval_pubkey，两把公钥不同；平台由外壳填。
-    let req = server.requests.borrow()[0].clone();
+    let req = server.requests.lock().unwrap()[0].clone();
     assert!(req.csr.starts_with("-----BEGIN CERTIFICATE REQUEST-----"));
     assert_eq!(
         req.approval_pubkey,
@@ -207,20 +217,22 @@ fn full_flow_produces_identity_after_confirmation() {
     assert_eq!(reloaded.tls_public_key().fingerprint(), tls_fpr);
 }
 
-#[test]
-fn confirm_false_or_timeout_deletes_keys() {
+#[tokio::test]
+async fn confirm_false_or_timeout_deletes_keys() {
     let server = FakeServer::new();
     let store = keys();
     let t0 = now_s();
-    let pending = pairing::begin(&server.pairing_string(), "mac", &store, &server, t0).unwrap();
+    let pending = pairing::begin(&server.pairing_string(), "mac", &store, &server, t0)
+        .await
+        .unwrap();
     assert!(!pending.is_expired(t0 + PENDING_TTL_S));
     assert!(pending.is_expired(t0 + PENDING_TTL_S + 1));
     pending.discard(&store).unwrap();
     assert_eq!(store.key_count(), 0);
 }
 
-#[test]
-fn every_rejection_deletes_generated_keys() {
+#[tokio::test]
+async fn every_rejection_deletes_generated_keys() {
     let cases = [
         (Fault::Untrusted, "ca_fingerprint_mismatch"),
         (Fault::Network, "network"),
@@ -233,9 +245,10 @@ fn every_rejection_deletes_generated_keys() {
     ];
     let server = FakeServer::new();
     for (fault, reason) in cases {
-        server.fault.set(fault);
+        server.set_fault(fault);
         let store = keys();
         let err = pairing::begin(&server.pairing_string(), "mac", &store, &server, now_s())
+            .await
             .err()
             .unwrap();
         assert_eq!(err.code, ShellErrorCode::PairingFailed, "{fault:?}");
@@ -244,8 +257,8 @@ fn every_rejection_deletes_generated_keys() {
     }
 }
 
-#[test]
-fn token_invalid_is_one_uniform_error() {
+#[tokio::test]
+async fn token_invalid_is_one_uniform_error() {
     let server = FakeServer::new();
     let mut seen = Vec::new();
     // 服务端统一返回 401 pair_token_invalid；外壳也只给一种错误，不区分无效 / 已用 / 过期。
@@ -253,13 +266,14 @@ fn token_invalid_is_one_uniform_error() {
         server.pairing_string(),
         server.pairing_string().replace(&server.token, "gp1_wrong"),
     ] {
-        server.fault.set(if seen.is_empty() {
+        server.set_fault(if seen.is_empty() {
             Fault::TokenInvalid
         } else {
             Fault::None
         });
         let store = keys();
         let err = pairing::begin(&pairing_string, "mac", &store, &server, now_s())
+            .await
             .err()
             .unwrap();
         assert_eq!(store.key_count(), 0);
@@ -269,23 +283,24 @@ fn token_invalid_is_one_uniform_error() {
     assert!(seen[0].contains("\"pair_token_invalid\""));
 }
 
-#[test]
-fn hardware_unavailable_fails_closed_before_any_request() {
+#[tokio::test]
+async fn hardware_unavailable_fails_closed_before_any_request() {
     let server = FakeServer::new();
     let store = keys();
     store.set_hardware_available(false);
     let err = pairing::begin(&server.pairing_string(), "mac", &store, &server, now_s())
+        .await
         .err()
         .unwrap();
     assert_eq!(err.code, ShellErrorCode::KeyUnavailable);
     assert!(
-        server.requests.borrow().is_empty(),
+        server.requests.lock().unwrap().is_empty(),
         "硬件不可用时不得发出配对请求"
     );
 }
 
-#[test]
-fn bad_inputs_never_generate_keys() {
+#[tokio::test]
+async fn bad_inputs_never_generate_keys() {
     let server = FakeServer::new();
     let store = keys();
     for (s, name, field) in [
@@ -295,16 +310,17 @@ fn bad_inputs_never_generate_keys() {
         (server.pairing_string(), &"x".repeat(65)[..], "device_name"),
     ] {
         let err = pairing::begin(&s, name, &store, &server, now_s())
+            .await
             .err()
             .unwrap();
         assert_eq!(err.field.as_deref(), Some(field));
     }
     assert_eq!(store.key_count(), 0);
-    assert!(server.requests.borrow().is_empty());
+    assert!(server.requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn expired_chain_is_rejected() {
+#[tokio::test]
+async fn expired_chain_is_rejected() {
     let server = FakeServer::new();
     let store = keys();
     // 把"现在"放到证书有效期之后。
@@ -315,6 +331,7 @@ fn expired_chain_is_rejected() {
         &server,
         now_s() + 400 * 86_400,
     )
+    .await
     .err()
     .unwrap();
     assert_eq!(err.reason.as_deref(), Some("chain_expired"));

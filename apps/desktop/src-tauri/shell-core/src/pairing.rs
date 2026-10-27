@@ -211,8 +211,10 @@ pub enum TransportError {
 }
 
 /// 单向 TLS 的配对传输：只信链到 `endpoint.ca_fingerprint` 的服务端证书，不用系统信任库。
-pub trait PairTransport {
-    fn pair(
+/// 实现见 [`crate::http::HttpPairTransport`]。
+#[async_trait::async_trait]
+pub trait PairTransport: Send + Sync {
+    async fn pair(
         &self,
         endpoint: &PairEndpoint,
         body: &PairRequestBody,
@@ -389,7 +391,7 @@ impl PendingIdentity {
 }
 
 /// `pairing_begin` 的第 1–6 步。失败时已生成的密钥一律删除。
-pub fn begin(
+pub async fn begin(
     pairing_string: &str,
     device_name: &str,
     store: &dyn KeyStore,
@@ -403,7 +405,7 @@ pub fn begin(
     }
     // 硬件不可用时 fail-closed（OQ-S2），不会降级为软件密钥。
     let keys: Arc<dyn DeviceKeys> = Arc::from(store.generate().map_err(ShellError::from)?);
-    let result = exchange(&parsed, name, keys.clone(), transport, now_s);
+    let result = exchange(&parsed, name, keys.clone(), transport, now_s).await;
     match result {
         Ok(response) => Ok(PendingIdentity {
             keys,
@@ -418,7 +420,7 @@ pub fn begin(
     }
 }
 
-fn exchange(
+async fn exchange(
     parsed: &PairingString,
     name: &str,
     keys: Arc<dyn DeviceKeys>,
@@ -439,7 +441,7 @@ fn exchange(
         port: parsed.port,
         ca_fingerprint: parsed.ca_fingerprint.clone(),
     };
-    let response = match transport.pair(&endpoint, &body) {
+    let response = match transport.pair(&endpoint, &body).await {
         Ok(PairReply::Created(response)) => *response,
         // 三种原因 UI 看到的错误完全相同（§12 配对第 3 条）。响应丢失时 token 已被消耗，同样提示重新生成。
         Ok(PairReply::TokenInvalid) => return Err(token_invalid()),
