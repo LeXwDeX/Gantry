@@ -1,6 +1,8 @@
 //! 集成测试共用：内存 store 与 `settings.updated` 写入。
 #![allow(dead_code)]
 
+pub mod egress;
+
 use std::sync::Arc;
 
 use gantry_core::entities::{Actor, ActorKind, SettingsResource, SettingsScope};

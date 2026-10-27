@@ -1,9 +1,8 @@
 /**
  * Gantry API 实体类型。
  *
- * 来源：docs/interfaces/api.md、docs/data-model.md、docs/interfaces/config.md。
- * 共享机器可读 schema（schemas/openapi.yaml）尚未交付，因此本文件是**手工转写**，
- * 不是生成代码；schema 到位后应由生成类型取代。
+ * 以 schemas/openapi.yaml 为准**手工转写**。字段集合、可选性与可空性由
+ * tests/unit/openapi-types.test.ts 逐字段比对，漂移会让测试失败（#135）。
  */
 
 export type Level = "None" | "Low" | "Medium" | "High" | "Max" | "Ultimate";
@@ -75,7 +74,7 @@ export type Ref =
 export interface RefOption {
   id: string;
   label: string;
-  primary?: boolean;
+  primary?: boolean | null;
 }
 
 export type Card =
@@ -103,8 +102,8 @@ export interface Project {
   default_branch: string;
   allowed_merge_methods: Array<"merge" | "squash" | "rebase">;
   merge_queue_enabled: boolean;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Delivery {
@@ -121,8 +120,8 @@ export interface Delivery {
   parent_id: string | null;
   depends_on: string[];
   origin: "conversation" | "github_label" | "github_command";
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Worktree {
@@ -133,10 +132,12 @@ export interface Worktree {
   path: string;
   lock: {
     holder: "engine" | "guardian" | "human";
-    delivery_id: string;
+    delivery_id: string | null;
     acquired_at: string;
     lease_until: string;
   } | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type NodeRole =
@@ -177,9 +178,12 @@ export interface WorkflowNode {
   status: NodeStatus;
   verdict: Verdict | null;
   superseded_by: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
-export interface Workflow {
+/** `workflows.list` 的列表项：不带节点。 */
+export interface WorkflowSummary {
   id: string;
   delivery_id: string | null;
   conversation_id: string | null;
@@ -187,7 +191,13 @@ export interface Workflow {
   graph_rev: number;
   status: "running" | "paused" | "succeeded" | "failed" | "cancelled";
   template: string;
-  nodes?: WorkflowNode[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** `workflows.get` 的响应：带完整节点。 */
+export interface Workflow extends WorkflowSummary {
+  nodes: WorkflowNode[];
 }
 
 export interface Attempt {
@@ -196,9 +206,9 @@ export interface Attempt {
   n: number;
   sandbox_id: string | null;
   status: "preparing" | "running" | "succeeded" | "failed" | "cancelled";
-  started_at: string;
+  started_at: string | null;
   ended_at: string | null;
-  result_ref: string;
+  result_ref: string | null;
   failure_class:
     | "timeout"
     | "exec_failed"
@@ -216,13 +226,15 @@ export interface Attempt {
     cache_write_tokens: number;
     requests: number;
   };
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Conversation {
   id: string;
   project_id: string;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Message {
@@ -236,8 +248,8 @@ export interface Message {
   refs: Ref[];
   cards: Card[];
   delivery_id: string | null;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export type InboxKind =
@@ -251,7 +263,7 @@ export type InboxKind =
 export interface InboxOption {
   id: string;
   label: string;
-  primary?: boolean;
+  primary?: boolean | null;
 }
 
 export interface DecisionNeededPayload {
@@ -259,16 +271,18 @@ export interface DecisionNeededPayload {
   reason_code: string;
   options: InboxOption[];
   node_id?: string | null;
-  patch?: { ref: string; paths: string[] };
+  patch?: { ref: string; paths: string[] } | null;
 }
 
 export interface EscalationPayload {
   reason_code: string;
   node_id?: string | null;
   attempt_id?: string | null;
-  target_level?: Level;
-  evidence?: Array<Ref | { kind: "result"; ref: string }>;
-  options?: InboxOption[];
+  target_level?: Level | null;
+  /** `reason_code = outbox_failed:<code>` 时为终态失败的 Outbox 动作（#67）。 */
+  action_id?: string | null;
+  evidence: Array<Ref | { kind: "result"; ref: string }>;
+  options?: InboxOption[] | null;
 }
 
 export interface BudgetExhaustedPayload {
@@ -311,8 +325,8 @@ export interface InboxItem {
   payload: InboxPayload;
   status: "open" | "resolved" | "dismissed";
   dedup_key: string;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface InboxSummaryEntry {
@@ -350,7 +364,7 @@ export type ApprovalTarget =
       kind: "branch";
       repo: string;
       branch: string;
-      expected_remote_oid: string;
+      expected_remote_oid?: string | null;
     }
   | {
       kind: "review_thread";
@@ -368,7 +382,7 @@ export type ApprovalTarget =
   | {
       kind: "settings";
       scope: "global" | "project";
-      project_id?: string;
+      project_id?: string | null;
       resource: string;
       base_rev: number;
     }
@@ -384,9 +398,9 @@ export interface Approval {
   signature: string | null;
   status: ApprovalStatus;
   expires_at: string;
-  consumed_by?: string | null;
-  created_at?: string;
-  updated_at?: string;
+  consumed_by: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Device {
@@ -399,6 +413,8 @@ export interface Device {
   role: "viewer" | "operator" | "approver";
   status: "active" | "revoked";
   last_seen: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Me {
@@ -415,11 +431,17 @@ export interface Me {
 
 export interface BudgetLedger {
   id: string;
-  delivery_id?: string;
   subject: "delivery" | "conversation";
+  delivery_id: string | null;
+  conversation_id: string | null;
+  project_id: string;
+  day: string | null;
   template: string | null;
   limits: Record<string, unknown>;
   used: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  config_rev?: number | null;
 }
 
 export interface ApiList<T> {
@@ -455,19 +477,24 @@ export interface SettingsCatalog {
     capabilities: Record<string, SettingsCatalogModel>;
     adapters: Record<string, { provider_kinds: string[]; supports_fallback: boolean }>;
   };
-  levels?: { graph_templates?: Record<string, string[]> };
-  policies?: {
-    actions?: Record<
+  levels: { graph_templates: Record<string, string[]> };
+  policies: {
+    actions: Record<
       string,
       { default: string; allowed: string[]; dangerous: boolean; reserved: boolean }
     >;
   };
-  guardian?: {
-    triage?: Record<string, { default?: string; allowed: string[]; locked: boolean; value?: string }>;
+  guardian: {
+    triage: Record<string, { default?: string; allowed: string[]; locked: boolean; value?: string }>;
   };
-  roles?: { approver_keys?: string[] };
-  egress?: { suggested_groups?: unknown; forbidden_hosts?: string[] };
-  notify?: { channels?: Record<string, { available: boolean; reason?: string }> };
+  roles: { approver_keys: string[] };
+  egress: { suggested_groups: Record<string, { hosts: string[] }>; forbidden_hosts: string[] };
+  notify: {
+    channels: {
+      desktop: { available: boolean };
+      mobile_push: { available: boolean; reason?: string };
+    };
+  };
 }
 
 export interface SettingsStatus {
@@ -478,7 +505,7 @@ export interface SettingsStatus {
       applied_rev: number;
       health: "ok" | "degraded" | "unhealthy";
       detail?: string;
-      unresolved_secret_refs?: string[];
+      unresolved_secret_refs: string[];
     }
   >;
 }

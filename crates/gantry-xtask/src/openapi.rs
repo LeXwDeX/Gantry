@@ -1533,6 +1533,7 @@ mod tests {
                     node_id: None,
                     attempt_id: None,
                     target_level: None,
+                    action_id: None,
                     evidence: vec![EvidenceRef::Result {
                         kind: EvidenceKind::Result,
                         reference: b::sha(),
@@ -1547,6 +1548,7 @@ mod tests {
                     node_id: Some(b::node().id),
                     attempt_id: Some(b::attempt().id),
                     target_level: Some(Level::High),
+                    action_id: None,
                     evidence: vec![EvidenceRef::Ref(Ref::Pr {
                         repo: b::repo(),
                         number: 7,

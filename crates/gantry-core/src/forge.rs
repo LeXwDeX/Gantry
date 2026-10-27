@@ -17,6 +17,10 @@ use crate::ids::{ActionId, DeliveryId, ProjectId, WorktreeId};
 use crate::text::UntrustedText;
 use crate::time::Timestamp;
 
+mod key;
+
+pub use key::{derive_target_intent, KeyError, TargetIntent};
+
 pub use crate::entities::{
     ForgeActionKind, ForgeEventKind, ForgeOrigin, ReviewState as ReviewSnapshotState,
 };

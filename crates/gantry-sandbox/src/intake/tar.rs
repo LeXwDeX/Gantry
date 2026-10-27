@@ -12,7 +12,7 @@ use super::{pre_check, Collector, IntakePlan, IntakeResult, Reject, MAX_ENTRIES}
 const BLOCK: usize = 512;
 
 /// 归档里的头部与填充开销：每个条目至少一个头块，再加两个结束块。
-fn archive_cap(plan: &IntakePlan) -> u64 {
+pub fn archive_cap(plan: &IntakePlan) -> u64 {
     plan.total_max_bytes
         .saturating_add(((MAX_ENTRIES as u64) + 2) * 2 * BLOCK as u64)
 }

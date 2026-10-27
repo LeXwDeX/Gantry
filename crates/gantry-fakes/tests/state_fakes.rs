@@ -749,6 +749,7 @@ async fn inbox_dedups_only_open_items_and_keeps_push_tokens_private() {
             node_id: None,
             attempt_id: None,
             target_level: None,
+            action_id: None,
             evidence: vec![],
             options: Some(vec![InboxOption::new("accept", "Accept", true)]),
         },
