@@ -420,6 +420,17 @@ impl Executor {
         let now = tx.now();
         let outcome = match disposition {
             Disposition::Done(github_ref) => {
+                // Gantry 创建 / 操作的 PR：之后的事件经此绑定到交付单元（forge.md §7.5 第 5 点）。
+                if let Some(pr) = &github_ref.pr {
+                    tx.module_conn(crate::webhook::MODULE).put(
+                        crate::effects::EFFECT_TABLE,
+                        &crate::effects::pr_key(super::payload_repo(&action.payload), pr.number),
+                        &crate::effects::EffectRow {
+                            action_id: action.id,
+                            delivery_id: action.delivery_id,
+                        },
+                    )?;
+                }
                 tx.outbox().complete(&action.id, github_ref).await?;
                 StepOutcome::Succeeded
             }
@@ -519,8 +530,18 @@ impl Executor {
         action: &OutboxAction,
         effects: Vec<ExpectedEffect>,
     ) -> Result<(), Flow> {
-        // write-ahead：早于变更调用（FA §4.2）。forge_effect_index 需要 store 的模块私有表（#88 S1）。
+        // write-ahead：早于变更调用（FA §4.2）；归因索引与预期效果同事务（forge.md §7.3）。
         let mut tx = self.store.begin_write().await.map_err(Flow::Store)?;
+        crate::effects::put_effects(
+            &mut tx.module_conn(crate::webhook::MODULE),
+            super::payload_repo(&action.payload),
+            &effects,
+            &crate::effects::EffectRow {
+                action_id: action.id,
+                delivery_id: action.delivery_id,
+            },
+        )
+        .map_err(Flow::Store)?;
         tx.outbox()
             .record_effects(&action.id, effects)
             .await

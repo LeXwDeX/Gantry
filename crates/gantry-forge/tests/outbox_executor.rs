@@ -31,9 +31,9 @@ use gantry_fakes::github::{FakeGitHub, ScriptedFailure};
 use gantry_fakes::policy::FakePolicy;
 use gantry_fakes::repo::FakeRepo;
 use gantry_forge::{
-    AuthError, CrashPoint, ExecError, Executor, ExecutorDeps, ExecutorOptions, FaultInjector,
-    Forge, ForgeConfig, Permission, ProjectBinding, StaticTokenProvider, StepOutcome,
-    TokenProvider, TokenPurpose,
+    module_spec, AuthError, CrashPoint, ExecError, Executor, ExecutorDeps, ExecutorOptions,
+    FaultInjector, Forge, ForgeConfig, Permission, ProjectBinding, StaticTokenProvider,
+    StepOutcome, TokenProvider, TokenPurpose,
 };
 use gantry_store::{Store, StoreDeps};
 
@@ -123,10 +123,13 @@ impl Harness {
         let (_, bot_id) = github.bot();
         let clock = Arc::new(FakeClock::new(MS));
         let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(11))));
-        let store = Store::open_in_memory_sync(StoreDeps {
-            clock: clock.clone(),
-            ids: ids.clone(),
-        })
+        let store = Store::open_in_memory_sync_with(
+            StoreDeps {
+                clock: clock.clone(),
+                ids: ids.clone(),
+            },
+            &[module_spec()],
+        )
         .unwrap();
         let mut project = Project {
             id: id::<Prj>(1),

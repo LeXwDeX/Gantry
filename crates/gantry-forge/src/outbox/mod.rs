@@ -50,6 +50,14 @@ impl Forge {
         executor::Executor::new(self.store.clone(), self.config.clone(), deps)
     }
 
+    /// webhook 收件箱的分发器（归一化 + 归因，forge.md §7.5–§7.6）。
+    pub fn dispatcher(
+        &self,
+        deps: crate::normalize::DispatcherDeps,
+    ) -> crate::normalize::Dispatcher {
+        crate::normalize::Dispatcher::new(self.store.clone(), self.config.clone(), deps)
+    }
+
     /// 共享本实例配置的 `ForgeReader`。读取器不持有 store：读 GitHub 不产生事件、不改快照。
     pub fn reader(&self, deps: crate::reader::ReaderDeps) -> crate::reader::Reader {
         crate::reader::Reader::new(self.config.clone(), deps)
@@ -151,7 +159,7 @@ fn invalid(pointer: &str, message: String) -> EnqueueError {
     }
 }
 
-fn payload_repo(payload: &ActionPayload) -> &gantry_core::canon::RepoSlug {
+pub(crate) fn payload_repo(payload: &ActionPayload) -> &gantry_core::canon::RepoSlug {
     use ActionPayload::*;
     match payload {
         PushBranch(p) => &p.repo,
