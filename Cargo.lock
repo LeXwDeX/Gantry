@@ -259,6 +259,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gantry-forge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gantry-core",
+ "gantry-fakes",
+ "gantry-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "gantry-notify"
 version = "0.1.0"
 dependencies = [
@@ -268,6 +282,7 @@ dependencies = [
  "gantry-store",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
 ]
 
@@ -294,6 +309,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "unicode-normalization",
+]
+
+[[package]]
+name = "gantry-sandbox"
+version = "0.1.0"
+dependencies = [
+ "gantry-core",
+ "thiserror",
 ]
 
 [[package]]
