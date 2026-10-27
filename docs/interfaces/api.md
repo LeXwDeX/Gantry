@@ -99,7 +99,7 @@
 - `certificate_chain` 为 `[叶子, 中间 CA, 根]`（P-64）；客户端必须验证根证书的指纹等于配对串里固定的离线根 CA 指纹、链完整，再存入系统钥匙串 / 凭据存储。`ca_fingerprint` 是根 CA 指纹。
 - `confirmation_code`（6 位）与服务端控制台显示的一致，由用户人工核对（architecture §7.1 步骤 5）。核对失败的处置、设备在核对前是否已 `active`：OQ-12。
 - token 无效、已用、过期、被作废**统一**返回 `401 pair_token_invalid`，不区分原因（不给枚举 oracle）。响应丢失后 token 已被消耗，只能重新生成 token 再配对（本端点不支持 `Idempotency-Key`）。
-- 配对成功写 `device.paired` 事件。新设备的 `role`：第一台配对设备为 `approver`（所有者），之后配对的设备默认 `operator`（P-23）；示例是第一台设备。手机档案设备至多 `operator`，即使是第一台（P-76）；第一台是手机时系统暂无 approver，怎样处理待决（decisions Q-10，推荐：安装引导期持续到第一台桌面设备配对，它成为 approver）。
+- 配对成功写 `device.paired` 事件。新设备的 `role`：第一台配对设备为 `approver`（所有者），之后配对的设备默认 `operator`（P-23）；示例是第一台设备。手机档案设备至多 `operator`，即使是第一台（P-76）；第一台是手机时，安装引导期持续到第一台桌面设备配对，由它成为 approver（decisions D-18）。
 
 ### 1.4 版本与兼容
 
@@ -470,7 +470,7 @@
 | --- | --- | --- |
 | `GET /v1/deliveries` | 查询：`project_id`、`stage`（可重复）、`stage_status`、`active=true`（排除 `closed` / `abandoned`，供左侧"进行中"列表）、分页 | 列表 `Delivery` |
 | `GET /v1/deliveries/{delivery_id}` | — | `Delivery` |
-| `PATCH /v1/deliveries/{delivery_id}` | `{ "level_cap": "Max" }`（仅此字段；`stage` 为 `closed` / `abandoned` 时 `409 conflict`，`reason: invalid_state`） | `200 Delivery`；产生 `delivery.level_changed`。调高上限只放宽引擎可加码的范围，`level_effective` 不会因此自动上升；调低到 `level_effective` 以下时 `level_effective` 随之下调，但已触发的闸门不撤销。两种情况都**不改变**创建时按 `level_cap` 固定的预算模板（P-57；预算耗尽后的追加见 decisions Q-11）。桌面端消息带 `level_cap` 且 `@` 已有交付时等同本路由（P-82，§4.5） |
+| `PATCH /v1/deliveries/{delivery_id}` | `{ "level_cap": "Max" }`（仅此字段；`stage` 为 `closed` / `abandoned` 时 `409 conflict`，`reason: invalid_state`） | `200 Delivery`；产生 `delivery.level_changed`。调高上限只放宽引擎可加码的范围，`level_effective` 不会因此自动上升；调低到 `level_effective` 以下时 `level_effective` 随之下调，但已触发的闸门不撤销。两种情况都**不改变**创建时按 `level_cap` 固定的预算模板（P-57；预算耗尽后的追加见 decisions D-19）。桌面端消息带 `level_cap` 且 `@` 已有交付时等同本路由（P-82，§4.5） |
 | `POST /v1/deliveries/{delivery_id}/abandon` | `{ "reason": "不做了" }`（`reason` 可选，≤ 500 字符） | `200 Delivery`（`stage: abandoned`，`stage_status: done`）；产生 `delivery.abandoned` |
 | `POST /v1/deliveries/{delivery_id}/pause` | `{}`；`Idempotency-Key` 必带 | `200 Delivery`（`stage_status: paused`）；产生 `delivery.paused`。引擎不再派发新节点，运行中的尝试跑到安全点；已是 `paused` 原样 `200`；终态 → `409 conflict`（`invalid_state`）（P-56） |
 | `POST /v1/deliveries/{delivery_id}/resume` | `{}`；`Idempotency-Key` 必带 | `200 Delivery`（`stage_status` 回到暂停前的值，期间上报项已处理则为 `running`）；产生 `delivery.resumed`。不是 `paused` → 已在目标状态则原样 `200`，终态 → `409 conflict` |

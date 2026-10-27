@@ -370,7 +370,7 @@ renderUntrusted(t: UntrustedText | string, mode: "plain" | "markdown"): RenderNo
 | `decision_needed` | `payload.options[]`（`{id, label, primary?}`，P-63）、`reason_code` | 每个选项一个按钮 → `inbox.choose { option_id }`（带 `Idempotency-Key`）；`primary` 选项强调色。放弃 / 重新规划（gate `REJECT`，P-55）、GitHub 状态外部改变后的继续 / 放弃、workflow 补丁的手动应用（`payload.kind = manual_action`，附补丁，P-48）都是这一类（engine.md §7.11） |
 | `escalation` | `reason_code`、证据 `Ref` 链接、`payload.options[]`（P-63） | 升档一律是 `escalation`（`level_cap_exceeded`）；守护的 `escalation` 没有选项（评审争议改为 `decision_needed`（`review_dispute`），选项 `fix` / `keep`，P-79）；按 `options[]` 渲染按钮（同上）；没有 `options[]` 时只给"忽略"（`inbox.dismiss`，对阻塞项不解除暂停，界面文案写明"忽略不会继续任务"） |
 | `spec_needed` | `missing[] { aspect, question }` 逐条列出；没有选项（P-79） | "回复补充…" → 切到该项目对话，`ctx = {kind: delivery, id: delivery_id}`，聚焦输入框（自由文本答复走发消息，api.md §4.8） |
-| `budget_exhausted` | `dimension` / `limit` / `used` | 按 `payload.options[]` 渲染 `raise_cap`（仅桌面；追加量待决 Q-11，按钮文案取服务端 `label`）/ `abandon`；另有"忽略" |
+| `budget_exhausted` | `dimension` / `limit` / `used` | 按 `payload.options[]` 渲染 `raise_cap`（仅桌面；追加量见 decisions D-19，按钮文案取服务端 `label`）/ `abandon`；另有"忽略" |
 | `security_finding` | `finding.severity` / `category` / `title`（`UntrustedText`）、来源 `Ref` | "查看"（选中来源）；"忽略…"需二次确认 |
 
 浮层中点击条目标题行：切换到该项目、`sel` 设为该交付的主项（有 PR 取 PR，否则 Issue）、关闭浮层。
