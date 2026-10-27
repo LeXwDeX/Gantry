@@ -3,16 +3,17 @@
 //! 本切片（#69）只落类型与确定性 ID，不写 `decide` 的逻辑。字段以规格为准；
 //! 规格引用了但 core 尚未定义的类型，在这里按下列方式处理，待对应模块落地后替换：
 //! - `MessageRef`（M2 `SupplySpec`）：暂用 `MessageId`；
-//! - `ResolvedModel`（models.md §6）：只取 `attempt.started` 记录的三项；
+//! - `ResolvedModel`（models.md §6）：只取 `attempt.started` 记录的三项与 `attempt_wall_s`；
 //! - `LevelPolicy` 依赖 `RiskSignals`（§7.10，M2），`DecideEnv` 暂不带它；
-//! - `EngineSettings` 只带 `config_rev`，§10 的其余键随 `decide` 切片补齐。
+//! - `EngineSettings` 只带 `config_rev` 与 `project`，§10 的其余键随所需切片补齐。
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use gantry_core::canon::{sha256, GitOid, Sha256Digest, SubjectDigest};
+use gantry_core::canon::{sha256, GitOid, RepoSlug, Sha256Digest, SubjectDigest};
 use gantry_core::entities::{
     Actor, ApprovalAction, ApprovalStatus, AttemptStatus, BudgetLedger, Exec, FailureClass,
-    FailureDetail, GithubRef, LockHolder, PatchRef, Ref, Role, Seq, Tier, TokenUsage, Verdict,
+    FailureDetail, GithubRef, LockHolder, MergeMethod, PatchRef, Ref, Role, Seq, Tier, TokenUsage,
+    Verdict,
 };
 use gantry_core::events::{
     InboxResolution, NewEvent, OutboxCancelReason, OutboxFailureCode, PatchRejectedData,
@@ -389,6 +390,8 @@ pub struct ResolvedModel {
     pub provider_id: String,
     pub model: String,
     pub reasoning_effort: Effort,
+    /// `SandboxExec.attempt_wall_s`：有效 `wall_time_s` 的一项（§7.8，#70 C）。
+    pub attempt_wall_s: u64,
 }
 
 /// `models.resolve` 结果表的键：（用途, 档位, tier, critical）。
@@ -402,10 +405,33 @@ pub struct ModelKey {
 
 pub type ModelTable = BTreeMap<ModelKey, ResolvedModel>;
 
-/// `EffectiveSettings` 中引擎读取的子集（§10）。
+/// `EffectiveSettings` 中引擎读取的子集（§10）。两次决策之间整体切换（§7.13）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineSettings {
     pub config_rev: Seq,
+    /// 本交付单元所属项目的事实（§7.14.3，#70）。
+    pub project: ProjectFacts,
+    /// `sandbox.limits.wall_time_s` 与 `sandbox.kill_grace_s`（§10，#70 C）。
+    pub sandbox: SandboxLimits,
+}
+
+/// 有效 `wall_time_s` 与锁租约所需的沙盒设置（§7.7、§7.8）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SandboxLimits {
+    pub wall_time_s: u64,
+    pub kill_grace_s: u64,
+}
+
+/// 构造 `push_branch` / `create_pr` / `merge_pr` 的 payload 与 `ActionFacts` 所需的项目事实。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectFacts {
+    pub repo: RepoSlug,
+    /// `base_ref` 与 `create_pr.base`。
+    pub default_branch: String,
+    /// forge 的 `push.branch_prefix`（§10 默认 `gantry/`）。
+    pub branch_prefix: String,
+    /// 至少一项（core 校验）；M1 的 `merge_method` 取第一项。
+    pub allowed_merge_methods: Vec<MergeMethod>,
 }
 
 /// 引擎内部常量（§10，编译期默认值，不是设置）。
@@ -539,6 +565,7 @@ pub enum CommandRejection {
     NotSupportedYet(&'static str),
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Decision {
     Append(NewEvent),
     Raise(RaiseRequest),
@@ -551,11 +578,12 @@ pub enum Decision {
     Effect(Effect),
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Effect {
+    /// 执行器先 `resolve(base_ref)` 得到 base_sha 再 `create_worktree`（§7.14.5，#70 A）。
     EnsureWorktree {
         branch: BranchName,
         base_ref: String,
-        base_sha: GitOid,
     },
     RemoveWorktree {
         worktree_id: WorktreeId,
@@ -622,6 +650,7 @@ impl TrustedInstructions {
 }
 
 /// `RunAttempt` 的全部输入；AttemptRunner 不再回读状态。
+#[derive(Debug, PartialEq)]
 pub struct AttemptPlan {
     pub attempt_id: AttemptId,
     pub node_id: NodeId,

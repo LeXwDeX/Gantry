@@ -5,7 +5,8 @@
 //! [`driver::SandboxDriver`] 只在本模块内部使用，实现有 [`podman_driver::PodmanDriver`]
 //! 与测试用的 `fake::FakeDriver`（`testing` feature）。本 crate 目前交付容器面的请求类型
 //! [`spec::ContainerSpec`]、参数闸 [`invariants::validate_invariants`]、Podman
-//! 参数渲染 [`podman::render_create_args`]，staging 与材料打包 [`stage`]、进度采集 [`progress`]，以及先停后取的产物提取规则 [`intake`]。
+//! 参数渲染 [`podman::render_create_args`]，staging 与材料打包 [`stage`]、进度采集 [`progress`]、先停后取的产物提取规则 [`intake`]，
+//! 以及引擎面服务 [`service::SandboxManager`]（生命周期、计时器、取消、Egress 协作、崩溃恢复与孤儿巡检）。
 
 pub mod driver;
 #[cfg(any(test, feature = "testing"))]

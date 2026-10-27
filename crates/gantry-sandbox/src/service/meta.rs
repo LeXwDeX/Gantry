@@ -1,13 +1,21 @@
 //! `meta.json`：每次相位迁移先原子写盘再执行动作（sandbox.md §7.1、§7.13）。
 //!
-//! 只记相位、容器 ID、deadline、终止原因与「令牌是否已签发」；不存令牌本身。
+//! 记相位、容器 ID、deadline、终止原因、「令牌是否已签发」，以及崩溃恢复要用的
+//! 运行参数（[`Resume`]）、退出事实与各相位时刻；不存令牌本身，也不存 `SandboxSpec`。
 
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use gantry_core::ids::{AttemptId, SandboxId};
+use gantry_core::canon::Sha256Digest;
+use gantry_core::ids::{AttemptId, ProjectId, SandboxId};
+use gantry_core::ports::sandbox::Timings;
+use gantry_core::settings::resource::SandboxIo;
+use gantry_core::time::Timestamp;
 use serde::{Deserialize, Serialize};
+
+use crate::driver::ExitFacts;
+use crate::intake::IntakePlan;
 
 /// 内部状态机（§7.1）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +64,81 @@ pub struct Meta {
     pub token_issued: bool,
     #[serde(default)]
     pub cancel_requested: bool,
+    /// 恢复监督与 collect 所需参数（受理后、排队前写入）。
+    #[serde(default)]
+    pub resume: Option<Resume>,
+    /// `Stopped` 时记录：容器删除后恢复仍能给出终止事实。
+    #[serde(default)]
+    pub exit: Option<ExitFacts>,
+    #[serde(default)]
+    pub lost: bool,
+    #[serde(default)]
+    pub timings: TimingsRecord,
+    /// `Collected` 时记录的日志尾部 CAS 引用：容器删除后恢复，尾部仍与原结果相同。
+    #[serde(default)]
+    pub tails: Option<TailsRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CasRef {
+    pub sha256: Sha256Digest,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailsRecord {
+    pub stdout: CasRef,
+    pub stderr: CasRef,
+}
+
+/// 崩溃恢复要用、但 `UnfinishedAttempt` 不带的运行参数。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resume {
+    pub project_id: ProjectId,
+    pub io: SandboxIo,
+    pub intake: IntakePlan,
+    pub wall_time_s: u64,
+    pub idle_timeout_s: u64,
+    pub kill_grace_s: u64,
+}
+
+/// [`Timings`] 的落盘形状。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimingsRecord {
+    #[serde(default)]
+    pub created: Option<Timestamp>,
+    #[serde(default)]
+    pub staged: Option<Timestamp>,
+    #[serde(default)]
+    pub started: Option<Timestamp>,
+    #[serde(default)]
+    pub stopped: Option<Timestamp>,
+    #[serde(default)]
+    pub collected: Option<Timestamp>,
+}
+
+impl From<Timings> for TimingsRecord {
+    fn from(t: Timings) -> Self {
+        Self {
+            created: t.created,
+            staged: t.staged,
+            started: t.started,
+            stopped: t.stopped,
+            collected: t.collected,
+        }
+    }
+}
+
+impl From<TimingsRecord> for Timings {
+    fn from(t: TimingsRecord) -> Self {
+        Self {
+            created: t.created,
+            staged: t.staged,
+            started: t.started,
+            stopped: t.stopped,
+            collected: t.collected,
+        }
+    }
 }
 
 impl Meta {
@@ -69,7 +152,27 @@ impl Meta {
             terminal_reason: None,
             token_issued: false,
             cancel_requested: false,
+            resume: None,
+            exit: None,
+            lost: false,
+            timings: TimingsRecord::default(),
+            tails: None,
         }
+    }
+
+    /// 相位已过 `Starting`（`start` 确定成功过）。`Starting` 本身不算：deadline 在
+    /// `start` 之前就落盘，那一刻容器可能还没启动。
+    pub fn past_start(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Running
+                | Phase::Stopping
+                | Phase::Stopped
+                | Phase::Collecting
+                | Phase::Collected
+                | Phase::Destroying
+                | Phase::Destroyed
+        )
     }
 
     /// 写入原因；已有原因时不覆盖（先写入者胜），返回最终生效的原因。
