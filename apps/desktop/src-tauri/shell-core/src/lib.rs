@@ -5,6 +5,7 @@
 
 pub mod approval;
 pub mod events;
+pub mod guarded;
 pub mod http;
 pub mod ipc;
 pub mod keys;
