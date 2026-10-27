@@ -6,7 +6,9 @@
 //! - [`bootstrap`]：安装时一次性产出根 / 中间 / 服务端材料（§6.6）；
 //! - [`keys`]：P-256 公钥、指纹与 [`CertSerial`]；
 //! - [`csr`]：不可信 CSR 与 `approval_pubkey` 的校验（§7.4.3、§7.4.4）；
-//! - [`text`]：设备名校验与终端输出净化（§8 终端注入）。
+//! - [`text`]：设备名校验与终端输出净化（§8 终端注入）；
+//! - [`journal`]：吊销日志 `revocations.journal` 的追加、复制与重放筛选（§7.6，P-67、P-80）；
+//! - [`verifier`]：mTLS 握手校验器（§7.3）。
 //!
 //! 设备注册表、配对、握手校验、吊销等依赖 `store` 的部分在后续切片中加入。
 
@@ -14,9 +16,11 @@ pub mod bootstrap;
 pub mod ca;
 pub mod config;
 pub mod csr;
+pub mod journal;
 pub mod keys;
 mod rng;
 pub mod text;
+pub mod verifier;
 
 pub use ca::{Authority, IssuedCert};
 pub use config::CertPolicy;

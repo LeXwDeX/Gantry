@@ -1024,6 +1024,8 @@ pub struct ProjectEventData {
     pub installation_id: i64,
     pub bot_user_id: i64,
     pub default_branch: String,
+    /// 至少一项：引擎 M1 取第一项作为 `merge_pr.merge_method`（engine.md §7.14.3 `ProjectFacts`，#70）。
+    #[schemars(length(min = 1))]
     pub allowed_merge_methods: Vec<crate::entities::MergeMethod>,
     pub merge_queue_enabled: bool,
     pub created_at: Timestamp,
@@ -1032,6 +1034,16 @@ pub struct ProjectEventData {
 
 impl EventData for ProjectEventData {
     const TYPES: &'static [EventType] = &[EventType::ProjectAdded, EventType::ProjectUpdated];
+
+    fn validate(&self) -> Result<(), SchemaError> {
+        if self.allowed_merge_methods.is_empty() {
+            return Err(SchemaError::shape(
+                "/allowed_merge_methods",
+                "allowed_merge_methods must not be empty",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// `conversation.created`：data-model §3 的 `Conversation`。

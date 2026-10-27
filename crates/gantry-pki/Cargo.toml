@@ -19,9 +19,15 @@ zeroize = "1"
 rand_core = "0.6"
 pem = "3"
 base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki = { version = "0.103", package = "rustls-webpki", default-features = false, features = ["ring", "std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-fakes = { path = "../gantry-fakes" }
+rand_core = { version = "0.6", features = ["getrandom"] }

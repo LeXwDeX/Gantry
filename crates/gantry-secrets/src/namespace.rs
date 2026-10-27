@@ -122,6 +122,9 @@ impl Namespace {
     }
 
     fn check_size(&self, value: &SecretValue) -> Result<(), SecretsError> {
+        if value.expose().is_empty() {
+            return Err(SecretsError::EmptyValue);
+        }
         if value.expose().len() > self.root.max_value {
             return Err(SecretsError::TooLarge {
                 limit: self.root.max_value,

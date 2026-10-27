@@ -151,7 +151,7 @@ impl Authority {
 
     /// 由本 CA（根）签发在线中间 CA：`CA:TRUE, pathlen:0`，`keyCertSign | cRLSign`，
     /// `CN = "Gantry Intermediate CA <seq>"`。返回中间 CA 和它的 PKCS#8 私钥 PEM（交给 `secrets`）。
-    pub(crate) fn issue_intermediate(
+    pub fn issue_intermediate(
         &self,
         seq: u32,
         now: Timestamp,
