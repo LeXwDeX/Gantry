@@ -617,9 +617,11 @@ name = "gantry-policy"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "gantry-core",
  "gantry-fakes",
  "gantry-store",
+ "p256",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
