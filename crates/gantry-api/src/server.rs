@@ -26,7 +26,7 @@ use http::{HeaderMap, Method, Response, StatusCode, Uri};
 use serde_json::Value;
 use tokio::sync::watch;
 
-use crate::auth::{self, AuthContext, DeviceLookup, PeerCert};
+use crate::auth::{self, AuthContext, PeerCert};
 use crate::consts::{IDEMPOTENCY_KEY_MAX, IDEMPOTENCY_KEY_MIN};
 use crate::handlers;
 use crate::idempotency::{self, Begin, IdempotencyStore, StoredResponse};
@@ -35,6 +35,9 @@ use crate::query::{self, Query};
 use crate::rate::{RateLimiter, RateState};
 use crate::registry::{self, IdemPolicy, Milestone, RateClass, Registry, RouteMatch, RouteSpec};
 use crate::sse::{EventStream, StreamRegistry};
+use gantry_pki::admin::DeviceAdmin;
+use gantry_pki::directory::DeviceDirectory;
+use gantry_pki::CertSerial;
 
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 pub const X_LOG_EPOCH: HeaderName = HeaderName::from_static("x-log-epoch");
@@ -74,7 +77,10 @@ pub struct Services {
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<IdGen>,
     pub store: Store,
-    pub devices: Arc<dyn DeviceLookup>,
+    /// `pki` 的设备目录（鉴权热路径、`GET /v1/devices`、心跳内吊销检查）。
+    pub devices: Arc<dyn DeviceDirectory>,
+    /// `pki` 的设备管理（改名、改角色、吊销、续期）。
+    pub admin: Arc<dyn DeviceAdmin>,
     /// 交付单元控制 #8 #43–#45（P-56）。
     pub engine: Arc<dyn DeliveryControl>,
     /// 发消息 #12。
@@ -320,7 +326,13 @@ impl ApiCore {
                 None,
             );
         };
-        let device = match self.svc.devices.by_cert_serial(&peer.serial).await {
+        // 序列号格式不合法的证书不可能由本 CA 签发：视同不在册。
+        let serial = peer.serial.parse::<CertSerial>().ok();
+        let lookup = match &serial {
+            Some(serial) => self.svc.devices.by_cert_serial(serial).await,
+            None => Ok(None),
+        };
+        let device = match lookup {
             Ok(device) => device,
             Err(_) => {
                 return early(
@@ -339,10 +351,7 @@ impl ApiCore {
                 None,
             );
         };
-        self.svc
-            .devices
-            .touch_last_seen(&device.id, self.svc.clock.now())
-            .await;
+        self.svc.devices.touch_last_seen(&device.id).await;
         let subject = device.id.to_string();
         let read_state = || Some(self.limiter.peek(&subject, RateClass::Read));
 

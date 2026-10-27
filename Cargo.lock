@@ -782,14 +782,20 @@ dependencies = [
  "bytes",
  "gantry-core",
  "gantry-fakes",
+ "gantry-pki",
  "gantry-store",
  "http",
  "jsonschema",
+ "p256",
+ "pem",
+ "rand_core",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
  "tokio",
+ "x509-parser",
 ]
 
 [[package]]

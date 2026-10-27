@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::auth::profile_str;
 use crate::consts::{API_VERSION, RENEW_AFTER_DEN, RENEW_AFTER_NUM};
 use crate::control;
+use crate::devices;
 use crate::problem::Problem;
 use crate::reads;
 use crate::server::{ApiCore, HandlerRequest, Reply, RouteHandler};
@@ -31,6 +32,9 @@ impl RouteHandler for Builtin {
             "getInboxItem" => reads::get_inbox(core, &req).await,
             "getInboxSummary" => reads::inbox_summary(core, &req).await,
             "streamEvents" => sse::stream_events(core, &req).await,
+            "listDevices" => devices::list(core, &req).await,
+            "renameDevice" => devices::rename(core, &req).await,
+            "renewDeviceCertificate" => devices::renew(core, &req).await,
             _ => Err(Problem::not_found()),
         }
     }

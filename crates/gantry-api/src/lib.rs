@@ -19,6 +19,7 @@
 pub mod auth;
 pub mod consts;
 pub mod control;
+pub mod devices;
 pub mod handlers;
 pub mod idempotency;
 pub mod problem;
@@ -30,7 +31,7 @@ pub mod server;
 pub mod sse;
 pub mod validate;
 
-pub use auth::{AuthContext, DeviceLookup, LookupError, PeerCert};
+pub use auth::{AuthContext, PeerCert};
 pub use problem::{FieldError, Problem, ProblemCode};
 pub use registry::{Milestone, RouteSpec, ROUTES};
 pub use server::{
