@@ -423,7 +423,7 @@ CREATE TABLE settings_docs (                                -- 投影：settings
 | `conversations` | Conversation | `conversation.created` | `UNIQUE(project_id)` |
 | `messages` | Message | `message.posted` | `(conversation_id, id)` |
 | `deliveries` | Delivery | `delivery.created` / `stage_changed` / `level_changed` / `paused` / `resumed` / `abandoned`；`worktree.created`（挂 `worktree_id`） | `(project_id, stage, id)`；`(parent_id)` |
-| `issue_snapshots`、`pr_snapshots`、`delivery_issues` | IssueRef / PullRequestRef 与绑定 | `delivery.created`（绑定）、`forge.synced`、`forge.<kind>`；只有 `actor.kind = forge` 的事件可更新快照列 [提议] | `PK(repo, number)`；`(delivery_id)` |
+| `issue_snapshots`、`pr_snapshots`、`delivery_issues` | IssueRef / PullRequestRef 与绑定 | `delivery.created`（绑定）；快照列只由 `forge.synced` 折叠（见下方「GitHub 快照投影」） | `PK(project_id, number)`；`(delivery_id)` |
 | `workflows`、`nodes` | Workflow、Node | `workflow.created` / `revised` / `finished`、`node.*`（含 `node.retry_requested`） | `(delivery_id, stage)`；`(conversation_id)`（`delivery_id` 可空时必有 `conversation_id`，P-58）；`(workflow_id)` |
 | `attempts` | Attempt | `attempt.started` / `finished` | `UNIQUE(node_id, n)`；终态后拒绝任何修改 |
 | `worktrees` | Worktree + 锁 | `worktree.*` | `UNIQUE(project_id, branch)` |
@@ -433,6 +433,14 @@ CREATE TABLE settings_docs (                                -- 投影：settings
 | `budget_ledgers` | BudgetLedger | `delivery.created`（建账）、`budget.charged` / `exhausted` | 交付台账 `UNIQUE(delivery_id)`；会话台账（`subject = conversation`，P-58）按 `(conversation_id, UTC 日)` 唯一，`budget.charged` 无 `delivery_id` 而带 `conversation_id` 时首笔即建账 |
 | `devices` | Device（事件可得的列） | `device.paired` / `updated` / `revoked` | `UNIQUE(cert_serial)`；`last_seen` 等非事件列归 `pki` 的表（OQ-4） |
 | `settings_secret_changes` | `(ref, version) → seq` 反查 | `settings.updated` 的 `secret_changes[]` | `PK(ref, version)`；只存名字与版本，无值无哈希 |
+
+**GitHub 快照投影（#150，M1 已落地于内存实现）**：
+
+- 快照列**只由 `forge.synced` 折叠**，`forge.<kind>` 不写快照列（forge 的约定见 #150 评论），避免两条派生路径不一致。信封必须是 `actor.kind = forge`、`subject = project_id`，否则整条事件拒绝（core 只校验 `data`）。
+- 折叠只取 `changes[].to`。本地该列已有值时要求 `from` 等于它，否则 `PreconditionFailed`，整条事件不生效：forge 按"回读值 − 当前快照"做差，`from` 不符说明两边已漂移。本地还没有值时不比较 `from`，所以首次快照的 `from` 取什么（#150 的方案 A：`from = null`）由契约决定，投影规则不变。
+- 同一 `(project_id, number)` 的 `target.node_id` 必须不变；PR 与 Issue 分开存放。Issue 不接受 `merged`。`state_reason` 的 `null` 是真实值（未同步与"无关闭原因"区分开）。
+- `pr_snapshot(repo, number)` / `issue_snapshot(repo, number)` 经 `project.added` / `project.updated` 维护的 `project → repo` 索引解析项目；仓库同时绑定多个项目时有歧义，返回 `None`。PR 的全部列都同步过才返回 `Some`（Issue 要求 `title` 与 `state`），不编造默认值。
+- 折叠规则是纯函数 `gantry_store::GithubSnapshots::apply`，从日志全量重放与增量折叠结果一致（测试 `rebuild_from_log_matches_incremental_fold`）；SQLite 版复用同一函数与同一组测试。
 
 ### 7.3 写路径
 

@@ -12,8 +12,8 @@ use gantry_core::entities::{
     PolicyActionId, ReasonCode, Severity,
 };
 use gantry_core::events::{
-    ApprovalInvalidatedData, ApprovalRequestedData, EventType, NewEvent, PatchValidatedData,
-    PolicySubject, PolicyTarget, Subject,
+    ApprovalRequestedData, EventType, NewEvent, PatchValidatedData, PolicySubject, PolicyTarget,
+    Subject,
 };
 use gantry_core::ids::{ActionId, ApprovalId, Apr, Clock, IdGen, ProjectId};
 use gantry_core::ports::{
@@ -568,18 +568,6 @@ fn check_execution(approval: &Approval, check: &ExecutionCheck) -> Result<(), Ga
     Ok(())
 }
 
-fn invalidated_data(reason: &InvalidateReason) -> ApprovalInvalidatedData {
-    match reason {
-        InvalidateReason::DeliveryAbandoned => ApprovalInvalidatedData::DeliveryAbandoned,
-        // 端口的原因不带事件契约要求的前后 head / attempt；按发起方主动作废记账。
-        InvalidateReason::SubjectReplaced
-        | InvalidateReason::AttemptSuperseded
-        | InvalidateReason::HeadMoved
-        | InvalidateReason::OwnerCancelled
-        | InvalidateReason::Other(_) => ApprovalInvalidatedData::OwnerCancelled,
-    }
-}
-
 #[async_trait]
 impl PolicyPort for PolicyEngine {
     async fn decide_action(
@@ -744,7 +732,7 @@ impl PolicyPort for PolicyEngine {
             &mut tx,
             &record,
             ApprovalStatus::Invalidated,
-            approvals::invalidated_data(invalidated_data(&reason)),
+            approvals::invalidated_data((&reason).into()),
             ctx.actor.clone(),
             ctx.causation_id,
         )

@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::canon::{RepoSlug, Sha256Digest, SubjectDigest};
+use crate::canon::{GitOid, RepoSlug, Sha256Digest, SubjectDigest};
 use crate::entities::{
     Actor, Approval, ApprovalAction, ApprovalTarget, InboxKind, PolicyActionId, Seq, Severity,
 };
+use crate::events::ApprovalInvalidatedData;
 use crate::forge::ForgeActionKind;
 use crate::ids::{ActionId, ApprovalId, AttemptId, DeliveryId, ProjectId};
 use crate::worker::{PatchReason, PatchVerdict, Proposal, RepoPath};
@@ -149,15 +150,35 @@ pub enum DenyReason {
     ApprovalChainUnavailable,
 }
 
-/// 审批发起方主动作废的语义。规格书只给类型名；这里覆盖现有调用点。
+/// 审批作废的原因，与 `approval.invalidated` 的 `reason` 一一对应
+/// （event-data §2.2.3，#89 Q2）：变体带上事件要求的前后值，policy 不再猜。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvalidateReason {
-    SubjectReplaced,
-    AttemptSuperseded,
+    HeadMoved { from: GitOid, to: GitOid },
+    PrClosed,
+    PrMerged,
     DeliveryAbandoned,
-    HeadMoved,
+    AttemptSuperseded { from: AttemptId, to: AttemptId },
     OwnerCancelled,
-    Other(String),
+}
+
+impl From<&InvalidateReason> for ApprovalInvalidatedData {
+    fn from(reason: &InvalidateReason) -> Self {
+        match reason {
+            InvalidateReason::HeadMoved { from, to } => Self::HeadChanged {
+                previous_head_sha: *from,
+                current_head_sha: *to,
+            },
+            InvalidateReason::PrClosed => Self::PrClosed,
+            InvalidateReason::PrMerged => Self::PrMerged,
+            InvalidateReason::DeliveryAbandoned => Self::DeliveryAbandoned,
+            InvalidateReason::AttemptSuperseded { from, to } => Self::AttemptSuperseded {
+                previous_attempt_id: *from,
+                current_attempt_id: *to,
+            },
+            InvalidateReason::OwnerCancelled => Self::OwnerCancelled,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
