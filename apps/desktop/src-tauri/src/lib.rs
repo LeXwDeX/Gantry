@@ -8,13 +8,16 @@
 
 use std::collections::BTreeMap;
 
-use gantry_desktop_shell::ipc::ShellError;
+use gantry_desktop_shell::ipc::{ShellError, ShellErrorCode};
+use gantry_desktop_shell::links;
 use gantry_desktop_shell::storage::{AppStore, Prefs};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::ipc::Channel;
 use tauri::webview::NewWindowResponse;
-use tauri::{Manager, State, Url, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State, Url, WebviewWindowBuilder};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_opener::OpenerExt;
 
 type CmdResult<T> = Result<T, ShellError>;
 
@@ -198,21 +201,54 @@ fn ui_state_list(store: State<'_, AppStore>) -> CmdResult<BTreeMap<String, Value
 
 // ---- 外链与诊断 ----
 
+/// 只放行 `https`、无用户信息；非 `github.com` 主机先弹原生确认框（§6.1）。
+/// 确认框会阻塞，所以是异步命令，在阻塞线程里等待用户。
 #[tauri::command(rename_all = "snake_case")]
-fn open_external(url: String) -> CmdResult<()> {
-    let _ = url;
-    Err(ShellError::unavailable("open_external"))
+async fn open_external(app: AppHandle, url: String) -> CmdResult<()> {
+    let link = links::check_external(&url)?;
+    if link.needs_confirm {
+        let dialog = app.clone();
+        let host = link.host_display.clone();
+        let confirmed = tauri::async_runtime::spawn_blocking(move || {
+            dialog
+                .dialog()
+                .message(format!(
+                    "即将在系统浏览器中打开外部网站。\n\n主机：{host}\n\n请确认这是你要访问的网站。"
+                ))
+                .title("打开外部链接")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "打开".into(),
+                    "取消".into(),
+                ))
+                .blocking_show()
+        })
+        .await
+        .map_err(|_| ShellError::unavailable("确认框"))?;
+        if !confirmed {
+            return Err(ShellError::new(ShellErrorCode::UserCancelled, "用户取消"));
+        }
+    }
+    open_in_browser(&app, &link.url)
 }
 
+/// URL 由外壳拼出，永远指向 `github.com`，不需要确认框。
 #[tauri::command(rename_all = "snake_case")]
 fn open_github(
+    app: AppHandle,
     kind: String,
     repo: String,
     number: Option<u64>,
     sha: Option<String>,
 ) -> CmdResult<()> {
-    let _ = (kind, repo, number, sha);
-    Err(ShellError::unavailable("open_github"))
+    let url = links::GithubTarget::from_args(&kind, &repo, number, sha.as_deref())?.url()?;
+    open_in_browser(&app, &url)
+}
+
+fn open_in_browser(app: &AppHandle, url: &str) -> CmdResult<()> {
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| ShellError::unavailable("系统浏览器"))
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -237,6 +273,9 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        // 两个插件只给外壳的 Rust 代码用；能力文件不授予它们的任何 JS 侧权限（S-5）。
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             identity_status,
             pairing_begin,
