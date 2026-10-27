@@ -208,6 +208,22 @@ impl CommandSet for FakeCommands {
             },
             "fake.drive" => self.drive(args).await,
             "fake.real_grant" => self.real_grant(args).await,
+            "fake.real_execute" => self.real_execute(args).await,
+            "fake.enqueue_merge_probe" => self.enqueue_merge_probe(args).await,
+            "fake.real_approval" => {
+                match (
+                    self.fakes.approvals.as_ref(),
+                    args.get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| id.parse::<ApprovalId>().ok()),
+                ) {
+                    (Some(approvals), Some(id)) => match approvals.get(&id).await {
+                        Ok(approval) => Response::ok(json!(approval)),
+                        Err(error) => Response::err("policy", error.to_string()),
+                    },
+                    _ => Response::err("bad_request", "expected real policy and approval id"),
+                }
+            }
             "fake.end_bootstrap" => {
                 self.setup().bootstrap_over = true;
                 Response::ok(json!({}))
@@ -344,7 +360,7 @@ impl FakeCommands {
                 return Response::err("store", error.to_string());
             }
         }
-        let done = match execute_outbox(store, head).await {
+        let done = match execute_outbox(store, head, self.fakes.real_executor.is_some()).await {
             Ok(done) => done,
             Err(error) => return Response::err("store", error),
         };
@@ -380,6 +396,27 @@ impl FakeCommands {
                     return Response::err("store", error.to_string());
                 }
             }
+            if let Some((_, github)) = &self.fakes.real_executor {
+                // FakeForge 和 HTTP FakeGitHub 是独立事实源；create_pr 仍由替身完成，
+                // 显式同步同一个 PR 号和 head，真实执行器只处理 merge_pr。
+                if github.pull("acme/web", engine_cfg::PR_NUMBER).is_none() {
+                    for _ in 1..engine_cfg::PR_NUMBER {
+                        github.insert_issue("acme/web", "number placeholder");
+                    }
+                    github.set_branch("acme/web", "gantry/test", &head.to_string());
+                    let (login, id) = github.bot();
+                    assert_eq!(
+                        github.insert_pull(
+                            "acme/web",
+                            "gantry/test",
+                            "main",
+                            (&login, id),
+                            "fixture"
+                        ),
+                        engine_cfg::PR_NUMBER
+                    );
+                }
+            }
             *self
                 .fakes
                 .snapshots
@@ -400,6 +437,90 @@ impl FakeCommands {
         self.drive
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    async fn real_execute(&self, args: Value) -> Response {
+        let Some((executor, github)) = &self.fakes.real_executor else {
+            return Response::err("forge", "real executor is not enabled");
+        };
+        if args.get("move_head").and_then(Value::as_bool) == Some(true) {
+            github.set_pull_head("acme/web", engine_cfg::PR_NUMBER, engine_cfg::BASE);
+        }
+        let result = executor.run_once().await;
+        let calls = github
+            .recorded_calls()
+            .iter()
+            .filter(|call| call.method == "PUT" && call.path.ends_with("/merge"))
+            .count();
+        Response::ok(
+            json!({"result": format!("{result:?}"), "merge_calls": calls, "pull": github.pull("acme/web", engine_cfg::PR_NUMBER)}),
+        )
+    }
+
+    async fn enqueue_merge_probe(&self, args: Value) -> Response {
+        use gantry_core::entities::{MergeMethod, Priority};
+        use gantry_core::forge::{ActionPayload, MergeMode, MergePrPayload};
+        use gantry_core::ports::{EnqueueRequest, EnqueuedBy, EnqueuedByModule, OutboxPort};
+        if self.fakes.real_executor.is_none() {
+            return Response::err("forge", "real executor is not enabled");
+        }
+        let Some(id) = args
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse::<ApprovalId>().ok())
+        else {
+            return Response::err("bad_request", "expected approval id");
+        };
+        let Some(head) = self
+            .fakes
+            .sandbox
+            .jobs()
+            .iter()
+            .find_map(|job| self.fakes.repo.commit_record(job))
+            .map(|record| record.commit_oid)
+        else {
+            return Response::err("forge", "head not ready");
+        };
+        let ctx = ActorCtx {
+            actor: Actor::new(ActorKind::Engine, "test-probe"),
+            device: None,
+            role: None,
+            client_profile: None,
+            request_id: "01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().unwrap(),
+            idempotency_key: None,
+            dedup_key: None,
+            causation_id: None,
+        };
+        let req = EnqueueRequest {
+            project_id: super::project_id(),
+            delivery_id: "dlv_01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().unwrap(),
+            payload: ActionPayload::MergePr(MergePrPayload {
+                repo: engine_cfg::repo_slug(),
+                pull_number: engine_cfg::PR_NUMBER,
+                expected_head_sha: head,
+                merge_method: MergeMethod::Squash,
+                mode: MergeMode::Auto,
+                commit_title: None,
+                commit_message: None,
+            }),
+            requires_approval: Some(id),
+            depends_on: vec![],
+            priority: Priority::High,
+            not_before: None,
+            epoch: if args.get("second").and_then(Value::as_bool) == Some(true) {
+                2
+            } else {
+                1
+            },
+            enqueued_by: EnqueuedBy {
+                module: EnqueuedByModule::Engine,
+                causation_id: None,
+            },
+        };
+        match self.fakes.forge.enqueue(req, &ctx).await {
+            Ok(action) => Response::ok(json!({"id": action.action.id})),
+            Err(error) => Response::err("forge", error.to_string()),
+        }
     }
 
     async fn real_grant(&self, args: Value) -> Response {
@@ -555,6 +676,7 @@ fn script_merge(
 async fn execute_outbox(
     store: &gantry_store::Store,
     head: Option<GitOid>,
+    leave_merge: bool,
 ) -> Result<Vec<ForgeActionKind>, String> {
     let text = |error: gantry_store::StoreError| error.to_string();
     let mut done = Vec::new();
@@ -573,6 +695,10 @@ async fn execute_outbox(
             return Ok(done);
         };
         let action = claimed.action;
+        if leave_merge && action.kind == ForgeActionKind::MergePr {
+            tx.rollback().await.map_err(text)?;
+            return Ok(done);
+        }
         let pr = match (action.kind, head) {
             (ForgeActionKind::CreatePr, Some(head)) => Some(GithubPrRef {
                 number: engine_cfg::PR_NUMBER,

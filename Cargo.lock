@@ -1136,6 +1136,7 @@ dependencies = [
  "gantry-deploy",
  "gantry-engine",
  "gantry-fakes",
+ "gantry-forge",
  "gantry-notify",
  "gantry-policy",
  "gantry-store",
