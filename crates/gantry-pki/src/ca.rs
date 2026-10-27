@@ -49,7 +49,9 @@ impl IssuedCert {
             return Err(PkiError::Crypto("trailing bytes after certificate".into()));
         }
         let serial = CertSerial::from_be_bytes(parsed.raw_serial()).ok_or_else(|| {
-            PkiError::Crypto("certificate serial is not a positive 128-bit integer".into())
+            PkiError::Crypto(
+                "certificate serial is not a positive integer of at most 20 bytes".into(),
+            )
         })?;
         let not_before = seconds_to_timestamp(parsed.validity().not_before.timestamp())?;
         let not_after = seconds_to_timestamp(parsed.validity().not_after.timestamp())?;

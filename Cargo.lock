@@ -487,6 +487,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]
@@ -572,6 +573,7 @@ dependencies = [
 name = "gantry-pki"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "gantry-core",
  "libc",
  "p256",
@@ -624,6 +626,7 @@ dependencies = [
  "futures-core",
  "gantry-core",
  "gantry-sandbox",
+ "getrandom 0.3.4",
  "libc",
  "serde",
  "serde_json",

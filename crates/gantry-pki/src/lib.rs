@@ -4,15 +4,19 @@
 //!
 //! - [`ca`]：信任层次（离线根 → 在线中间 CA → 服务端 / 设备叶子）与证书参数（§7.1）；
 //! - [`bootstrap`]：安装时一次性产出根 / 中间 / 服务端材料（§6.6）；
-//! - [`keys`]：P-256 公钥、指纹与 [`CertSerial`]。
+//! - [`keys`]：P-256 公钥、指纹与 [`CertSerial`]；
+//! - [`csr`]：不可信 CSR 与 `approval_pubkey` 的校验（§7.4.3、§7.4.4）；
+//! - [`text`]：设备名校验与终端输出净化（§8 终端注入）。
 //!
 //! 设备注册表、配对、握手校验、吊销等依赖 `store` 的部分在后续切片中加入。
 
 pub mod bootstrap;
 pub mod ca;
 pub mod config;
+pub mod csr;
 pub mod keys;
 mod rng;
+pub mod text;
 
 pub use ca::{Authority, IssuedCert};
 pub use config::CertPolicy;

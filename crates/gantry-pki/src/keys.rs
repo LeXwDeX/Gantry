@@ -102,12 +102,18 @@ impl fmt::Debug for P256PublicKey {
     }
 }
 
-/// 证书序列号：128 位随机数、最高位清零保证为正，表示为小写十六进制、去前导零（§7.1）。
+/// 证书序列号：小写十六进制、去前导零（§7.1）。
+///
+/// 本模块签发时生成 128 位随机数、最高位清零保证为正；解析时接受 RFC 5280 允许的
+/// 至多 20 字节正整数（外部 CA 签发的证书也要能读出序列号再拒绝）。
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CertSerial(String);
 
+/// RFC 5280 §4.1.2.2：序列号不超过 20 个八位组。
+const MAX_SERIAL_BYTES: usize = 20;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("certificate serial must be 1–32 lowercase hex digits without leading zeros")]
+#[error("certificate serial must be 1–40 lowercase hex digits without leading zeros")]
 pub struct SerialError;
 
 impl CertSerial {
@@ -123,11 +129,11 @@ impl CertSerial {
         }
     }
 
-    /// 从大端字节构造（证书里的 INTEGER 内容）。全零或超过 128 位返回 `None`。
+    /// 从大端字节构造（证书里的 INTEGER 内容）。全零或超过 20 字节返回 `None`。
     pub fn from_be_bytes(bytes: &[u8]) -> Option<Self> {
         let start = bytes.iter().position(|b| *b != 0)?;
         let trimmed = &bytes[start..];
-        if trimmed.len() > 16 {
+        if trimmed.len() > MAX_SERIAL_BYTES {
             return None;
         }
         let hex: String = trimmed.iter().map(|b| format!("{b:02x}")).collect();
@@ -165,7 +171,7 @@ impl FromStr for CertSerial {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let valid = !s.is_empty()
-            && s.len() <= 32
+            && s.len() <= MAX_SERIAL_BYTES * 2
             && !s.starts_with('0')
             && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         if valid {
@@ -229,7 +235,9 @@ mod tests {
         assert_eq!(odd.to_be_bytes(), vec![0x0a, 0xbc]);
         assert!(CertSerial::from_be_bytes(&[0, 0]).is_none());
         assert_eq!("abc".parse::<CertSerial>().unwrap(), odd);
-        for bad in ["", "0abc", "ABC", "xyz", &"f".repeat(33)] {
+        assert!(CertSerial::from_be_bytes(&[0x7f; 20]).is_some());
+        assert!(CertSerial::from_be_bytes(&[0x7f; 21]).is_none());
+        for bad in ["", "0abc", "ABC", "xyz", &"f".repeat(41)] {
             assert!(bad.parse::<CertSerial>().is_err(), "{bad}");
         }
     }
