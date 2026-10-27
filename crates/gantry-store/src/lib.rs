@@ -8,7 +8,7 @@
 //! `seq` 重放日志得到，之后由 `append` 增量维护。内置投影有交付单元、收件箱
 //! （`inbox_items`，收件箱状态的唯一来源）、设备、GitHub 快照与 settings，读取方法
 //! 按 §6.2 挂在 `TxReader` / `ReadSnapshot` 上。尚未覆盖的事件记录到 `unprojected`，
-//! 不静默吞掉。模块投影器、CAS 磁盘后端、备份与 `verify` 尚未实现。
+//! 不静默吞掉。模块投影器、备份与数据库 `verify` 尚未实现。
 //!
 //! `WriteTx` 在 `Inner` 的克隆上工作：`commit` 校验 `revision`，先把增量写进
 //! SQLite（若有），成功后原子替换内存状态；`rollback` 丢弃。直接写（游标、
@@ -52,7 +52,7 @@ pub mod github;
 pub mod module;
 pub mod projection;
 
-pub use cas::{Cas, CasKind, CasReader, CasStat, GcReport, RetentionPolicy};
+pub use cas::{Cas, CasKind, CasReader, CasStat, CasVerifyReport, GcReport, RetentionPolicy};
 pub use durable::{StoreConfig, SCHEMA_VERSION};
 pub use github::{GithubSnapshots, IssueSnapshotRow, PrSnapshotRow};
 pub use module::{ModuleConn, ModuleReader, ModuleRow, ModuleSpec, MODULE_SCAN_MAX};
@@ -95,7 +95,7 @@ impl Drop for TempDir {
 impl Store {
     /// 打开数据目录下的 SQLite 存储（store.md §6.1、§7.1）：取排他锁（第二个实例得到
     /// `AlreadyRunning`）→ 迁移（版本更高得到 `SchemaTooNew`）→ 载入并重放投影。
-    /// CAS 暂为内存后端，磁盘后端随后续切片落地。
+    /// CAS 对象在 `<dir>/cas`，元数据在 `cas_objects` 表（§7.7）。
     pub async fn open(
         cfg: StoreConfig,
         deps: StoreDeps,
@@ -105,14 +105,20 @@ impl Store {
         let (durable, inner) = durable::Durable::open(&cfg, &registry, || {
             Ok(deps.ids.next_ulid().map_err(StoreError::Id)?.to_string())
         })?;
-        let cas = Cas::in_memory(deps.clock.clone(), cas::DEFAULT_MAX_OBJECT_BYTES);
+        let durable = Arc::new(durable);
+        let cas = Cas::on_disk(
+            cfg.dir.join("cas"),
+            durable.clone(),
+            deps.clock.clone(),
+            cas::DEFAULT_MAX_OBJECT_BYTES,
+        )?;
         Ok(Store {
             inner: Arc::new(RwLock::new(inner)),
             gate: Arc::new(WriteGate::new()),
             deps: Arc::new(deps),
             modules: Arc::new(registry),
             cas,
-            durable: Some(Arc::new(durable)),
+            durable: Some(durable),
             #[cfg(feature = "testing")]
             temp_dir: None,
         })
