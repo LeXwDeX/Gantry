@@ -659,3 +659,16 @@ pub async fn send(
 }
 
 pub const MESSAGES_BODY: &str = r#"{"model":"example-worker-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#;
+
+/// 等到条件成立（只用于调用方观察不到结束信号的场景，如调用方主动断开）。
+/// 上限很宽，只为避免死等；正常情况下条件很快成立。
+pub async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

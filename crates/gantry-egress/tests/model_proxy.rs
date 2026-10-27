@@ -155,7 +155,6 @@ async fn sse_is_streamed_before_the_upstream_finishes() {
     );
     assert!(String::from_utf8_lossy(&rest).contains("message_stop"));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let usage = usage_of(&egress, 1);
     assert_eq!(usage.usage, TokenUsage::new(10, 9, 0, 0, 1));
     assert!(!usage.incomplete);
@@ -174,7 +173,6 @@ async fn interrupted_upstream_streams_are_truncated_and_estimated() {
     let reply = post_messages(&egress, &token, &[]).await;
     assert_eq!(reply.status, 200);
     assert!(reply.truncated, "the caller sees a truncated stream");
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let usage = usage_of(&egress, 1);
     assert!(usage.incomplete);
     assert!(usage.usage.input_tokens >= 100, "known lower bound kept");
@@ -210,25 +208,18 @@ async fn caller_disconnect_cancels_the_upstream_stream() {
     drop(body);
     drop(sender);
     conn.abort();
-    for _ in 0..40 {
-        if egress
-            .mock
-            .aborted
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
+    // 调用方断开后它看不到任何结束信号：按条件等待，而不是假定某个时长内完成。
+    wait_until("upstream stream is cancelled", || {
         egress
             .mock
             .aborted
-            .load(std::sync::atomic::Ordering::SeqCst),
-        "upstream stream must be cancelled"
-    );
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(usage_of(&egress, 1).incomplete);
+            .load(std::sync::atomic::Ordering::SeqCst)
+    })
+    .await;
+    wait_until("the interrupted request is metered", || {
+        usage_of(&egress, 1).incomplete
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -683,7 +674,6 @@ async fn svc_model_requires_ledger_headers_and_honours_call_closure() {
         .headers
         .iter()
         .all(|(n, _)| !n.starts_with("x-gantry")));
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let record = &egress.registry.usage_since(None, None).unwrap().items[0];
     assert_eq!(record.tier, gantry_core::entities::Tier::Planner);
@@ -720,7 +710,6 @@ async fn audit_failures_fail_closed() {
     egress.audit.fail_writes(true);
     // 这一条照常完成，但审计写失败 → 之后的请求一律拒绝。
     assert_eq!(post_messages(&egress, &token, &[]).await.status, 200);
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let reply = post_messages(&egress, &token, &[]).await;
     assert_eq!(reply.status, 503);
     let status = egress.registry.status().unwrap();
