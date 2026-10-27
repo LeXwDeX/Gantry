@@ -46,10 +46,12 @@ use serde_json::Value;
 mod devices;
 use module::{ModuleRegistry, ModuleTables};
 
+pub mod cas;
 pub mod github;
 pub mod module;
 pub mod projection;
 
+pub use cas::{Cas, CasKind, CasReader, CasStat, GcReport, RetentionPolicy};
 pub use github::{GithubSnapshots, IssueSnapshotRow, PrSnapshotRow};
 pub use module::{ModuleConn, ModuleReader, ModuleRow, ModuleSpec, MODULE_SCAN_MAX};
 pub use projection::{DeliveryRow, FoldError, StageEntered};
@@ -69,6 +71,7 @@ pub struct Store {
     gate: Arc<WriteGate>,
     deps: Arc<StoreDeps>,
     modules: Arc<ModuleRegistry>,
+    cas: Cas,
 }
 
 impl Store {
@@ -95,6 +98,7 @@ impl Store {
     ) -> Result<Store, StoreError> {
         let registry = ModuleRegistry::new(modules)?;
         let log_id = deps.ids.next_ulid().map_err(StoreError::Id)?.to_string();
+        let cas = Cas::in_memory(deps.clock.clone(), cas::DEFAULT_MAX_OBJECT_BYTES);
         Ok(Store {
             inner: Arc::new(RwLock::new(Inner {
                 log_id,
@@ -105,6 +109,7 @@ impl Store {
             gate: Arc::new(WriteGate::new()),
             deps: Arc::new(deps),
             modules: Arc::new(registry),
+            cas,
         })
     }
 
@@ -161,6 +166,11 @@ impl Store {
         EventLog {
             store: self.clone(),
         }
+    }
+
+    /// 内容寻址存储（store.md §6.4）。
+    pub fn cas(&self) -> Cas {
+        self.cas.clone()
     }
 
     pub fn cursors(&self) -> Cursors {
@@ -2463,6 +2473,13 @@ pub enum StoreError {
     /// 模块表文档无法编码 / 解码为调用方给的类型。
     #[error("module table value: {0}")]
     ModuleValue(String),
+    /// CAS 对象超过 `store.cas.max_object_bytes`，或超过 `get_bytes` 的 `max`。
+    #[error("cas object of {bytes} bytes exceeds {max}")]
+    CasTooLarge { bytes: u64, max: u64 },
+    #[error("corrupt: {0}")]
+    Corrupt(String),
+    #[error("io: {0}")]
+    Io(String),
 }
 
 impl StoreError {
