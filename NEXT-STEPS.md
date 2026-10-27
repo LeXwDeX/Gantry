@@ -4,41 +4,30 @@
 
 ## 现状（2026-10-27）
 
-基线 `main@b90437b`。
+基线 `main@03f2d24`。这是 #290 合入后的文档基线；最近一次完整本机门槛记录在 `main@64a498b`，`03f2d24` 只改文档，尚未重跑完整门槛。
 
-- **M0 已合入。** 领域核心、端口、内存存储、测试替身、内存模拟接口和浏览器模拟场景前端都在 `main` 上；前后端尚未接线，真实联调未验证。契约文本已于 2026-10-27 由用户统一批准。
-- **M1 只做了引擎的局部。** `crates/gantry-engine` 约 1100 行，已实现部分见下表；`decide`、执行体、调度和终结管线都还没有。M1 端到端路径上另外 13 个服务端 / 桌面 crate（`forge`、`repo`、`sandbox`、`worker`、`egress`、`models`、`policy`、`notify`、`conversation`、`api`、`pki`、`secrets`、`desktop-shell`）都还没有。
+- **M0 已合入。** 领域核心、端口、内存存储、测试替身、内存模拟接口和浏览器模拟场景前端都在 `main` 上；M0 契约文本已于 2026-10-27 由用户统一批准。
+- **M1.1 决策器的 issue 范围已关闭。** 18 个 issue 全部关闭：`decide` 六个切片、执行体与运行时、控制面、崩溃点矩阵和失败路径都已合入。里程碑本身等 #291 收尾后关闭。已关闭 issue 不等于 engine.md 每条边界都已满足，评审发现见 [本轮评审](docs/reviews/2026-10-27-m1-closeout-review.md)。
+- **M1.2 服务端泳道已完成替身对接。** 16 个 issue 全部关闭。`api`、`forge`、`repo`、`sandbox`、`worker`、`egress`、`models`、`policy`、`notify`、`conversation`、`pki`、`secrets` 和 store 的 SQLite 持久层都有 crate 与测试；证据主要来自替身和模块测试，真实 GitHub、模型、Podman、密钥环境尚未联合验证。
+- **M1.3 仍在进行。** #101、#102、#103、#104 已关闭，剩 #289、#291。桌面 UI 和 Tauri 外壳已有代码，前端有三种适配器；真实服务端联调尚未证明。`gantryd` 的 `assemble_real` 仍返回 `NotReady`，测试替身装配在 `tests/support/`。
+- **工作区**：20 个 package，即 19 个 `crates/*` 加 `apps/desktop/src-tauri/shell-core`（package `gantry-desktop-shell`）。Tauri 应用本身在 `apps/desktop/src-tauri`，因系统 WebView 依赖不在根 workspace。
+- **M1.4 仍开放。** #105 是 A 级跨泳道集成（真实模块替换替身）；#106 B 级本机 Ubuntu 虚拟机和 #107 C 级外部资源都需先征求用户确认，C 级还需要真实资源。
+- **生产装配**：SQLite 持久层已实现，但没有接入 `gantryd`；`assemble_real` 总是返回 `NotReady`（`crates/gantryd/src/assembly.rs:93-99`）。#289 只补引擎侧前置（settings 换算、默认预留策略、`status()`），不等于所有真实装配完成；#105 才负责跨泳道替换和集成。
+- **验收口径**：A + B 级全绿才记为「M1 本机验收通过」，C 级全绿才记为「M1 退出」（#87）。当前三级证据都未全部取得。
+- **已知外部阻塞**：GitHub Actions 因账户计费问题未启动（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
 
-| 已实现（`crates/gantry-engine`） | PR |
-| --- | --- |
-| `low.single` 模板的 `low.implement` 单节点图 | #26 |
-| 事件投影：delivery / workflow / node / attempt / inbox | #33 |
-| 预算台账构造、检查、记账、余额 | #35 |
-| 阶段转移表驱动的 `advance` | #37 |
-| `budget_from_level` 与 `delivery.created` | #39 |
-| Outbox 意图构造与幂等键派生 | #41 |
-| `create_delivery` 单事务写入 | #43 |
-| `advance_stage` 写入 `delivery.stage_changed` | #45 |
-| 暂停 / 继续 / 放弃 | #47 |
-| 调整 `level_cap`；压低上限派生 `level_effective`（契约 #59、实现 #60） | #49 |
-| 失败节点重试 | #51 |
-| 模板目录、崩溃恢复重放 | #53 |
-| 上报项写入 inbox | #55 |
-| 收尾评审修正：创建去重与预算记账 | #77 |
+**本机检查**：最近一次完整门槛记录在 `main@64a498b`：fmt、clippy `-D warnings`、`cargo check --workspace --all-targets`、`cargo test --workspace --all-features`、`xtask schemas --check`、mock-api 测试和前端 lint / typecheck / test / build 通过。静态评审后，主力在 `main@03f2d24` 运行 `cargo check --workspace --all-targets` 并通过；完整门槛仍需在合并 #291 前复跑。MSRV 1.85 的普通 `cargo check --locked --workspace --all-features` 通过，`--all-targets` 因 `settings/clamp.rs` 测试的 E0716 失败，见 #292；不要把两者混为同一项。
 
-以上 PR 均已合入；`decide` 的类型契约（engine.md §7.14）由 #63 合入，M1 验收证据分级（`docs/m1-acceptance.md`，提议）由 #62 合入。
+**未实现或未验证**：
+- 真实装配、真实 GitHub App、模型、Podman、目标主机与代码签名；桌面端真实 API 联调。
+- store 的剩余 §12 验收条目（#267）和 api 的读路由 / 共用用例（#280）。
+- 评审确认的问题 #293、#294、#295、#296、#297、#298、#300、#301、#302、#303、#304、#305、#306、#307、#308、#309、#310，以及文档项 #299；逐项见 issue 和本轮评审。
+- #311–#315 是尚待复核的疑点，不代表已证实缺陷；复核后再决定是修复、并入现有 issue 还是排除。
 
-**本机检查（2026-10-27 实测）**：`cargo fmt`、`cargo clippy` 通过；工作区测试 463 passed / 0 failed / 2 ignored（两个 ignored 是由父测试启动的看门狗子进程入口）；MSRV `cargo +1.85 check` 通过；`cargo --locked xtask schemas --check` 0 failure、0 warning，保留 3 个显式未验证块，`schemas/`、`fixtures/` 无漂移；模拟接口测试 29 passed。前端在当前 `main` 上重跑（含 vitest 4.1.12 等依赖升级之后）：`npm ci`、边界检查、类型检查通过；单元测试 24 个文件、287 passed；正式与场景资源构建通过，仍有超过 500 kB 的构建块警告；浏览器端到端测试 66 passed。环境为 macOS arm64、Rust 1.97.0 / 1.85.1、Node 26.12.0、npm 11.20.0；未验证 Node 22、Linux / Windows。结果只覆盖内存存储、测试替身与浏览器模拟场景。
+**M0 遗留**（#82–#85 已关闭；仍开放项）：
 
-**远端 CI**：GitHub Actions 因账户计费问题全部在数秒内失败，#77、#78、#79 是在没有 CI 的情况下按本机检查合入的。最近一次可追溯的全绿远端结果是 M0 时期 PR #17 的 run 40334369717。
-
-**未实现或未验证**：Outbox 执行与审批消费（`PolicyPort` 尚未接入引擎）；终结管线与 `waiting_human` / `blocked` 自动切换；`attempt.*`、`budget.charged` 的事件写入；真实 GitHub App、模型、Podman、目标主机与代码签名。M1 端到端退出标准全部未验证，取证分级见 [M1 验收证据分级](docs/m1-acceptance.md)。
-
-**M0 遗留**（里程碑 [M0.9 M0 遗留收口](https://github.com/LeXwDeX/gantry/milestone/2)）：
-
-- #82：B-01 Egress 调用级终结：`core::ports::egress::EgressControl` 只有 `call_usage` 等用量查询和整令牌吊销，还没有调用级关闭屏障；候选方案见 [调用级终结](docs/interfaces/egress-call-terminal.md)。在它批准并实现之前，直接调用的最终结算、释放和零判定都没有可信证据。
-- #83：`xtask schemas --check` 报告的 OpenAPI / core 人工核对差异尚未逐项判定是允许的视图差异还是漂移。
-- #84：3 个显式未验证文档块（`github_ref` 组合、App Manifest、`ResultBundle`）仍按 `example` / `contract-undefined` 登记。
+- #86：恢复远端 CI 并在 `main` 上补一次全绿。
+- #292：修复 MSRV 1.85 下的测试编译错误，并让 CI 的 MSRV 任务覆盖测试目标。
 
 ## 待拍板
 
@@ -64,66 +53,59 @@ M0 契约文本已由用户在 2026-10-27 统一批准，状态标注已在 #85 
 
 | 里程碑 | 对应阶段 | issue |
 | --- | --- | --- |
-| [M0.9 M0 遗留收口](https://github.com/LeXwDeX/gantry/milestone/2) | M0 遗留 | #82–#86 |
-| [M1.1 决策器：契约补缺与 decide 实现](https://github.com/LeXwDeX/gantry/milestone/1) | 阶段 1、2 | #64–#75 |
-| [M1.2 服务端泳道（替身对接）](https://github.com/LeXwDeX/gantry/milestone/3) | 阶段 3 | #88–#100；待拍板汇总 #87 |
-| [M1.3 桌面端、组装与部署](https://github.com/LeXwDeX/gantry/milestone/4) | 阶段 3 | #101–#104 |
+| [M0.9 M0 遗留收口](https://github.com/LeXwDeX/gantry/milestone/2) | M0 遗留 | #82–#86、#122、#135、#179、#292 |
+| [M1.1 决策器：契约补缺与 decide 实现](https://github.com/LeXwDeX/gantry/milestone/1) | 阶段 1、2 | #58、#64–#75、#80、#125、#129、#133、#277 |
+| [M1.2 服务端泳道（替身对接）](https://github.com/LeXwDeX/gantry/milestone/3) | 阶段 3 | #87–#100、#150、#220 |
+| [M1.3 桌面端、组装与部署](https://github.com/LeXwDeX/gantry/milestone/4) | 阶段 3 | #101–#104、#289、#291 |
 | [M1.4 M1 验收（B / C 级）](https://github.com/LeXwDeX/gantry/milestone/5) | 阶段 4、5 | #105–#107 |
 | [M2-prep Agent 扩展性预留](https://github.com/LeXwDeX/gantry/milestone/6) | 阶段 6 | #108–#110 |
 
+M0.9 只剩 #86、#292；#82–#85、#122、#135、#179 已关闭。M1.1（18/18）和 M1.2（16/16）的 issue 已全部关闭，但两个里程碑要等 #291 收尾后才关闭。M1.3 的 #101–#104 已关闭，#289、#291 仍开放。
+
+### 当前优先级（2026-10-27 起）
+
+1. **#291**：完成本轮文档和评审记录，关闭 M1.1、M1.2 里程碑。
+2. **#289**：engine 侧真实装配前置；只补 settings 换算、默认预留策略和 `status()`。
+3. **#105**：A 级跨泳道集成，用真实模块替换替身；#280、#267 可与其并行。
+4. **#106 → #107**：B 级本机 Ubuntu 虚拟机、C 级外部资源。两项都要先征求用户确认，C 级还需要真实资源。
+5. **#292**：可随时插入；修 MSRV 1.85 的测试编译错误，并扩大 CI 的 MSRV 覆盖。
+6. **M2-prep**：#108 → #109 → #110 按顺序推进；这条工作线可与 M1 并行，不阻塞 M1.4。
+
+### 本轮新发现
+
+本轮评审确认的问题已分别登记，不并入 #291 的实现范围：engine 见 #293、#302、#306、#309、#310；store 见 #300；forge / repo 见 #298、#301、#303、#305、#308；api / notify / conversation 见 #296、#297、#307；sandbox / worker / egress / models 见 #294、#295、#304；其他入口文档见 #299。`#311`–`#315` 仍是待复核疑点，只有复核后才决定修复、并入现有 issue 或排除。`#267`、`#280` 是既有验收缺口，继续按各自 issue 跟踪。
+
 ### 阶段 0：合并上一轮 PR（已完成）
 
-#59、#60、#63、#62 已于 2026-10-26 按序合入，#77、#78、#79 随后合入；#48、#61 已关闭。#58 留到 `decide` 实现合入后关闭。
+#59、#60、#63、#62 已于 2026-10-26 按序合入，#77、#78、#79 随后合入；#48、#61 已关闭。#58 已在 `decide` 实现合入后关闭。
 
-### M1.1 关键路径（阶段 1、2）
+### 阶段 1–2：M1.1 决策器（issue 已完成，收尾进行中）
 
-M1.1 的 issue（#64–#75）都还没有动工。
+M1.1 的 18 个 issue（#58、#64–#75、#80、#125、#129、#133、#277）已全部关闭，不再是待开工列表。契约缺口 E1、E3–E6 已由 #64–#68 合入；`decide` 的六个切片（#69–#74）和桌面场景修正（#75）已合入。E2（`node.finished.fingerprints[]`）仍按规格留到 M2，不属于本里程碑。
 
-- **可以立即开工**：#64（E1）、#65（E4）只依赖已合入的 #63，可与 #69 并行；#68（E5）不阻塞，随时可做。
-- **串行主线**：#69 → #70 → #71 → #72 → #73 → #74。#72 等 #66 拍板，#73 等 #67 拍板，#74 另依赖 E1（#64）、E4（#65）。
-- **可并行**：#75（桌面场景适配器 `level_changed` data 与契约不符，归 `fe-desktop` 泳道）与引擎主线无关。
+已关闭 issue 不表示每条规格边界都没有缺陷；本轮评审确认的运行时缺口由 #293、#302、#306、#309、#310 跟踪，#313 是待复核疑点，不能把 M1.1 的关闭状态当成 engine.md §12.2 全部通过。
 
-### 阶段 1：契约补缺（engine.md §7.14.6 的 E1–E6，各自独立契约 PR）
+### 阶段 3：M1.2 issue 全关，M1.3 仍开放（真实装配未完成）
 
-| 序 | 缺口 | 改动面 | 完成标准 | 阻塞 |
-| --- | --- | --- | --- | --- |
-| 1 | E1 `attempt.finished.result_commit`（#64） | `core/events.rs`、`schemas/events/attempt.finished.json`、夹具正反例、engine.md §11、repo.md OQ-R2 | `status = succeeded` 且有补丁时必填，与 `result_tree` 同现；反例：有 tree 无 commit 被拒 | **M1 端到端、重启一致** |
-| 2 | E4 `SandboxService::recover` 区分"未受理 / 受理后丢失"（#65） | `core::ports::sandbox`、`FakeSandboxService`、sandbox.md §6.1 | 替身一致性测试覆盖两种结果 | M1 重启一致 |
-| 3 | E3 `Deny { report: None }` 的上报码（#66，需拍板） | policy.md §6（推荐：对 `engine` 发起的动作 `Deny` 必带 `ReportHint`）或 data-model 词表 | 二选一由用户定；`FakePolicy` 同步 | M1 失败路径 |
-| 4 | E6 Outbox 终态失败后的重做入口（#67，需拍板） | data-model 上报词表（推荐给 `outbox_failed:*` 加 `retry` / `abandon` 选项）、notify、api | 选 `retry` → 新 `epoch` 的动作与新审批 | M1 失败路径 |
-| 5 | E5 `attempt.finished.accepted_open_pr`（#68） | 同 E1 | 执行器据 `result_ref` 从 CAS 取提议原文填入 `create_pr` | 不阻塞（先用模板） |
-| 6 | E2 `node.finished.fingerprints[]`（M2，暂不开 issue） | 同 E1 | ≤ 64 条，仅 `REVISE` / `REJECT` | M2 |
+服务端泳道见 [M1.2](https://github.com/LeXwDeX/gantry/milestone/3)（#87–#100、#150、#220，16 个 issue 全部关闭），组装、桌面与部署见 [M1.3](https://github.com/LeXwDeX/gantry/milestone/4)（#101–#104 已关闭，#289/#291 仍开放）。
 
-### 阶段 2：`be-engine` 实现 `decide`（契约批准后，按切片各一 PR）
+这些泳道已有 crate、模块测试和替身对接。**测试替身通过不等于真实模块已在生产装配中协同运行**：`gantryd::assemble_real` 仍返回 `NotReady`，SQLite 存储尚未接入生产装配；真实 GitHub、Podman、模型、密钥环境和桌面真实 API 联调都未验证。逐项装配按 #289 → #105 推进，不能把已关闭的泳道 issue 当成端到端完成。
 
-1. **类型与状态折叠**（#69）：§7.14 的类型落到 `crates/gantry-engine`；投影补 `outbox`、`approvals`、`locks`、`open_inbox`、`stage_entered`、`abandon_cause`、`worktree`、`Evidence`。验收：从夹具事件序列重建的 `DeliveryState` 与逐字段期望一致。
-2. **Low 正常路径的纯决策**（#70）：T2 → 建 `low.implement` → 派发 → `Finalized(Committed)` → T6 → `expected_actions` 出 `push_branch` / `create_pr` → T8 → T10（只等 CI）→ 合并审批两段式 → T12。验收：§12.2"端到端（替身）""合并需要审批"在纯函数层面通过。
-3. **执行体与路由**（#71）：`DeliveryActor`、在途集合、收敛循环、`EventRouter` 路由表与低水位游标。验收：§12.2"决策纯度""两段式判定""关闭客户端任务继续"。
-4. **`AttemptRunner` 与终结管线**（#72）：接 `FakeSandboxService`、`FakeRepo`、`FakePolicy`；V1–V6 与失败分类。验收：§12.2"失败分类优先级""重试策略""自报不驱动状态""JobSpec 隔离""材料来源""预算与计量""受保护路径"。
-5. **控制面与异常路径**（#73）：暂停 / 继续 / 重试 / 放弃、T11 / T14 / T15、`base_advanced` 对账。验收：§12.2 对应条目。
-6. **崩溃点矩阵**（#74）：§12.2"重启一致""不重复创建 PR""release"。依赖 E1、E4 已落地。
+#104 已关闭，但实机两次幂等执行、`systemd-analyze verify`、`nft -c` 及依赖 root、systemd 或沙盒的 doctor 检查延期到 #106；见 [#104 评论](https://github.com/LeXwDeX/gantry/issues/104#issuecomment-6433339355)和 [PR #207](https://github.com/LeXwDeX/gantry/pull/207)。#106 需先征求用户确认本机虚拟机环境。
 
-每片都附上 §7.14.5 前置条件表中对应行的正例与反例。
+### 阶段 4：A 级集成与 B 级环境（本机）
 
-### 阶段 3：M1 其他泳道（按对引擎端到端的依赖排序）
+见 [M1.4](https://github.com/LeXwDeX/gantry/milestone/5)：#105（A 级跨泳道集成）、#106（B 级本机 Ubuntu 虚拟机）。两项通过后才算「M1 本机验收通过」。
 
-服务端泳道见 [M1.2](https://github.com/LeXwDeX/gantry/milestone/3)（#88–#100），组装、桌面与部署见 [M1.3](https://github.com/LeXwDeX/gantry/milestone/4)（#101–#104）。
-
-`policy` v0 与 `notify`（端口与替身已有，体量小）→ `repo`（镜像、工作树、锁、补丁）→ `forge`（Outbox 执行、webhook、对账，先对 `FakeGitHub`）→ `models` + `egress`（回环反向代理、计量）→ `sandbox` + `worker`（rootless Podman、Claude Code 适配）→ `api` + `pki` + `secrets`（mTLS、配对、签名审批）→ `desktop-shell`（密钥、事件流、签名）。每个泳道按其模块规格"测试与验收"一节逐条完成；规格不足时停下开 Issue。
-
-**并行推进（2026-10-27）**：已按泳道开 issue，与阶段 2 并行推进。各泳道只依赖 `core::ports` 和现有替身，不依赖 `decide`；上面的顺序是对引擎端到端的依赖顺序，不是开工顺序。
-
-### 阶段 4：B 级环境（本机虚拟机）
-
-见 [M1.4](https://github.com/LeXwDeX/gantry/milestone/5)：#105（A 级跨泳道集成）、#106（B 级环境）。
-
-按 [M1 验收证据分级](docs/m1-acceptance.md) §3 的 B 列，把每条退出标准做成可重复脚本；不需要任何第三方账号。
+A 级先按 [M1 验收证据分级](docs/m1-acceptance.md) §3 的 A 列，用真实模块替换替身并通过 engine.md §12.2；B 级再把每条退出标准做成可重复脚本。B 级不需要任何第三方账号，但 #106 需要用户先确认本机虚拟机与 Podman 环境。
 
 ### 阶段 5：C 级外部资源
 
 见 [M1.4](https://github.com/LeXwDeX/gantry/milestone/5)：#107（需拍板）。
 
-B 级全绿后，按 [§4 清单](docs/m1-acceptance.md#4-外部资源最小清单c-级)申请资源，只复跑 B 级已通过的场景。
+B 级全绿后，按 [§4 清单](docs/m1-acceptance.md#4-外部资源最小清单c-级)申请资源，只复跑 B 级已通过的场景。动作、GitHub App、模型密钥、目标主机和签名证书都需用户确认后才使用。
+
+> [M1 验收证据分级](docs/m1-acceptance.md) 顶部的项目现状仍停在 2026-10-26；验收标准和分级口径没有变化，过时表述由 #299 跟踪。
 
 ### 阶段 6：Agent 可扩展性预留（调研 → 设计 → 契约，不早于阶段 2 完成）
 
