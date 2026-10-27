@@ -18,7 +18,10 @@ async fn me_matches_openapi_and_hides_the_approval_pubkey() {
         h.devices.insert(d.clone());
         let resp = send(&h, req(Method::GET, "/v1/me", &d), "").await;
         assert_eq!(resp.status(), 200);
-        assert_eq!(header(&resp, "content-type"), Some("application/json"));
+        assert_eq!(
+            header(&resp, "content-type"),
+            Some("application/json; charset=utf-8")
+        );
         assert_eq!(header(&resp, "x-event-seq"), Some("0"));
         let b = body(&resp);
         validate("MeResponse", &b);

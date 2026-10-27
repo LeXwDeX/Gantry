@@ -11,6 +11,7 @@ use crate::auth::profile_str;
 use crate::consts::{API_VERSION, RENEW_AFTER_DEN, RENEW_AFTER_NUM};
 use crate::control;
 use crate::problem::Problem;
+use crate::reads;
 use crate::server::{ApiCore, HandlerRequest, Reply, RouteHandler};
 
 pub struct Builtin;
@@ -25,6 +26,9 @@ impl RouteHandler for Builtin {
             }
             "retryNode" => control::retry_node(core, &req).await,
             "postMessage" => control::post_message(core, &req).await,
+            "listInbox" => reads::list_inbox(core, &req).await,
+            "getInboxItem" => reads::get_inbox(core, &req).await,
+            "getInboxSummary" => reads::inbox_summary(core, &req).await,
             _ => Err(Problem::not_found()),
         }
     }

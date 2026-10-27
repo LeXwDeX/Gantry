@@ -43,8 +43,10 @@ pub const RATELIMIT_RESET: HeaderName = HeaderName::from_static("ratelimit-reset
 pub const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
 pub const IDEMPOTENT_REPLAYED: HeaderName = HeaderName::from_static("idempotent-replayed");
 
-const PROBLEM_JSON: &str = "application/problem+json";
+const PROBLEM_JSON: &str = "application/problem+json; charset=utf-8";
 const JSON: &str = "application/json";
+/// 响应的媒体类型（`openapi.yaml` 的响应 content 键）。
+const JSON_UTF8: &str = "application/json; charset=utf-8";
 
 /// 本模块的静态配置（本文 §10；限流等常量在 [`crate::consts`]）。
 #[derive(Clone, Debug)]
@@ -609,7 +611,7 @@ fn success_response(
     *resp.status_mut() = reply.status;
     let headers = resp.headers_mut();
     if has_body {
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static(JSON));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(JSON_UTF8));
     }
     for (name, value) in reply.headers {
         headers.insert(name, value);
