@@ -8,7 +8,7 @@
 
 1. **CA 层次**：离线根 CA（安装时生成、导出到离线介质后从服务端删除）+ 在线中间 CA（私钥只经 `secrets` 由本模块读取）；提供安装时的引导工具（`bootstrap`，命令 `gantry pki bootstrap-ca`，名称 [提议]，deploy.md §7.3）供 `deploy` 调用（architecture §7.1 步骤 1）。
 2. **服务端证书**：签发服务端叶子证书，到期前自动续签并热加载，不断开现有连接。
-3. **配对**：`gantry pair` 的令牌与配对窗口；配对端点 `POST /v1/pair` 的全部业务逻辑（令牌核验、证书签名请求（CSR）校验、`approval_pubkey` 校验与登记、签发、创建 Device、确认码）；第一台设备为 `approver`、之后默认 `operator`（P-23）。HTTP 监听器由 `api` 持有，业务由本模块实现（[api.md §1.3](../interfaces/api.md)）。
+3. **配对**：`gantry pair` 的令牌与配对窗口；配对端点 `POST /v1/pair` 的全部业务逻辑（令牌核验、证书签名请求（CSR）校验、`approval_pubkey` 校验与登记、签发、创建 Device、确认码）；第一台**桌面**设备为 `approver`、其余默认 `operator`，手机一律 `operator`（P-23、P-76、D-18，§7.4.3 第 6.1 步）。HTTP 监听器由 `api` 持有，业务由本模块实现（[api.md §1.3](../interfaces/api.md)）。
 4. **设备注册表**：Device 实体（名称、平台、`pubkey_fpr`、`approval_pubkey` / `approval_pubkey_fpr`、角色、状态、`last_seen`）、证书表、吊销表；事件 `device.paired` / `device.updated` / `device.revoked`。
 5. **握手校验**：提供 rustls 的 `ClientCertVerifier`——证书链、有效期、增强密钥用途、算法、`cert_serial` 是否在册且未吊销（无证书吊销列表（CRL）与在线证书状态协议（OCSP），握手时直接查库）。
 6. **角色与吊销**：`set_role`、`revoke`、重命名；对 `api` 暴露"在调用方事务内执行"的接口，使"消费审批 + 写业务"同事务（api.md §6.6）。
@@ -17,14 +17,14 @@
 9. **证书轮换与续期**：服务端叶子证书自动续签（M1）；中间 CA 轮换（M3，需要离线根）；设备证书续期 `POST /v1/devices/self/renew` 的业务（M1，P-64；客户端在剩余 1/3 有效期时自动发起）。
 10. **主机应急命令** `gantry device recover`（P-39）：需主机 root，吊销设备或把一台设备提升为 approver，写审计事件。
 11. **向 `policy` 提供验签公钥**：经 `api` 传递设备登记的**审批签名公钥** `approval_pubkey`（P-256，[api.md §6.3](../interfaces/api.md)，P-47）；mTLS 客户端公钥只用于握手，不用于审批验签。
-12. **引导期判定**（P-66）：提供"是否仍处于引导期（从未配对过任何设备）"的查询，供主机命令判断能否不经签名写入"仅 approver"键（§6.2 `bootstrap_period`）。
+12. **引导期判定**（P-66）：提供"是否仍处于引导期（从未配对过任何桌面档案设备，D-18）"的查询，供主机命令判断能否不经签名写入"仅 approver"键（§6.2 `bootstrap_period`）。
 
 ### 1.1 各里程碑交付
 
 | 里程碑 | 交付 |
 | --- | --- |
 | M0 | 不交付实现。`TestCA`（测试用证书与设备）由 `contract` 泳道交付，供 `api`、`fe-desktop` 集成测试（milestones 替身表）；`schemas/events/device.*.json`。本模块在 M0 只落 crate 骨架与 trait |
-| M1 | 全部主体：`bootstrap`（离线根 + 在线中间 CA + 服务端证书）、握手校验器、配对（令牌、窗口、CSR 与 `approval_pubkey` 校验、签发链 `[叶子, 中间 CA, 根]`、确认码、首台 approver / 之后 operator）、设备证书续期（`renew` 业务 + `POST /v1/devices/self/renew` 对接，P-64）、`revocations.journal` 与恢复后重放（P-67）、设备注册表与 `device.*` 事件、`set_role` / `revoke` / 重命名、`last_seen` 节流、服务端证书自动续签与热加载、`gantry pair`、`gantry device recover`、启动自检（根私钥不得在服务端） |
+| M1 | 全部主体：`bootstrap`（离线根 + 在线中间 CA + 服务端证书）、握手校验器、配对（令牌、窗口、CSR 与 `approval_pubkey` 校验、签发链 `[叶子, 中间 CA, 根]`、确认码、首台桌面设备 approver / 其余 operator，D-18）、设备证书续期（`renew` 业务 + `POST /v1/devices/self/renew` 对接，P-64）、`revocations.journal` 与恢复后重放（P-67）、设备注册表与 `device.*` 事件、`set_role` / `revoke` / 重命名、`last_seen` 节流、服务端证书自动续签与热加载、`gantry pair`、`gantry device recover`、启动自检（根私钥不得在服务端） |
 | M2 | 无新增功能；回归 |
 | M3 | 中间 CA 轮换（需要离线根解锁）；`RevocationNotifier` 被 `api` 用于进程内即时断开事件流（M1 的心跳检查保留为兜底） |
 | M4 | `platform = ios` 的配对（配对串需适合二维码；`approval_pubkey` 可省略，P-76）；与 `fe-mobile` 联调；手机档案设备永远不能成为 approver（P-76）：配对时角色至多 `operator`，`set_role` 与 `recover --promote` 对 `ios` 设备设 approver 一律拒绝（本模块强制，`api` 另在路由层拒绝） |
@@ -125,8 +125,8 @@ pub trait DeviceDirectory: Send + Sync {
     /// 设备已吊销 → None。
     async fn verifying_key(&self, id: &DeviceId) -> Result<Option<VerifyingKey>, PkiError>;
     /// 引导期（P-66）：库里从未有过任何设备（含已吊销）时为 true。主机命令据此决定能否不经签名
-    /// 写入 core::bootstrap_writable 允许的"仅 approver"键；第一台设备配对后恒为 false。
-    async fn bootstrap_period(&self) -> Result<bool, PkiError>;   // 第一台设备是手机时引导期延续到第一台桌面设备配对（decisions D-18）
+    /// 写入 core::bootstrap_writable 允许的"仅 approver"键；第一台桌面设备配对后恒为 false（只配过手机时仍为 true，D-18）。
+    async fn bootstrap_period(&self) -> Result<bool, PkiError>;   // 库里从未有过桌面档案设备（含已吊销）时为 true（decisions D-18）
     /// 节流写入（≤ 每设备每 60 s 一次），不产生事件
     async fn touch_last_seen(&self, id: &DeviceId);
 }
@@ -337,7 +337,7 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 4. **设备字段**：`name` 1–64 字符、不含控制字符与换行；`platform ∈ {windows, macos, ios}`（`ios` 在 M4 前也接受并如实记录）→ 否则 `Validation`。
 5. **CSR**：见 §7.4.4。→ 否则 `Validation`（指针 `/csr`）。令牌在 CSR 校验失败时**不**被消耗（令牌只在签发成功后失效），但失败计入第 2 步之外的限流（`api` 按源 IP，5/min）。
 6. **单一写事务**：
-   1. 角色：同一写事务里 `tx.read().devices(limit 1)` 为空（**含已吊销的设备也算存在**）→ `approver`，否则 `operator`（P-23）；但 `platform = ios` 恒为 `operator`（P-76，即使是第一台；此时安装引导期持续到第一台桌面设备配对，由它成为 approver，decisions D-18）。单写者串行化保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。该口径对"唯一 approver 被吊销后重新配对"的后果见 OQ-K11。
+   1. 角色（P-23、P-76、D-18）：`platform = ios` 恒为 `operator`，即使是第一台设备。桌面档案（`windows` / `macos`）：同一写事务里读到库中**从未有过任何桌面档案设备**（**已吊销的也算有过**）→ 本台成为 `approver`，否则 `operator`。所以先配手机、再配桌面时，第一台桌面设备成为 `approver`；安装引导期也持续到这一刻（§6.2 `bootstrap_period`）。判定只看"是否有过桌面设备"，不看"当前有没有 approver"：唯一的桌面 approver 被吊销或降级后，新配对的桌面设备仍是 `operator`，审批能力只能用 `gantry device recover --promote` 恢复（OQ-K11）。单写者串行化保证"第一台"唯一（并发两次首配对只会有一台 `approver`）。
    2. 生成 `dev_<ULID>`、序列号；用中间 CA 私钥签发设备叶子（§7.1）。
    3. 追加 `device.paired`：`data = {device_id, name, platform, role, cert_serial, pubkey_fpr, approval_pubkey, approval_pubkey_fpr}`（`store` 的 `devices` 投影据此落库，`status = active`）；`actor = {kind: "system", id: "pki"}`；`project_id = null`。
    4. 同一事务经 `module_conn("pki")` 写 `pki_device_certs`（`active`）、`pki_device_state`（`pubkey_spki`）；会话置 `redeemed`，写入 `redeemed_device_id` 与 `confirmation_code`。
@@ -437,7 +437,7 @@ pub trait PkiControl: Send + Sync {
 | 根私钥不常驻 | `bootstrap` 只在内存持有根私钥，加密导出后 `zeroize`；`Pki::open` 启动自检：数据目录与 `secrets/` 中若存在与根证书公钥匹配的私钥 → 拒绝启动并提示"根私钥必须离线保存" |
 | 中间 CA 私钥隔离 | 只经 `secrets` 以使用方 `pki` 读取，`api`、`engine`、`sandbox` 等读不到；进程内以 `Zeroizing` 持有，日志与 `Debug` 输出不含密钥 |
 | 配对面最小化 | 单向 TLS 面只有 `POST /v1/pair` 一条路由；窗口外端口关闭；令牌高熵、短 TTL、单次、失败即作废、只存哈希、恒定时间比较；`401 pair_token_invalid` 统一，不给枚举 oracle；配对失败是安全信号，单独计数告警（api.md §1.3 第 4 点） |
-| 防"抢先配对" | 令牌带外传递且单次；确认码 + 终端显示设备名与指纹让管理员核对；首台设备成为 approver 之后，其余设备默认 `operator`（P-23），抢注的设备也不能审批 |
+| 防"抢先配对" | 令牌带外传递且单次；确认码 + 终端显示设备名与指纹让管理员核对；首台桌面设备成为 approver 之后，其余设备默认 `operator`（P-23、D-18）；approver 被吊销或降级也不会让后来配对的设备自动成为 approver（OQ-K11），抢注的设备不能审批 |
 | 防权限提升 | 签发的叶子参数完全由服务端决定（忽略 CSR 的 CA 位 / EKU / SAN）；`CA:FALSE`、`EKU: clientAuth` 固定；不能自助改角色 / 自吊销以外的操作 |
 | 吊销失败即关闭 | 握手时序列号不在册 → 拒绝；吊销无缓存；会话恢复 / 0-RTT 禁用（`api`）；吊销先写 `revocations.journal` 再提交，备份恢复不会让被吊销设备复活（P-67） |
 | 终端注入 | 设备名由未认证方提供，打印到管理员终端前剥离控制字符与 ANSI 转义；`gantry device recover list` 同样处理 |
@@ -522,7 +522,7 @@ pub trait PkiControl: Send + Sync {
 **配对（M1）**
 
 - [ ] 成功路径：令牌 + 合法 CSR + `approval_pubkey` → `201`，含 api.md §1.3 列出的全部字段（`certificate_chain` 三张，末张的 DER 指纹等于 `ca_fingerprint`）；Device 的 `approval_pubkey_fpr` 正确；`store` 的 `devices` 投影与 `pki_device_certs`、`pki_device_state` 各一行；一条 `device.paired`；`confirmation_code` 为 6 位数字且与会话行一致。
-- [ ] 第一台设备 `role = approver`，第二台起 `operator`；两个并发的首次配对恰好产生一台 `approver`。
+- [ ] 第一台桌面设备 `role = approver`，第二台起 `operator`；先配手机（`operator`）、再配桌面，桌面成为 `approver`（D-18）；两个并发的首次桌面配对恰好产生一台 `approver`。
 - [ ] 令牌：单次有效（第二次兑换 `401`）；过期（`FakeClock` 推进 10 分钟）→ `401`；作废（5 次错误）→ `401`；无效 / 已用 / 过期 / 作废四种情形的 `401` 响应体与头**逐字节相同**。
 - [ ] 数据库与日志中搜不到明文令牌（扫描库文件与捕获的 `tracing` 输出）；库里只有 SHA-256。
 - [ ] 新会话作废旧会话：旧令牌立即 `401`。
@@ -535,7 +535,7 @@ pub trait PkiControl: Send + Sync {
 - [ ] 配对窗口：存在 `open` 会话时 `window()` 为 `Some`；兑换成功 / 作废 / 过期 / 取消后 1 秒内变为 `None`（与 `api` 联调：窗口外配对端口拒绝连接）。
 - [ ] 令牌兑换成功后，用返回的证书对 mTLS 监听器做一次握手 + `GET /v1/me` 成功（与 `api` 联调，M1 退出标准的前置）。
 - [ ] 配对串编码往返测试（待 OQ-K3 契约后补测试向量）；客户端用 `fp` 钉扎离线根 CA 指纹，错误指纹的服务端被拒（模拟中间人）。
-- [ ] 引导期：库为空时 `bootstrap_period() = true`；首台设备配对后为 `false`，吊销全部设备后仍为 `false`（P-66）。
+- [ ] 引导期：库为空时 `bootstrap_period() = true`；只配过手机时仍为 `true`（D-18）；首台桌面设备配对后为 `false`，吊销全部设备后仍为 `false`（P-66）。
 
 **握手校验（M1）**
 
@@ -568,7 +568,7 @@ pub trait PkiControl: Send + Sync {
 
 - [ ] 非 root 运行 `recover` → 拒绝、退出码非 0、数据库与控制套接字零触碰。
 - [ ] root：`revoke` 吊销目标设备，事件 `actor = {system, host_recover}`、`data.via = "host_recover"`；`promote` 把一台 `operator` 提升为 `approver`；`list` 输出已剥离控制字符。
-- [ ] 吊销唯一的 approver 后，新配对的设备是 `operator`（不是 approver，OQ-K11），用 `promote` 恢复审批能力；在线模式下被吊销设备的事件流在 ≤ 15 s（心跳）内关闭，无需重启。
+- [ ] 吊销（或降级）唯一的 approver 后，新配对的桌面设备是 `operator`（不是 approver，OQ-K11），用 `promote` 恢复审批能力；在线模式下被吊销设备的事件流在 ≤ 15 s（心跳）内关闭，无需重启。
 - [ ] 两种模式都覆盖：**在线**（守护进程运行，经 `PkiControl` 执行，不打开数据库、不触发 `AlreadyRunning`）与**离线**（守护进程停止，`recover` 直接 `Store::open`，之后数据目录的文件属主仍是服务用户，守护进程可继续读写）；守护进程运行时尝试离线模式 → 得到 `AlreadyRunning` 并提示改用在线模式。
 - [ ] 幂等：重复吊销 / 重复提升不重复发事件。
 
@@ -602,5 +602,5 @@ pub trait PkiControl: Send + Sync {
 | OQ-K8 | **已决：见裁决 C1 / P-47**（双密钥：配对同时提交 CSR 与 `approval_pubkey`，审批一律用审批签名密钥，服务端用登记的 `approval_pubkey` 验签）。原问题：审批签名密钥是否与 mTLS 密钥分开 | 已落实到 §6.2、§6.3、§7.4.3 | — |
 | OQ-K9 | 同一公钥重复配对的处置（本文：拒绝）；已吊销设备的公钥是否允许再次配对 | 仅拒绝与 `active` 设备重复 | — |
 | OQ-K10 | 服务端叶子私钥由 `secrets` 托管（本文：是，使用方 `Consumer::Pki`，secrets.md §6）；`secrets` 的 `stage` / `commit` 是否也用于叶子私钥续签的原子切换（先 `stage` 新私钥，证书入库后 `commit`） | 续签时 `stage` → 写 `pki_server_cert` → `commit` | `secrets` 规格 |
-| OQ-K11 | "第一台设备为 approver"的口径（deploy.md OPS-16）：本文按"设备表里从未有过任何设备"判定（含已吊销者）。后果：用 `gantry device recover --revoke` 吊销唯一的 approver 后，重新配对的设备是 `operator`，必须再 `--promote`。是否应改为"当前没有 `active` 的 approver"则新设备成为 approver（更省事，但抬高了抢先配对的风险） | 按"从未有过设备"；恢复靠 `--promote` | `deploy` 运行手册、P-23 的解读 |
+| OQ-K11 | "第一台设备为 approver"的口径（deploy.md OPS-16）：本文按"库里从未有过任何桌面档案设备"判定（含已吊销者；手机不计，D-18）。后果：吊销或降级唯一的 approver 后，重新配对的桌面设备是 `operator`，必须再 `--promote`。是否应改为"当前没有 `active` 的 approver"则新设备成为 approver（更省事，但抬高了抢先配对的风险） | 按"从未有过桌面设备"（协调会话 2026-10-27 在 #98 确认，不采用"当前没有 approver"的口径）；恢复靠 `--promote` | `deploy` 运行手册、P-23 的解读 |
 | OQ-K12 | 设备续期换证 / 换钥时 `device.updated` 要带哪些字段才能让 `store` 的 `devices` 投影更新 `cert_serial` / `pubkey_fpr`；`pubkey_spki` 是否也应进事件（目前只在 `pki_device_state`，备份恢复后可由证书重建）；`approval_pubkey` 进事件（Device 派生列） | 事件带 `changed: {cert_serial, pubkey_fpr}`；`pubkey_spki` 不进事件 | `schemas/events/device.*`、`store` |
