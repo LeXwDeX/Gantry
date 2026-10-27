@@ -99,6 +99,10 @@ struct GithubState {
     app_id: Option<u64>,
     /// 替身时钟：每次 PR 变化前进一秒，产生 `created_at` / `updated_at` / `closed_at`。
     tick: i64,
+    /// App Manifest 转换：`code -> 响应`（一次性，转换后删除，同 GitHub）。
+    manifests: HashMap<String, Value>,
+    /// `GET /users/{login}` 的用户：`login -> id`。
+    users: HashMap<String, i64>,
 }
 
 /// M0 的 GitHub 替身。
@@ -135,6 +139,8 @@ impl FakeGitHub {
             next_comment: 1,
             app_id: None,
             tick: 0,
+            manifests: HashMap::new(),
+            users: HashMap::new(),
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -203,6 +209,16 @@ impl FakeGitHub {
     /// 已签发的安装令牌数。
     pub fn issued_tokens(&self) -> u64 {
         self.lock().issued_tokens
+    }
+
+    /// 登记一个 Manifest 转换结果（`POST /app-manifests/{code}/conversions` 的 201 响应体）。
+    pub fn set_manifest_conversion(&self, code: &str, response: Value) {
+        self.lock().manifests.insert(code.to_owned(), response);
+    }
+
+    /// 登记一个可经 `GET /users/{login}` 查到的用户。
+    pub fn set_user(&self, login: &str, id: i64) {
+        self.lock().users.insert(login.to_owned(), id);
     }
 
     /// 设置远端分支 head（模拟推送）。
@@ -1092,6 +1108,25 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 200,
                 body: Value::Array(comments).to_string(),
                 retry_after_s: None,
+            }
+        }
+        ("POST", ["app-manifests", code, "conversions"]) => match state.manifests.remove(*code) {
+            Some(body) => Response {
+                status: 201,
+                body: body.to_string(),
+                retry_after_s: None,
+            },
+            None => not_found(),
+        },
+        ("GET", ["users", login]) => {
+            let login = percent_decode(login);
+            match state.users.get(&login) {
+                Some(id) => Response {
+                    status: 200,
+                    body: json!({"login": login, "id": id, "type": "Bot"}).to_string(),
+                    retry_after_s: None,
+                },
+                None => not_found(),
             }
         }
         ("POST", ["graphql"]) => {

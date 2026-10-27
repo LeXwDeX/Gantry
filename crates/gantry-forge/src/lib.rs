@@ -21,7 +21,9 @@
 //! - 归一化与自身事件归因：[`Dispatcher`]（回读 → 快照差异 → `forge.<kind>` + `forge.synced`，
 //!   `forge_effect_index` 归因与绑定，forge.md §7.5–§7.6）。
 //!
-//! 对账 / drift、`/setup/github/callback`、惩罚期持久化在后续切片。
+//! - App 创建回调：[`setup::SetupService`]（`/setup/github/callback`，forge.md §7.14）。
+//!
+//! 对账 / drift 在后续切片。
 //!
 //! 已知限制（M1 切片内）：
 //! - 只接受 M1 的 5 个动作（forge.md §1.1）；其余 9 个动作在 M2 起开放，入队时拒绝。
@@ -36,6 +38,7 @@ mod github;
 pub mod normalize;
 mod outbox;
 mod reader;
+pub mod setup;
 pub mod webhook;
 
 pub use auth::app::{AppAuthDeps, AppAuthOptions, AppTokenProvider, PermissionReport};
