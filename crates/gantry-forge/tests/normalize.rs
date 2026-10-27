@@ -14,9 +14,12 @@ use std::time::Duration;
 use gantry_core::canon::{sha256, GitOid, RepoSlug};
 use gantry_core::entities::{Actor, ActorKind, ForgeEventKind, MergeMethod, Priority, Project};
 use gantry_core::events::{Event, EventType, Subject};
+use gantry_core::forge::DriftDetectedBy;
 use gantry_core::forge::{ActionPayload, CreatePrPayload};
 use gantry_core::ids::{ActionId, Id, IdGen, IdKind, Prj, Ulid};
-use gantry_core::ports::{ActorCtx, EnqueueRequest, EnqueuedBy, EnqueuedByModule, OutboxPort};
+use gantry_core::ports::{
+    ActorCtx, DriftKind, EnqueueRequest, EnqueuedBy, EnqueuedByModule, OutboxPort, ReconcileTarget,
+};
 use gantry_core::secret::SecretString;
 use gantry_core::testing::{FakeClock, SeqEntropy};
 use gantry_core::time::Timestamp;
@@ -532,4 +535,134 @@ async fn webhook_before_github_ref_is_still_self() {
         opened[0].data["caused_by_action"],
         json!(action.to_string())
     );
+}
+
+/// §12 A：丢弃一个 `pull_request.closed` 投递 → 巡检补发 `pr_merged(source=reconcile)` 并追加
+/// `forge.synced`；`dedup_key` 与 webhook 路径一致，再投递原 webhook 不产生第二个事件。
+#[tokio::test]
+async fn reconcile_recovers_a_dropped_close_and_dedups_with_the_late_webhook() {
+    let h = Harness::new();
+    let (_, n) = h.create_own_pr().await;
+    h.deliver("pull_request", h.pr_payload("opened", n, h.bot))
+        .await;
+    h.dispatcher().drain().await.unwrap();
+
+    // 有人在 GitHub 上合并了 PR，但 closed 投递丢了。
+    h.github.set_pull_merged(REPO, n);
+    let report = h
+        .dispatcher()
+        .reconcile(
+            ReconcileTarget::Project(id::<Prj>(1)),
+            DriftDetectedBy::Patrol,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.emitted.len(), 2, "pr_merged + forge.synced");
+    let events = h.forge_events().await;
+    let merged = of_kind(&events, ForgeEventKind::PrMerged);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].data["source"], "reconcile");
+    assert_eq!(merged[0].data["delivery_ids"], json!([]));
+    let merge_sha = merged[0].data["data"]["merge_commit_sha"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        merged[0].data["dedup_key"],
+        json!(format!("pr_merged:{REPO}:{n}:{merge_sha}"))
+    );
+    let synced = events.last().unwrap();
+    assert_eq!(synced.ty, EventType::ForgeSynced);
+    assert_eq!(synced.data["source"], "reconcile");
+    assert_eq!(synced.data["changes"][0]["field"], "state");
+    assert_eq!(synced.data["changes"][0]["to"], "merged");
+
+    // 原 webhook 晚到：快照已更新，不产生第二个事件。
+    let before = h.forge_events().await.len();
+    h.deliver("pull_request", h.pr_payload("closed", n, HUMAN))
+        .await;
+    assert!(matches!(
+        h.dispatcher().drain().await.unwrap().as_slice(),
+        [DispatchOutcome::Done { events: 0, .. }]
+    ));
+    assert_eq!(h.forge_events().await.len(), before);
+
+    // 已合并的 PR 不再在巡检范围内。
+    let again = h
+        .dispatcher()
+        .reconcile(
+            ReconcileTarget::Project(id::<Prj>(1)),
+            DriftDetectedBy::Patrol,
+        )
+        .await
+        .unwrap();
+    assert!(again.emitted.is_empty());
+}
+
+/// §12 A：人在 GitHub 上推了一个提交 → `forge.drift_detected(head_diverged)` +
+/// `pr_synchronized(origin=external)`。
+#[tokio::test]
+async fn human_push_after_gantry_push_is_head_diverged() {
+    let h = Harness::new();
+    let (action, n) = h.create_own_pr().await;
+    h.deliver("pull_request", h.pr_payload("opened", n, h.bot))
+        .await;
+    h.dispatcher().drain().await.unwrap();
+    // 白盒：写入"该分支最近一次成功的 push_branch"（执行器成功推送时写的行，见 effects.rs）。
+    let mut tx = h.store.begin_write().await.unwrap();
+    tx.module_conn(MODULE)
+        .put(
+            "forge_effect_index",
+            &format!("push|{REPO}|{HEAD}"),
+            &json!({
+                "action_id": action.to_string(),
+                "delivery_id": id::<gantry_core::ids::Dlv>(2).to_string(),
+                "head_sha": oid("head-1").to_string(),
+            }),
+        )
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    h.github
+        .set_pull_head(REPO, n, &oid("human-commit").to_string());
+    let report = h
+        .dispatcher()
+        .reconcile(
+            ReconcileTarget::Pr {
+                project: id::<Prj>(1),
+                number: n,
+            },
+            DriftDetectedBy::Patrol,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.drifts, vec![DriftKind::HeadDiverged]);
+    let events = h.forge_events().await;
+    let synced = of_kind(&events, ForgeEventKind::PrSynchronized);
+    assert_eq!(synced.len(), 1);
+    assert_eq!(synced[0].data["origin"], "external");
+    assert_eq!(synced[0].data["source"], "reconcile");
+    let drift: Vec<_> = events
+        .iter()
+        .filter(|event| event.ty == EventType::ForgeDriftDetected)
+        .collect();
+    assert_eq!(drift.len(), 1);
+    assert_eq!(drift[0].data["kind"], "head_diverged");
+    assert_eq!(
+        drift[0].data["expected"]["head_sha"],
+        json!(oid("head-1").to_string())
+    );
+    assert_eq!(
+        drift[0].data["expected"]["basis_action"],
+        json!(action.to_string())
+    );
+    assert_eq!(
+        drift[0].data["actual"]["head_sha"],
+        json!(oid("human-commit").to_string())
+    );
+    assert_eq!(
+        drift[0].data["synthesized_events"],
+        json!(["pr_synchronized"])
+    );
+    assert_eq!(drift[0].data["detected_by"], "patrol");
 }
