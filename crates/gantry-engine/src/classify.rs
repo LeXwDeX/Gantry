@@ -15,6 +15,10 @@ pub enum PatchCheck {
     Invalid,
     /// 机械拒绝或策略拒绝，`detail` 为 `policy.*` 子码（如 `policy.path_protected:workflows`）。
     Denied { detail: String },
+    /// `repo` 判定 base 冲突（P10）：工作树分支头已前移，不自动 rebase。worker-protocol §9 的
+    /// 词表没有对应子码；暂记 `infra.base_conflict`，按 `infra.*` 重新派发（engine.md §7.8 V5 行
+    /// "用新的 `base_sha` 重新派发，计一次重试"）。
+    BaseConflict,
 }
 
 /// 分类所需的全部事实：运行时事实来自 `JobOutcome`，其余是 V2–V5 的结论。
@@ -133,6 +137,9 @@ pub fn classify(facts: &RunFacts) -> Classification {
         }
         PatchCheck::Denied { detail } => {
             return Classification::fail(FailureClass::PolicyDenied, detail.clone())
+        }
+        PatchCheck::BaseConflict => {
+            return Classification::fail(FailureClass::InfraError, "infra.base_conflict")
         }
     }
     // 9. gate 的 verdict ≠ ACCEPT → verdict.*（不是重试，按 §7.5 进入图的迭代）。

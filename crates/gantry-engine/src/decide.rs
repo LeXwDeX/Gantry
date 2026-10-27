@@ -207,6 +207,7 @@ pub enum EffectErrorClass {
 }
 
 /// AttemptRunner 走完 V1–V6 后的结论。
+#[derive(Clone, Debug)]
 pub struct Finalized {
     pub attempt_id: AttemptId,
     pub node_id: NodeId,
@@ -216,6 +217,8 @@ pub struct Finalized {
     pub result_ref: Option<Sha256Digest>,
     pub usage_metered: TokenUsage,
     pub weighted_tokens: u64,
+    /// `JobToken { config_rev, weights }`：组装 SandboxSpec 时所用的修订与权重（§7.14.2，#72）。
+    pub weight_audit: gantry_core::events::WeightAudit,
     pub wall_time_s: u64,
     pub verdict: Option<Verdict>,
     pub patch: PatchResult,
@@ -223,6 +226,7 @@ pub struct Finalized {
     pub signals: OutputSignals,
 }
 
+#[derive(Clone, Debug)]
 pub enum PatchResult {
     None,
     NoChange,
@@ -248,6 +252,7 @@ pub enum PatchResult {
     },
 }
 
+#[derive(Clone, Debug)]
 pub struct ProposalOutcome {
     pub proposal_id: String,
     pub decision: ProposalDecision,

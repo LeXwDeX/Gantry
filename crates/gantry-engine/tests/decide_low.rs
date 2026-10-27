@@ -419,6 +419,7 @@ fn finalized(sim: &Sim, proposals: Vec<ProposalOutcome>) -> Finalized {
         result_ref: Some(serde_json::from_value(json!(RESULT_REF)).unwrap()),
         usage_metered: TokenUsage::default(),
         weighted_tokens: 0,
+        weight_audit: serde_json::from_value(json!({"basis": "job_token", "config_rev": 1, "weights": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25}})).unwrap(),
         wall_time_s: 120,
         verdict: None,
         patch: PatchResult::Committed {
@@ -1622,4 +1623,50 @@ fn budget_cap_raises_budget_exhausted() {
     assert_eq!(open_kinds(&sim), vec![InboxKind::BudgetExhausted]);
     assert_eq!(sim.state.ledger.exhausted.len(), 1);
     assert!(!sim.state.may_dispatch());
+}
+
+/// §12.2"预算与计量"（决策部分）：终结时按 Egress 计量写 tokens_by_tier 的 budget.charged，
+/// 加权口径（weight_audit）取自 Finalized，即组装 SandboxSpec 时那份（#72、#220）。
+#[test]
+fn finalize_charges_metered_tokens_with_weight_audit() {
+    let mut sim = dispatched();
+    let mut f = finalized(&sim, vec![]);
+    f.usage_metered = serde_json::from_value(json!({"input_tokens": 18200, "output_tokens": 2400, "cache_read_tokens": 9000, "cache_write_tokens": 1200, "requests": 1})).unwrap();
+    f.weighted_tokens = 32600;
+    let attempt = f.attempt_id;
+    let audit = f.weight_audit.clone();
+    sim.external(
+        "patch.validated",
+        &attempt.to_string(),
+        json!({"job_id": attempt, "sha256": PATCH_SHA, "base_sha": BASE_SHA, "result_tree": TREE,
+               "verdict": "allow", "files": [], "reasons": [], "config_rev": 1}),
+    );
+    let decisions = sim.decide(
+        Input::Report(EffectReport::AttemptFinalized(f.clone())),
+        InputIdentity::Report(EffectKey::Run(attempt)),
+    );
+    let charge = decisions
+        .iter()
+        .find_map(|d| match d {
+            Decision::Append(e)
+                if e.ty == EventType::BudgetCharged && e.data["dimension"] == "tokens_by_tier" =>
+            {
+                Some(e.data.clone())
+            }
+            _ => None,
+        })
+        .expect("tokens_by_tier charge");
+    assert_eq!(charge["delta"], 32600);
+    assert_eq!(charge["used_after"], 32600);
+    assert_eq!(charge["tier"], "worker");
+    assert_eq!(charge["usage"]["input_tokens"], 18200);
+    assert_eq!(
+        charge["weight_audit"],
+        serde_json::to_value(&audit).unwrap()
+    );
+    sim.report(EffectReport::AttemptFinalized(f), EffectKey::Run(attempt));
+    assert_eq!(
+        sim.state.ledger.used.tokens_by_tier.get(&Tier::Worker),
+        Some(&32600)
+    );
 }

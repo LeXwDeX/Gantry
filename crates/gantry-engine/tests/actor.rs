@@ -515,6 +515,7 @@ impl Harness {
             result_ref: Some(serde_json::from_value(json!(PATCH_SHA)).unwrap()),
             usage_metered: TokenUsage::default(),
             weighted_tokens: 0,
+            weight_audit: serde_json::from_value(json!({"basis": "job_token", "config_rev": 1, "weights": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25}})).unwrap(),
             wall_time_s: 60,
             verdict: None,
             patch: PatchResult::Committed {
