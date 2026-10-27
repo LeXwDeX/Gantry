@@ -557,7 +557,12 @@ async fn reconcile_recovers_a_dropped_close_and_dedups_with_the_late_webhook() {
         )
         .await
         .unwrap();
-    assert_eq!(report.emitted.len(), 2, "pr_merged + forge.synced");
+    assert_eq!(
+        report.emitted.len(),
+        3,
+        "pr_merged + drift(pr_state_diverged) + forge.synced"
+    );
+    assert_eq!(report.drifts, vec![DriftKind::PrStateDiverged]);
     let events = h.forge_events().await;
     let merged = of_kind(&events, ForgeEventKind::PrMerged);
     assert_eq!(merged.len(), 1);
@@ -571,6 +576,13 @@ async fn reconcile_recovers_a_dropped_close_and_dedups_with_the_late_webhook() {
         merged[0].data["dedup_key"],
         json!(format!("pr_merged:{REPO}:{n}:{merge_sha}"))
     );
+    let drift: Vec<_> = events
+        .iter()
+        .filter(|event| event.ty == EventType::ForgeDriftDetected)
+        .collect();
+    assert_eq!(drift[0].data["kind"], "pr_state_diverged");
+    assert_eq!(drift[0].data["synthesized_events"], json!(["pr_merged"]));
+    assert_eq!(drift[0].data["actual"]["state"], "merged");
     let synced = events.last().unwrap();
     assert_eq!(synced.ty, EventType::ForgeSynced);
     assert_eq!(synced.data["source"], "reconcile");
@@ -665,4 +677,218 @@ async fn human_push_after_gantry_push_is_head_diverged() {
         json!(["pr_synchronized"])
     );
     assert_eq!(drift[0].data["detected_by"], "patrol");
+}
+
+/// 评审：`review_submitted`（针对旧 head 的标 `stale`）、`forge.synced(review_state)`、
+/// `review_dismissed`。
+#[tokio::test]
+async fn reviews_are_normalized_and_drive_review_state() {
+    let h = Harness::new();
+    let (_, n) = h.create_own_pr().await;
+    h.deliver("pull_request", h.pr_payload("opened", n, h.bot))
+        .await;
+    h.dispatcher().drain().await.unwrap();
+
+    let review_id = h.github.add_review(
+        REPO,
+        n,
+        ("alice", 7),
+        "CHANGES_REQUESTED",
+        &oid("head-1").to_string(),
+    );
+    let mut payload = h.pr_payload("submitted", n, 7);
+    payload["review"] = json!({
+        "id": review_id,
+        "state": "changes_requested",
+        "commit_id": oid("head-1").to_string(),
+        "submitted_at": "2023-11-14T23:00:00Z",
+        "user": {"login": "alice", "id": 7, "type": "User"},
+        "body": "please add a test"
+    });
+    h.deliver("pull_request_review", payload).await;
+    h.dispatcher().drain().await.unwrap();
+    let events = h.forge_events().await;
+    let reviews = of_kind(&events, ForgeEventKind::ReviewSubmitted);
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].data["data"]["state"], "changes_requested");
+    assert_eq!(reviews[0].data["stale"], json!(false));
+    assert_eq!(reviews[0].data["origin"], "external");
+    assert_eq!(
+        reviews[0].data["dedup_key"],
+        json!(format!("review:{REPO}:{review_id}"))
+    );
+    let synced = events.last().unwrap();
+    assert_eq!(synced.ty, EventType::ForgeSynced);
+    assert_eq!(synced.data["changes"][0]["field"], "review_state");
+    assert_eq!(synced.data["changes"][0]["to"], "changes_requested");
+
+    let mut dismissed = h.pr_payload("dismissed", n, HUMAN);
+    dismissed["review"] = json!({"id": review_id, "state": "dismissed"});
+    h.deliver("pull_request_review", dismissed).await;
+    h.dispatcher().drain().await.unwrap();
+    assert_eq!(
+        of_kind(&h.forge_events().await, ForgeEventKind::ReviewDismissed).len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn check_run_for_an_old_head_is_stale() {
+    let h = Harness::new();
+    let (_, n) = h.create_own_pr().await;
+    h.deliver("pull_request", h.pr_payload("opened", n, h.bot))
+        .await;
+    h.github.set_pull_head(REPO, n, &oid("head-2").to_string());
+    h.deliver("pull_request", h.pr_payload("synchronize", n, HUMAN))
+        .await;
+    h.dispatcher().drain().await.unwrap();
+    h.deliver(
+        "check_run",
+        json!({
+            "action": "completed",
+            "check_run": {
+                "id": 31, "name": "test", "head_sha": oid("head-1").to_string(),
+                "conclusion": "failure", "completed_at": "2023-11-14T23:10:00Z",
+                "check_suite": {"id": 7},
+                "app": {"id": 15368, "slug": "github-actions"},
+                "output": {"title": "1 failed", "summary": "x".repeat(10), "annotations_count": 2},
+                "pull_requests": [{"number": n}]
+            },
+            "installation": {"id": 42},
+            "repository": {"full_name": REPO},
+            "sender": {"login": "github-actions[bot]", "id": 41898282, "type": "Bot"}
+        }),
+    )
+    .await;
+    h.dispatcher().drain().await.unwrap();
+    let events = h.forge_events().await;
+    let runs = of_kind(&events, ForgeEventKind::CheckRunCompleted);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].data["stale"], json!(true));
+    assert_eq!(runs[0].data["data"]["annotations_count"], json!(2));
+    assert_eq!(runs[0].data["origin"], "external");
+}
+
+#[tokio::test]
+async fn installation_and_repository_events_are_system_events() {
+    let h = Harness::new();
+    h.deliver(
+        "installation",
+        json!({
+            "action": "new_permissions_accepted",
+            "installation": {"id": 42},
+            "sender": {"login": "octocat", "id": HUMAN, "type": "User"}
+        }),
+    )
+    .await;
+    h.deliver(
+        "repository",
+        json!({
+            "action": "edited",
+            "changes": {"default_branch": {"from": "master"}},
+            "repository": {"full_name": REPO, "default_branch": "main"},
+            "installation": {"id": 42},
+            "sender": {"login": "octocat", "id": HUMAN, "type": "User"}
+        }),
+    )
+    .await;
+    h.dispatcher().drain().await.unwrap();
+    let events = h.forge_events().await;
+    let installation = of_kind(&events, ForgeEventKind::InstallationChanged);
+    assert_eq!(installation.len(), 1);
+    assert_eq!(
+        installation[0].data["data"]["action"],
+        "new_permissions_accepted"
+    );
+    assert!(installation[0].data["dedup_key"]
+        .as_str()
+        .unwrap()
+        .starts_with("inst:42:new_permissions_accepted:"));
+    let repo = of_kind(&events, ForgeEventKind::RepoChanged);
+    assert_eq!(repo.len(), 1);
+    assert_eq!(repo[0].data["data"]["default_branch"], "main");
+    // ForgeEventEnvelope.occurred_at 序列化为三位毫秒 + `Z`（§12 A）。
+    for event in events
+        .iter()
+        .filter(|event| matches!(event.ty, EventType::Forge(_)))
+    {
+        let occurred = event.data["occurred_at"].as_str().unwrap();
+        assert_eq!(
+            occurred.len(),
+            "2023-11-14T22:13:20.000Z".len(),
+            "{occurred}"
+        );
+        assert!(occurred.ends_with('Z') && occurred.as_bytes()[19] == b'.');
+    }
+}
+
+/// 分发器启动扫描（forge.md §7.4 末段）：崩溃时停在 processing 的行重新入队并处理。
+#[tokio::test]
+async fn recover_requeues_rows_left_in_processing() {
+    let h = Harness::new();
+    let (_, n) = h.create_own_pr().await;
+    let delivery = h
+        .deliver("pull_request", h.pr_payload("opened", n, h.bot))
+        .await;
+    // 模拟"标 processing 后崩溃"。
+    let mut tx = h.store.begin_write().await.unwrap();
+    let mut row: InboxRow = tx
+        .module_conn(MODULE)
+        .get(INBOX_TABLE, &delivery)
+        .unwrap()
+        .unwrap();
+    row.status = InboxStatus::Processing;
+    tx.module_conn(MODULE)
+        .put(INBOX_TABLE, &delivery, &row)
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(h.dispatcher().drain().await.unwrap().is_empty());
+
+    assert_eq!(h.dispatcher().recover().await.unwrap(), 1);
+    h.dispatcher().drain().await.unwrap();
+    assert_eq!(
+        of_kind(&h.forge_events().await, ForgeEventKind::PrOpened).len(),
+        1
+    );
+}
+
+/// `ForgeReader::reconcile_now` 交给分发器（on_demand）。
+#[tokio::test]
+async fn reconcile_now_runs_through_the_reader() {
+    use gantry_core::ports::ForgeReader;
+    let h = Harness::new();
+    let (_, n) = h.create_own_pr().await;
+    h.deliver("pull_request", h.pr_payload("opened", n, h.bot))
+        .await;
+    h.dispatcher().drain().await.unwrap();
+    h.github.set_pull_state(REPO, n, "closed");
+    let reader = h.forge.reader(gantry_forge::ReaderDeps {
+        tokens: Arc::new(StaticTokenProvider::new(SecretString::new(
+            "ghs_read".into(),
+        ))),
+        api_base: h.github.base_url(),
+        clock: h.clock.clone(),
+        http_timeout: Duration::from_secs(5),
+        reconciler: Some(Arc::new(h.dispatcher())),
+    });
+    let report = reader
+        .reconcile_now(
+            ReconcileTarget::Pr {
+                project: id::<Prj>(1),
+                number: n,
+            },
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.drifts, vec![DriftKind::PrStateDiverged]);
+    let events = h.forge_events().await;
+    let closed = of_kind(&events, ForgeEventKind::PrClosed);
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].data["source"], "reconcile");
+    let drift: Vec<_> = events
+        .iter()
+        .filter(|event| event.ty == EventType::ForgeDriftDetected)
+        .collect();
+    assert_eq!(drift[0].data["detected_by"], "on_demand");
 }

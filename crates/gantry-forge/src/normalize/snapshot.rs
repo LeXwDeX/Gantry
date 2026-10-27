@@ -48,6 +48,13 @@ pub struct PrSnap {
     pub labels: Vec<String>,
     pub mergeable_state: String,
     pub head_epoch: u64,
+    /// §7.5 第 7 点的口径（REST reviews 推出）；旧行没有该字段时取 `none`。
+    #[serde(default = "no_review")]
+    pub review_state: ReviewState,
+}
+
+fn no_review() -> ReviewState {
+    ReviewState::None
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +64,12 @@ pub struct IssueSnap {
     pub state: ForgeSyncedState,
     pub state_reason: Option<IssueStateReason>,
     pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub assignees: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +81,7 @@ fn title_text(title: &str, kind: &str) -> UntrustedText {
     UntrustedText::new(title.to_owned(), format!("github:{kind}.title"), false)
 }
 
-/// M1 还没有回读 checks / review 汇总（GraphQL 回读随后续切片）：首次快照用保守值。
+/// M1 还没有回读 checks 汇总（需要 GraphQL / check-runs 回读）：快照用保守值。
 fn pending_checks() -> CheckSummary {
     CheckSummary {
         passed: 0,
@@ -90,7 +103,7 @@ impl PrSnap {
             mergeable_state: self.mergeable_state.clone(),
             in_merge_queue: false,
             checks: pending_checks(),
-            review_state: ReviewState::None,
+            review_state: self.review_state.clone(),
         }
     }
 
@@ -137,6 +150,12 @@ impl PrSnap {
             out.push(ForgeSyncedChange::MergeableState {
                 from: self.mergeable_state.clone(),
                 to: next.mergeable_state.clone(),
+            });
+        }
+        if self.review_state != next.review_state {
+            out.push(ForgeSyncedChange::ReviewState {
+                from: self.review_state.clone(),
+                to: next.review_state.clone(),
             });
         }
         out

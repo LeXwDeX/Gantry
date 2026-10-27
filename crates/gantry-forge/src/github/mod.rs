@@ -321,6 +321,27 @@ impl GithubClient {
         serde_json::from_slice(&response.body).map_err(|error| ApiError::Decode(error.to_string()))
     }
 
+    /// PR 的 reviews（一页，最多 100 条；§7.5 第 7 点的 `review_state` 口径）。
+    pub async fn list_reviews(
+        &self,
+        token: &SecretString,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Vec<Value>, ApiError> {
+        match self
+            .json(
+                token,
+                "GET",
+                &format!("/repos/{repo}/pulls/{number}/reviews?per_page=100"),
+                None,
+            )
+            .await?
+        {
+            Value::Array(items) => Ok(items),
+            _ => Err(ApiError::Decode("reviews is not an array".into())),
+        }
+    }
+
     /// 远端分支 head；分支不存在返回 `None`。
     pub async fn branch_head(
         &self,
