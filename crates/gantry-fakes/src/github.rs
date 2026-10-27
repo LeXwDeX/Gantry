@@ -92,6 +92,9 @@ struct GithubState {
     /// 安装令牌响应里的 `expires_at`。
     token_expires_at: String,
     issued_tokens: u64,
+    /// `(repo, issue / PR number) -> 评论`（Issue 与 PR 对话区共用，同 GitHub）。
+    comments: HashMap<(String, u64), Vec<Value>>,
+    next_comment: u64,
 }
 
 /// M0 的 GitHub 替身。
@@ -124,6 +127,8 @@ impl FakeGitHub {
             installations: HashMap::new(),
             token_expires_at: DEFAULT_TOKEN_EXPIRES_AT.to_owned(),
             issued_tokens: 0,
+            comments: HashMap::new(),
+            next_comment: 1,
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -246,6 +251,48 @@ impl FakeGitHub {
         });
         state.issues.insert((repo.to_owned(), number), issue);
         number
+    }
+
+    /// 设置 Issue 或 PR 的标题与正文。
+    pub fn set_title_body(&self, repo: &str, number: u64, title: &str, body: &str) {
+        let mut state = self.lock();
+        let state = &mut *state;
+        let key = (repo.to_owned(), number);
+        for object in [state.pulls.get_mut(&key), state.issues.get_mut(&key)]
+            .into_iter()
+            .flatten()
+        {
+            object["title"] = json!(title);
+            object["body"] = json!(body);
+        }
+    }
+
+    /// 在 Issue / PR 对话区追加一条评论，返回评论 ID。`created_at` 为 RFC 3339。
+    pub fn add_comment(
+        &self,
+        repo: &str,
+        number: u64,
+        author: (&str, &str),
+        created_at: &str,
+        body: &str,
+    ) -> u64 {
+        let mut state = self.lock();
+        let id = state.next_comment;
+        state.next_comment += 1;
+        let (login, association) = author;
+        state
+            .comments
+            .entry((repo.to_owned(), number))
+            .or_default()
+            .push(json!({
+                "id": id,
+                "user": {"login": login},
+                "author_association": association,
+                "created_at": created_at,
+                "updated_at": created_at,
+                "body": body,
+            }));
+        id
     }
 
     pub fn pull(&self, repo: &str, number: u64) -> Option<Value> {
@@ -928,6 +975,48 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     retry_after_s: None,
                 },
                 None => not_found(),
+            }
+        }
+        ("GET", ["repos", owner, repo, "issues", number, "comments"]) => {
+            let full = format!("{owner}/{repo}");
+            let Some(number) = number.parse::<u64>().ok() else {
+                return not_found();
+            };
+            let key = (full, number);
+            if !state.issues.contains_key(&key) && !state.pulls.contains_key(&key) {
+                return not_found();
+            }
+            let query = parse_query(&request.path);
+            let per_page = query
+                .get("per_page")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(30)
+                .clamp(1, 100);
+            let page = query
+                .get("page")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1)
+                .max(1);
+            // RFC 3339 的 `Z` 形式按字节序即时间序；替身只接受这种形式。
+            let since = query.get("since").cloned();
+            let comments: Vec<Value> = state
+                .comments
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .filter(|comment| {
+                    since.as_deref().is_none_or(|since| {
+                        comment["updated_at"].as_str().unwrap_or_default() >= since
+                    })
+                })
+                .skip((page - 1) * per_page)
+                .take(per_page)
+                .cloned()
+                .collect();
+            Response {
+                status: 200,
+                body: Value::Array(comments).to_string(),
+                retry_after_s: None,
             }
         }
         ("POST", ["graphql"]) => {

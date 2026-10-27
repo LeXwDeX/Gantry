@@ -523,6 +523,7 @@ fn merge_request(requested_by: Actor) -> ActionRequest {
             },
         },
         requested_by,
+        epoch: 1,
     }
 }
 
@@ -597,6 +598,7 @@ async fn policy_decisions_and_approvals_are_single_use() {
             },
         },
         requested_by: actor(),
+        epoch: 1,
     };
     action_conformance(&policy, action.clone(), &ctx)
         .await

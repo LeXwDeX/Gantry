@@ -136,6 +136,7 @@ pub struct ActionRequest {
     pub kind: ForgeActionKind,               // core；14 个之一
     pub facts: ActionFacts,                  // 按 kind 的结构化事实，见下
     pub requested_by: Actor,              // {kind: engine|guardian, id}
+    pub epoch: u32,                       // 待入队动作的 epoch（forge-actions §2.2、engine.md §7.14.4），初值 1；见 §7.3 第 5 步（#89 Q3）
 }
 
 pub enum ActionFacts {
@@ -422,7 +423,7 @@ pub struct PolicyBuild { pub patch_approvals: bool, pub settings: SettingsSource
 2. **取处置**：`config.actions[id]`，缺失则 `unlisted_action`。
 3. **`push_branch` 族的 I8 前置**（`push_branch` / `force_push` / `push_outside_prefix`）：必须从 `store` 读到 `validation_ref` 对应的 `patch.validated` 记录，其 `sha256 == validation_ref` 且 `result_tree == expected_tree_oid`；找不到 → `Deny(NoValidatedPatch)`。该补丁的结论为 `deny` → `Deny(PatchDenied)`；为 `needs_approval`（M2）→ 必须存在一份已被 `repo` 消费的 `patch_apply_protected` 审批（`consumed_by` = 该补丁的 `att_…`、`subject_digest = validation_ref`，P-54），否则 `Deny(PatchNotApproved)`；补丁审批在提交前已消费，**不**成为本次 `push_branch` 的 `requires_approval`，第 2 步的处置照常适用。
 4. **`merge_pr`**：从 `store` 的 PR 快照读当前 head；`expected_head_sha ≠` 快照 head → `Deny(HeadMismatch)`（调用方应先重读）；否则审批规格为 `{merge_pr, {kind:"pr", repo, number}, digest = head}`。`merge_pr` 的 GitHub 侧就绪条件（必需 review、checks、merge queue）由 `engine` 在请求审批前确认、由 GitHub 在合并时强制；本模块不重复判断（P-12、P-33）。
-5. **处置分派**：`auto` → `Allow`（`approval = None`）；`deny` → `Deny(ActionDenied)`；`approve` → 查同主体审批：`granted` 且未过期且主体仍一致 → `Allow{approval}`；`pending` → `NeedsApproval{pending}`；`denied` → `Deny(ApprovalDenied)`（同主体不再自动重新询问；主体变了才会产生新规格）；`consumed` / `invalidated` / `expired` → `NeedsApproval{pending: None}`（`expired` / `invalidated`）或 `Deny(ApprovalConsumed)`（`consumed`）。
+5. **处置分派**：`auto` → `Allow`（`approval = None`）；`deny` → `Deny(ActionDenied)`；`approve` → 查同主体审批：`granted` 且未过期且主体仍一致 → `Allow{approval}`；`pending` → `NeedsApproval{pending}`；`denied` → `Deny(ApprovalDenied)`（同主体不再自动重新询问；主体变了才会产生新规格）；`expired` / `invalidated` → `NeedsApproval{pending: None}`；`consumed` → 按 `epoch` 区分（#89 Q3）：审批绑定 `(action, target, subject_digest, epoch)`，其中 `epoch` 取消费它的 Outbox 动作（`consumed_by`）入队时的 `epoch`（`outbox.enqueued.action.epoch`）。`req.epoch` 不大于该值 → `Deny(ApprovalConsumed)`（同一动作已执行或正在执行，防止重复）；`req.epoch` 更大（用户对 `outbox_failed` 选 `retry` 后的新动作）→ `NeedsApproval{pending: None}`，需要新审批（P-54）。
 6. **审批形状表**（`approve` 处置时的 `action` / `target` / `subject_digest`）：
 
 | 判定 id | `Approval.action` | `target` | `subject_digest` | 出处 |
@@ -577,7 +578,7 @@ stateDiagram-v2
 | `StaleHead` 落盘后崩溃 | 失效事务已提交即为失效；未提交则审批仍 `pending`，下一次 `grant` 会再次发现 head 不一致并失效 |
 | 订阅游标丢失 / 事件重放 | 转移是 CAS 且按 `consumed_by` / 终态幂等，重放无副作用；游标丢失则从 `0` 重扫活跃审批（以 `approvals` 现状与 PR 快照对比，补做失效） |
 | `forge` 在 `consume_for_execution` 之后、GitHub 变更前后崩溃 | 重放时审批已 `consumed` 且 `consumed_by` 是本动作 → `AlreadyConsumedBySameAction`，`forge` 先 probe（已完成则补记 `succeeded`），不误取消、不重复消费 |
-| 消费后执行终态失败 | 审批保持 `consumed`，不退回；入队方以新 `epoch` 重新入队并请求新审批（P-54） |
+| 消费后执行终态失败 | 审批保持 `consumed`，不退回；入队方以新 `epoch` 重新判定（`ActionRequest.epoch` 更大 → `NeedsApproval{pending: None}`，§7.3 第 5 步）并请求新审批（P-54） |
 | 审批已 `granted` 但 PR head 同时被推送，事件尚未到达 | `forge` 执行点的 `live_head_sha` 复核兜底（`HeadChanged`）；事件到达后审批随即 `invalidated` |
 | 时钟回拨 / 跳变 | 以 `store` 事务内的单调 `seq` 与事件时间戳为准做审计；过期判断用 `Clock`（单调基准 + 墙钟），回拨不会让已过期审批复活（终态不可变），最多使 pending 的有效期变长一个跳变量 [建议：启动时若墙钟早于最近事件时间戳则告警] |
 | 密钥扫描器 panic / 超时 | 该补丁按 `deny(policy.secret)` 处理（失败即关闭） |
@@ -654,7 +655,7 @@ stateDiagram-v2
 
 - [ ] `consume_internal` 的 `MismatchReason` 各一个测试（`NotGranted`、`Consumed`、`Expired`、`ActionMismatch`、`TargetMismatch`、`DigestMismatch`、`BaseRevMismatch` 共七种）：为内容 A 批准的审批提交内容 B → `DigestMismatch`；第二次使用 → `Consumed`；业务写入失败回滚时审批仍为 `granted`（同事务）。
 - [ ] `consume_for_execution(MergePr)`：`approval.subject_digest`、`expected_head_sha`、`live_head_sha` 三者任一不等 → 不放行（`HeadChanged` / `ApprovalInvalid`），不触发任何转移。
-- [ ] `consume_for_execution` 被同一 `act_…` 调用两次 → 第二次 `AlreadyConsumedBySameAction`；被另一个动作调用 → `ConsumedByOther`；消费发生在执行开始前，`approval.consumed.data.consumed_by` 为该 Outbox 动作 ID；消费后执行终态失败，审批仍为 `consumed`，同主体再次 `decide_action` 得到需要新审批（P-54）。
+- [ ] `consume_for_execution` 被同一 `act_…` 调用两次 → 第二次 `AlreadyConsumedBySameAction`；被另一个动作调用 → `ConsumedByOther`；消费发生在执行开始前，`approval.consumed.data.consumed_by` 为该 Outbox 动作 ID；消费后执行终态失败，审批仍为 `consumed`；同主体同 `epoch` 再次 `decide_action` 得到 `Deny(ApprovalConsumed)`，`epoch` 更大时得到 `NeedsApproval{pending: None}`（P-54，#89 Q3）。
 - [ ] 审批链路故障注入（`store` 写失败）：`approve` 判定得到 `Deny(ApprovalChainUnavailable)`，不会 `Allow`。
 
 **动作判定（M1，M2 扩展）**
@@ -663,7 +664,7 @@ stateDiagram-v2
 - [ ] `merge_pr`：无审批 → `NeedsApproval`；`pending` → 带 `pending`；`granted` 且 head 未变 → `Allow{approval}`；`expected_head_sha` 与快照不符 → `Deny(HeadMismatch)`；`denied` → `Deny(ApprovalDenied)`；`consumed` → `Deny(ApprovalConsumed)`。
 - [ ] `push_branch` 条件伪动作：`force = true` → `force_push`；非 `gantry/` 前缀 → `push_outside_prefix`；两者同时 → `force_push`；`gantry/` 前缀、非 force、补丁 `allow` → `Allow`。
 - [ ] `push_branch` 没有匹配的 `patch.validated`（或 `validation_ref` 对不上）→ `Deny(NoValidatedPatch)`。
-- [ ] 处置为 `approve` 而审批形状未定义的动作（如把 `create_pr` 配成 `approve`、`push_outside_prefix`）→ `Deny(ApprovalShapeUndefined)` + `ReportHint`，不会 `Allow` 也不会创建审批。
+- [ ] 处置为 `approve` 而审批形状未定义的动作（如把 `create_pr` 配成 `approve`）→ `Deny(ApprovalShapeUndefined)` + `ReportHint`，不会 `Allow` 也不会创建审批。`push_outside_prefix` 的形状 `{branch, git_oid}` 已在 data-model 审批形状表（`core::APPROVAL_SHAPES`）定义，给出 `NeedsApproval`（#89 Q5）。
 - [ ] 同一 `Deny` 被连续判定 100 次，`policy.denied` 只有一条（`dedup_key`）。
 - [ ] `resolve_review_thread` 含人类评论 → `resolve_review_thread_human` → 默认 `Deny(ActionDenied)`（M3）。
 

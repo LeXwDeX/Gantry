@@ -30,6 +30,7 @@ fn request(kind: ForgeActionKind, facts: ActionFacts) -> ActionRequest {
         kind,
         facts,
         requested_by: ctx().actor,
+        epoch: 1,
     }
 }
 
@@ -409,21 +410,132 @@ async fn approval_chain_failure_fails_closed() {
     );
 }
 
-/// #66 已定"engine 发起的 Deny 必带 ReportHint"，但其余 DenyReason 在上报词表里
-/// 还没有对应码（policy.md OQ-P15），拍板前没有合法取值。
+fn report_code(decision: &ActionDecision) -> Option<&str> {
+    let ActionDecision::Deny { report, .. } = decision else {
+        panic!("expected deny, got {decision:?}");
+    };
+    report.as_ref().map(|hint| hint.reason_code.as_str())
+}
+
+/// policy.md §6.1（#66、#133）：engine 发起的 Deny 除 HeadMismatch 外都带
+/// ReportHint，其余原因用码族 `policy.action_denied:<deny_reason>`。
 #[tokio::test]
-#[ignore = "待 policy.md OQ-P15 拍板：其余 DenyReason 的上报码"]
-async fn every_engine_deny_carries_a_report_hint() {
+async fn engine_denies_carry_report_codes_except_head_mismatch() {
     let h = Harness::new();
-    let decision = h
+    let stale = h
         .engine
         .decide_action(merge("stale"), &ctx())
         .await
         .expect("decide");
-    let ActionDecision::Deny { report, .. } = decision else {
-        panic!("expected deny");
+    assert_eq!(deny_reason(&stale), &DenyReason::HeadMismatch);
+    assert_eq!(report_code(&stale), None);
+
+    let approval = needs_approval(&h, merge("head")).await;
+    h.deny(&approval).await;
+    let denied = h
+        .engine
+        .decide_action(merge("head"), &ctx())
+        .await
+        .expect("decide");
+    assert_eq!(
+        report_code(&denied),
+        Some("policy.action_denied:approval_denied")
+    );
+
+    let no_patch = h
+        .engine
+        .decide_action(push("gantry/x", false), &ctx())
+        .await
+        .expect("decide");
+    assert_eq!(deny_reason(&no_patch), &DenyReason::NoValidatedPatch);
+    assert_eq!(
+        report_code(&no_patch),
+        Some("policy.action_denied:no_validated_patch")
+    );
+
+    let h = Harness::with_rules(
+        PolicyBuild::M1,
+        policies_with(PolicyActionId::PushBranch, SettingsDisposition::Deny),
+    );
+    let action_denied = h
+        .engine
+        .decide_action(push("gantry/x", false), &ctx())
+        .await
+        .expect("decide");
+    assert_eq!(deny_reason(&action_denied), &DenyReason::ActionDenied);
+    assert_eq!(
+        report_code(&action_denied),
+        Some("policy.action_denied:action_denied")
+    );
+}
+
+/// #89 Q1：`ResolveReviewThread` 与 `Other` 的拒绝也写 `policy.denied`，目标取自
+/// `ActionFacts`。
+#[tokio::test]
+async fn denials_of_thread_and_other_actions_record_their_targets() {
+    let h = Harness::with_rules(
+        PolicyBuild::M1,
+        policies_with(
+            PolicyActionId::ResolveReviewThread,
+            SettingsDisposition::Deny,
+        ),
+    );
+    let thread = request(
+        ForgeActionKind::ResolveReviewThread,
+        ActionFacts::ResolveReviewThread {
+            repo: slug(),
+            number: 7,
+            thread_node_id: "PRRT_1".into(),
+            thread_has_human_comment: false,
+        },
+    );
+    let decision = h
+        .engine
+        .decide_action(thread, &ctx())
+        .await
+        .expect("decide");
+    assert_eq!(deny_reason(&decision), &DenyReason::ActionDenied);
+    let events = h.events(EventType::PolicyDenied).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].data["target"],
+        serde_json::json!({"kind": "review_thread", "repo": slug(), "number": 7, "thread_node_id": "PRRT_1"})
+    );
+}
+
+/// #89 Q3：已消费的审批，同一 epoch 再判定为 ApprovalConsumed（防重复执行）；
+/// retry 后更大的 epoch 需要新审批。
+#[tokio::test]
+async fn consumed_approval_is_distinguished_by_epoch() {
+    let h = Harness::new();
+    let approval = needs_approval(&h, merge("head")).await;
+    h.grant(&approval).await;
+    let act = id::<Act>(1);
+    h.enqueued_merge(act, "head", 1).await;
+    h.engine
+        .consume_for_execution(&approval.id, &merge_check("head", "head"), &act, &ctx())
+        .await
+        .expect("consume");
+
+    let same = h
+        .engine
+        .decide_action(merge("head"), &ctx())
+        .await
+        .expect("decide");
+    assert_eq!(deny_reason(&same), &DenyReason::ApprovalConsumed);
+
+    let retry = ActionRequest {
+        epoch: 2,
+        ..merge("head")
     };
-    assert!(report.is_some());
+    let decision = h.engine.decide_action(retry, &ctx()).await.expect("decide");
+    assert!(
+        matches!(
+            decision,
+            ActionDecision::NeedsApproval { pending: None, .. }
+        ),
+        "{decision:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

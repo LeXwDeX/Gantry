@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gantry_core::canon::{sha256, GitOid, RepoSlug, Sha256Digest};
+use gantry_core::canon::{sha256, GitOid, IdempotencyKey, RepoSlug, Sha256Digest};
 use gantry_core::entities::{
     Actor, ActorKind, Approval, CheckSummary, MergeMethod, Project, PullRequestRef,
     PullRequestState, ReviewState, Seq,
@@ -16,7 +16,8 @@ use gantry_core::entities::{
 use gantry_core::events::{
     ApprovalGrantedData, Event, EventType, NewEvent, PatchValidatedData, Subject,
 };
-use gantry_core::ids::{Dev, Id, IdGen, IdKind, ProjectId, Ulid};
+use gantry_core::forge::ForgeActionKind;
+use gantry_core::ids::{ActionId, Dev, Dlv, Id, IdGen, IdKind, ProjectId, Ulid};
 use gantry_core::ports::{ActorCtx, ForgeError, ForgeReader};
 use gantry_core::testing::{FakeClock, SeqEntropy};
 use gantry_core::time::Timestamp;
@@ -24,7 +25,7 @@ use gantry_core::worker::{FileMode, FileStatus, PatchFile, PatchVerdict, RepoPat
 use gantry_fakes::forge::FakeForge;
 use gantry_policy::{PolicyBuild, PolicyDeps, PolicyEngine, PolicyRules};
 use gantry_store::{AppendOpts, EventFilter, Store, StoreDeps, TypePattern};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub const MS: u64 = 1_700_000_000_000;
 
@@ -190,6 +191,51 @@ impl Harness {
     pub async fn deny(&self, approval: &Approval) {
         self.append_for(approval, EventType::ApprovalDenied, serde_json::json!({}))
             .await;
+    }
+
+    /// engine 入队 `merge_pr`（PR 7、`head`）写的 outbox.enqueued，带给定 `epoch`。
+    pub async fn enqueued_merge(&self, action: ActionId, head: &str, epoch: u32) {
+        let delivery = id::<Dlv>(3);
+        let intent =
+            json!({"expected_head_sha": oid(head), "merge_method": "squash", "mode": "auto"});
+        let key = IdempotencyKey::derive(
+            &project_id(),
+            &delivery,
+            ForgeActionKind::MergePr,
+            "pr:7:merge",
+            &intent,
+            epoch,
+        )
+        .expect("idempotency key");
+        let data = json!({"action": {
+            "delivery_id": delivery,
+            "kind": "merge_pr",
+            "payload": {"repo": slug(), "pull_number": 7, "expected_head_sha": oid(head), "merge_method": "squash", "mode": "auto"},
+            "target": "pr:7:merge",
+            "intent": intent,
+            "idempotency_key": key,
+            "requires_approval": null,
+            "depends_on": [],
+            "priority": "normal",
+            "not_before": null,
+            "epoch": epoch,
+            "coalesce_key": null,
+            "enqueued_by": {"module": "engine", "causation_id": null}
+        }});
+        let mut tx = self.store.begin_write().await.expect("begin");
+        tx.append(NewEvent {
+            ty: EventType::OutboxEnqueued,
+            subject: Subject::parse(&action.to_string()).expect("subject"),
+            project_id: Some(project_id()),
+            actor: Actor::new(ActorKind::Engine, "test"),
+            causation_id: None,
+            correlation_id: Some(delivery.to_string()),
+            data,
+            dedup_key: None,
+        })
+        .await
+        .expect("append outbox.enqueued");
+        tx.commit().await.expect("commit");
     }
 
     /// `repo` 写的 patch.validated（结论 allow）。

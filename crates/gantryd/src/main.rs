@@ -2,6 +2,7 @@
 
 use std::process::ExitCode;
 
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> ExitCode {
     let options = match gantryd::Options::parse(std::env::args().skip(1)) {
@@ -18,4 +19,10 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(not(unix))]
+fn main() -> ExitCode {
+    eprintln!("gantryd: the server runs on Linux only");
+    ExitCode::FAILURE
 }
