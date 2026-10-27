@@ -22,7 +22,9 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/MergeMethod"
-      }
+      },
+      "description": "至少一项（与 `project.added` / `updated` 的校验一致，#70）。",
+      "minItems": 1
     },
     "merge_queue_enabled": {
       "type": "boolean"

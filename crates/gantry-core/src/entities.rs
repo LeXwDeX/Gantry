@@ -130,6 +130,8 @@ pub struct Project {
     pub installation_id: i64,
     pub bot_user_id: i64,
     pub default_branch: String,
+    /// 至少一项（与 `project.added` / `updated` 的校验一致，#70）。
+    #[schemars(length(min = 1))]
     pub allowed_merge_methods: Vec<MergeMethod>,
     pub merge_queue_enabled: bool,
     pub created_at: Timestamp,
