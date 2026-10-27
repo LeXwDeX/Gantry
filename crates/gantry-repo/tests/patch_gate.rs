@@ -763,6 +763,18 @@ async fn concurrent_validations_do_not_interfere() {
     }
     for task in tasks {
         let (outcome, tree) = task.await.unwrap();
+        // UntrustedText 的 Debug 不含正文；失败时把 git 的原因打出来便于诊断。
+        if let Err(gantry_core::ports::RepoError::Git {
+            op,
+            status,
+            stderr_tail,
+        }) = &outcome
+        {
+            panic!(
+                "validate_patch failed in {op} ({status:?}): {}",
+                stderr_tail.as_untrusted_str()
+            );
+        }
         let PatchOutcome::Validated(patch) = outcome.unwrap() else {
             panic!("expected Validated");
         };

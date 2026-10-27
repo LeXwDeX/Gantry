@@ -235,3 +235,35 @@ fn bootstrap_period_lasts_until_the_first_desktop_device() {
     assert!(bootstrap_period(false));
     assert!(!bootstrap_period(true));
 }
+
+/// 按配对顺序折叠"是否有过桌面设备"，模拟同一写事务里读到的状态（D-18、OQ-K11）。
+fn pair_sequence(platforms: &[DevicePlatform]) -> Vec<DeviceRole> {
+    let mut desktop_ever_paired = false;
+    platforms
+        .iter()
+        .map(|platform| {
+            let role = initial_role(platform, desktop_ever_paired);
+            if matches!(platform, DevicePlatform::Windows | DevicePlatform::Macos) {
+                desktop_ever_paired = true;
+            }
+            role
+        })
+        .collect()
+}
+
+#[test]
+fn phone_first_then_desktop_makes_the_desktop_approver() {
+    use DevicePlatform::{Ios, Macos, Windows};
+    use DeviceRole::{Approver, Operator};
+    // 先配两台手机：都是 operator，引导期仍在持续。
+    assert_eq!(pair_sequence(&[Ios, Ios]), vec![Operator, Operator]);
+    assert!(bootstrap_period(false));
+    // 再配桌面：第一台桌面设备成为 approver，之后的桌面与手机都是 operator。
+    assert_eq!(
+        pair_sequence(&[Ios, Macos, Windows, Ios]),
+        vec![Operator, Approver, Operator, Operator]
+    );
+    assert!(!bootstrap_period(true));
+    // 唯一的桌面 approver 被吊销后，"有过桌面设备"仍为真：新桌面设备是 operator，只能 recover --promote。
+    assert_eq!(initial_role(&Windows, true), Operator);
+}
