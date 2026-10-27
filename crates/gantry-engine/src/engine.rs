@@ -199,40 +199,9 @@ impl Engine {
             .ok_or(EngineError::NotFound)
     }
 
-    /// 重建一个交付单元的 `DeliveryState`：先按 subject 取 `delivery.created` 得到所属项目，
-    /// 再只扫本项目的事件（含 `project_id` 为空的全局事件），按路由表归属后折叠。
+    /// 重建一个交付单元的 `DeliveryState`（见 [`load_delivery_state`]）。
     pub async fn load_state(&self, id: &DeliveryId) -> Result<Option<DeliveryState>, EngineError> {
-        let subject = Subject::parse(&id.to_string())
-            .map_err(|error| SchemaError::shape("/subject", error.to_string()))?;
-        let Some(project_id) = self
-            .store
-            .events()
-            .by_subject(&subject)
-            .await?
-            .into_iter()
-            .find_map(|event| event.project_id)
-        else {
-            return Ok(None);
-        };
-        let filter = EventFilter {
-            project_ids: Some(BTreeSet::from([project_id])),
-            include: Vec::new(),
-            exclude: Vec::new(),
-        };
-        let mut router = Router::default();
-        let mut state: Option<DeliveryState> = None;
-        self.scan(&filter, |event| {
-            if router.route(event)?.delivery() != Some(*id) {
-                return Ok(());
-            }
-            match &mut state {
-                Some(state) => state.apply(event)?,
-                None => state = Some(DeliveryState::created(event)?),
-            }
-            Ok(())
-        })
-        .await?;
-        Ok(state)
+        load_delivery_state(&self.store, id).await
     }
 
     /// 节点所属交付单元：只扫建图事件（`workflow.created` / `revised` 里登记了节点）。
@@ -258,19 +227,9 @@ impl Engine {
     async fn scan(
         &self,
         filter: &EventFilter,
-        mut visit: impl FnMut(&gantry_core::events::Event<serde_json::Value>) -> Result<(), EngineError>,
+        visit: impl FnMut(&gantry_core::events::Event<serde_json::Value>) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
-        let mut cursor = Seq::ZERO;
-        loop {
-            let page = self.store.events().scan(cursor, filter, 200).await?;
-            for event in &page.events {
-                visit(event)?;
-            }
-            if page.scanned_to >= page.head {
-                return Ok(());
-            }
-            cursor = page.scanned_to;
-        }
+        scan_events(&self.store, filter, visit).await
     }
 
     /// 暂停：停止派发新节点，记录暂停前的 `stage_status`。已暂停 → 幂等返回。
@@ -418,4 +377,64 @@ fn ensure_active(delivery: &DeliveryRow) -> Result<(), EngineError> {
         return Err(EngineError::InvalidState("delivery is terminal"));
     }
     Ok(())
+}
+
+/// 重建一个交付单元的 `DeliveryState`：先按 subject 取 `delivery.created` 得到所属项目，
+/// 再只扫本项目的事件（含 `project_id` 为空的全局事件），按路由表归属后折叠。
+///
+/// 读的是已提交日志。执行体在持有写租约（`begin_write`）之后调用它：单写者下租约期间
+/// 没有别人能提交，读到的就是本事务开始时的状态（engine.md §7.1）。
+pub async fn load_delivery_state(
+    store: &Store,
+    id: &DeliveryId,
+) -> Result<Option<DeliveryState>, EngineError> {
+    let subject = Subject::parse(&id.to_string())
+        .map_err(|error| SchemaError::shape("/subject", error.to_string()))?;
+    let Some(project_id) = store
+        .events()
+        .by_subject(&subject)
+        .await?
+        .into_iter()
+        .find_map(|event| event.project_id)
+    else {
+        return Ok(None);
+    };
+    let filter = EventFilter {
+        project_ids: Some(BTreeSet::from([project_id])),
+        include: Vec::new(),
+        exclude: Vec::new(),
+    };
+    let mut router = Router::default();
+    let mut state: Option<DeliveryState> = None;
+    scan_events(store, &filter, |event| {
+        if router.route(event)?.delivery() != Some(*id) {
+            return Ok(());
+        }
+        match &mut state {
+            Some(state) => state.apply(event)?,
+            None => state = Some(DeliveryState::created(event)?),
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(state)
+}
+
+/// 按页扫完 `filter` 命中的已提交事件。
+pub(crate) async fn scan_events(
+    store: &Store,
+    filter: &EventFilter,
+    mut visit: impl FnMut(&gantry_core::events::Event<serde_json::Value>) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    let mut cursor = Seq::ZERO;
+    loop {
+        let page = store.events().scan(cursor, filter, 200).await?;
+        for event in &page.events {
+            visit(event)?;
+        }
+        if page.scanned_to >= page.head {
+            return Ok(());
+        }
+        cursor = page.scanned_to;
+    }
 }

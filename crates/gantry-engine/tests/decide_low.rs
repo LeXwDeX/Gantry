@@ -284,8 +284,7 @@ impl Sim {
                 "kind": request.payload.kind(),
                 "payload": payload,
                 "target": derived.target,
-                // core 的推导对空的 commit_title 写 null，而 outbox.enqueued 契约要求省略（已上报）。
-                "intent": strip_nulls(derived.intent),
+                "intent": derived.intent,
                 "idempotency_key": key.as_str(),
                 "requires_approval": request.requires_approval,
                 "depends_on": request.depends_on,
@@ -312,18 +311,6 @@ impl Sim {
             action,
             json!({"github_ref": github_ref}),
         );
-    }
-}
-
-fn strip_nulls(value: Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (k, strip_nulls(v)))
-                .collect(),
-        ),
-        other => other,
     }
 }
 
