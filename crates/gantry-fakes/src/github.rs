@@ -103,6 +103,8 @@ struct GithubState {
     manifests: HashMap<String, Value>,
     /// `GET /users/{login}` 的用户：`login -> id`。
     users: HashMap<String, i64>,
+    /// `(repo, PR number) -> reviews`（REST 形状，`state` 大写）。
+    reviews: HashMap<(String, u64), Vec<Value>>,
 }
 
 /// M0 的 GitHub 替身。
@@ -141,6 +143,7 @@ impl FakeGitHub {
             tick: 0,
             manifests: HashMap::new(),
             users: HashMap::new(),
+            reviews: HashMap::new(),
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -214,6 +217,33 @@ impl FakeGitHub {
     /// 登记一个 Manifest 转换结果（`POST /app-manifests/{code}/conversions` 的 201 响应体）。
     pub fn set_manifest_conversion(&self, code: &str, response: Value) {
         self.lock().manifests.insert(code.to_owned(), response);
+    }
+
+    /// 在 PR 上追加一条 review（`state`：`APPROVED` / `CHANGES_REQUESTED` / `COMMENTED` /
+    /// `DISMISSED`），返回 review ID。
+    pub fn add_review(
+        &self,
+        repo: &str,
+        number: u64,
+        reviewer: (&str, i64),
+        state: &str,
+        commit: &str,
+    ) -> u64 {
+        let mut state_guard = self.lock();
+        let id = state_guard.next_comment;
+        state_guard.next_comment += 1;
+        state_guard
+            .reviews
+            .entry((repo.to_owned(), number))
+            .or_default()
+            .push(json!({
+                "id": id,
+                "user": {"login": reviewer.0, "id": reviewer.1, "type": "User"},
+                "state": state,
+                "commit_id": commit,
+                "body": "",
+            }));
+        id
     }
 
     /// 登记一个可经 `GET /users/{login}` 查到的用户。
@@ -1107,6 +1137,21 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
             Response {
                 status: 200,
                 body: Value::Array(comments).to_string(),
+                retry_after_s: None,
+            }
+        }
+        ("GET", ["repos", owner, repo, "pulls", number, "reviews"]) => {
+            let Some(number) = number.parse::<u64>().ok() else {
+                return not_found();
+            };
+            let key = (format!("{owner}/{repo}"), number);
+            if !state.pulls.contains_key(&key) {
+                return not_found();
+            }
+            Response {
+                status: 200,
+                body: Value::Array(state.reviews.get(&key).cloned().unwrap_or_default())
+                    .to_string(),
                 retry_after_s: None,
             }
         }
