@@ -117,6 +117,8 @@ pub struct Seen {
     pub path: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// 客户端出示的证书（叶子 DER），单向 TLS 时为空。
+    pub peer: Option<Vec<u8>>,
 }
 
 pub type Handler = Arc<dyn Fn(Seen) -> (u16, Vec<(String, String)>, Vec<u8>) + Send + Sync>;
@@ -144,8 +146,15 @@ pub async fn serve(
                 let Ok(tls) = acceptor.accept(tcp).await else {
                     return;
                 };
+                let peer = tls
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .and_then(|c| c.first())
+                    .map(|c| c.to_vec());
                 let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                     let handler = handler.clone();
+                    let peer = peer.clone();
                     let (live, peak) = (live.clone(), peak.clone());
                     async move {
                         let n = live.fetch_add(1, Ordering::SeqCst) + 1;
@@ -162,6 +171,7 @@ pub async fn serve(
                                 })
                                 .collect(),
                             body: req.into_body().collect().await.unwrap().to_bytes().to_vec(),
+                            peer: peer.clone(),
                         };
                         let (status, headers, body) = handler(seen);
                         live.fetch_sub(1, Ordering::SeqCst);
@@ -224,8 +234,15 @@ pub async fn serve_any(config: Arc<ServerConfig>, handler: AnyHandler) -> Socket
                 let Ok(tls) = acceptor.accept(tcp).await else {
                     return;
                 };
+                let peer = tls
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .and_then(|c| c.first())
+                    .map(|c| c.to_vec());
                 let service = hyper::service::service_fn(move |req: Request<Incoming>| {
                     let handler = handler.clone();
+                    let peer = peer.clone();
                     async move {
                         let seen = Seen {
                             method: req.method().to_string(),
@@ -238,6 +255,7 @@ pub async fn serve_any(config: Arc<ServerConfig>, handler: AnyHandler) -> Socket
                                 })
                                 .collect(),
                             body: req.into_body().collect().await.unwrap().to_bytes().to_vec(),
+                            peer: peer.clone(),
                         };
                         let resp: Response<BoxBody<Bytes, Infallible>> = match handler(seen) {
                             Reply::Full(status, headers, body) => {

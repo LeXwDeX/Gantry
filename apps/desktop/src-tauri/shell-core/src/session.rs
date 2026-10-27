@@ -50,6 +50,8 @@ pub struct Shell {
     stream: Mutex<Option<StreamHandle>>,
     events_config: EventsConfig,
     guarded: crate::guarded::GuardedWrites,
+    /// `/v1/me` 的 `certificate.renew_after`（毫秒）；以它为准，缺省时按剩余 1/3 推算。
+    server_renew_after: Mutex<Option<i64>>,
 }
 
 impl Shell {
@@ -71,6 +73,7 @@ impl Shell {
             stream: Mutex::new(None),
             events_config: EventsConfig::default(),
             guarded: Default::default(),
+            server_renew_after: Mutex::new(None),
         }
     }
 
@@ -424,6 +427,116 @@ impl Shell {
         self.set_phase(Phase::Revoked, sink);
     }
 
+    // ---- 证书自动续期（§7.2"自动续期"，P-64）----
+
+    /// 何时该续期（Unix 毫秒）：服务端给的 `renew_after`，否则叶子剩余 1/3 有效期处。
+    pub fn renew_after_ms(&self) -> Option<i64> {
+        if let Some(ms) = *self.server_renew_after.lock().unwrap() {
+            return Some(ms);
+        }
+        let identity = self.store.identity()?;
+        let (_, nb, na) = leaf_validity(&identity.cert_chain_pem)?;
+        Some(nb + (na - nb) * 2 / 3)
+    }
+
+    /// 到期则续期一次；返回是否换了证书。失败时保留旧证书，临近到期时标记 `cert_expiring`。
+    pub async fn renew_if_due(&self) -> Result<bool, ShellError> {
+        let Some(due) = self.renew_after_ms() else {
+            return Ok(false);
+        };
+        if self.now_ms() < due {
+            return Ok(false);
+        }
+        match self.renew_now().await {
+            Ok(()) => {
+                self.conn.lock().unwrap().cert_expiring = false;
+                Ok(true)
+            }
+            Err(e) => {
+                self.update_cert_expiring();
+                Err(e)
+            }
+        }
+    }
+
+    fn update_cert_expiring(&self) {
+        let Some(identity) = self.store.identity() else {
+            return;
+        };
+        if let Some((_, _, na)) = leaf_validity(&identity.cert_chain_pem) {
+            self.conn.lock().unwrap().cert_expiring = na - self.now_ms() < CERT_WARN_MS;
+        }
+    }
+
+    /// 后台续期：每 `check_every` 检查一次，到期则续期；失败留到下一轮重试（不打扰用户）。
+    pub fn spawn_renewal(
+        self: &Arc<Self>,
+        check_every: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let shell = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(check_every).await;
+                let Some(shell) = shell.upgrade() else { return };
+                if shell.store.identity().is_some_and(|i| !i.revoked) {
+                    let _ = shell.renew_if_due().await;
+                }
+            }
+        })
+    }
+
+    /// 生成新 CSR（沿用 mTLS 客户端密钥）→ `POST /v1/devices/self/renew` → 校验新链 → 原子替换。
+    /// 审批签名密钥与 `approval_pubkey` 不变。下一次握手用新证书，在途连接不受影响。
+    pub async fn renew_now(&self) -> Result<(), ShellError> {
+        let c = self.connected()?;
+        let csr = crate::pairing::build_csr(c.keys.clone())?;
+        let body = serde_json::to_vec(&json!({ "csr": csr })).expect("可序列化");
+        let request = routes::PreparedRequest {
+            operation_id: "renewDeviceCertificate",
+            method: "POST",
+            path_and_query: "/v1/devices/self/renew".into(),
+            body: Some(body),
+            idempotency_key: None,
+        };
+        let resp = c
+            .client
+            .send_prepared(&request)
+            .await
+            .map_err(|_| not_connected())?;
+        if resp.status == 401 {
+            return Err(ShellError::not_paired());
+        }
+        if resp.status != 200 {
+            return Err(ShellError {
+                reason: Some("renew_rejected".into()),
+                ..ShellError::new(ShellErrorCode::PairingFailed, "证书续期失败")
+            });
+        }
+        let reply: Value = serde_json::from_slice(&resp.body).map_err(|_| not_connected())?;
+        let chain: Vec<String> = reply["certificate_chain"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // 新链根指纹不符 → 丢弃新证书、继续用旧证书（疑似中间人）。
+        crate::pairing::verify_chain(
+            &chain,
+            &c.identity.ca_fingerprint,
+            &c.keys.tls_public_key(),
+            self.now_ms() / 1000,
+        )?;
+        let mut identity = c.identity.clone();
+        identity.cert_chain_pem = chain;
+        identity.renewed_at = Some(rfc3339(self.now_ms()));
+        self.store.save_identity(&identity)?;
+        *self.connected.write().unwrap() = None;
+        *self.server_renew_after.lock().unwrap() = None;
+        Ok(())
+    }
+
     // ---- 审批签名（§7.4.1）----
 
     /// `GET /v1/me`：顺带校正时钟偏差（本地 − 服务端）并比对纪元号。
@@ -440,6 +553,10 @@ impl Shell {
             return Err(not_connected());
         }
         let me: Value = serde_json::from_slice(&resp.body).map_err(|_| not_connected())?;
+        *self.server_renew_after.lock().unwrap() = me["certificate"]["renew_after"]
+            .as_str()
+            .and_then(|t| t.parse::<gantry_core::time::Timestamp>().ok())
+            .map(|t| t.as_millis());
         if let Some(server_ms) = me["server"]["time"]
             .as_str()
             .and_then(|t| t.parse::<gantry_core::time::Timestamp>().ok())
@@ -661,6 +778,9 @@ impl Shell {
         }
     }
 }
+
+/// §10 `cert_warn_days`：续期失败且距到期不足 7 天时 `cert_expiring = true`。
+const CERT_WARN_MS: i64 = 7 * 86_400_000;
 
 fn not_connected() -> ShellError {
     ShellError::new(ShellErrorCode::NotConnected, "连接中断")

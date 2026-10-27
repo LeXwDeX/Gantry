@@ -329,12 +329,21 @@ pub fn run() {
                 Ok(store) => store,
                 Err(e) => Box::new(UnavailableKeyStore(e.to_string())),
             };
-            app.manage(Arc::new(Shell::new(
+            let shell = Arc::new(Shell::new(
                 AppStore::open(&data_dir)?,
                 keys,
                 Box::new(HttpPairTransport::default()),
                 system_clock(),
-            )));
+            ));
+            // 证书自动续期（P-64）：每 10 分钟检查一次 [建议值]，到剩余 1/3 有效期时后台续期。
+            {
+                let shell = shell.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _task = shell.spawn_renewal(std::time::Duration::from_secs(600));
+                    std::future::pending::<()>().await;
+                });
+            }
+            app.manage(shell);
             let config = app
                 .config()
                 .app
