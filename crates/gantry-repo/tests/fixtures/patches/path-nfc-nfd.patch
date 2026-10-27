@@ -1,0 +1,12 @@
+diff --git a/café.txt b/café.txt
+new file mode 100644
+--- /dev/null
++++ b/café.txt
+@@ -0,0 +1 @@
++x
+diff --git a/café.txt b/café.txt
+new file mode 100644
+--- /dev/null
++++ b/café.txt
+@@ -0,0 +1 @@
++x

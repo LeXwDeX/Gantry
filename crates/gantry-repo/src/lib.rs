@@ -9,8 +9,11 @@
 //!
 //! 本模块从不读取沙盒写入过的目录，也不联网（I1、I2、I8）。
 
+pub mod cas;
+mod gate;
 pub mod git;
 pub mod mirror;
+pub mod patch;
 pub mod workspace;
 pub mod worktree;
 
@@ -26,11 +29,11 @@ use gantry_core::events::{
     Event, EventType, NewEvent, Subject, WorktreeCreatedData, WorktreeLockedData,
     WorktreeRemovedData, WorktreeUnlockReason, WorktreeUnlockedData,
 };
-use gantry_core::ids::{Clock, DeliveryId, IdGen, ProjectId, WorktreeId};
+use gantry_core::ids::{AttemptId, Clock, DeliveryId, IdGen, ProjectId, WorktreeId};
 use gantry_core::machines::worktree_lock;
 use gantry_core::ports::{
     ActorCtx, CommitInfo, CommitPatch, CommitRecord, CreateWorktree, LockError, LockToken,
-    MirrorGuard, MirrorHealth, MirrorInfo, MirrorMode, PatchOutcome, PrepareWorkspace,
+    MirrorGuard, MirrorHealth, MirrorInfo, MirrorMode, PatchOutcome, PolicyPort, PrepareWorkspace,
     PreparedWorkspace, RepoError, RepoService, RevSpec, StoreError as PortStoreError,
     ValidatePatch, WorktreeLocks,
 };
@@ -39,6 +42,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
+use crate::cas::PatchCas;
 use crate::git::{GitCmd, GitEnv, GitOutput};
 use crate::mirror::{io, io_error, MirrorEntry, MirrorLock};
 use crate::worktree::{check_token, lease_until, ActiveLock, WorktreeTable, HUMAN_LEASE_MAX};
@@ -105,6 +109,10 @@ pub struct RepoDeps {
     pub store: Store,
     pub clock: Arc<dyn Clock>,
     pub ids: Arc<IdGen>,
+    /// 规则判定（大小上限、P6、P8、P9）与提交说明的密钥扫描。
+    pub policy: Arc<dyn PolicyPort>,
+    /// 补丁字节与校验记录（见 [`cas`]）。
+    pub cas: Arc<dyn PatchCas>,
 }
 
 /// 持有共享 / 独占 flock 的镜像仓访问守卫。
@@ -132,6 +140,10 @@ struct Inner {
     /// 工作树投影；写路径在 store 事务的整个生命周期内持有它。
     worktrees: tokio::sync::Mutex<WorktreeTable>,
     git_slots: Mutex<BTreeMap<ProjectId, Arc<Semaphore>>>,
+    /// 按 job_id 的校验结论（由 `patch.*` 事件重建）。
+    patches: tokio::sync::Mutex<BTreeMap<AttemptId, gate::PatchRecord>>,
+    /// 同一 job_id 的校验串行化。
+    job_locks: Mutex<BTreeMap<AttemptId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl std::fmt::Debug for GitRepo {
@@ -181,9 +193,12 @@ impl GitRepo {
                 mirror_create: tokio::sync::Mutex::new(()),
                 worktrees: tokio::sync::Mutex::new(table),
                 git_slots: Mutex::new(BTreeMap::new()),
+                patches: tokio::sync::Mutex::new(BTreeMap::new()),
+                job_locks: Mutex::new(BTreeMap::new()),
             }),
         };
         repo.rebuild_worktrees().await?;
+        repo.rebuild_patches().await?;
         repo.expire_locks().await?;
         for entry in repo.mirror_entries() {
             GitCmd::new("worktree-prune", &entry.git_dir)
@@ -901,10 +916,10 @@ impl RepoService for GitRepo {
 
     async fn validate_patch(
         &self,
-        _ctx: &ActorCtx,
-        _req: ValidatePatch,
+        ctx: &ActorCtx,
+        req: ValidatePatch,
     ) -> Result<PatchOutcome, RepoError> {
-        Err(io_error("validate_patch lands in a later #91 slice"))
+        self.validate_impl(ctx, req).await
     }
 
     async fn commit_patch(

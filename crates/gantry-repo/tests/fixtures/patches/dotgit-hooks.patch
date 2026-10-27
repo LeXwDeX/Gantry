@@ -1,0 +1,6 @@
+diff --git a/.git/hooks/pre-commit b/.git/hooks/pre-commit
+new file mode 100755
+--- /dev/null
++++ b/.git/hooks/pre-commit
+@@ -0,0 +1 @@
++#!/bin/sh

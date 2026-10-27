@@ -1,0 +1,6 @@
+diff --git "a/x\000y" "b/x\000y"
+new file mode 100644
+--- /dev/null
++++ "b/x\000y"
+@@ -0,0 +1 @@
++x
