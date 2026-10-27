@@ -35,7 +35,7 @@ use gantry_core::ports::policy::{
 };
 use gantry_core::ports::repo::{BranchName, LockToken};
 use gantry_core::time::Timestamp;
-use gantry_core::worker::{MissingAspect, PatchRejectReason, Proposal};
+use gantry_core::worker::{MissingAspect, OpenPrParams, PatchRejectReason, Proposal};
 
 use crate::state::{ActionKey, FindingFingerprint, OpenInbox};
 use crate::template::{stage_graph, StageGraph};
@@ -462,6 +462,8 @@ pub struct DecideEnv<'a> {
     pub sandbox_capacity: u32,
     pub inflight: &'a BTreeSet<EffectKey>,
     pub denied: &'a BTreeSet<ActionKey>,
+    /// `open_pr` 提议原文，执行体开事务前预取（§7.14.2）；只读。
+    pub proposals: &'a ProposalTexts,
     pub consts: EngineConsts,
 }
 
@@ -469,6 +471,61 @@ impl DecideEnv<'_> {
     pub fn mint(&self) -> IdMint {
         IdMint::new(self.now, self.seed)
     }
+}
+
+/// `open_pr` 提议原文表（#125）。执行体内存，不持久化；同一键的值恒定（CAS 内容寻址）。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProposalTexts(BTreeMap<ProposalRef, ProposalText>);
+
+impl ProposalTexts {
+    /// `None` = 尚未预取（或预取遇瞬时 IO 错误）；与 `Some(Missing)` 含义不同（§7.14.3）。
+    pub fn get(&self, key: &ProposalRef) -> Option<&ProposalText> {
+        self.0.get(key)
+    }
+
+    /// 执行体预取后登记；瞬时 IO 错误不登记。
+    pub fn insert(&mut self, key: ProposalRef, text: ProposalText) {
+        self.0.insert(key, text);
+    }
+
+    pub fn contains(&self, key: &ProposalRef) -> bool {
+        self.0.contains_key(key)
+    }
+}
+
+/// 取自 `AttemptState` 的 `result_ref` 与 `accepted_open_pr`。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProposalRef {
+    pub result_ref: Sha256Digest,
+    pub proposal_id: String,
+}
+
+impl ProposalRef {
+    /// 尝试带被接受的提议时的键；没有 `accepted_open_pr` 或 `result_ref` 时为 `None`。
+    pub fn of(attempt: &crate::state::AttemptState) -> Option<Self> {
+        Some(Self {
+            result_ref: attempt.result_ref?,
+            proposal_id: attempt.accepted_open_pr.clone()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalText {
+    /// 原样保存；模型产出，作数据交 forge 执行时净化（I5）。
+    Found(OpenPrParams),
+    /// 确定性缺失：已读过 CAS，但取不到可用的该提议。
+    Missing(ProposalMissing),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalMissing {
+    /// CAS 中没有 `result_ref` 指向的对象。
+    ObjectAbsent,
+    /// 结果对象里没有该 `proposal_id`。
+    NotInResult,
+    /// 有该 id，但 kind ≠ open_pr 或 params 解码失败。
+    Malformed,
 }
 
 // ---------------------------------------------------------------------------

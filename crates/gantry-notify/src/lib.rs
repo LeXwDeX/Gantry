@@ -6,9 +6,11 @@
 //! `dedup_key` 去重、`choose` / `dismiss` / `resolve`、查询与按项目计数
 //! （`GET /v1/inbox/summary` 的数据来源，P-63）。收件箱状态只来自 `store`
 //! 的内置 `inbox_items` 投影；本模块只追加 `inbox.*` 事件、不持有自己的状态
-//! （§7.10）。通知管线（M2）与 APNs（M4）不在本 crate 的 M1 范围内。
+//! （§7.10）。[`AutoClose`] 按事件日志执行自动关闭规则 R1、R2（§7.5）。通知管线（M2）与 APNs（M4）不在本 crate 的 M1 范围内。
 
+mod autoclose;
 mod inbox;
 mod validate;
 
+pub use autoclose::{AutoClose, AutoCloseError, AUTOCLOSE_CONSUMER};
 pub use inbox::Notify;
