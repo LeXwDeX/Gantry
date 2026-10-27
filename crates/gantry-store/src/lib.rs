@@ -1,21 +1,21 @@
 #![forbid(unsafe_code)]
 
-//! Gantry 事件存储的 M0 内存实现（store.md §1.1、§6 的 `open_in_memory`）。
+//! Gantry 事件存储（store.md）。
 //!
-//! 只实现单进程、单写者的最小一致性行为：追加事件、`dedup_key` 去重、投影、
-//! Outbox 表、游标与 `log_epoch`。内置 `inbox_items` 投影是收件箱状态的唯一
-//! 来源（store.md §7.2），`TxReader` / `ReadSnapshot` 的 `inbox_*` 方法按 §6.2 读取；
-//! 内置 `devices` 投影同理，读取方法为 `device` / `device_by_cert_serial` / `devices`。SQLite、模块投影器、CAS、备份与完整
-//! `ProjectionRead` 留给 M1；未实现的入口在这里显式返回错误或记录到
-//! `unprojected`，不静默吞掉。缺口清单见 `docs/m0-contract-gaps.md`。
+//! 两个打开入口共用同一条代码路径：`Store::open` 把事实源（事件、Outbox、游标、
+//! 模块私有表、`meta`）持久化到 SQLite（`durable` 模块，方案见 #88），
+//! `open_in_memory`（testing）不落盘。投影一律是内存中的纯折叠结果：`open` 时按
+//! `seq` 重放日志得到，之后由 `append` 增量维护。内置投影有交付单元、收件箱
+//! （`inbox_items`，收件箱状态的唯一来源）、设备、GitHub 快照与 settings，读取方法
+//! 按 §6.2 挂在 `TxReader` / `ReadSnapshot` 上。尚未覆盖的事件记录到 `unprojected`，
+//! 不静默吞掉。模块投影器、CAS 磁盘后端、备份与 `verify` 尚未实现。
 //!
-//! M0 的 `WriteTx` 在 `Inner` 的克隆上工作：`commit` 校验 `revision` 后原子替换，
-//! `rollback` 丢弃。所有直接写（游标、`log_epoch`、testing 模块状态）在同一把
-//! `Inner` 写锁下 clone-modify-swap 并递增 `revision`，因此它们不会等待
-//! `WriteGate`，也不会与同线程持有的 `WriteTx` 死锁；提交时 `revision` 已变则
-//! 返回 `PreconditionFailed`，不覆盖直接写。`begin_write` 让出执行线程等待令牌，
-//! `begin_write_sync` 在 `Condvar` 上阻塞；两个入口共用同一 FIFO 队列。这对测试
-//! 替身足够；真实存储必须用 SQLite 事务。
+//! `WriteTx` 在 `Inner` 的克隆上工作：`commit` 校验 `revision`，先把增量写进
+//! SQLite（若有），成功后原子替换内存状态；`rollback` 丢弃。直接写（游标、
+//! `log_epoch`、testing 模块状态）在同一把 `Inner` 写锁下修改并递增 `revision`，
+//! 因此不会等待 `WriteGate`，也不会与同线程持有的 `WriteTx` 死锁；提交时
+//! `revision` 已变则返回 `PreconditionFailed`，不覆盖直接写。`begin_write` 让出执行
+//! 线程等待令牌，`begin_write_sync` 在 `Condvar` 上阻塞；两个入口共用同一 FIFO 队列。
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -47,11 +47,13 @@ mod devices;
 use module::{ModuleRegistry, ModuleTables};
 
 pub mod cas;
+mod durable;
 pub mod github;
 pub mod module;
 pub mod projection;
 
 pub use cas::{Cas, CasKind, CasReader, CasStat, GcReport, RetentionPolicy};
+pub use durable::{StoreConfig, SCHEMA_VERSION};
 pub use github::{GithubSnapshots, IssueSnapshotRow, PrSnapshotRow};
 pub use module::{ModuleConn, ModuleReader, ModuleRow, ModuleSpec, MODULE_SCAN_MAX};
 pub use projection::{DeliveryRow, FoldError, StageEntered};
@@ -72,9 +74,78 @@ pub struct Store {
     deps: Arc<StoreDeps>,
     modules: Arc<ModuleRegistry>,
     cas: Cas,
+    /// SQLite 持久层；`open_in_memory` 为 `None`。
+    durable: Option<Arc<durable::Durable>>,
+    /// `open_temp` 的临时目录；排在 `durable` 之后，连接先关再删目录。
+    #[cfg(feature = "testing")]
+    temp_dir: Option<Arc<TempDir>>,
+}
+
+/// `open_temp` 的数据目录：最后一个 `Store` 句柄释放时删除。
+#[cfg(feature = "testing")]
+struct TempDir(std::path::PathBuf);
+
+#[cfg(feature = "testing")]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 impl Store {
+    /// 打开数据目录下的 SQLite 存储（store.md §6.1、§7.1）：取排他锁（第二个实例得到
+    /// `AlreadyRunning`）→ 迁移（版本更高得到 `SchemaTooNew`）→ 载入并重放投影。
+    /// CAS 暂为内存后端，磁盘后端随后续切片落地。
+    pub async fn open(
+        cfg: StoreConfig,
+        deps: StoreDeps,
+        modules: &[ModuleSpec],
+    ) -> Result<Store, StoreError> {
+        let registry = ModuleRegistry::new(modules)?;
+        let (durable, inner) = durable::Durable::open(&cfg, &registry, || {
+            Ok(deps.ids.next_ulid().map_err(StoreError::Id)?.to_string())
+        })?;
+        let cas = Cas::in_memory(deps.clock.clone(), cas::DEFAULT_MAX_OBJECT_BYTES);
+        Ok(Store {
+            inner: Arc::new(RwLock::new(inner)),
+            gate: Arc::new(WriteGate::new()),
+            deps: Arc::new(deps),
+            modules: Arc::new(registry),
+            cas,
+            durable: Some(Arc::new(durable)),
+            #[cfg(feature = "testing")]
+            temp_dir: None,
+        })
+    }
+
+    /// testing：在临时目录打开 SQLite 存储，最后一个句柄释放时删除目录（§6.1）。
+    #[cfg(feature = "testing")]
+    pub async fn open_temp(deps: StoreDeps, modules: &[ModuleSpec]) -> Result<Store, StoreError> {
+        // 测试的 `IdGen` 是确定性的，不能拿来区分目录；用进程号 + 进程内计数 + 墙钟。
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!(
+            "gantry-store-{}-{}-{nonce}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        let mut store = Self::open(StoreConfig::new(&dir), deps, modules).await?;
+        store.temp_dir = Some(Arc::new(TempDir(dir)));
+        Ok(store)
+    }
+
+    /// testing：绕过 store 直接对 SQLite 执行语句，用来验证数据库层约束（触发器等）。
+    #[cfg(feature = "testing")]
+    pub fn execute_raw_sql(&self, sql: &str) -> Result<(), StoreError> {
+        match &self.durable {
+            Some(durable) => durable.execute_raw(sql),
+            None => Err(StoreError::Unsupported("in-memory store has no SQLite")),
+        }
+    }
+
     /// M0 内存实现。`modules` 声明各模块的私有表（§7.10）；名字不合规返回
     /// `InvalidModuleSpec`。
     #[cfg(feature = "testing")]
@@ -111,6 +182,8 @@ impl Store {
             deps: Arc::new(deps),
             modules: Arc::new(registry),
             cas,
+            durable: None,
+            temp_dir: None,
         })
     }
 
@@ -200,6 +273,11 @@ impl Store {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(durable) = &self.durable {
+            durable
+                .persist_log_epoch(inner.log_epoch + 1)
+                .expect("persist log_epoch");
+        }
         inner.log_epoch += 1;
         inner.revision += 1;
         LogIdentity {
@@ -467,8 +545,6 @@ enum Wake {
 }
 
 impl WriteGate {
-    // 只有 `open_in_memory` 造新 gate；其余构造入口不存在。
-    #[cfg(feature = "testing")]
     fn new() -> Self {
         Self {
             state: Mutex::new(GateState::default()),
@@ -752,7 +828,7 @@ impl WriteTx {
             data: ev.data,
         };
 
-        self.project(&event)?;
+        self.snapshot.project(&event, Fold::Append)?;
         self.snapshot.events.push(event.clone());
         self.snapshot.head = seq_value;
         self.snapshot.last_ts = Some(ts);
@@ -819,6 +895,10 @@ impl WriteTx {
                 "another writer committed first".to_owned(),
             ));
         }
+        if let Some(durable) = &self.store.durable {
+            // 先落盘，成功后才替换内存状态；失败时两边都保持提交前的样子。
+            durable.persist(&inner, &self.snapshot, self.started_at)?;
+        }
         let base_revision = self.base_revision;
         let first_new = if self.snapshot.head > self.first_seq {
             self.first_seq + 1
@@ -838,11 +918,26 @@ impl WriteTx {
     }
 
     // -----------------------------------------------------------------------
+    // Outbox（同一事务）
+    // -----------------------------------------------------------------------
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fold {
+    Append,
+    Replay,
+}
+
+impl Inner {
+    // -----------------------------------------------------------------------
     // 投影
     // -----------------------------------------------------------------------
 
-    fn project(&mut self, event: &Event<Value>) -> Result<(), StoreError> {
+    /// 折叠一条事件。`Replay` 是启动时从日志重建：Outbox 是主表（§7.2），
+    /// 它的行从持久层载入，`outbox.*` 事件此时不再改行。
+    fn project(&mut self, event: &Event<Value>, mode: Fold) -> Result<(), StoreError> {
         match event.ty {
+            EventType::OutboxSucceeded | EventType::OutboxFailed if mode == Fold::Replay => {}
             EventType::SettingsUpdated => {
                 let data: SettingsUpdatedData =
                     decode_data(event).map_err(StoreError::InvalidEvent)?;
@@ -850,17 +945,17 @@ impl WriteTx {
             }
             EventType::DeliveryCreated => {
                 let row = DeliveryRow::created(event).map_err(fold_error)?;
-                if self.snapshot.deliveries.contains_key(&row.id) {
+                if self.deliveries.contains_key(&row.id) {
                     return Err(StoreError::PreconditionFailed(format!(
                         "delivery {} already created",
                         row.id
                     )));
                 }
-                self.snapshot.deliveries.insert(row.id, row);
+                self.deliveries.insert(row.id, row);
             }
             ty if DeliveryRow::folds(ty) => {
                 let id = subject_id::<Dlv>(&event.subject)?;
-                let row = self.snapshot.deliveries.get_mut(&id).ok_or_else(|| {
+                let row = self.deliveries.get_mut(&id).ok_or_else(|| {
                     StoreError::PreconditionFailed(format!("delivery {id} has no projection row"))
                 })?;
                 // 先在副本上折叠：前置条件失败时行保持不变。
@@ -872,7 +967,7 @@ impl WriteTx {
                 let data = decode_data::<gantry_core::events::OutboxSucceededData>(event)
                     .map_err(StoreError::InvalidEvent)?;
                 let id = subject_id::<Act>(&event.subject)?;
-                let row = self.snapshot.outbox.get_mut(&id).ok_or_else(|| {
+                let row = self.outbox.get_mut(&id).ok_or_else(|| {
                     StoreError::PreconditionFailed(format!("outbox row {id} not found"))
                 })?;
                 // 事件投影也不允许从终态回退：只有执行中的动作可以成功。
@@ -891,7 +986,7 @@ impl WriteTx {
                 let data = decode_data::<gantry_core::events::OutboxFailedData>(event)
                     .map_err(StoreError::InvalidEvent)?;
                 let id = subject_id::<Act>(&event.subject)?;
-                let row = self.snapshot.outbox.get_mut(&id).ok_or_else(|| {
+                let row = self.outbox.get_mut(&id).ok_or_else(|| {
                     StoreError::PreconditionFailed(format!("outbox row {id} not found"))
                 })?;
                 if row.action.status != OutboxStatus::Executing {
@@ -910,7 +1005,7 @@ impl WriteTx {
             }
             ty if GithubSnapshots::folds(ty) => {
                 // `apply` 失败时不改动自身，因此直接在快照上折叠。
-                self.snapshot.github.apply(event).map_err(fold_error)?;
+                self.github.apply(event).map_err(fold_error)?;
             }
             EventType::InboxRaised => {
                 let data =
@@ -929,12 +1024,12 @@ impl WriteTx {
             }
             ty if devices::DeviceTable::folds(ty) => {
                 // 先在副本上折叠：前置条件失败时投影保持不变。
-                let mut next = self.snapshot.devices.clone();
+                let mut next = self.devices.clone();
                 next.apply(event)?;
-                self.snapshot.devices = next;
+                self.devices = next;
             }
             _ => {
-                self.snapshot.unprojected.push(UnprojectedEvent {
+                self.unprojected.push(UnprojectedEvent {
                     seq: event.seq,
                     ty: event.ty,
                     reason: "no_projector",
@@ -970,20 +1065,20 @@ impl WriteTx {
                 "inbox {id} must be raised as open"
             )));
         }
-        if self.snapshot.inbox.contains_key(&id) {
+        if self.inbox.contains_key(&id) {
             return Err(StoreError::PreconditionFailed(format!(
                 "inbox {id} already raised"
             )));
         }
         // 先全部校验、后统一修改：失败时事务快照里不留下半折叠的状态。
         for target in &data.supersedes {
-            let row = self.snapshot.inbox.get(target).ok_or_else(|| {
+            let row = self.inbox.get(target).ok_or_else(|| {
                 StoreError::PreconditionFailed(format!("superseded inbox {target} not found"))
             })?;
             gantry_core::machines::inbox::check(row.status, InboxStatus::Resolved)
                 .map_err(|error| StoreError::PreconditionFailed(error.to_string()))?;
         }
-        if self.snapshot.inbox.values().any(|row| {
+        if self.inbox.values().any(|row| {
             row.status == InboxStatus::Open
                 && row.dedup_key == item.dedup_key
                 && !data.supersedes.contains(&row.id)
@@ -993,12 +1088,12 @@ impl WriteTx {
             ));
         }
         for target in &data.supersedes {
-            if let Some(row) = self.snapshot.inbox.get_mut(target) {
+            if let Some(row) = self.inbox.get_mut(target) {
                 row.status = InboxStatus::Resolved;
                 row.updated_at = event.ts;
             }
         }
-        self.snapshot.inbox.insert(id, item);
+        self.inbox.insert(id, item);
         Ok(())
     }
 
@@ -1015,7 +1110,6 @@ impl WriteTx {
             )));
         }
         let row = self
-            .snapshot
             .inbox
             .get_mut(&id)
             .ok_or_else(|| StoreError::PreconditionFailed(format!("inbox {id} not found")))?;
@@ -1063,7 +1157,6 @@ impl WriteTx {
             resource: resource_key(data.resource),
         };
         let current_rev = self
-            .snapshot
             .settings
             .get(&key)
             .and_then(|revisions| revisions.last())
@@ -1076,25 +1169,16 @@ impl WriteTx {
                 current_rev.as_u64()
             )));
         }
-        self.snapshot
-            .settings
-            .entry(key)
-            .or_default()
-            .push(SettingsRev {
-                rev: event.seq,
-                value: data.value.clone(),
-            });
+        self.settings.entry(key).or_default().push(SettingsRev {
+            rev: event.seq,
+            value: data.value.clone(),
+        });
         for change in &data.secret_changes {
-            self.snapshot
-                .secret_changes
+            self.secret_changes
                 .insert((change.secret_ref.to_string(), change.version), event.seq);
         }
         Ok(())
     }
-
-    // -----------------------------------------------------------------------
-    // Outbox（同一事务）
-    // -----------------------------------------------------------------------
 }
 
 impl gantry_core::ports::TxHandle for WriteTx {
@@ -1880,6 +1964,9 @@ impl Cursors {
         if seq == current {
             return Ok(());
         }
+        if let Some(durable) = &self.store.durable {
+            durable.persist_cursor(consumer, seq, self.store.deps.clock.now())?;
+        }
         inner.cursors.insert(consumer.to_owned(), seq);
         inner.revision += 1;
         Ok(())
@@ -2442,6 +2529,22 @@ fn subject_id<K: gantry_core::ids::IdKind>(
 pub mod testing {
     //! 测试支撑：与 `core::testing` 的假时钟 / 确定性熵源一起使用。
     pub use gantry_core::testing::{FakeClock, SeqEntropy};
+
+    use crate::{ModuleSpec, Store, StoreDeps, StoreError};
+
+    /// 一致性测试的打开入口：环境变量 `GANTRY_STORE_BACKEND=sqlite` 时用
+    /// `open_temp`（SQLite），否则用 `open_in_memory`。同一组用例因此可以对两个
+    /// 后端各跑一遍（store.md §12 "内存实现与 SQLite 实现共用同一套一致性测试"）。
+    pub async fn open_for_tests(
+        deps: StoreDeps,
+        modules: &[ModuleSpec],
+    ) -> Result<Store, StoreError> {
+        if std::env::var("GANTRY_STORE_BACKEND").as_deref() == Ok("sqlite") {
+            Store::open_temp(deps, modules).await
+        } else {
+            Store::open_in_memory(deps, modules).await
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2481,6 +2584,17 @@ pub enum StoreError {
     Corrupt(String),
     #[error("io: {0}")]
     Io(String),
+    /// 同一数据目录已有另一个实例持有排他锁。
+    #[error("store already running for this data directory")]
+    AlreadyRunning,
+    #[error("schema version {found} is newer than supported {supported}")]
+    SchemaTooNew { found: u32, supported: u32 },
+    #[error("database busy")]
+    Busy,
+    #[error("disk full")]
+    DiskFull,
+    #[error("sqlite: {0}")]
+    Sqlite(String),
 }
 
 impl StoreError {

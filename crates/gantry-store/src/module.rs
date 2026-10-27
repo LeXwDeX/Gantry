@@ -53,6 +53,11 @@ pub(crate) struct ModuleRegistry {
 }
 
 impl ModuleRegistry {
+    /// 已注册的全部表名。
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.tables.keys().copied()
+    }
+
     pub(crate) fn new(specs: &[ModuleSpec]) -> Result<Self, StoreError> {
         let mut modules = BTreeMap::new();
         let mut tables = BTreeMap::new();
