@@ -12,8 +12,10 @@ gantry-store = { path = "../gantry-store" }
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
 
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
+gantry-fakes = { path = "../gantry-fakes" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
