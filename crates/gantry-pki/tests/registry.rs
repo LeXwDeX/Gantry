@@ -254,6 +254,25 @@ async fn token_is_single_use_expires_and_is_voided_after_five_failures() {
 }
 
 #[tokio::test]
+async fn token_expiring_while_waiting_for_the_write_lease_is_rejected() {
+    let env = Env::new().await;
+    let token = env.token().await;
+    // 另一个写事务占着单写者租约；redeem 排队期间令牌过期。
+    let blocker = env.store.begin_write().await.unwrap();
+    let env_ref = &env;
+    let (result, ()) = tokio::join!(
+        env.pairing
+            .redeem(Keys::new().request(&token, DevicePlatform::Macos)),
+        async move {
+            tokio::task::yield_now().await;
+            env_ref.advance(10 * MIN_MS);
+            drop(blocker);
+        }
+    );
+    assert_eq!(token_reason(result), TokenInvalidReason::Expired);
+}
+
+#[tokio::test]
 async fn new_session_voids_the_old_token() {
     let env = Env::new().await;
     let old = env.token().await;
