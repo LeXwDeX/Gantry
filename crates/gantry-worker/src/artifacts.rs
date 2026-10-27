@@ -66,3 +66,21 @@ pub fn write_result(out: &Path, result: &ResultJson) -> Result<ArtifactRef, Arti
         .map_err(|err| ArtifactError::Invalid(RESULT_JSON, err.to_string()))?;
     write_atomic(out, RESULT_JSON, &bytes)
 }
+
+/// `report.md` 的大小上限（worker.md §7.5）。
+pub const MAX_REPORT_BYTES: usize = 256 * 1024;
+const REPORT_TRUNCATED: &str = "\n\n[report truncated by gantry-worker]\n";
+
+/// 写 `report.md`，超过上限时在字符边界截断并附说明行；返回引用与是否截断。
+pub fn write_report(out: &Path, text: &str) -> Result<(ArtifactRef, bool), ArtifactError> {
+    if text.len() <= MAX_REPORT_BYTES {
+        return write_atomic(out, REPORT_MD, text.as_bytes()).map(|r| (r, false));
+    }
+    let mut end = MAX_REPORT_BYTES - REPORT_TRUNCATED.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bytes = text.as_bytes()[..end].to_vec();
+    bytes.extend_from_slice(REPORT_TRUNCATED.as_bytes());
+    write_atomic(out, REPORT_MD, &bytes).map(|r| (r, true))
+}
