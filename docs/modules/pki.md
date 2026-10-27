@@ -261,6 +261,22 @@ pub mod recover {       // gantry device recover
 
 `src/{lib.rs, config.rs, ca.rs, bootstrap.rs, issue.rs, csr.rs, pairing.rs, verifier.rs, tls.rs, directory.rs, admin.rs, recover.rs, rotate.rs, revocation.rs, store_schema.rs}`；`tests/` 下按 §12 分文件。
 
+### 6.8 M1 实现与上面草案的差异
+
+M1 的实现（`crates/gantry-pki`，#98）在不改变语义的前提下做了以下取舍，以代码为准：
+
+| 草案 | M1 实现 | 原因 |
+| --- | --- | --- |
+| `DeviceDirectory::list(PageReq) -> Page<Device>` | 直接用 `store` 的 `Page` / `Paged<Device>` | 与 `store` 的键集分页一致，不另造一套 |
+| `replay_revocations()` | `replay_revocations(backup_at)`：只重放 `revoked_at` 晚于备份时刻的条目（P-80） | 备份时刻由 `deploy` 的恢复命令传入，`pki` 读不到备份元数据 |
+| `Pki::spawn_background(shutdown)` | `Pki::tick()`：关闭过期配对窗口 + 按需续签服务端证书，由 `gantryd` 定期调用（建议每 6 小时，配对窗口可更频繁） | 后台任务的调度归装配方，本模块只提供一步可测的动作 |
+| `open_session(opts, host)` / `PkiControl::pair_open(opts, host)` | `open_session(created_by_uid)`：TTL 等取引导配置；配对串编码待 OQ-K3 | 配对串契约未定，`PairingTicket` 先给令牌与根指纹 |
+| `recover::run(cmd, env, store, clock)` | `recover::run(cmd, env, store, directory, admin)` | 吊销要写吊销日志，复用 `StoreAdmin` 的同一份实现 |
+| `pki_pairing_sessions` 每会话一行 | 整张会话表存为一个文档（键 `sessions`） | 同一时刻至多一个 open 会话，已结束会话定期清理，表很小 |
+| 中间 CA / 服务端私钥在 `secrets` 里的名字未定 | `ca.intermediate.key`、`tls.server.key`（使用方 `pki`）；`deploy` 引导时按此名写入 | 两边需要同一个名字 |
+| 根私钥自检"数据目录与 `secrets/`" | 扫描引导配置给出的目录里未加密的 PEM 私钥（PKCS#8 / SEC1）并按公钥比对；加密私钥无法比对，由 `deploy` 的安装断言覆盖 | `secrets/` 里的文件是密文 |
+| `RevocationNotifier` | 未实现（M3） | M1 由 `api` 的心跳检查兜底 |
+
 ## 7. 内部设计
 
 ### 7.1 信任层次与证书参数

@@ -15,7 +15,10 @@
 //!
 //! - 读取：[`Reader`] 实现 `ForgeReader::discussion`（P-59）；快照类读取随对账切片补齐。
 //!
-//! webhook、归一化、对账在后续切片。
+//! - webhook 接收：[`WebhookReceiver`]（回环监听、HMAC 双 secret、`delivery_id` 去重、先落盘再 2xx，
+//!   forge.md §7.4）。
+//!
+//! 归一化、自身事件归因、对账在后续切片。
 //!
 //! 已知限制（M1 切片内）：
 //! - 只接受 M1 的 5 个动作（forge.md §1.1）；其余 9 个动作在 M2 起开放，入队时拒绝。
@@ -28,6 +31,7 @@ mod git;
 mod github;
 mod outbox;
 mod reader;
+pub mod webhook;
 
 pub use auth::app::{AppAuthDeps, AppAuthOptions, AppTokenProvider, PermissionReport};
 pub use auth::{AuthError, StaticTokenProvider, TokenProvider, TokenPurpose};
@@ -39,3 +43,11 @@ pub use outbox::executor::{
 pub use outbox::key::{derive_target_intent, KeyError, TargetIntent};
 pub use outbox::{Forge, M1_ACTIONS};
 pub use reader::{Reader, ReaderDeps};
+pub use webhook::{
+    InboxRow, InboxStatus, WebhookDeps, WebhookError, WebhookOptions, WebhookReceiver, WebhookStats,
+};
+
+/// `forge` 的模块私有表（store.md §7.10）；装配方交给 `Store::open*`。
+pub fn module_spec() -> gantry_store::ModuleSpec {
+    gantry_store::ModuleSpec::new(webhook::MODULE, &[webhook::INBOX_TABLE])
+}

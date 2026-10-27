@@ -2,240 +2,19 @@
 //! 首台角色与引导期（D-18）、令牌规则、不可信字段、配对窗口，以及设备目录
 //! （`by_cert_serial`、`verifying_key`、`last_seen` 节流、握手在册查询）。
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+mod common;
 
-use gantry_core::entities::{Actor, ActorKind, DevicePlatform, DeviceRole, DeviceStatus};
-use gantry_core::events::{DeviceRevokedData, EventType, NewEvent, Subject};
-use gantry_core::ids::{DeviceId, IdGen};
-use gantry_core::secret::SecretString;
-use gantry_core::testing::{FakeClock, SeqEntropy};
+use common::{fixture, Env, Keys, API, MIN_MS};
+use gantry_core::entities::{DevicePlatform, DeviceRole, DeviceStatus};
+use gantry_core::ids::DeviceId;
 use gantry_core::time::Timestamp;
-use gantry_pki::bootstrap::{self, BootstrapParams, MemoryFsProbe};
 use gantry_pki::csr::encode_approval_pubkey;
-use gantry_pki::directory::{DeviceDirectory, StoreDirectory};
-use gantry_pki::pairing::{SessionState, SessionTable, TokenInvalidReason};
-use gantry_pki::pairing_service::{
-    FieldError, Issuer, NewDevice, PairError, PairRequest, PairResponse, PairingConfig,
-    PairingService,
-};
-use gantry_pki::store_schema::{
-    self, CertRowStatus, DeviceCertRow, DeviceStateRow, DEVICE_CERTS, DEVICE_STATE, MODULE,
-    PAIRING_SESSIONS, SESSIONS_KEY,
-};
+use gantry_pki::directory::DeviceDirectory;
+use gantry_pki::pairing::{SessionState, TokenInvalidReason};
+use gantry_pki::pairing_service::{FieldError, PairError, PairResponse};
+use gantry_pki::store_schema::{CertRowStatus, DeviceStateRow, DEVICE_CERTS, DEVICE_STATE, MODULE};
 use gantry_pki::verifier::{CertStatusLookup, DeviceCertStatus};
-use gantry_pki::{fingerprint, Authority, CertPolicy, CertSerial, IssuedCert, P256PublicKey};
-use gantry_store::{Store, StoreDeps};
-use p256::pkcs8::EncodePublicKey;
-use rcgen::{CertificateParams, KeyPair};
-
-const NOW_MS: i64 = 1_798_761_600_000; // 2027-01-01T00:00:00Z
-const MIN_MS: i64 = 60_000;
-const DAY_MS: i64 = 86_400_000;
-const API: &str = "https://gantry.example.test:8443";
-
-struct AlwaysMemory;
-
-impl MemoryFsProbe for AlwaysMemory {
-    fn is_memory_fs(&self, _dir: &Path) -> io::Result<bool> {
-        Ok(true)
-    }
-}
-
-fn temp_dir() -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "pki-registry-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn fixture(name: &str) -> String {
-    fs::read_to_string(format!(
-        "{}/tests/fixtures/csr/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap()
-}
-
-struct Env {
-    store: Store,
-    clock: Arc<FakeClock>,
-    pairing: PairingService,
-    directory: StoreDirectory,
-    root: IssuedCert,
-}
-
-impl Env {
-    async fn new() -> Self {
-        let dir = temp_dir();
-        bootstrap::run_with(
-            BootstrapParams {
-                server_names: vec!["gantry.example.test".into()],
-                root_passphrase: SecretString::new("pw".into()),
-                install_id: "registry".into(),
-                out_dir: dir.clone(),
-                policy: CertPolicy::default(),
-            },
-            &FakeClock::new(NOW_MS - DAY_MS),
-            &SeqEntropy::new(1),
-            &AlwaysMemory,
-        )
-        .unwrap();
-        let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
-        let intermediate =
-            Authority::load(&read("intermediate.crt"), &read("intermediate.key")).unwrap();
-        let root =
-            IssuedCert::from_der(pem::parse(read("root.crt")).unwrap().into_contents()).unwrap();
-        let _ = fs::remove_dir_all(&dir);
-
-        let clock = Arc::new(FakeClock::new(NOW_MS));
-        let entropy = Arc::new(SeqEntropy::new(42));
-        let store = Store::open_in_memory(
-            StoreDeps {
-                clock: clock.clone(),
-                ids: Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7)))),
-            },
-            &[store_schema::module_spec()],
-        )
-        .await
-        .unwrap();
-        let pairing = PairingService::new(
-            store.clone(),
-            clock.clone(),
-            entropy,
-            Arc::new(Issuer::new(intermediate, root.clone())),
-            PairingConfig::new(API),
-        );
-        let directory = StoreDirectory::new(store.clone(), clock.clone());
-        Self {
-            store,
-            clock,
-            pairing,
-            directory,
-            root,
-        }
-    }
-
-    fn advance(&self, ms: i64) {
-        let now = self.clock.now_timestamp().as_millis();
-        self.clock.set(Timestamp::from_millis(now + ms));
-    }
-
-    async fn token(&self) -> String {
-        self.pairing
-            .open_session(0)
-            .await
-            .unwrap()
-            .token
-            .expose_secret()
-            .to_owned()
-    }
-
-    async fn pair(&self, platform: DevicePlatform) -> PairResponse {
-        let token = self.token().await;
-        self.pairing
-            .redeem(Keys::new().request(&token, platform))
-            .await
-            .unwrap()
-    }
-
-    async fn sessions(&self) -> SessionTable {
-        self.store
-            .snapshot()
-            .await
-            .unwrap()
-            .module_conn(MODULE)
-            .get(PAIRING_SESSIONS, SESSIONS_KEY)
-            .unwrap()
-            .unwrap()
-    }
-
-    async fn cert_row(&self, serial: &str) -> Option<DeviceCertRow> {
-        self.store
-            .snapshot()
-            .await
-            .unwrap()
-            .module_conn(MODULE)
-            .get(DEVICE_CERTS, serial)
-            .unwrap()
-    }
-
-    async fn revoke_event(&self, device: &PairResponse) {
-        let id = device.device.id;
-        let mut tx = self.store.begin_write().await.unwrap();
-        tx.append(NewEvent {
-            ty: EventType::DeviceRevoked,
-            subject: Subject::parse(&id.to_string()).unwrap(),
-            project_id: None,
-            actor: Actor::new(ActorKind::System, "pki"),
-            causation_id: None,
-            correlation_id: None,
-            data: serde_json::to_value(DeviceRevokedData {
-                device_id: id,
-                cert_serials: vec![device.device.cert_serial.clone()],
-                remaining_approvers: 0,
-                via: None,
-            })
-            .unwrap(),
-            dedup_key: None,
-        })
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-    }
-}
-
-/// 设备端的两把密钥：mTLS 客户端密钥（出 CSR）与审批签名密钥。
-struct Keys {
-    client: KeyPair,
-    approval: P256PublicKey,
-}
-
-impl Keys {
-    fn new() -> Self {
-        let secret = p256::SecretKey::random(&mut rand_core::OsRng);
-        let approval = P256PublicKey::from_spki_der(
-            secret.public_key().to_public_key_der().unwrap().as_bytes(),
-        )
-        .unwrap();
-        Self {
-            client: KeyPair::generate().unwrap(),
-            approval,
-        }
-    }
-
-    fn csr(&self) -> String {
-        CertificateParams::default()
-            .serialize_request(&self.client)
-            .unwrap()
-            .pem()
-            .unwrap()
-    }
-
-    fn client_public(&self) -> P256PublicKey {
-        P256PublicKey::from_spki_der(&self.client.public_key_der()).unwrap()
-    }
-
-    fn request(&self, token: &str, platform: DevicePlatform) -> PairRequest {
-        PairRequest {
-            token: token.to_owned(),
-            csr_pem: self.csr(),
-            approval_pubkey: Some(encode_approval_pubkey(&self.approval)),
-            device: NewDevice {
-                name: "Lex 的 MacBook".into(),
-                platform,
-            },
-        }
-    }
-}
+use gantry_pki::{fingerprint, CertSerial, IssuedCert};
 
 fn field_errors(result: Result<PairResponse, PairError>) -> Vec<FieldError> {
     match result {
@@ -472,6 +251,25 @@ async fn token_is_single_use_expires_and_is_voided_after_five_failures() {
             .await,
         Err(PairError::TokenInvalid(_))
     ));
+}
+
+#[tokio::test]
+async fn token_expiring_while_waiting_for_the_write_lease_is_rejected() {
+    let env = Env::new().await;
+    let token = env.token().await;
+    // 另一个写事务占着单写者租约；redeem 排队期间令牌过期。
+    let blocker = env.store.begin_write().await.unwrap();
+    let env_ref = &env;
+    let (result, ()) = tokio::join!(
+        env.pairing
+            .redeem(Keys::new().request(&token, DevicePlatform::Macos)),
+        async move {
+            tokio::task::yield_now().await;
+            env_ref.advance(10 * MIN_MS);
+            drop(blocker);
+        }
+    );
+    assert_eq!(token_reason(result), TokenInvalidReason::Expired);
 }
 
 #[tokio::test]
