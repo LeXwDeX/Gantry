@@ -218,6 +218,7 @@ fn identity() -> IdentityFile {
         paired_at: "2026-10-27T00:00:00.000Z".into(),
         renewed_at: None,
         log_epoch: Some(1),
+        revoked: false,
     }
 }
 

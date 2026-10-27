@@ -383,6 +383,7 @@ impl PendingIdentity {
             paired_at,
             renewed_at: None,
             log_epoch: None,
+            revoked: false,
         }
     }
 

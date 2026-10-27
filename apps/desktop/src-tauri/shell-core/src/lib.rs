@@ -4,6 +4,7 @@
 //! （`apps/desktop/src-tauri`）只负责把这里的能力注册成白名单 IPC 命令。
 
 pub mod approval;
+pub mod events;
 pub mod http;
 pub mod ipc;
 pub mod keys;
