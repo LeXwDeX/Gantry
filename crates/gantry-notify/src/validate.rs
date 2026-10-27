@@ -10,9 +10,11 @@ use std::collections::BTreeSet;
 use gantry_core::entities::{DecisionKind, InboxOption, InboxPayload};
 use gantry_core::ports::{validate_raise_kind, RaiseError, RaiseRequest};
 
-/// `escalation` 只有 `level_cap_exceeded` 带选项；其余 `reason_code` 不带。
+/// `escalation` 只有 `level_cap_exceeded` 与 `outbox_failed:<code>`（#67）带选项；
+/// 其余 `reason_code` 不带。
 const LEVEL_CAP_EXCEEDED: &str = "level_cap_exceeded";
 const ESCALATION_LEVEL_CAP: &[&str] = &["upgrade", "narrow", "abandon"];
+const ESCALATION_OUTBOX_FAILED: &[&str] = &["retry", "abandon"];
 const DECISION_GATE_REJECT: &[&str] = &["replan", "abandon"];
 const DECISION_MANUAL_ACTION: &[&str] = &["done", "abandon"];
 const DECISION_REVIEW_DISPUTE: &[&str] = &["fix", "keep"];
@@ -32,15 +34,28 @@ pub(crate) fn raise_request(req: &RaiseRequest) -> Result<(), RaiseError> {
     match &req.payload {
         InboxPayload::Escalation {
             reason_code,
+            action_id,
+            ..
+        } if reason_code.is_outbox_failed() != action_id.is_some() => Err(invalid(
+            "/payload/action_id",
+            "action_id is required exactly when reason_code is outbox_failed:<code>",
+        )),
+        InboxPayload::Escalation {
+            reason_code,
             options,
             ..
         } => match options {
             None => Ok(()),
-            Some(_) if reason_code.as_str() != LEVEL_CAP_EXCEEDED => Err(invalid(
+            Some(options) if reason_code.as_str() == LEVEL_CAP_EXCEEDED => {
+                check_options(options, ESCALATION_LEVEL_CAP)
+            }
+            Some(options) if reason_code.is_outbox_failed() => {
+                check_options(options, ESCALATION_OUTBOX_FAILED)
+            }
+            Some(_) => Err(invalid(
                 "/payload/options",
                 "this escalation reason_code carries no options",
             )),
-            Some(options) => check_options(options, ESCALATION_LEVEL_CAP),
         },
         InboxPayload::DecisionNeeded { kind, options, .. } => {
             let allowed = match kind {
