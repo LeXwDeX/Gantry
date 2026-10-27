@@ -121,7 +121,7 @@ pub fn created(subject: &'static str) -> Spec {
             "level_cap": "Medium",
             "level_effective": "Low",
             "origin": "conversation",
-            "source_message_id": null,
+            "source_message_id": null, "user_text": "修复登录超时",
             "issues": [],
             "budget": {
                 "template": "low.single",

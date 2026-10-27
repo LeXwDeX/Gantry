@@ -27,7 +27,7 @@ fn created() -> DeliveryCreatedData {
         "level_cap": "Low",
         "level_effective": "Low",
         "origin": "conversation",
-        "source_message_id": null,
+        "source_message_id": null, "user_text": "修复登录超时",
         "issues": [],
         "budget": {"template": "low.single", "limits": low_limits()},
         "config_rev": 7

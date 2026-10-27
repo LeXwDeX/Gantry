@@ -531,3 +531,28 @@ fn supersedes_unblocks() {
     assert!(state.open_inbox.contains_key(&id(NEW_INBOX)));
     assert_eq!(state.open_inbox.len(), 1);
 }
+
+/// #122：人工锁的 `worktree.locked` 不带 delivery_id，按工作树归属投给原交付单元。
+#[test]
+fn human_lock_routes_by_worktree_owner() {
+    let all = events(&low_path());
+    let mut router = Router::default();
+    let created = all
+        .iter()
+        .find(|event| event.ty.as_str() == "worktree.created")
+        .unwrap();
+    let Route::Delivery { id: owner, .. } = router.route(created).unwrap() else {
+        panic!("worktree.created must route to its delivery");
+    };
+    let mut human = all
+        .iter()
+        .find(|event| event.ty.as_str() == "worktree.locked")
+        .unwrap()
+        .clone();
+    human.data["holder"] = json!("human");
+    human.data["delivery_id"] = Value::Null;
+    assert!(matches!(
+        router.route(&human).unwrap(),
+        Route::Delivery { id, .. } if id == owner
+    ));
+}

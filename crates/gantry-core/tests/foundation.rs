@@ -595,10 +595,9 @@ fn approval_consume_rules() {
 fn worktree_lock_rules() {
     let lock = builders::worktree();
     assert!(lock.lock.is_none());
-    let delivery = builders::delivery().id;
     let request = worktree_lock::LockRequest {
         holder: LockHolder::Human,
-        delivery_id: delivery,
+        delivery_id: None,
         lease_until: Timestamp::from_millis(1_700_000_100_000),
         max_lease: Some(Timestamp::from_millis(1_700_000_200_000)),
     };

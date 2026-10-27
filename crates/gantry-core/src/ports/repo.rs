@@ -26,11 +26,39 @@ pub struct MirrorInfo {
     pub fetch_refspecs: Vec<String>,
 }
 
-/// 受控访问守卫。真实实现内部持有 flock；Drop 释放。`core` 只承载字段。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 受控访问守卫（repo.md §6.1）：持有实现方的锁句柄，守卫 drop 即释放。
+///
+/// 真实实现的句柄是镜像仓的共享 flock：`Fetch` / `Push` / `Read` 期间 `repo` 的
+/// `gc` / 重建（独占锁）必须等待，所以 `forge` 在 `git fetch` / `git push` 全程持有
+/// 守卫。守卫因此不可 Clone。`core` 不做 IO，只保存一个不透明的句柄。
 pub struct MirrorGuard {
     pub git_dir: PathBuf,
     pub fetch_refspecs: Vec<String>,
+    _lease: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl MirrorGuard {
+    /// `lease` 在守卫 drop 时随之 drop；不需要锁的实现（替身）传 `()`。
+    pub fn new(
+        git_dir: PathBuf,
+        fetch_refspecs: Vec<String>,
+        lease: impl std::any::Any + Send + Sync,
+    ) -> Self {
+        Self {
+            git_dir,
+            fetch_refspecs,
+            _lease: Box::new(lease),
+        }
+    }
+}
+
+impl std::fmt::Debug for MirrorGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MirrorGuard")
+            .field("git_dir", &self.git_dir)
+            .field("fetch_refspecs", &self.fetch_refspecs)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

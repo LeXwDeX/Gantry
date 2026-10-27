@@ -61,6 +61,17 @@ fn sentinel_never_leaks() {
         seen.push(format!("{staged:?}"));
         seen.push(format!("{:?}", secrets.admin().staged_all().unwrap()));
         let meta = s.commit(&staged, &c).unwrap();
+        let id = gantry_secrets::BackupIdentity::generate();
+        let mut archive = Vec::new();
+        let manifest = secrets
+            .admin()
+            .export_backup(&[id.recipient()], &mut archive)
+            .unwrap();
+        assert!(
+            !common::contains(&archive, secret.as_bytes()),
+            "备份流泄露了值"
+        );
+        seen.push(format!("{manifest:?} {id:?}"));
         seen.push(format!("{meta:?}"));
         seen.push(format!("{:?}", s.list().unwrap()));
         seen.push(format!("{:?}", s.delete(&n, Expect::Any, &c).unwrap()));

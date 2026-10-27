@@ -45,7 +45,7 @@ use tokio::sync::Semaphore;
 
 use crate::cas::PatchCas;
 use crate::git::{GitCmd, GitEnv, GitOutput};
-use crate::mirror::{io, io_error, MirrorEntry, MirrorLock};
+use crate::mirror::{io, io_error, MirrorEntry};
 use crate::worktree::{check_token, lease_until, ActiveLock, WorktreeTable, HUMAN_LEASE_MAX};
 
 pub use crate::mirror::FETCH_REFSPEC;
@@ -114,16 +114,6 @@ pub struct RepoDeps {
     pub policy: Arc<dyn PolicyPort>,
     /// 补丁字节与校验记录（见 [`cas`]）。
     pub cas: Arc<dyn PatchCas>,
-}
-
-/// 持有共享 / 独占 flock 的镜像仓访问守卫。
-///
-/// `core::ports::MirrorGuard` 只承载字段、不能持锁；需要在 `git fetch` / `push`
-/// 期间挡住 gc 的调用方用 [`GitRepo::lease_mirror`] 取得本类型。
-#[derive(Debug)]
-pub struct MirrorLease {
-    pub guard: MirrorGuard,
-    _lock: MirrorLock,
 }
 
 #[derive(Clone)]
@@ -215,21 +205,6 @@ impl GitRepo {
 
     pub fn config(&self) -> &RepoConfig {
         &self.inner.cfg
-    }
-
-    /// 取镜像仓的 flock 守卫：`Fetch` / `Push` / `Read` 共享；gc / 重建独占。
-    pub async fn lease_mirror(
-        &self,
-        project: &ProjectId,
-        mode: MirrorMode,
-    ) -> Result<MirrorLease, RepoError> {
-        let entry = self.mirror_entry(project)?;
-        let _ = mode; // 三种模式都是共享锁（repo.md §6.1）
-        let lock = mirror::lock(&entry.git_dir, false).await?;
-        Ok(MirrorLease {
-            guard: entry.guard(),
-            _lock: lock,
-        })
     }
 
     /// 独占锁下的 `git gc`（repo.md §7.2：`gc.auto=0`，由本模块定时执行）。
@@ -513,7 +488,7 @@ impl GitRepo {
         }
         let request = worktree_lock::LockRequest {
             holder,
-            delivery_id: *delivery,
+            delivery_id: holder.bound_delivery(*delivery),
             lease_until: until,
             max_lease: None,
         };
@@ -521,7 +496,7 @@ impl GitRepo {
             .as_ref()
             .map(|lock| gantry_core::entities::WorktreeLock {
                 holder: lock.holder,
-                delivery_id: lock.delivery_id,
+                delivery_id: lock.holder.bound_delivery(lock.delivery_id),
                 acquired_at: lock.acquired_at,
                 lease_until: lock.lease_until,
             });
@@ -537,7 +512,7 @@ impl GitRepo {
                 &WorktreeLockedData {
                     worktree_id: *id,
                     holder,
-                    delivery_id: *delivery,
+                    delivery_id: holder.bound_delivery(*delivery),
                     lease_until: until,
                 },
             )
@@ -571,7 +546,7 @@ impl GitRepo {
         let until = lease_until(now, lease);
         let core_lock = gantry_core::entities::WorktreeLock {
             holder: lock.holder,
-            delivery_id: lock.delivery_id,
+            delivery_id: lock.holder.bound_delivery(lock.delivery_id),
             acquired_at: lock.acquired_at,
             lease_until: lock.lease_until,
         };
@@ -587,7 +562,7 @@ impl GitRepo {
                 &WorktreeLockedData {
                     worktree_id: token.worktree_id,
                     holder: token.holder,
-                    delivery_id: token.delivery_id,
+                    delivery_id: token.holder.bound_delivery(token.delivery_id),
                     lease_until: until,
                 },
             )
@@ -684,8 +659,8 @@ impl RepoService for GitRepo {
         Ok(info)
     }
 
-    /// 返回路径与 refspec。`core::ports::MirrorGuard` 不能持锁；需要挡住 gc 的
-    /// 调用方改用 [`GitRepo::lease_mirror`]。
+    /// 守卫持镜像仓的共享 flock（`Fetch` / `Push` / `Read` 都是共享锁），drop 即释放；
+    /// gc / 重建持独占锁，期间在这里等待。
     async fn mirror_access(
         &self,
         _ctx: &ActorCtx,
@@ -698,7 +673,8 @@ impl RepoService for GitRepo {
                 return Err(RepoError::MirrorNeedsRebuild);
             }
         }
-        Ok(entry.guard())
+        let lock = mirror::lock(&entry.git_dir, false).await?;
+        Ok(entry.guard(lock))
     }
 
     async fn commit_info(
@@ -1031,7 +1007,9 @@ fn machine_error(error: worktree_lock::LockError) -> RepoError {
             max: HUMAN_LEASE_MAX,
         },
         worktree_lock::LockError::NotHolder => RepoError::StaleLock,
-        worktree_lock::LockError::LockConflict | worktree_lock::LockError::InvalidLease => {
+        worktree_lock::LockError::LockConflict
+        | worktree_lock::LockError::InvalidLease
+        | worktree_lock::LockError::DeliveryBinding => {
             RepoError::Lock(LockError::Store(PortStoreError::InvalidState {
                 message: error.to_string(),
             }))

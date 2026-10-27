@@ -22,6 +22,11 @@ const ALLOWED: &[&str] = &[
     "dir",
     "harden_process",
     "staged_all",
+    "export_backup",
+    "import_backup",
+    // backup.rs
+    "parse",
+    "recipient",
 ];
 
 const FORBIDDEN_FRAGMENTS: &[&str] = &["env", "mount", "export_to", "to_file", "write_to", "dump"];

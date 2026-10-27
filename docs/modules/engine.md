@@ -855,8 +855,11 @@ impl DecideEnv<'_> {
 pub struct EngineSettings {
     pub config_rev: Seq,
     pub project: ProjectFacts,                // 本交付单元所属项目的事实（#70）
+    pub sandbox: SandboxLimits,               // sandbox.limits.wall_time_s 与 sandbox.kill_grace_s（§10，#70 C）
     // §10 的其余键（budget、escalation 等）随所需切片补入
 }
+/// 有效 wall_time_s 与锁租约所需的沙盒设置（§7.7、§7.8，#70 C）。
+pub struct SandboxLimits { pub wall_time_s: u64, pub kill_grace_s: u64 }
 /// 构造 push_branch / create_pr / merge_pr 的 payload 与 ActionFacts 所需的项目事实（#70）。
 pub struct ProjectFacts {
     pub repo: RepoSlug,                       // Project.repo（project.added / updated）
@@ -905,6 +908,10 @@ pub enum EffectKey {
 | `None` | 不进入期望动作集合（本轮不产出它的 `JudgeAction` / `Enqueue`） | 不能退回模板：预取成功后意图字段会变，`ActionKey` 随之改变，可能重复开 PR |
 
 `Missing` 能退回模板，前提是缺失永久不变：CAS 在 M1 不删除对象（store.md OQ-5）。将来引入 CAS 保留期时，必须保留非终态交付单元的 `attempt.finished.result_ref` 所指对象，否则同一意图在恢复前后会得到不同的键。
+
+`EnsureWorktree` 不带 `base_sha`（#70 A）：进入 implement 时还没有工作树与 PR，默认分支的 head 只能由 IO 取得。执行器在执行该副作用时先 `RepoService::resolve(base_ref)`，再 `create_worktree`。解析得到的 sha 记入 `worktree.created.base_sha`，之后的 `single` / `build` 都取它，重放时从事件读，`decide` 保持纯函数。
+
+有效 `wall_time_s`（§7.8）= min(`ResolvedModel.sandbox.attempt_wall_s`，`settings.sandbox.wall_time_s`，预算剩余 `wall_time`）；锁租约 `lease_s`（§7.7）= 有效 `wall_time_s` + `settings.sandbox.kill_grace_s` + 锁租约余量（`EngineConsts`，60 s）。两者都只读 `DecideEnv`（#70 C）。
 
 `merge_pr.merge_method` 在 M1 取 `ProjectFacts.allowed_merge_methods` 的第一项（OQ-14 定案前的做法，#70）。列表为空视为项目数据无效：`project.added` / `project.updated` 的 `data` 由 core 校验拒绝（`minItems: 1`），所以引擎不处理空列表。
 
@@ -956,6 +963,7 @@ pub struct FindingFingerprint(Sha256Digest);
 | 字段 | 类型 | 来源 |
 | --- | --- | --- |
 | `title` | `String` | `delivery.created` |
+| `user_text` | `String` | `delivery.created.user_text`：组装 `AttemptPlan.instructions` 的用户原文（可信，§6；#70 B） |
 | `abandon_cause` | `Option<AbandonCause>` | `delivery.abandoned.reason`：`pr_closed` → `PrClosedUnmerged`，`issue_not_planned` → `IssueNotPlanned`，其余 → `UserAbandoned`；T15 只认 `PrClosedUnmerged`（core `next_stage_with_abandon`） |
 | `stage_entered` | `(Seq, Timestamp, Option<String>)` | 最近一次 `delivery.stage_changed`（或 `delivery.created`）的 `seq`、`ts` 与 `reason`；"本阶段内"类前置条件都以它为界 |
 | `pr_snapshot` | `Option<PullRequestRef>` | **只读，不由引擎折叠**：加载 `DeliveryState` 时从 `store` 的 GitHub 快照投影读取（#150；加载归 #71）。T8 的 `head_sha`、T10 的 `checks.required_ok` 与 PR 是否 open、合并入队的 `mergeable_state` 都读它。`decide` 的测试直接构造 |
@@ -987,7 +995,7 @@ pub enum Decision {
 }
 
 pub enum Effect {
-    EnsureWorktree { branch: BranchName, base_ref: String, base_sha: GitOid }, // T2 / T5（§7.12 分支名）
+    EnsureWorktree { branch: BranchName, base_ref: String },   // T2 / T5（§7.12 分支名）；执行器先 resolve(base_ref) 得到 base_sha 再 create_worktree（#70 A）
     RemoveWorktree { worktree_id: WorktreeId, lock: Option<LockToken> }, // T12 / T13 释放工作树；lock 为空时执行器先以 engine 身份取锁再删（remove_worktree 需要 LockToken）
     AcquireLock { worktree_id: WorktreeId, node_id: NodeId, holder: LockHolder, lease_s: u64 },
     ReleaseLock { token: LockToken },
@@ -1193,7 +1201,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 
 | 事件 | 最小字段 |
 | --- | --- |
-| `delivery.created` | `title`、`level_cap`、`level_effective`、`origin`、`source_message_id`、`issues[]`、`budget = {template, limits}`、`config_rev` |
+| `delivery.created` | `title`、`level_cap`、`level_effective`、`origin`、`source_message_id`、`user_text`（`CreateDelivery.user_text` 原文，可信，≤ 16384 字符；重放时重建 `instructions`，#70 B）、`issues[]`、`budget = {template, limits}`、`config_rev` |
 | `delivery.stage_changed` | `from`、`to`、`reason`、`stage_status` |
 | `delivery.level_changed` | `from`、`to`、`kind`（`cap` / `effective`）、`reason`（`user` / `initial_risk` / `escalation:<rule_id>`）。`kind = effective` 只升（P-57，`core` 校验拒绝 `to < from`）。`kind = cap` 可升可降；应用时 `level_effective` 派生为 min(当前 `level_effective`, `to`)——这是用户压低上限时 `level_effective` 随之下调（api.md §4.4 PATCH、P-82）的**唯一**表达，不另写 `effective` 下降事件；所有投影（`store`、引擎、客户端）必须按同一规则派生（#48） |
 | `delivery.paused` / `delivery.resumed` | `by`、`status_before`（paused）/ `status_after`（resumed）（P-56） |

@@ -196,12 +196,12 @@ async fn corrupted_mirror_needs_rebuild() {
 }
 
 #[tokio::test]
-async fn gc_waits_for_shared_mirror_leases() {
+async fn gc_waits_for_mirror_guards() {
     let fx = Fixture::new("mirror-gc").await;
     fx.seed().await;
     let lease = fx
         .repo
-        .lease_mirror(&fx.project, MirrorMode::Push)
+        .mirror_access(&fx.ctx(), &fx.project, MirrorMode::Push)
         .await
         .unwrap();
     let repo = fx.repo.clone();
@@ -210,7 +210,10 @@ async fn gc_waits_for_shared_mirror_leases() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!gc.is_finished(), "gc must wait for the shared lease");
     // 共享锁之间互不阻塞。
-    let second = fx.repo.lease_mirror(&fx.project, MirrorMode::Read).await;
+    let second = fx
+        .repo
+        .mirror_access(&fx.ctx(), &fx.project, MirrorMode::Read)
+        .await;
     assert!(second.is_ok());
     drop(second);
     drop(lease);

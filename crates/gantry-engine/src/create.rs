@@ -21,6 +21,8 @@ pub struct NewDelivery {
     pub level_effective: Level,
     pub origin: DeliveryOrigin,
     pub source_message_id: MessageId,
+    /// 用户亲手输入的原文（可信，engine.md §6）；记入 `delivery.created` 供重放（#70 B）。
+    pub user_text: String,
     pub issues: Vec<IssueRef>,
     pub budget: DeliveryBudget,
     pub config_rev: Seq,
@@ -60,6 +62,7 @@ pub fn created_event(delivery: NewDelivery) -> Result<NewEvent, SchemaError> {
         level_effective: delivery.level_effective,
         origin: delivery.origin,
         source_message_id: Some(delivery.source_message_id),
+        user_text: delivery.user_text,
         issues: delivery.issues,
         budget: delivery.budget,
         config_rev: delivery.config_rev,
