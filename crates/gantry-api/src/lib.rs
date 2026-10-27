@@ -24,6 +24,7 @@ pub mod idempotency;
 pub mod problem;
 pub mod query;
 pub mod rate;
+pub mod reads;
 pub mod registry;
 pub mod server;
 pub mod validate;

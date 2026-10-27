@@ -10,6 +10,7 @@ description = "Gantry API 网关（api.md）：设备鉴权、路由注册表、
 gantry-core = { path = "../gantry-core" }
 gantry-store = { path = "../gantry-store" }
 async-trait.workspace = true
+base64 = "0.22"
 bytes = "1"
 http = "1"
 jsonschema = { version = "0.59", default-features = false }
