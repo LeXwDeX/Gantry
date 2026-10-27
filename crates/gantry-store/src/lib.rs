@@ -20,6 +20,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::{Context, Poll, Waker};
@@ -259,6 +260,100 @@ impl Store {
         }
     }
 
+    /// 一致性备份（store.md §7.8）：`VACUUM INTO '<dest_dir>/gantry-<ts>.db'`，写者可继续写；
+    /// 随后对副本做 `integrity_check`，并写一份清单 `gantry-<ts>.json`。CAS 目录是内容寻址的，
+    /// 由部署方增量复制，不在这里拷贝。
+    pub async fn backup_to(&self, dest_dir: &Path) -> Result<BackupReport, StoreError> {
+        let durable = self.durable.as_ref().ok_or(StoreError::Unsupported(
+            "in-memory store has nothing to back up",
+        ))?;
+        std::fs::create_dir_all(dest_dir).map_err(|error| StoreError::Io(error.to_string()))?;
+        let stamp = self.deps.clock.now().as_millis();
+        let db = dest_dir.join(format!("gantry-{stamp}.db"));
+        if db.exists() {
+            return Err(StoreError::PreconditionFailed(format!(
+                "backup {} already exists",
+                db.display()
+            )));
+        }
+        durable.vacuum_into(&db)?;
+        let facts = durable::inspect_backup(&db)?;
+        let manifest = dest_dir.join(format!("gantry-{stamp}.json"));
+        let body = serde_json::json!({
+            "schema_version": facts.schema_version,
+            "log_id": facts.log_id,
+            "log_epoch": facts.log_epoch,
+            "head_seq": facts.head_seq,
+            "events": facts.events,
+            "outbox_rows": facts.outbox_rows,
+            "cas_objects": facts.cas_objects,
+            "created_at": self.deps.clock.now(),
+        });
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec_pretty(&body).map_err(|error| StoreError::Io(error.to_string()))?,
+        )
+        .map_err(|error| StoreError::Io(error.to_string()))?;
+        Ok(BackupReport {
+            db,
+            manifest,
+            head_seq: Seq::new(facts.head_seq).map_err(StoreError::Seq)?,
+            log_id: facts.log_id,
+            log_epoch: facts.log_epoch,
+            events: facts.events,
+            cas_objects: facts.cas_objects,
+        })
+    }
+
+    /// 离线恢复（store.md §7.8，由运维命令调用）：校验副本、确认数据目录没有实例在跑，
+    /// 替换数据库文件；`log_epoch` 取副本与现有库中较大者加一（P-67），`log_id` 保持。
+    /// 之后用 `Store::open` 正常打开。
+    pub fn restore_from(backup_db: &Path, data_dir: &Path) -> Result<LogIdentity, StoreError> {
+        let (log_id, log_epoch) = durable::restore(backup_db, data_dir)?;
+        Ok(LogIdentity { log_id, log_epoch })
+    }
+
+    /// 完整性检查（store.md §7.8）。`Quick`：`quick_check` 与 `projected_seq == head`。
+    /// `Full`：`integrity_check`；从日志（SQLite 版从磁盘）重建全部状态，与当前内存状态逐项
+    /// 比较；CAS 重算摘要并为孤儿补行。只报告，不修复。
+    pub async fn verify(&self, level: VerifyLevel) -> Result<VerifyReport, StoreError> {
+        let mut report = VerifyReport::default();
+        {
+            // 提交与游标推进都在持有 `inner` 写锁时落盘；这里持读锁直到磁盘读取与比较
+            // 结束，内存与磁盘处于同一一致性边界，并发写不会造成误报。
+            let inner = self.inner.read().map_err(|_| StoreError::Poisoned)?;
+            if let Some(durable) = &self.durable {
+                report
+                    .problems
+                    .extend(durable.check(level == VerifyLevel::Full)?);
+                let projected = durable.projected_seq()?;
+                if projected != inner.head {
+                    report.problems.push(format!(
+                        "meta.projected_seq {projected} != head {}",
+                        inner.head
+                    ));
+                }
+            }
+            if level == VerifyLevel::Full {
+                let rebuilt = match &self.durable {
+                    Some(durable) => durable.reload(&self.modules)?,
+                    None => inner.rebuilt()?,
+                };
+                report.problems.extend(inner.differences(&rebuilt));
+            }
+        }
+        if level == VerifyLevel::Full {
+            let cas = self.cas.verify().await?;
+            for digest in &cas.corrupt {
+                report
+                    .problems
+                    .push(format!("cas object {} is corrupt", digest.to_hex()));
+            }
+            report.cas = Some(cas);
+        }
+        Ok(report)
+    }
+
     pub fn log_identity(&self) -> LogIdentity {
         let inner = self
             .inner
@@ -414,6 +509,41 @@ fn module_state_from<T: ModuleSnapshot + Clone>(
         .ok_or_else(|| {
             StoreError::PreconditionFailed(format!("module state {key} has another type"))
         })
+}
+
+/// `verify` 的深度（store.md §7.8）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifyLevel {
+    Quick,
+    Full,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VerifyReport {
+    /// 发现的问题；为空即通过。
+    pub problems: Vec<String>,
+    /// `Full` 时的 CAS 检查结果。
+    pub cas: Option<CasVerifyReport>,
+}
+
+impl VerifyReport {
+    pub fn is_ok(&self) -> bool {
+        self.problems.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupReport {
+    /// 副本数据库文件。
+    pub db: PathBuf,
+    /// 清单（JSON）。
+    pub manifest: PathBuf,
+    /// 副本对应的已提交前缀。
+    pub head_seq: Seq,
+    pub log_id: String,
+    pub log_epoch: u64,
+    pub events: u64,
+    pub cas_objects: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -935,6 +1065,58 @@ enum Fold {
 }
 
 impl Inner {
+    /// 从日志重建：非投影状态（Outbox、游标、模块表、去重键、日志身份）照抄，投影按
+    /// `seq` 重放。内存版 `verify(Full)` 用它检查增量折叠与重放是否一致。
+    fn rebuilt(&self) -> Result<Inner, StoreError> {
+        let mut next = Inner {
+            log_id: self.log_id.clone(),
+            log_epoch: self.log_epoch,
+            next_enqueue_seq: self.next_enqueue_seq,
+            dedup: self.dedup.clone(),
+            cursors: self.cursors.clone(),
+            outbox: self.outbox.clone(),
+            module_tables: self.module_tables.clone(),
+            ..Inner::default()
+        };
+        for event in &self.events {
+            next.project(event, Fold::Replay)?;
+            next.head = event.seq.as_u64();
+            next.last_ts = Some(event.ts);
+            next.events.push(event.clone());
+        }
+        Ok(next)
+    }
+
+    /// 与另一份状态逐项比较，返回不一致的部分（`verify(Full)`）。
+    fn differences(&self, other: &Inner) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mut check = |name: &str, same: bool| {
+            if !same {
+                problems.push(format!("{name} differs from a rebuild"));
+            }
+        };
+        check("head", self.head == other.head);
+        check("events", self.events == other.events);
+        check(
+            "log identity",
+            self.log_id == other.log_id && self.log_epoch == other.log_epoch,
+        );
+        check("dedup keys", self.dedup == other.dedup);
+        check("cursors", self.cursors == other.cursors);
+        check("outbox", self.outbox == other.outbox);
+        check("settings", self.settings == other.settings);
+        check(
+            "secret changes",
+            self.secret_changes == other.secret_changes,
+        );
+        check("deliveries", self.deliveries == other.deliveries);
+        check("inbox", self.inbox == other.inbox);
+        check("devices", self.devices == other.devices);
+        check("github snapshots", self.github == other.github);
+        check("module tables", self.module_tables == other.module_tables);
+        problems
+    }
+
     // -----------------------------------------------------------------------
     // 投影
     // -----------------------------------------------------------------------
@@ -944,8 +1126,9 @@ impl Inner {
     fn project(&mut self, event: &Event<Value>, mode: Fold) -> Result<(), StoreError> {
         match event.ty {
             EventType::OutboxSucceeded | EventType::OutboxFailed if mode == Fold::Replay => {}
-            // 行由 `OutboxTx::enqueue` 在同一事务写入；事件本身不再改表。
-            EventType::OutboxEnqueued => {}
+            // 行由 `OutboxTx` 在同一事务写入；这些事件本身不再改表。
+            EventType::OutboxEnqueued | EventType::OutboxExecuting | EventType::OutboxCancelled => {
+            }
             EventType::SettingsUpdated => {
                 let data: SettingsUpdatedData =
                     decode_data(event).map_err(StoreError::InvalidEvent)?;
@@ -2164,7 +2347,7 @@ impl OutboxTx<'_> {
 
     pub async fn claim(&mut self, opts: ClaimOpts) -> Result<Option<Claimed>, StoreError> {
         let now = self.tx.now();
-        cancel_failed_dependents(&mut self.tx.snapshot, now);
+        self.cancel_blocked().await?;
         let mut candidates: Vec<(u8, Seq, ActionId)> = Vec::new();
         for (id, row) in &self.tx.snapshot.outbox {
             if opts.exclude_deliveries.contains(&row.action.delivery_id) {
@@ -2219,10 +2402,40 @@ impl OutboxTx<'_> {
             row.action.attempts += 1;
         }
         row.action.updated_at = now;
-        Ok(Some(Claimed {
-            action: row.action.clone(),
-            replay,
-        }))
+        let action = row.action.clone();
+        // 状态 / 租约更新与 `outbox.executing` 同事务（event-data §2.2.4）。
+        self.append_outbox_event(
+            EventType::OutboxExecuting,
+            &action,
+            serde_json::json!({"attempts": action.attempts, "replay": replay}),
+        )
+        .await?;
+        Ok(Some(Claimed { action, replay }))
+    }
+
+    /// Outbox 状态事件的共用信封：`subject = act_…`、`correlation_id = delivery_id`、
+    /// `actor = forge`（认领、依赖级联与执行前复核都由 forge 发起，event-data §2.2.4）。
+    async fn append_outbox_event(
+        &mut self,
+        ty: EventType,
+        action: &OutboxAction,
+        data: Value,
+    ) -> Result<(), StoreError> {
+        self.tx
+            .append(NewEvent {
+                ty,
+                subject: Subject::parse(&action.id.to_string()).map_err(|error| {
+                    StoreError::PreconditionFailed(format!("action id subject: {error}"))
+                })?,
+                project_id: Some(action.project_id),
+                actor: Actor::new(ActorKind::Forge, "forge"),
+                causation_id: None,
+                correlation_id: Some(action.delivery_id.to_string()),
+                data,
+                dedup_key: None,
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn record_effects(
@@ -2300,7 +2513,17 @@ impl OutboxTx<'_> {
 
     pub async fn cancel_blocked(&mut self) -> Result<Vec<ActionId>, StoreError> {
         let now = self.tx.now();
-        Ok(cancel_failed_dependents(&mut self.tx.snapshot, now))
+        let cancelled = cancel_failed_dependents(&mut self.tx.snapshot, now);
+        for id in &cancelled {
+            let action = self.tx.snapshot.outbox[id].action.clone();
+            self.append_outbox_event(
+                EventType::OutboxCancelled,
+                &action,
+                serde_json::json!({"reason": "dependency_failed"}),
+            )
+            .await?;
+        }
+        Ok(cancelled)
     }
 
     pub async fn count_succeeded_since(
@@ -2444,7 +2667,13 @@ impl OutboxTx<'_> {
         });
         row.action.lease_until = None;
         row.action.updated_at = now;
-        Ok(())
+        let action = row.action.clone();
+        self.append_outbox_event(
+            EventType::OutboxCancelled,
+            &action,
+            serde_json::json!({"reason": cancel_reason_code(reason)}),
+        )
+        .await
     }
 }
 
@@ -2461,7 +2690,7 @@ fn cancel_reason_code(reason: CancelReason) -> &'static str {
 /// 认领前把依赖已失败/已取消的 queued 动作级联取消（直到不动点）。
 ///
 /// 迭代到不动点处理多层链与排序倒置；缺失的依赖继续阻塞（fail-closed）。
-/// 不追加 `outbox.cancelled` 事件：该事件未定义。
+/// 只改表；`outbox.cancelled` 由调用方（`cancel_blocked`）逐条追加。
 fn cancel_failed_dependents(inner: &mut Inner, now: Timestamp) -> Vec<ActionId> {
     let mut cancelled = Vec::new();
     loop {

@@ -288,7 +288,7 @@ pub enum AfterFailure { Terminal, Retry { not_before: Timestamp } }
 
 本节涉及的 `outbox.enqueued` / `outbox.executing` / `outbox.cancelled` data 字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
 
-**`outbox.enqueued` 已落地（#71 拍板）**：`OutboxTx::enqueue` 在 `created = true` 时于同一事务先追加 `outbox.enqueued`（`subject = act_…`、`project_id`、`correlation_id = delivery_id`、`causation_id = enqueued_by.causation_id`，`data.action` 按 event-data §2.2.4），再插入 Outbox 行；事件校验失败则整次入队失败、不留行。`created = false` 不追加。信封 `actor` 取自 `enqueued_by.module`：入队方是闭集 engine / guardian（`core::ports::EnqueuedByModule`），各自就是一个 `ActorKind`；不是 actor 类别的模块名返回 `PreconditionFailed`。`outbox.executing` / `outbox.cancelled` 尚未追加。
+**`outbox.enqueued` 已落地（#71 拍板）**：`OutboxTx::enqueue` 在 `created = true` 时于同一事务先追加 `outbox.enqueued`（`subject = act_…`、`project_id`、`correlation_id = delivery_id`、`causation_id = enqueued_by.causation_id`，`data.action` 按 event-data §2.2.4），再插入 Outbox 行；事件校验失败则整次入队失败、不留行。`created = false` 不追加。信封 `actor` 取自 `enqueued_by.module`：入队方是闭集 engine / guardian（`core::ports::EnqueuedByModule`），各自就是一个 `ActorKind`；不是 actor 类别的模块名返回 `PreconditionFailed`。`claim` 返回非空时同事务追加 `outbox.executing`（`{attempts, replay}`）；`cancel` 与 `cancel_blocked` 的依赖级联各追加一条 `outbox.cancelled`（`{reason}`）。这两类事件的 `actor` 为 `{forge, forge}`（认领、依赖检查、执行前复核都由 forge 发起，event-data §2.2.4）；`cancel` 目前没有调用方身份参数，M1 唯一调用方是 forge。
 
 ### 6.4 CAS
 
@@ -345,7 +345,7 @@ pub enum StoreError {
 
 **连接模型（单写者多读者）**：一个写连接，由 `tokio::sync::Mutex`（FIFO 公平）保护，事务一律 `BEGIN IMMEDIATE`；`read_connections` 个读连接组成池，每个读事务是一个 WAL 快照。写事务持有期间读者照常读旧快照。
 
-**M1 已落地（#88 SQLite 切片）**：`Store::open(StoreConfig::new(dir), deps, modules)` 与 testing 的 `Store::open_temp`。按 #88 评论里的方案，SQLite 只持久化事实源与非投影状态：`meta`、`events`（列与触发器同 §7.2）、`consumer_cursors`、`outbox`、各模块私有表；**投影不落表**，`open` 时按 `seq` 用同一套纯折叠函数重放（`Outbox` 是主表，重放时 `outbox.*` 事件不再改行），之后由 `append` 增量维护。`WriteTx::commit` 先在一个 `BEGIN IMMEDIATE` 事务里写入增量，SQLite 成功后才替换内存状态。与上表的差异：`outbox` 先存 `(id, idempotency_key, status, enqueued_seq, action JSON)`，其余列随投影落表时展开；读连接池、`snapshot_max_age_s`、`write_tx_max_hold_ms` 暂不需要（读走内存快照）。单实例用 `locking_mode = EXCLUSIVE` 实现，第二个 `open` 得到 `AlreadyRunning`，未引入 `gantry.lock` 文件。`GANTRY_STORE_BACKEND=sqlite` 让 store 的全部用例改用 `open_temp` 再跑一遍（`testing::open_for_tests`）。
+**M1 已落地（#88 SQLite 切片）**：`Store::open(StoreConfig::new(dir), deps, modules)` 与 testing 的 `Store::open_temp`。按 #88 评论里的方案，SQLite 只持久化事实源与非投影状态：`meta`、`events`（列与触发器同 §7.2）、`consumer_cursors`、`outbox`、各模块私有表；**投影不落表**，`open` 时按 `seq` 用同一套纯折叠函数重放（`Outbox` 是主表，重放时 `outbox.*` 事件不再改行），之后由 `append` 增量维护。`WriteTx::commit` 先在一个 `BEGIN IMMEDIATE` 事务里写入增量，SQLite 成功后才替换内存状态。与上表的差异：`outbox` 先存 `(id, idempotency_key, status, enqueued_seq, action JSON)`，其余列随投影落表时展开；读连接池、`snapshot_max_age_s`、`write_tx_max_hold_ms` 暂不需要（读走内存快照）。单实例由数据目录锁 `gantry.lock` 保证（一个只用来持锁的小 SQLite 库，`locking_mode = EXCLUSIVE`，跨进程与同进程都互斥，`Store::open` 与 `restore_from` 共用），第二个 `open` 得到 `AlreadyRunning`。`GANTRY_STORE_BACKEND=sqlite` 让 store 的全部用例改用 `open_temp` 再跑一遍（`testing::open_for_tests`）。
 
 ### 7.2 表结构草案
 
@@ -538,6 +538,8 @@ LIMIT 1;
 - 恢复是离线操作（`Store::restore_from(dir)`，由运维命令调用）：校验副本 → 替换数据库文件 → `log_epoch += 1`（P-67），`log_id` 保持。恢复后 `head` 可能小于恢复前客户端见过的 `seq`：`api` 在事件流与快照响应中携带 `log_epoch`，客户端发现变化就全量重同步。随后由 `pki` 重放 `revocations.journal` 中晚于备份的吊销（`deploy` 的恢复命令按此顺序调用）。
 - `verify(Quick)`：`PRAGMA quick_check`；`meta.projected_seq == head`；`outbox` 与 `events` 的 ID 前缀 / 枚举合法。`verify(Full)`：在临时库里全量折叠事件，与现有投影表逐表比较哈希；CAS 抽样重算摘要。
 - 发现 `SQLITE_CORRUPT`：拒绝启动并输出"从备份恢复"的指引；**不自动修复**。
+
+**M1 已落地（#88）**：`Store::backup_to(dest_dir) -> BackupReport` 写 `gantry-<ts>.db`（`VACUUM INTO`，与提交共用连接锁，副本恰为某次提交后的前缀）与清单 `gantry-<ts>.json`（`schema_version`、`log_id`、`log_epoch`、`head_seq`、`events`、`outbox_rows`、`cas_objects`、`created_at`），并对副本做 `integrity_check`、确认日志从 1 起无空洞。`Store::restore_from(backup_db, data_dir) -> LogIdentity` 是离线操作：校验副本 → 取数据目录锁 `gantry.lock`（与 `Store::open` 共用，持有到替换结束；被占用则 `AlreadyRunning`，不依赖旧库可读）→ 复制到临时名 → `log_epoch = max(副本, 现有库) + 1`、`log_id` 保持 → 删除旧 WAL → 原子替换。`Store::verify(VerifyLevel)`：`Quick` 为 `quick_check` 与 `projected_seq == head`；`Full` 为 `integrity_check`，从磁盘（内存版从日志）重建全部状态与当前内存状态逐项比较，再跑 `Cas::verify()`。outbox 的"ID 前缀 / 枚举合法"由类型化载入保证（载入失败即 `Corrupt`）。尚未做：`verify_sample()` 抽样校验 CAS 副本、`pki` 吊销日志重放的编排（归 `deploy`）。
 
 ### 7.9 迁移与投影重建
 
