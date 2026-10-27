@@ -1447,19 +1447,19 @@ async fn outbox_cancel_blocked_returns_all_cascaded_ids() {
         .scan(Seq::ZERO, &EventFilter::default(), 20)
         .await
         .unwrap();
-    let reasons: Vec<(String, Value)> = page
+    let reasons: Vec<(String, String)> = page
         .events
         .iter()
         .filter(|event| event.ty == EventType::OutboxCancelled)
         .map(|event| {
             (
                 event.subject.as_str().to_owned(),
-                event.data["reason"].clone(),
+                event.data["reason"].as_str().unwrap().to_owned(),
             )
         })
         .collect();
     assert_eq!(page.events.len(), 8);
-    assert_eq!(reasons[0], (a.action.id.to_string(), json!("manual")));
+    assert_eq!(reasons[0], (a.action.id.to_string(), "manual".to_owned()));
     assert_eq!(
         reasons[1..]
             .iter()
@@ -1467,7 +1467,7 @@ async fn outbox_cancel_blocked_returns_all_cascaded_ids() {
             .collect::<BTreeSet<_>>(),
         [b.action.id, c.action.id, d.action.id]
             .iter()
-            .map(|id| (id.to_string(), json!("dependency_failed")))
+            .map(|id| (id.to_string(), "dependency_failed".to_owned()))
             .collect::<BTreeSet<_>>()
     );
 }
@@ -1868,4 +1868,22 @@ async fn enqueue_appends_outbox_enqueued_in_the_same_tx() {
         StoreError::PreconditionFailed(_)
     ));
     tx.rollback().await.unwrap();
+}
+
+/// `verify(Full)`：增量折叠与从日志重建一致（§12.3 重建等价的一个样本；两个后端都跑）。
+#[tokio::test]
+async fn verify_full_matches_a_rebuild() {
+    let store = store().await;
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(delivery_created()).await.unwrap();
+    tx.append(message_posted()).await.unwrap();
+    tx.append(settings_global()).await.unwrap();
+    tx.commit().await.unwrap();
+    let report = store.verify(gantry_store::VerifyLevel::Full).await.unwrap();
+    assert!(report.is_ok(), "{:?}", report.problems);
+    assert!(store
+        .verify(gantry_store::VerifyLevel::Quick)
+        .await
+        .unwrap()
+        .is_ok());
 }

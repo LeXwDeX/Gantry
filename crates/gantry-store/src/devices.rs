@@ -18,7 +18,7 @@ use crate::{order_tag, subject_id, Order, Page, PageCursor, Paged, StoreError};
 
 const DEVICES_CURSOR_TAG: &str = "devices";
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct DeviceTable {
     rows: BTreeMap<DeviceId, Device>,
     /// `UNIQUE(cert_serial)`：当前序列号 → 设备（含已吊销的设备）。

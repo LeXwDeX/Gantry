@@ -511,3 +511,137 @@ async fn cas_tmp_leftovers_are_cleared_on_open() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// 备份、恢复与 verify（store.md §7.8、§12.5）
+// ---------------------------------------------------------------------------
+
+async fn append_delivery_and_messages(store: &Store, from: u32, to: u32) {
+    let mut tx = store.begin_write().await.unwrap();
+    for n in from..to {
+        tx.append(message_posted(&format!("msg-{n}")))
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn backup_restores_to_a_committed_prefix_with_bumped_epoch() {
+    use gantry_store::{CasKind, VerifyLevel};
+    let dir = Dir::new("backup-src");
+    let restored = Dir::new("backup-dst");
+    let backups = Dir::new("backup-files");
+    let store = open(&dir, 1_700_000_000_000).await.unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(delivery_created()).await.unwrap();
+    tx.commit().await.unwrap();
+    append_delivery_and_messages(&store, 0, 5).await;
+    store
+        .cas()
+        .put(b"bundle", CasKind::ResultBundle)
+        .await
+        .unwrap();
+
+    // 备份期间写者继续写：副本是某次提交之后的完整前缀。
+    let writer = {
+        let store = store.clone();
+        tokio::spawn(async move { append_delivery_and_messages(&store, 5, 25).await })
+    };
+    let report = store.backup_to(&backups.0).await.unwrap();
+    writer.await.unwrap();
+    assert!(report.head_seq.as_u64() >= 6);
+    assert_eq!(report.events, report.head_seq.as_u64());
+    assert_eq!(report.cas_objects, 1);
+    assert_eq!(report.log_epoch, 1);
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(&report.manifest).unwrap()).unwrap();
+    assert_eq!(manifest["head_seq"], json!(report.head_seq.as_u64()));
+    assert_eq!(manifest["log_id"], json!(report.log_id));
+    drop(store);
+
+    let identity = Store::restore_from(&report.db, &restored.0).unwrap();
+    assert_eq!(identity.log_id, report.log_id);
+    assert_eq!(identity.log_epoch, 2);
+    let back = open(&restored, 1_700_000_100_000).await.unwrap();
+    assert_eq!(back.log_identity(), identity);
+    assert_eq!(back.events().head().await.unwrap(), report.head_seq);
+    assert!(back
+        .snapshot()
+        .await
+        .unwrap()
+        .delivery(&DELIVERY.parse().unwrap())
+        .is_some());
+    let full = back.verify(VerifyLevel::Full).await.unwrap();
+    assert!(full.is_ok(), "{:?}", full.problems);
+
+    // 恢复到原目录（原库 epoch 1，副本 epoch 1）同样 +1；目录有实例在跑时拒绝。
+    let running = open(&dir, 1_700_000_200_000).await.unwrap();
+    assert!(matches!(
+        Store::restore_from(&report.db, &dir.0),
+        Err(StoreError::AlreadyRunning)
+    ));
+    drop(running);
+    let again = Store::restore_from(&report.db, &dir.0).unwrap();
+    assert_eq!(again.log_epoch, 2);
+    let reopened = open(&dir, 1_700_000_300_000).await.unwrap();
+    assert_eq!(reopened.events().head().await.unwrap(), report.head_seq);
+}
+
+#[tokio::test]
+async fn corrupt_backup_is_refused() {
+    let backups = Dir::new("backup-bad");
+    let target = Dir::new("backup-bad-dst");
+    std::fs::create_dir_all(&backups.0).unwrap();
+    let bogus = backups.0.join("gantry-1.db");
+    std::fs::write(&bogus, b"not a database").unwrap();
+    let error = Store::restore_from(&bogus, &target.0).unwrap_err();
+    assert!(
+        matches!(error, StoreError::Corrupt(_) | StoreError::Sqlite(_)),
+        "{error:?}"
+    );
+    assert!(!target.0.join("gantry.db").exists());
+}
+
+#[tokio::test]
+async fn verify_reports_divergence_between_disk_and_memory() {
+    use gantry_store::VerifyLevel;
+    let dir = Dir::new("verify");
+    let store = open(&dir, 1_700_000_000_000).await.unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(delivery_created()).await.unwrap();
+    tx.module_conn("policy")
+        .put("policy_challenges", "a/b/c", &json!({"nonce": "n1"}))
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(store.verify(VerifyLevel::Quick).await.unwrap().is_ok());
+    let full = store.verify(VerifyLevel::Full).await.unwrap();
+    assert!(full.is_ok(), "{:?}", full.problems);
+    assert!(full.cas.is_some());
+
+    // 绕过 store 改磁盘：Quick 发现 projected_seq 不符，Full 发现模块表不一致。
+    store
+        .execute_raw_sql(
+            "UPDATE meta SET value = '7' WHERE key = 'projected_seq';
+             UPDATE policy_challenges SET value = '{\"nonce\":\"forged\"}' WHERE key = 'a/b/c';",
+        )
+        .unwrap();
+    let quick = store.verify(VerifyLevel::Quick).await.unwrap();
+    assert!(
+        quick.problems.iter().any(|p| p.contains("projected_seq")),
+        "{:?}",
+        quick.problems
+    );
+    let full = store.verify(VerifyLevel::Full).await;
+    // projected_seq 不符时重载本身就会报 Corrupt；修回后 Full 报出模块表差异。
+    assert!(matches!(full, Err(StoreError::Corrupt(_))), "{full:?}");
+    store
+        .execute_raw_sql("UPDATE meta SET value = '1' WHERE key = 'projected_seq';")
+        .unwrap();
+    let full = store.verify(VerifyLevel::Full).await.unwrap();
+    assert_eq!(
+        full.problems,
+        vec!["module tables differs from a rebuild".to_owned()]
+    );
+}
