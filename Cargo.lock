@@ -1067,6 +1067,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gantryd"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gantry-core",
+ "gantry-engine",
+ "gantry-fakes",
+ "gantry-notify",
+ "gantry-policy",
+ "gantry-store",
+ "getrandom 0.3.4",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
