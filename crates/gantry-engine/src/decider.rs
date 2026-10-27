@@ -100,6 +100,7 @@ pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<
     control::reconcile_after_base_advance(state, env, &mut out);
     control::resolve_models_configured(state, env, &mut out);
     control::raise_models_not_configured(state, env, &mut out);
+    control::requeue_after_raise(state, &mut out);
     build_workflow(state, mint, &mut out);
     queue_nodes(state, &mut out);
     ensure_worktree(state, env, &mut out);

@@ -1916,6 +1916,112 @@ fn raise_cap_option_extends_exhausted_dimension() {
     assert!(!types(&on_event(&sim, replay)).contains(&"budget.limit_raised"));
 }
 
+/// raise_cap 之后继续（#73 决定 1）：追加额度、`budget_exhausted` 关闭后，引擎把因预算封顶失败的节点
+/// 重新排队并派发；追加之前不排队、RetryNode 也被拒。
+#[test]
+fn budget_failed_node_is_requeued_after_raise_cap() {
+    let mut sim = dispatched();
+    let node = node_id(&sim);
+    fail_running(
+        &mut sim,
+        FailureClass::BudgetExhausted,
+        "budget.tokens",
+        PatchResult::None,
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    // 反例：未追加额度 → 不重新排队；RetryNode → InvalidState（决定 2）。
+    assert!(!types(&sim.settle()).contains(&"node.retry_requested"));
+    assert_eq!(
+        command(
+            &sim,
+            Command::RetryNode {
+                node_id: node,
+                ctx: ctx(None)
+            }
+        ),
+        vec![Decision::Reply(Err(CommandRejection::InvalidState(
+            "budget quota has not been raised"
+        )))]
+    );
+    let item = sim
+        .state
+        .open_inbox
+        .values()
+        .find(|i| i.kind == InboxKind::BudgetExhausted)
+        .unwrap()
+        .clone();
+    let observed = choose(&mut sim, &item, "raise_cap", Some(item.clone()));
+    let out = on_event(&sim, observed);
+    sim.apply(out);
+    assert!(sim.state.may_dispatch());
+    // 正例：引擎写 node.retry_requested（by = engine），节点 failed → queued → 新尝试。
+    let out = sim.tick();
+    let retry: Vec<_> = appended(&out)
+        .into_iter()
+        .filter(|e| e.ty.as_str() == "node.retry_requested")
+        .collect();
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].actor.kind, ActorKind::Engine);
+    let _ = sim.settle();
+    assert_eq!(attempts(&sim), 2);
+    assert_eq!(node_status(&sim), NodeStatus::Running);
+    // 重放：节点已不是 failed，不再排队。
+    assert!(!types(&sim.tick()).contains(&"node.retry_requested"));
+}
+
+/// RetryNode 前置（#73 决定 2）：受保护路径失败时，没有已授予的补丁审批 → InvalidState；授予后 → Ok。
+#[test]
+fn retry_node_after_protected_path_needs_a_granted_approval() {
+    let mut sim = dispatched();
+    let node = node_id(&sim);
+    fail_running(
+        &mut sim,
+        FailureClass::PolicyDenied,
+        "policy.path_protected:lockfiles",
+        PatchResult::None,
+    );
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    let retry = |sim: &Sim| {
+        command(
+            sim,
+            Command::RetryNode {
+                node_id: node,
+                ctx: ctx(Some("retry-protected")),
+            },
+        )
+    };
+    assert_eq!(
+        retry(&sim),
+        vec![Decision::Reply(Err(CommandRejection::InvalidState(
+            "protected path change has no granted approval"
+        )))]
+    );
+    // 仍是 pending 的审批不算解除。
+    const APPROVAL: &str = "apr_01JB7P4M8T2X6N9R3Q5K1V7WZQ";
+    sim.external(
+        "approval.requested",
+        APPROVAL,
+        json!({"action": "patch_apply_protected",
+               "target": {"kind": "patch", "repo": "acme/web", "attempt_id": sim.state.node(&node).unwrap().attempts[0].id,
+                          "rules": ["lockfiles"], "paths": ["Cargo.lock"]},
+               "subject_digest": PATCH_SHA, "expires_at": "2026-10-24T12:45:00.000Z", "config_rev": 1,
+               "requested_by": {"kind": "engine", "id": "engine"}}),
+    );
+    assert!(matches!(
+        replies(&retry(&sim))[..],
+        [Err(CommandRejection::InvalidState(_))]
+    ));
+    sim.external(
+        "approval.granted",
+        APPROVAL,
+        json!({"approval_id": APPROVAL, "device_id": "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM",
+               "approval_pubkey_fpr": PATCH_SHA, "payload_sha256": PATCH_SHA}),
+    );
+    let out = retry(&sim);
+    assert_eq!(types(&out), vec!["node.retry_requested"]);
+    assert_eq!(replies(&out), vec![&Ok(())]);
+}
+
 // ---------------------------------------------------------------------------
 // models_not_configured（§9；§7.14.5 Raise(*) 与 Resolve(models_not_configured) 行）
 // ---------------------------------------------------------------------------

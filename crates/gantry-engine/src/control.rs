@@ -245,6 +245,22 @@ fn retry_node(state: &DeliveryState, node_id: NodeId, ctx: &ActorCtx) -> Vec<Dec
     if node.status != NodeStatus::Failed {
         return reply(Err(CommandRejection::InvalidState("node is not failed")));
     }
+    // 阻塞未解除时重试只会再失败一次（#73）：受保护路径要先有已授予的补丁审批，
+    // 预算耗尽要先追加额度。
+    if let Some(detail) = last_failure(node) {
+        if detail.starts_with("policy.path_protected:") && !patch_approval_granted(state) {
+            return reply(Err(CommandRejection::InvalidState(
+                "protected path change has no granted approval",
+            )));
+        }
+        if detail.starts_with("budget.")
+            && !budget_raised_since_exhausted(state, BudgetDimension::TokensByTier(node.tier))
+        {
+            return reply(Err(CommandRejection::InvalidState(
+                "budget quota has not been raised",
+            )));
+        }
+    }
     let mut out = vec![event_as(
         state,
         EventType::NodeRetryRequested,
@@ -270,6 +286,72 @@ fn retry_node(state: &DeliveryState, node_id: NodeId, ctx: &ActorCtx) -> Vec<Dec
     }
     out.push(Decision::Reply(Ok(())));
     out
+}
+
+fn last_failure(node: &crate::state::NodeState) -> Option<&str> {
+    node.attempts
+        .last()
+        .and_then(|a| a.failure_detail.as_ref())
+        .map(|d| d.as_str())
+}
+
+fn patch_approval_granted(state: &DeliveryState) -> bool {
+    state.approvals.values().any(|a| {
+        a.action == ApprovalAction::PatchApplyProtected && a.status == ApprovalStatus::Granted
+    })
+}
+
+/// 该维度最近一次 `budget.exhausted` 之后写过 `budget.limit_raised`。
+fn budget_raised_since_exhausted(state: &DeliveryState, dimension: BudgetDimension) -> bool {
+    let Some(exhausted) = state
+        .ledger
+        .exhausted
+        .iter()
+        .filter(|(d, _)| *d == dimension)
+        .map(|(_, seq)| *seq)
+        .max()
+    else {
+        return false;
+    };
+    state
+        .ledger
+        .raised
+        .iter()
+        .any(|(d, _, seq)| *d == dimension && *seq > exhausted)
+}
+
+/// `raise_cap` 之后继续（#73）：当前图里因预算封顶失败的节点，在该维度追加额度后由引擎重新排队
+/// （`node.retry_requested`，`by = engine`），再走正常派发。追加前或 `budget_exhausted` 未关闭时不产出；
+/// 重新排队后节点不再是 failed，重放不重复。
+pub(crate) fn requeue_after_raise(state: &DeliveryState, out: &mut Vec<Decision>) {
+    if !state.may_dispatch() {
+        return;
+    }
+    let Some(workflow) = current_workflow(state) else {
+        return;
+    };
+    for node in workflow.nodes.values() {
+        let budget_failed = node.status == NodeStatus::Failed
+            && last_failure(node).is_some_and(|d| d.starts_with("budget."));
+        if budget_failed
+            && budget_raised_since_exhausted(state, BudgetDimension::TokensByTier(node.tier))
+        {
+            out.push(engine_node_retry(state, node.id));
+        }
+    }
+}
+
+fn engine_node_retry(state: &DeliveryState, node_id: NodeId) -> Decision {
+    event_as(
+        state,
+        EventType::NodeRetryRequested,
+        &node_id.to_string(),
+        &NodeRetryRequestedData {
+            node_id,
+            by: engine_actor().id,
+        },
+        EventMeta::engine(),
+    )
 }
 
 // ---------------------------------------------------------------------------

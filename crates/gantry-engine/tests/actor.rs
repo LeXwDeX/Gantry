@@ -974,3 +974,77 @@ async fn inbox_resolved_carries_the_raised_item_and_upgrade_applies() {
     }
     assert_eq!(h.state().await.delivery.level_cap, Level::Medium);
 }
+
+// ---------------------------------------------------------------------------
+// 命令幂等（#73 决定 3）：同一请求身份重放返回首次结果；新请求照常检查前置条件
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn repeated_command_returns_first_result_new_request_is_checked() {
+    use gantry_core::entities::{FailureClass, FailureDetail};
+    use gantry_engine::decide::{Command, CommandRejection};
+
+    let h = Harness::new().await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    let mut actor = h.actor();
+    h.settle(&mut actor).await;
+    h.pump(&mut router, &mut actor).await;
+    let plan = h.runner.plans().remove(0);
+    let failed = Finalized {
+        attempt_id: plan.attempt_id,
+        node_id: plan.node_id,
+        status: AttemptStatus::Failed,
+        failure_class: Some(FailureClass::ExecFailed),
+        failure_detail: Some(FailureDetail::parse("exec.bad_job").unwrap()),
+        result_ref: None,
+        usage_metered: TokenUsage::default(),
+        weighted_tokens: 0,
+        weight_audit: serde_json::from_value(json!({"basis": "job_token", "config_rev": 1, "weights": {"input": 1.0, "output": 5.0, "cache_read": 0.1, "cache_write": 1.25}})).unwrap(),
+        wall_time_s: 60,
+        verdict: None,
+        patch: PatchResult::None,
+        proposals: vec![],
+        signals: OutputSignals::default(),
+    };
+    actor
+        .handle(
+            Input::Report(EffectReport::AttemptFinalized(failed)),
+            InputIdentity::Report(EffectKey::Run(plan.attempt_id)),
+        )
+        .await
+        .unwrap();
+
+    let ctx = |key: &str| ActorCtx {
+        actor: Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: gantry_core::ids::Ulid::from_parts(T0 as u64, 7).unwrap(),
+        idempotency_key: None,
+        dedup_key: Some(key.to_owned()),
+        causation_id: None,
+    };
+    let retry = |key: &str| {
+        let command = Command::RetryNode {
+            node_id: plan.node_id,
+            ctx: ctx(key),
+        };
+        (
+            Input::Command(command),
+            InputIdentity::Command(gantry_core::ids::Ulid::from_parts(T0 as u64, 7).unwrap()),
+        )
+    };
+    let (input, identity) = retry("retry-1");
+    assert_eq!(actor.handle(input, identity).await.unwrap(), vec![Ok(())]);
+    // 节点已重新排队并派发；同一请求重放 → 首次结果 Ok，不再写事件。
+    let head = h.store.events().head().await.unwrap();
+    let (input, identity) = retry("retry-1");
+    assert_eq!(actor.handle(input, identity).await.unwrap(), vec![Ok(())]);
+    assert_eq!(h.store.events().head().await.unwrap(), head);
+    // 新请求：节点已不是 failed → InvalidState。
+    let (input, identity) = retry("retry-2");
+    assert_eq!(
+        actor.handle(input, identity).await.unwrap(),
+        vec![Err(CommandRejection::InvalidState("node is not failed"))]
+    );
+}
