@@ -27,8 +27,7 @@ use std::time::Duration;
 use gantry_core::canon::IdempotencyKey;
 use gantry_core::entities::{
     Actor, ActorKind, ForgeActionKind, GithubRef, InboxItem, InboxKind, InboxStatus, OutboxAction,
-    OutboxError, OutboxStatus, Priority, Seq, SettingsResource, SettingsScope, Severity, Stage,
-    StageStatus,
+    OutboxError, OutboxStatus, Priority, Seq, SettingsResource, SettingsScope, Severity,
 };
 use gantry_core::events::{
     Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NewEvent,
@@ -38,9 +37,12 @@ use gantry_core::forge::ActionPayload;
 use gantry_core::ids::{
     Act, ActionId, Clock, DeliveryId, Dlv, EventId, Evt, IdError, IdGen, Inb, InboxId, ProjectId,
 };
-use gantry_core::level::Level;
 use gantry_core::time::Timestamp;
 use serde_json::Value;
+
+pub mod projection;
+
+pub use projection::{DeliveryRow, FoldError, StageEntered};
 
 // ---------------------------------------------------------------------------
 // 打开
@@ -338,7 +340,7 @@ struct Inner {
     settings: BTreeMap<SettingsKey, Vec<SettingsRev>>,
     secret_changes: BTreeMap<(String, u64), Seq>,
     next_enqueue_seq: u64,
-    deliveries: BTreeMap<DeliveryId, DeliveryProjection>,
+    deliveries: BTreeMap<DeliveryId, DeliveryRow>,
     /// 内置 `inbox_items` 投影（store.md §7.2）；收件箱状态的唯一来源。
     inbox: BTreeMap<InboxId, InboxItem>,
     unprojected: Vec<UnprojectedEvent>,
@@ -389,16 +391,6 @@ struct SettingsKey {
 struct SettingsRev {
     rev: Seq,
     value: Option<Value>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct DeliveryProjection {
-    id: DeliveryId,
-    project_id: ProjectId,
-    level_cap: Level,
-    level_effective: Level,
-    stage: Stage,
-    stage_status: StageStatus,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -821,108 +813,24 @@ impl WriteTx {
                 self.project_settings(event, &data)?;
             }
             EventType::DeliveryCreated => {
-                let data = decode_data::<gantry_core::events::DeliveryCreatedData>(event)
-                    .map_err(StoreError::InvalidEvent)?;
-                let id = subject_id::<Dlv>(&event.subject)?;
-                if self.snapshot.deliveries.contains_key(&id) {
+                let row = DeliveryRow::created(event).map_err(fold_error)?;
+                if self.snapshot.deliveries.contains_key(&row.id) {
                     return Err(StoreError::PreconditionFailed(format!(
-                        "delivery {id} already created"
+                        "delivery {} already created",
+                        row.id
                     )));
                 }
-                let delivery = DeliveryProjection {
-                    id,
-                    project_id: event.project_id.ok_or_else(|| {
-                        StoreError::InvalidEvent(SchemaError::consistency(
-                            "/project_id",
-                            "delivery.created requires project_id",
-                        ))
-                    })?,
-                    level_cap: data.level_cap,
-                    level_effective: data.level_effective,
-                    // data-model §4.1：交付单元从 spec 开始。
-                    stage: Stage::Spec,
-                    stage_status: StageStatus::Running,
-                };
-                self.snapshot.deliveries.insert(delivery.id, delivery);
+                self.snapshot.deliveries.insert(row.id, row);
             }
-            EventType::DeliveryStageChanged => {
-                let data = decode_data::<gantry_core::events::DeliveryStageChangedData>(event)
-                    .map_err(StoreError::InvalidEvent)?;
+            ty if DeliveryRow::folds(ty) => {
                 let id = subject_id::<Dlv>(&event.subject)?;
-                let current = self.snapshot.deliveries.get(&id).ok_or_else(|| {
+                let row = self.snapshot.deliveries.get_mut(&id).ok_or_else(|| {
                     StoreError::PreconditionFailed(format!("delivery {id} has no projection row"))
                 })?;
-                if current.stage != data.from {
-                    return Err(StoreError::PreconditionFailed(format!(
-                        "delivery {id} stage is {}, event says from {}",
-                        current.stage, data.from
-                    )));
-                }
-                if let Some(delivery) = self.snapshot.deliveries.get_mut(&id) {
-                    delivery.stage = data.to;
-                    delivery.stage_status = data.stage_status;
-                }
-            }
-            EventType::DeliveryLevelChanged => {
-                let data = decode_data::<gantry_core::events::DeliveryLevelChangedData>(event)
-                    .map_err(StoreError::InvalidEvent)?;
-                let id = subject_id::<Dlv>(&event.subject)?;
-                let current = self.snapshot.deliveries.get(&id).ok_or_else(|| {
-                    StoreError::PreconditionFailed(format!("delivery {id} has no projection row"))
-                })?;
-                let expected = match data.kind {
-                    gantry_core::events::LevelChangeKind::Cap => current.level_cap,
-                    gantry_core::events::LevelChangeKind::Effective => current.level_effective,
-                };
-                if expected != data.from {
-                    return Err(StoreError::PreconditionFailed(format!(
-                        "delivery {id} level does not match event.from"
-                    )));
-                }
-                if let Some(delivery) = self.snapshot.deliveries.get_mut(&id) {
-                    match data.kind {
-                        gantry_core::events::LevelChangeKind::Cap => {
-                            delivery.level_cap = data.to;
-                            if delivery.level_effective > data.to {
-                                delivery.level_effective = data.to;
-                            }
-                        }
-                        gantry_core::events::LevelChangeKind::Effective => {
-                            delivery.level_effective = data.to;
-                        }
-                    }
-                }
-            }
-            EventType::DeliveryAbandoned => {
-                let id = subject_id::<Dlv>(&event.subject)?;
-                let delivery = self.snapshot.deliveries.get_mut(&id).ok_or_else(|| {
-                    StoreError::PreconditionFailed(format!("delivery {id} has no projection row"))
-                })?;
-                delivery.stage = Stage::Abandoned;
-                delivery.stage_status = StageStatus::Done;
-            }
-            EventType::DeliveryPaused => {
-                let data = decode_data::<gantry_core::events::DeliveryPausedData>(event)
-                    .map_err(StoreError::InvalidEvent)?;
-                let id = subject_id::<Dlv>(&event.subject)?;
-                let delivery = self.snapshot.deliveries.get_mut(&id).ok_or_else(|| {
-                    StoreError::PreconditionFailed(format!("delivery {id} has no projection row"))
-                })?;
-                if delivery.stage_status != data.status_before {
-                    return Err(StoreError::PreconditionFailed(
-                        "delivery stage_status does not match event".to_owned(),
-                    ));
-                }
-                delivery.stage_status = StageStatus::Paused;
-            }
-            EventType::DeliveryResumed => {
-                let data = decode_data::<gantry_core::events::DeliveryResumedData>(event)
-                    .map_err(StoreError::InvalidEvent)?;
-                let id = subject_id::<Dlv>(&event.subject)?;
-                let delivery = self.snapshot.deliveries.get_mut(&id).ok_or_else(|| {
-                    StoreError::PreconditionFailed(format!("delivery {id} has no projection row"))
-                })?;
-                delivery.stage_status = data.status_after;
+                // 先在副本上折叠：前置条件失败时行保持不变。
+                let mut next = row.clone();
+                next.apply(event).map_err(fold_error)?;
+                *row = next;
             }
             EventType::OutboxSucceeded => {
                 let data = decode_data::<gantry_core::events::OutboxSucceededData>(event)
@@ -1265,6 +1173,11 @@ impl TxReader<'_> {
         max
     }
 
+    /// 交付单元行（`delivery.*` 的唯一折叠结果，见 [`projection`]）。
+    pub fn delivery(&self, id: &DeliveryId) -> Option<DeliveryRow> {
+        self.inner.deliveries.get(id).cloned()
+    }
+
     pub fn outbox_action(&self, id: &ActionId) -> Option<OutboxAction> {
         self.inner.outbox.get(id).map(|row| row.action.clone())
     }
@@ -1413,6 +1326,11 @@ impl ReadSnapshot {
 
     pub fn config_rev(&self, project: Option<&ProjectId>) -> Seq {
         TxReader { inner: &self.inner }.config_rev(project)
+    }
+
+    /// 交付单元行（`delivery.*` 的唯一折叠结果，见 [`projection`]）。
+    pub fn delivery(&self, id: &DeliveryId) -> Option<DeliveryRow> {
+        self.inner.deliveries.get(id).cloned()
     }
 
     pub fn outbox_action(&self, id: &ActionId) -> Option<OutboxAction> {
@@ -2370,6 +2288,13 @@ fn priority_rank(priority: Priority) -> u8 {
 // ---------------------------------------------------------------------------
 // 工具
 // ---------------------------------------------------------------------------
+
+fn fold_error(error: FoldError) -> StoreError {
+    match error {
+        FoldError::Data(error) => StoreError::InvalidEvent(error),
+        FoldError::Precondition(message) => StoreError::PreconditionFailed(message),
+    }
+}
 
 fn decode_data<T: gantry_core::events::EventData>(event: &Event<Value>) -> Result<T, SchemaError> {
     gantry_core::events::decode_event_data(event)

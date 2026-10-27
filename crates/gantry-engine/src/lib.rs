@@ -1,23 +1,25 @@
 //! 编排引擎（`docs/modules/engine.md`）。
 //!
-//! M1 目前落地已定义的模板与事件投影；`GraphTemplate` / `TemplateCx` /
-//! `ExitRule` 及完整决策器仍未实现。
+//! M1 目前落地：`low.single` 模板、`DeliveryState` 折叠与 §7.14.2 路由、§7.14 决策器类型、
+//! 预算台账与控制面写入；`decide` 的逻辑、执行体与调度仍未实现。
 
 pub mod budget;
 pub mod create;
+pub mod decide;
 pub mod engine;
 pub mod outbox;
-pub mod projection;
+pub mod route;
 pub mod stage;
+pub mod state;
 pub mod template;
 
 pub use budget::{charge, check, ledger_for_delivery, remaining};
 pub use create::{budget_from_level, created_event, NewDelivery};
 pub use engine::{Engine, EngineError};
 pub use outbox::{build as build_outbox, OutboxIntent};
-pub use projection::{
-    AttemptProjection, DeliveryProjection, NodeProjection, Projection, ProjectionError,
-    WorkflowProjection,
-};
+pub use route::{Route, RouteError, Router};
 pub use stage::{advance, StageTransition};
-pub use template::{stage_graph, NodeSpec, StageGraph, VerdictRule};
+pub use state::{retry_not_before, DeliveryState, StateError};
+pub use template::{
+    stage_graph, ExitRule, HeadBinding, NodeSpec, RevisionCx, StageGraph, TemplateCx, VerdictRule,
+};
