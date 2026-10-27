@@ -8,6 +8,10 @@ description = "Gantry 证书与配对（pki.md）：离线根 + 在线中间 CA�
 
 [dependencies]
 gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+async-trait.workspace = true
+tokio.workspace = true
+tracing = "0.1"
 thiserror.workspace = true
 sha2.workspace = true
 time.workspace = true
@@ -30,4 +34,5 @@ libc = "0.2"
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
