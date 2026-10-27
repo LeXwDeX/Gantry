@@ -384,7 +384,13 @@ async fn m1_ignores_policies_settings_in_the_log() {
         project_id: project_id(),
         delivery_id: None,
         kind: gantry_core::entities::ForgeActionKind::CreatePr,
-        facts: gantry_core::ports::ActionFacts::Other { repo: slug() },
+        facts: gantry_core::ports::ActionFacts::Other {
+            target: gantry_core::events::PolicyTarget::PrCreation {
+                repo: slug(),
+                head: "gantry/x".into(),
+                base: "main".into(),
+            },
+        },
         requested_by: ctx().actor,
     };
     let decision = h.engine.decide_action(req, &ctx()).await.expect("decide");

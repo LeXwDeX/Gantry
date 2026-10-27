@@ -691,19 +691,27 @@ impl AddedLineSource for AddedLines {
 // ---------------------------------------------------------------------------
 
 /// `git worktree add --detach <scratch>/<job_id> <base_sha>`。
+///
+/// `admin` 串行化同一镜像仓上的 worktree 管理操作（add / remove / prune）：
+/// `git worktree add` 会遍历已有的管理目录，并发创建时可能读到另一个尚未写完
+/// `commondir` 的目录而失败。检出与之后的应用、枚举不受此锁限制。
 pub async fn add_scratch(
     env: &GitEnv,
     mirror: &Path,
+    admin: &tokio::sync::Mutex<()>,
     dir: &Path,
     base: &GitOid,
 ) -> Result<(), RepoError> {
     crate::mirror::remove_dir_if_exists(dir)?;
-    GitCmd::new("worktree-add", mirror)
-        .args(["worktree", "add", "--quiet", "--detach", "--no-checkout"])
-        .arg(dir)
-        .arg(base.to_string())
-        .run(env)
-        .await?;
+    {
+        let _admin = admin.lock().await;
+        GitCmd::new("worktree-add", mirror)
+            .args(["worktree", "add", "--quiet", "--detach", "--no-checkout"])
+            .arg(dir)
+            .arg(base.to_string())
+            .run(env)
+            .await?;
+    }
     // 先只填 index 再按 index 检出：不运行 post-checkout（hooksPath=/dev/null），
     // 也不初始化子模块。
     GitCmd::new("read-tree", dir)
@@ -714,7 +722,13 @@ pub async fn add_scratch(
 }
 
 /// 删除一次性检出与其 worktree 元数据；成功、失败、超时都调用。
-pub async fn remove_scratch(env: &GitEnv, mirror: &Path, dir: &Path) {
+pub async fn remove_scratch(
+    env: &GitEnv,
+    mirror: &Path,
+    admin: &tokio::sync::Mutex<()>,
+    dir: &Path,
+) {
+    let _admin = admin.lock().await;
     let _ = GitCmd::new("worktree-remove", mirror)
         .args(["worktree", "remove", "--force"])
         .arg(dir)

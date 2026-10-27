@@ -337,7 +337,13 @@ async fn approve_without_defined_shape_is_denied_with_report() {
     );
     let req = request(
         ForgeActionKind::CreatePr,
-        ActionFacts::Other { repo: slug() },
+        ActionFacts::Other {
+            target: gantry_core::events::PolicyTarget::PrCreation {
+                repo: slug(),
+                head: "gantry/x".into(),
+                base: "main".into(),
+            },
+        },
     );
     let decision = h.engine.decide_action(req, &ctx()).await.expect("decide");
     let ActionDecision::Deny { reason, report, .. } = decision else {
@@ -358,6 +364,8 @@ async fn resolve_thread_with_human_comment_is_denied_by_default() {
         ForgeActionKind::ResolveReviewThread,
         ActionFacts::ResolveReviewThread {
             repo: slug(),
+            number: 7,
+            thread_node_id: "PRRT_x".into(),
             thread_has_human_comment: true,
         },
     );

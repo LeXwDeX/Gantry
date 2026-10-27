@@ -117,7 +117,7 @@ impl GitRepo {
         }
 
         // 镜像仓重建后 tree 对象可能不在了：用 CAS 里的补丁在 base 上重放出同一个 tree。
-        self.ensure_tree(git_dir, &req.job_id, &patch, &result_tree)
+        self.ensure_tree(&req.project_id, git_dir, &req.job_id, &patch, &result_tree)
             .await?;
 
         // 5–6. 净化说明，确定性 commit-tree。
@@ -302,6 +302,7 @@ impl GitRepo {
 
     async fn ensure_tree(
         &self,
+        project: &ProjectId,
         git_dir: &Path,
         job: &AttemptId,
         patch: &ValidatedPatch,
@@ -328,8 +329,9 @@ impl GitRepo {
             .await?
             .ok_or(RepoError::PatchRecordMissing)?;
         let dir = self.inner.cfg.scratch_dir().join(format!("replay-{job}"));
+        let admin = self.worktree_admin(project);
         let result = async {
-            patch::add_scratch(&self.inner.env, git_dir, &dir, &patch.base_sha).await?;
+            patch::add_scratch(&self.inner.env, git_dir, &admin, &dir, &patch.base_sha).await?;
             GitCmd::new("apply", &dir)
                 .args(["apply", "--index", "--whitespace=nowarn", "-p1", "-"])
                 .stdin(bytes)
@@ -342,7 +344,7 @@ impl GitRepo {
             GitOid::parse(out.stdout_str()?.trim()).map_err(|_| io_error("bad tree oid"))
         }
         .await;
-        patch::remove_scratch(&self.inner.env, git_dir, &dir).await;
+        patch::remove_scratch(&self.inner.env, git_dir, &admin, &dir).await;
         if result? != *tree {
             return Err(RepoError::PatchDigestMismatch);
         }
