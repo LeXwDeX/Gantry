@@ -1,0 +1,21 @@
+[package]
+name = "gantry-forge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 与 GitHub 之间的唯一通道：Outbox 入队与执行、webhook、归一化与对账（forge.md）"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
+gantry-fakes = { path = "../gantry-fakes" }
+tokio.workspace = true
