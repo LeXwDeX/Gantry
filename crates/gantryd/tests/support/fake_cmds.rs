@@ -1,7 +1,7 @@
-//! `fakes` 装配专用的控制命令：进程级测试从进程外驱动替身、观察事件日志。
+//! 替身装配专用的控制命令 `fake.*`：进程级测试从进程外驱动替身、观察事件日志。
 //!
-//! 这些命令替代尚不存在的入口（api 的 `POST /v1/deliveries` 等），只在
-//! `--profile fakes` 下可用；真实装配不编译、不注册它们。
+//! 这些命令替代还没接线的入口（api 的 `POST /v1/deliveries` 等），只注册在
+//! 测试进程里，服务端二进制里没有。
 
 use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, SettingsResource};
 use gantry_core::ids::{DeliveryId, MessageId, ProjectId};
@@ -13,17 +13,27 @@ use gantry_store::EventFilter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::assembly::Assembly;
-use crate::control::Response;
+use std::sync::Arc;
+
+use gantryd::assembly::Assembly;
+use gantryd::control::{CommandSet, Response};
 
 /// `fake.*` 命令的固定执行者；与真实设备 / 主机命令区分开。
 const FAKE_ACTOR: &str = "gantryd_fake";
 
-pub async fn handle(assembly: &Assembly, cmd: &str, args: Value) -> Response {
-    match cmd {
-        "fake.create_delivery" => create_delivery(assembly, args).await,
-        "fake.events" => events(assembly, args).await,
-        other => Response::err("unknown_command", format!("unknown command {other:?}")),
+pub struct FakeCommands {
+    pub assembly: Arc<Assembly>,
+}
+
+#[async_trait::async_trait]
+impl CommandSet for FakeCommands {
+    async fn handle(&self, cmd: &str, args: &Value) -> Option<Response> {
+        let args = args.clone();
+        Some(match cmd {
+            "fake.create_delivery" => create_delivery(&self.assembly, args).await,
+            "fake.events" => events(&self.assembly, args).await,
+            _ => return None,
+        })
     }
 }
 

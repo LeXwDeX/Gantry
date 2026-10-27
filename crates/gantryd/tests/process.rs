@@ -1,5 +1,9 @@
-//! 进程级测试：起一个真的 `gantryd` 进程（`--profile fakes`），只经控制通道交互。
-#![cfg(feature = "fakes")]
+//! 进程级测试：起独立的 gantryd 进程，只经控制通道和信号交互。
+//!
+//! 替身装配的进程由本测试二进制重新执行自身得到（见 `support`）；只测真实装配
+//! 启动行为的用例直接跑 `gantryd` 二进制。
+
+mod support;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
@@ -12,6 +16,33 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 const BIN: &str = env!("CARGO_BIN_EXE_gantryd");
+
+/// 替身装配的 gantryd 子进程入口；不带 `CHILD_ENV` 时什么也不做。
+#[test]
+fn fake_gantryd_child() {
+    if let Ok(spec) = std::env::var(support::CHILD_ENV) {
+        support::child_main(&spec);
+    }
+}
+
+/// 起一个替身装配的 gantryd（本测试二进制只跑 `fake_gantryd_child`）。
+fn fake_gantryd(scratch: &Scratch, control_uid: u32) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            support::CHILD_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(
+            support::CHILD_ENV,
+            format!("{}\n{control_uid}", scratch.config().display()),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    command
+}
 const PROJECT: &str = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA";
 const MESSAGE: &str = "msg_01JB7N3R5T8X2V6M9Q4K1W7YZD";
 
@@ -77,15 +108,7 @@ struct Daemon {
 
 impl Daemon {
     fn spawn(scratch: &Scratch, control_uid: u32) -> Self {
-        let child = Command::new(BIN)
-            .arg("--config")
-            .arg(scratch.config())
-            .args(["--profile", "fakes", "--control-uid"])
-            .arg(control_uid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = fake_gantryd(scratch, control_uid).spawn().unwrap();
         let daemon = Self { child };
         wait_for_socket(&scratch.socket());
         daemon
@@ -271,23 +294,55 @@ fn stale_socket_is_replaced_but_a_live_one_is_not() {
     let _daemon = Daemon::spawn(&scratch, scratch.uid());
     Client::connect(&scratch).ok(json!({"cmd": "status"}));
 
-    let uid = scratch.uid().to_string();
-    let config = scratch.config();
-    let second = run_to_exit(&[
-        "--config",
-        config.to_str().unwrap(),
-        "--profile",
-        "fakes",
-        "--control-uid",
-        &uid,
-    ]);
+    let second = fake_gantryd(&scratch, scratch.uid()).output().unwrap();
     assert!(!second.status.success());
     assert!(String::from_utf8_lossy(&second.stderr).contains("another gantryd"));
     Client::connect(&scratch).ok(json!({"cmd": "status"}));
 }
 
+/// 两个实例同时启动、路径上有残留套接字：恰好一个赢得锁并服务，另一个拒绝启动；
+/// 输的一方不删赢家的套接字。
 #[test]
-fn real_profile_refuses_to_start_without_a_persistent_store() {
+fn concurrent_starts_leave_exactly_one_owner() {
+    let scratch = Scratch::new();
+    let mut crashed = Daemon::spawn(&scratch, scratch.uid());
+    crashed.child.kill().unwrap();
+    crashed.child.wait().unwrap();
+
+    let a = fake_gantryd(&scratch, scratch.uid()).spawn().unwrap();
+    let b = fake_gantryd(&scratch, scratch.uid()).spawn().unwrap();
+    let (mut a, mut b) = (Daemon { child: a }, Daemon { child: b });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let loser = loop {
+        if let Some(status) = a.child.try_wait().unwrap() {
+            break (status, &mut a);
+        }
+        if let Some(status) = b.child.try_wait().unwrap() {
+            break (status, &mut b);
+        }
+        assert!(Instant::now() < deadline, "neither instance gave up");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!loser.0.success());
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(loser.1.child.stderr.as_mut().unwrap(), &mut stderr).unwrap();
+    assert!(stderr.contains("another gantryd"), "{stderr}");
+    wait_for_socket(&scratch.socket());
+    Client::connect(&scratch).ok(json!({"cmd": "status"}));
+    let alive = [a.child.try_wait().unwrap(), b.child.try_wait().unwrap()];
+    assert_eq!(alive.iter().filter(|status| status.is_none()).count(), 1);
+}
+
+#[test]
+fn server_binary_has_no_fakes_flags() {
+    for flag in [&["--profile", "fakes"][..], &["--control-uid", "501"]] {
+        let output = run_to_exit(flag);
+        assert_eq!(output.status.code(), Some(2), "{flag:?}");
+    }
+}
+
+#[test]
+fn server_binary_refuses_to_start_without_a_persistent_store() {
     let scratch = Scratch::new();
     let config = scratch.config();
     let output = run_to_exit(&["--config", config.to_str().unwrap()]);
@@ -306,7 +361,8 @@ fn bad_config_fails_before_binding() {
     )
     .unwrap();
     let config = scratch.config();
-    let output = run_to_exit(&["--config", config.to_str().unwrap(), "--profile", "fakes"]);
+    let output = run_to_exit(&["--config", config.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("levels"));
     assert!(!output.status.success());
     assert!(!scratch.socket().exists());
 }
