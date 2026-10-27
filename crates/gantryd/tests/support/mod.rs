@@ -4,22 +4,26 @@
 //! `GANTRYD_FAKES_CHILD` 环境变量重新执行自身（只跑 [`CHILD_TEST`] 这一个测试），
 //! 这个子进程就是"用替身装配的 gantryd"；父进程只经控制通道和信号跟它交互。
 
+pub mod engine_cfg;
 pub mod fake_cmds;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use gantry_core::ids::{Clock, IdGen};
+use async_trait::async_trait;
+use gantry_core::canon::GitOid;
+use gantry_core::entities::{MergeMethod, Project, PullRequestRef};
+use gantry_core::ids::{Clock, IdGen, ProjectId};
 use gantry_core::ports::inbox::InboxPort;
-use gantry_core::ports::policy::PolicyPort;
-use gantry_engine::Engine;
+use gantry_engine::actor::PrSnapshots;
+use gantry_engine::runtime::{EnginePorts, EngineRuntime, RuntimeSettings};
 use gantry_fakes::{
-    conversation::FakeConversation, egress::EgressStub, forge::FakeForge,
-    models::FakeModelProvider, repo::FakeRepo, sandbox::FakeSandboxService,
-    worker::StubWorkerAdapter,
+    conversation::FakeConversation, egress::EgressStub, evented_repo::EventedRepo,
+    forge::FakeForge, golden::GoldenSandbox, models::FakeModelProvider, policy::FakePolicy,
+    repo::FakeRepo, worker::StubWorkerAdapter,
 };
 use gantry_notify::Notify;
-use gantry_policy::{PolicyDeps, PolicyEngine};
 use gantry_store::{Store, StoreDeps};
 use gantryd::assembly::{Assembly, ModuleInfo, OsEntropy, Profile, Provider, SystemClock};
 use gantryd::config::BootConfig;
@@ -30,9 +34,38 @@ pub const CHILD_TEST: &str = "fake_gantryd_child";
 /// 子进程的配置路径与控制通道放行的 uid，格式 `<config>\n<uid>`。
 pub const CHILD_ENV: &str = "GANTRYD_FAKES_CHILD";
 
-/// engine、notify、policy 用真实实现；store（内存）与其余模块用替身。
+/// 测试扮演 GitHub 时写入的 PR 快照（生产里由 forge 同步写 store 投影）。
+#[derive(Default)]
+pub struct Snapshots(pub Mutex<Option<PullRequestRef>>);
+
+#[async_trait]
+impl PrSnapshots for Snapshots {
+    async fn pull_request(&self, _: &ProjectId, number: u64) -> Option<PullRequestRef> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .filter(|pr| pr.number == number)
+    }
+}
+
+/// `fake.*` 命令要直接操纵的替身。
+pub struct FakeHandles {
+    pub store: Store,
+    pub policy: Arc<FakePolicy>,
+    pub repo: Arc<FakeRepo>,
+    pub sandbox: Arc<GoldenSandbox>,
+    pub snapshots: Arc<Snapshots>,
+}
+
+pub fn project_id() -> ProjectId {
+    engine_cfg::PROJECT.parse().expect("fixture")
+}
+
+/// engine（`EngineRuntime`）与 notify 用真实实现；store（内存）与其余模块用替身。
+/// policy 用 `FakePolicy`：§12.2 的合并审批要按脚本放行（真实 policy 需要设备签名）。
 /// 换成真实实现的模块从这里挪到 `gantryd::assembly::assemble_real`。
-pub fn assemble_fakes() -> Assembly {
+pub async fn assemble_fakes() -> (Assembly, FakeHandles) {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(OsEntropy)));
     let store = Store::open_in_memory_sync(StoreDeps {
@@ -40,31 +73,64 @@ pub fn assemble_fakes() -> Assembly {
         ids: ids.clone(),
     })
     .expect("in-memory store");
+    let base = GitOid::parse(engine_cfg::BASE).expect("fixture");
+    let now = clock.now();
 
     let forge = Arc::new(FakeForge::new_in(store.clone()));
-    let repo = Arc::new(FakeRepo::new(clock.now()));
+    forge.insert_project(Project {
+        id: project_id(),
+        repo: engine_cfg::repo_slug(),
+        installation_id: 1,
+        bot_user_id: 2,
+        default_branch: "main".into(),
+        allowed_merge_methods: vec![MergeMethod::Squash],
+        merge_queue_enabled: false,
+        created_at: now,
+        updated_at: now,
+    });
+    let repo = Arc::new(FakeRepo::new(now));
+    repo.set_ref(project_id(), "main", base);
+    let evented = Arc::new(EventedRepo::new(repo.clone(), store.clone()));
+    let sandbox = Arc::new(GoldenSandbox::new(store.cas(), base, clock.clone()));
+    let policy = Arc::new(FakePolicy::new_in(store.clone()));
+    let snapshots = Arc::new(Snapshots::default());
     let inbox: Arc<dyn InboxPort> = Arc::new(Notify::new(store.clone(), ids.clone()));
-    let policy: Arc<dyn PolicyPort> = Arc::new(PolicyEngine::new(PolicyDeps {
-        store: store.clone(),
-        forge: forge.clone(),
-        clock: clock.clone(),
-        ids: ids.clone(),
-    }));
-    let engine = Arc::new(Engine::new(store.clone(), inbox.clone()));
+    let worker = Arc::new(StubWorkerAdapter::new());
+
+    let engine = EngineRuntime::new(
+        store.clone(),
+        EnginePorts {
+            inbox: inbox.clone(),
+            outbox: forge.clone(),
+            policy: policy.clone(),
+            forge: forge.clone(),
+            repo: evented.clone(),
+            sandbox: sandbox.clone(),
+            worker: worker.clone(),
+            cas: Arc::new(store.cas()),
+            clock: clock.clone(),
+            entropy: Arc::new(OsEntropy),
+            snapshots: Some(snapshots.clone()),
+        },
+        RuntimeSettings {
+            actor: engine_cfg::actor_config(),
+            runner: engine_cfg::runner_config(),
+            poll_interval: Duration::from_millis(5),
+            cleanup_lease: Duration::from_secs(60),
+        },
+    )
+    .await
+    .expect("engine runtime");
 
     use Provider::{Absent, Fake, Real};
     let modules = vec![
         ModuleInfo::new("store", Fake, "in-memory log; SQLite store not wired"),
-        ModuleInfo::new("engine", Real, "decide / executor pending #70-#73"),
+        ModuleInfo::new("engine", Real, "EngineRuntime with fixture settings"),
         ModuleInfo::new("notify", Real, ""),
-        ModuleInfo::new("policy", Real, "built-in M1 rules"),
+        ModuleInfo::new("policy", Fake, "FakePolicy; merge approval is scripted"),
         ModuleInfo::new("forge", Fake, "FakeForge; real forge needs a GitHub App"),
-        ModuleInfo::new("repo", Fake, "FakeRepo"),
-        ModuleInfo::new(
-            "sandbox",
-            Fake,
-            "FakeSandboxService; real sandbox needs Podman",
-        ),
+        ModuleInfo::new("repo", Fake, "EventedRepo over FakeRepo"),
+        ModuleInfo::new("sandbox", Fake, "GoldenSandbox; real sandbox needs Podman"),
         ModuleInfo::new("worker", Fake, "StubWorkerAdapter"),
         ModuleInfo::new(
             "models",
@@ -82,24 +148,32 @@ pub fn assemble_fakes() -> Assembly {
         ModuleInfo::new("api", Absent, "not wired yet"),
     ];
 
-    Assembly {
+    let assembly = Assembly {
         profile: Profile::Fakes,
-        store,
+        store: store.clone(),
         ids,
         engine,
         inbox,
-        policy,
+        policy: policy.clone(),
         outbox: forge.clone(),
         forge,
-        repo: repo.clone(),
-        locks: repo,
-        sandbox: Arc::new(FakeSandboxService::new()),
-        worker: Arc::new(StubWorkerAdapter::new()),
+        repo: evented,
+        locks: repo.clone(),
+        sandbox: sandbox.clone(),
+        worker,
         models: Arc::new(FakeModelProvider::new()),
         egress: Arc::new(EgressStub::new()),
         conversation: Arc::new(FakeConversation::new()),
         modules,
-    }
+    };
+    let handles = FakeHandles {
+        store,
+        policy,
+        repo,
+        sandbox,
+        snapshots,
+    };
+    (assembly, handles)
 }
 
 /// 子进程主体：读配置、替身装配、服务到 SIGTERM。启动失败打印到 stderr 并 panic
@@ -113,9 +187,12 @@ pub fn child_main(spec: &str) {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let assembly = Arc::new(assemble_fakes());
-        let commands: Vec<Arc<dyn CommandSet>> =
-            vec![Arc::new(fake_cmds::FakeCommands::new(assembly.clone()))];
+        let (assembly, handles) = assemble_fakes().await;
+        let assembly = Arc::new(assembly);
+        let commands: Vec<Arc<dyn CommandSet>> = vec![Arc::new(fake_cmds::FakeCommands::new(
+            assembly.clone(),
+            handles,
+        ))];
         if let Err(error) = gantryd::serve(&config, assembly, commands, ControlAuth { uid }).await {
             eprintln!("gantryd: {error}");
             panic!("gantryd failed to start");

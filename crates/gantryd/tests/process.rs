@@ -194,6 +194,7 @@ fn status_reports_profile_and_module_providers() {
     let status = Client::connect(&scratch).ok(json!({"cmd": "status"}));
     assert_eq!(status["profile"], "fakes");
     assert_eq!(status["head_seq"], 0);
+    assert_eq!(status["engine"]["degraded"], json!({}));
     let provider = |module: &str| {
         status["modules"]
             .as_array()
@@ -203,10 +204,12 @@ fn status_reports_profile_and_module_providers() {
             .unwrap_or_else(|| panic!("{module} missing from {status}"))["provider"]
             .clone()
     };
-    for module in ["engine", "notify", "policy"] {
+    for module in ["engine", "notify"] {
         assert_eq!(provider(module), "real", "{module}");
     }
-    for module in ["store", "forge", "repo", "sandbox", "models", "egress"] {
+    for module in [
+        "store", "policy", "forge", "repo", "sandbox", "models", "egress",
+    ] {
         assert_eq!(provider(module), "fake", "{module}");
     }
 }
@@ -262,18 +265,24 @@ fn create_delivery_appends_one_event_and_dedupes_by_message() {
     let mut client = Client::connect(&scratch);
     let create = json!({
         "cmd": "fake.create_delivery",
-        "args": {"project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login", "user_text": "修复登录超时"},
+        "args": {"project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login",
+                 "user_text": "修复登录超时"},
     });
     let first = client.ok(create.clone())["delivery_id"].clone();
     let second = client.ok(create)["delivery_id"].clone();
     assert_eq!(first, second);
 
     let events = client.ok(json!({"cmd": "fake.events", "args": {"after": 0}}));
+    // 引擎随即在后台推进这个交付单元，日志里还会有它的后续事件；这里只看建单。
     let events = events["events"].as_array().unwrap();
-    assert_eq!(events.len(), 1, "{events:?}");
+    let created: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "delivery.created")
+        .collect();
+    assert_eq!(created.len(), 1, "{events:?}");
     assert_eq!(events[0]["type"], "delivery.created");
-    assert_eq!(events[0]["subject"], first);
-    assert_eq!(events[0]["data"]["budget"]["template"], "low.single");
+    assert_eq!(created[0]["subject"], first);
+    assert_eq!(created[0]["data"]["budget"]["template"], "low.single");
 }
 
 #[test]
@@ -369,62 +378,67 @@ fn bad_config_fails_before_binding() {
     assert!(!scratch.socket().exists());
 }
 
-/// engine.md §12.2「端到端（替身）」。引擎的 `decide`、执行体与终结管线未实现，
-/// 交付单元创建后停在 `spec`；`fake.sandbox_golden` / `fake.forge_check_suite`
-/// 两条注入命令随执行体接入一起补。
+/// engine.md §12.2「端到端（替身）」主路径，跑在独立的 gantryd 进程里：
+/// `create_delivery(Low)` → 替身沙盒回放 `single` 黄金结果（补丁 + `open_pr` 提议）→
+/// 入队 `push_branch` / `create_pr` → 合并审批 → 阶段序列恰为
+/// `spec → implement → propose → review → merge → closed`，`spec → implement` 的
+/// `reason = admission_skipped`。forge 执行器、GitHub 快照与审批设备由 `fake.drive` 扮演。
 #[test]
-#[ignore = "等待 #70（Low 正常路径 decide）、#71（执行体与事件路由）、#72（AttemptRunner 与终结管线）"]
 fn end_to_end_low_delivery_reaches_closed_with_fakes() {
     let scratch = Scratch::new();
-    let _daemon = Daemon::spawn(&scratch, scratch.uid());
+    let daemon = Daemon::spawn(&scratch, scratch.uid());
     let mut client = Client::connect(&scratch);
-    client.ok(json!({"cmd": "fake.sandbox_golden", "args": {"node": "single", "open_pr": true}}));
     let delivery = client.ok(json!({
         "cmd": "fake.create_delivery",
-        "args": {"project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login", "user_text": "修复登录超时"},
+        "args": {"project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login",
+                 "user_text": "修复登录超时"},
     }))["delivery_id"]
         .clone();
 
-    let stages = |client: &mut Client| -> Vec<(String, String)> {
-        let page = client.ok(json!({"cmd": "fake.events", "args": {"after": 0}}));
-        page["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|event| {
-                event["type"] == "delivery.stage_changed" && event["subject"] == delivery
-            })
-            .map(|event| {
-                (
-                    event["data"]["to"].as_str().unwrap_or_default().to_owned(),
-                    event["data"]["reason"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                )
-            })
-            .collect()
-    };
-    let wait_for = |client: &mut Client, stage: &str| {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !stages(client).iter().any(|(to, _)| to == stage) {
-            assert!(
-                Instant::now() < deadline,
-                "never reached {stage}: {:?}",
-                stages(client)
-            );
-            std::thread::sleep(Duration::from_millis(50));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        if step["done"] == true {
+            break;
         }
-    };
+        assert!(
+            Instant::now() < deadline,
+            "stuck at {}: {:?}",
+            step["stage"],
+            stages(&mut client, &delivery)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
-    wait_for(&mut client, "review");
-    client.ok(json!({"cmd": "fake.forge_check_suite", "args": {"conclusion": "success"}}));
-    wait_for(&mut client, "closed");
-
-    let stages = stages(&mut client);
+    let stages = stages(&mut client, &delivery);
     let order: Vec<&str> = stages.iter().map(|(to, _)| to.as_str()).collect();
     assert_eq!(order, ["implement", "propose", "review", "merge", "closed"]);
     assert_eq!(stages[0].1, "admission_skipped");
+    let status = client.ok(json!({"cmd": "status"}));
+    assert_eq!(status["engine"]["degraded"], json!({}), "{status}");
+
+    // 停机：引擎主循环随控制通道一起退出，进程以 0 退出。
+    assert!(daemon.terminate().success());
+}
+
+/// 交付单元的阶段迁移 `(to, reason)`，按日志顺序。
+fn stages(client: &mut Client, delivery: &Value) -> Vec<(String, String)> {
+    let page = client.ok(json!({"cmd": "fake.events", "args": {"after": 0}}));
+    page["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "delivery.stage_changed" && event["subject"] == *delivery)
+        .map(|event| {
+            (
+                event["data"]["to"].as_str().unwrap_or_default().to_owned(),
+                event["data"]["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

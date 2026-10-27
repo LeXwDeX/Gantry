@@ -38,6 +38,9 @@ pub enum StartError {
     Bind(#[from] BindError),
     #[error("signal handler: {0}")]
     Signal(std::io::Error),
+    /// 引擎主循环只在存储错误时退出（engine.md §7.15）。
+    #[error("engine stopped: {0}")]
+    Engine(String),
 }
 
 pub const USAGE: &str = "usage: gantryd [--config <path>]";
@@ -88,17 +91,39 @@ pub async fn serve(
     );
 
     let (stop, stopped) = watch::channel(false);
+    let engine = tokio::spawn(assembly.engine.clone().run(stopped_signal(stopped.clone())));
     let control = Arc::new(Control::new(assembly, commands));
     let serve = socket.serve(control, auth, stopped);
     tokio::pin!(serve);
+    tokio::pin!(engine);
+    let mut engine_done = None;
     tokio::select! {
         _ = &mut serve => {}
         _ = sigterm.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
+        result = &mut engine => engine_done = Some(result),
     }
     let _ = stop.send(true);
     eprintln!("gantryd: shutting down");
-    Ok(())
+    // 引擎处理完已入队的回报后返回；在途尝试留给下次启动的 Recover（engine.md §7.15）。
+    let result = match engine_done {
+        Some(result) => result,
+        None => engine.await,
+    };
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(StartError::Engine(error.to_string())),
+        Err(join) => Err(StartError::Engine(join.to_string())),
+    }
+}
+
+/// `watch` 置为 `true` 时完成的 future（引擎 `run` 的停机信号）。
+async fn stopped_signal(mut stopped: watch::Receiver<bool>) {
+    while !*stopped.borrow() {
+        if stopped.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

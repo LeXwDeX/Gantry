@@ -21,7 +21,7 @@ use gantry_core::ports::repo::{RepoService, WorktreeLocks};
 use gantry_core::ports::sandbox::SandboxService;
 use gantry_core::ports::worker::WorkerAdapter;
 use gantry_core::time::Timestamp;
-use gantry_engine::Engine;
+use gantry_engine::runtime::EngineRuntime;
 use gantry_store::Store;
 use serde::Serialize;
 
@@ -74,7 +74,8 @@ pub struct Assembly {
     pub profile: Profile,
     pub store: Store,
     pub ids: Arc<IdGen>,
-    pub engine: Arc<Engine>,
+    /// 引擎运行时（engine.md §7.15）：`serve` 负责 `run` 到停机；写入口经 `engine()`。
+    pub engine: Arc<EngineRuntime>,
     pub inbox: Arc<dyn InboxPort>,
     pub policy: Arc<dyn PolicyPort>,
     pub outbox: Arc<dyn OutboxPort>,
