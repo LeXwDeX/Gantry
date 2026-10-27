@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite --mode scenario",
+    "dev:mock": "vite --mode mock",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "build": "vite build",
     "build:scenario": "vite build --mode scenario --outDir dist-scenario",
+    "build:mock": "vite build --mode mock --outDir dist-mock",
     "test:e2e": "playwright test",
     "lint": "node scripts/check-boundaries.mjs"
   },

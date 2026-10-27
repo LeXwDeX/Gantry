@@ -19,7 +19,9 @@ function check(file, text) {
     errors.push(`${file}:${line + 1}: ${reason}`);
   };
   const visit = (node) => {
-    if (ts.isIdentifier(node) && forbidden.has(node.text)) {
+    // 只有 Mock API 外壳替身可以联网；它不进入正式包（工厂按构建 mode 折叠）。
+    const mockNetwork = file.startsWith('src/ipc/mock/') && node.text === 'fetch';
+    if (ts.isIdentifier(node) && forbidden.has(node.text) && !mockNetwork) {
       report(node, `禁止直接使用 ${node.text}`);
     }
     if (ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression)
@@ -67,6 +69,9 @@ function check(file, text) {
 
 assert.equal(check('src/example.tsx', '// fetch()\nconst label = "innerHTML"; <button onClick={send}>发送</button>').length, 0);
 assert.equal(check('src/ipc/tauri.ts', 'import { invoke } from "@tauri-apps/api/core";').length, 0);
+assert.equal(check('src/ipc/mock/adapter.ts', 'globalThis.fetch(url)').length, 0);
+assert.ok(check('src/ipc/mock/adapter.ts', 'new EventSource(url)').length > 0);
+assert.ok(check('src/ipc/tauri.ts', 'fetch(url)').length > 0);
 for (const unsafe of [
   'fetch("https://example.com")', 'window["localStorage"]',
   'el.innerHTML = text', '<div onClick={send} />', '<script />',
