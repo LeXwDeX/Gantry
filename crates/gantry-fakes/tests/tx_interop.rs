@@ -313,7 +313,8 @@ async fn shared_tx_commit_is_visible_across_store_forge_policy_and_inbox() {
     );
     tx.commit().await.expect("commit shared tx");
 
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 4);
+    // 入队同事务追加 `outbox.enqueued`（store.md §6.3），因此比其余三条多一条。
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 5);
     assert_eq!(forge.outbox_len(), 1);
     assert_eq!(
         forge.outbox_action(&enqueued.action.id).unwrap().id,
@@ -445,7 +446,8 @@ async fn same_tx_deduplicates_events_enqueues_and_inbox_items() {
     ));
     tx.commit().await.unwrap();
     assert_eq!(forge.outbox_len(), 1);
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 2);
+    // 一条 `outbox.enqueued`（第二次入队去重，不追加）+ inbox.raised + budget 事件。
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 3);
     let page = store
         .events()
         .scan(Seq::ZERO, &EventFilter::default(), 10)
@@ -740,7 +742,7 @@ async fn terminal_fail_through_store_rejects_queued_rows() {
             project_id: id::<Prj>(1),
             delivery_id: id::<Dlv>(2),
             kind: gantry_core::entities::ForgeActionKind::CreateComment,
-            target: "pr:7".into(),
+            target: "comment:pr:7:comment:1".into(),
             intent: json!({"body": "hi"}),
             payload: json!({
                 "repo": "acme/widgets",

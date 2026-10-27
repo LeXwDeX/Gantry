@@ -99,8 +99,15 @@ fn enqueue_request() -> OutboxInsert {
         project_id: PROJECT.parse().unwrap(),
         delivery_id: DELIVERY.parse().unwrap(),
         kind: ForgeActionKind::CreatePr,
-        target: "branch:gantry/dlv-12".to_owned(),
-        intent: json!({"head": "gantry/dlv-12", "base": "main"}),
+        target: "pr:gantry/dlv-12->main".to_owned(),
+        intent: json!({
+            "base": "main",
+            "head": "gantry/dlv-12",
+            "title": "fix",
+            "body": "body",
+            "draft": false,
+            "closes": []
+        }),
         payload: json!({
             "repo": "acme/widgets",
             "head": "gantry/dlv-12",
@@ -182,7 +189,7 @@ async fn committed_state_survives_reopen() {
     let store = open(&dir, 1_700_000_100_000).await.unwrap();
     assert_eq!(store.log_identity().log_id, identity.log_id);
     assert_eq!(store.log_identity().log_epoch, 1);
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 3);
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 4);
     let page = store
         .events()
         .scan(Seq::ZERO, &EventFilter::default(), 10)
@@ -194,6 +201,7 @@ async fn committed_state_survives_reopen() {
         vec![
             EventType::DeliveryCreated,
             EventType::MessagePosted,
+            EventType::OutboxEnqueued,
             EventType::OutboxSucceeded
         ]
     );
@@ -229,7 +237,7 @@ async fn committed_state_survives_reopen() {
     let Appended::New(next) = tx.append(message_posted("msg-2")).await.unwrap() else {
         panic!("expected a new event");
     };
-    assert_eq!(next.seq.as_u64(), 4);
+    assert_eq!(next.seq.as_u64(), 5);
     tx.commit().await.unwrap();
 }
 

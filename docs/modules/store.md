@@ -288,6 +288,8 @@ pub enum AfterFailure { Terminal, Retry { not_before: Timestamp } }
 
 本节涉及的 `outbox.enqueued` / `outbox.executing` / `outbox.cancelled` data 字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
 
+**`outbox.enqueued` 已落地（#71 拍板）**：`OutboxTx::enqueue` 在 `created = true` 时于同一事务先追加 `outbox.enqueued`（`subject = act_…`、`project_id`、`correlation_id = delivery_id`、`causation_id = enqueued_by.causation_id`，`data.action` 按 event-data §2.2.4），再插入 Outbox 行；事件校验失败则整次入队失败、不留行。`created = false` 不追加。信封 `actor` 取自 `enqueued_by.module`：入队方是闭集 engine / guardian（`core::ports::EnqueuedByModule`），各自就是一个 `ActorKind`；不是 actor 类别的模块名返回 `PreconditionFailed`。`outbox.executing` / `outbox.cancelled` 尚未追加。
+
 ### 6.4 CAS
 
 ```rust

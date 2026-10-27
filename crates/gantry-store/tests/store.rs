@@ -100,6 +100,18 @@ fn create_pr_payload() -> Value {
     })
 }
 
+/// create_pr 的 intent（forge-actions §3.2）：与 `create_pr_payload` 一致，`outbox.enqueued` 会核对。
+fn create_pr_intent() -> Value {
+    json!({
+        "base": "main",
+        "head": "gantry/dlv-12",
+        "title": "fix",
+        "body": "body",
+        "draft": false,
+        "closes": []
+    })
+}
+
 fn settings_global() -> NewEvent {
     let mut event = event(
         "settings.updated",
@@ -383,8 +395,8 @@ async fn outbox_enqueue_is_idempotent_and_rolls_back() {
         project_id: project(),
         delivery_id: delivery(),
         kind: ForgeActionKind::CreatePr,
-        target: "branch:gantry/dlv-12".to_owned(),
-        intent: json!({"head": "gantry/dlv-12", "base": "main"}),
+        target: "pr:gantry/dlv-12->main".to_owned(),
+        intent: create_pr_intent(),
         payload: create_pr_payload(),
         requires_approval: None,
         depends_on: Vec::new(),
@@ -421,8 +433,8 @@ async fn outbox_claim_and_complete_update_the_row_and_log() {
             project_id: project(),
             delivery_id: delivery(),
             kind: ForgeActionKind::CreatePr,
-            target: "branch:gantry/dlv-12".to_owned(),
-            intent: json!({"head": "gantry/dlv-12"}),
+            target: "pr:gantry/dlv-12->main".to_owned(),
+            intent: create_pr_intent(),
             payload: create_pr_payload(),
             requires_approval: None,
             depends_on: Vec::new(),
@@ -465,13 +477,15 @@ async fn outbox_claim_and_complete_update_the_row_and_log() {
     let snapshot = store.snapshot().await.unwrap();
     let action = snapshot.outbox_action(&enqueued.action.id).unwrap();
     assert_eq!(action.status, OutboxStatus::Succeeded);
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 1);
+    // 入队与完成各一条事件，同一事务。
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 2);
     let page = store
         .events()
         .scan(Seq::ZERO, &EventFilter::default(), 10)
         .await
         .unwrap();
-    assert_eq!(page.events[0].ty, EventType::OutboxSucceeded);
+    assert_eq!(page.events[0].ty, EventType::OutboxEnqueued);
+    assert_eq!(page.events[1].ty, EventType::OutboxSucceeded);
 }
 
 #[tokio::test]
@@ -484,7 +498,7 @@ async fn outbox_retry_stays_queued_and_terminal_fails() {
             project_id: project(),
             delivery_id: delivery(),
             kind: ForgeActionKind::CreateComment,
-            target: "pr:12".to_owned(),
+            target: "comment:pr:12:comment:1".to_owned(),
             intent: json!({"body": "hi"}),
             payload: json!({
                 "repo": "acme/widgets",
@@ -532,7 +546,8 @@ async fn outbox_retry_stays_queued_and_terminal_fails() {
     let action = snapshot.outbox_action(&enqueued.action.id).unwrap();
     assert_eq!(action.status, OutboxStatus::Queued);
     assert!(action.not_before.is_some());
-    assert_eq!(store.events().head().await.unwrap(), Seq::ZERO);
+    // 只有入队事件：Retry 不追加 outbox.failed（P-53）。
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 1);
 
     let mut tx = store.begin_write().await.unwrap();
     // Retry 回到 queued；再次认领是普通认领（replay = false），再走终态失败。
@@ -567,8 +582,9 @@ async fn outbox_retry_stays_queued_and_terminal_fails() {
         .scan(Seq::ZERO, &EventFilter::default(), 10)
         .await
         .unwrap();
-    assert_eq!(page.events.len(), 1);
-    assert_eq!(page.events[0].ty, EventType::OutboxFailed);
+    assert_eq!(page.events.len(), 2);
+    assert_eq!(page.events[0].ty, EventType::OutboxEnqueued);
+    assert_eq!(page.events[1].ty, EventType::OutboxFailed);
 }
 
 #[tokio::test]
@@ -862,7 +878,7 @@ fn comment_request(epoch: u32) -> OutboxInsert {
         project_id: project(),
         delivery_id: delivery(),
         kind: ForgeActionKind::CreateComment,
-        target: "pr:12".to_owned(),
+        target: "comment:pr:12:comment:1".to_owned(),
         intent: json!({"body": "hi"}),
         payload: json!({
             "repo": "acme/widgets",
@@ -1413,8 +1429,8 @@ async fn outbox_cancel_blocked_returns_all_cascaded_ids() {
     }
     tx.commit().await.unwrap();
 
-    // outbox.cancelled 的 data 未定义：级联只改表，不写事件。
-    assert_eq!(store.events().head().await.unwrap(), Seq::ZERO);
+    // 只有四条入队事件；级联取消暂不写 outbox.cancelled（不在本次范围）。
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 4);
 }
 
 #[tokio::test]
@@ -1725,4 +1741,92 @@ async fn lowering_cap_clamps_effective_in_projection() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// outbox.enqueued（event-data §2.2.4、forge.md §5、#71）
+// ---------------------------------------------------------------------------
+
+/// 入队即可见：`created = true` 时同一事务追加恰好一条 `outbox.enqueued`，信封与 data
+/// 按契约填写；`created = false` 不追加；事件校验失败时整次入队失败，行不落地。
+#[tokio::test]
+async fn enqueue_appends_outbox_enqueued_in_the_same_tx() {
+    let store = store().await;
+    let causation: gantry_core::ids::EventId = "evt_01JBX2E3G5J7K9N1Q3S5T7W9YA".parse().unwrap();
+    let request = || OutboxInsert {
+        project_id: project(),
+        delivery_id: delivery(),
+        kind: ForgeActionKind::CreatePr,
+        target: "pr:gantry/dlv-12->main".to_owned(),
+        intent: create_pr_intent(),
+        payload: create_pr_payload(),
+        requires_approval: None,
+        depends_on: Vec::new(),
+        priority: Priority::Normal,
+        not_before: None,
+        epoch: 0,
+        coalesce_key: None,
+        enqueued_by: EnqueuedBy {
+            module: "guardian".to_owned(),
+            causation_id: Some(causation),
+        },
+    };
+
+    let mut tx = store.begin_write().await.unwrap();
+    let enqueued = tx.outbox().enqueue(request()).await.unwrap();
+    assert!(enqueued.created);
+    assert!(!tx.outbox().enqueue(request()).await.unwrap().created);
+    tx.commit().await.unwrap();
+
+    let page = store
+        .events()
+        .scan(Seq::ZERO, &EventFilter::default(), 10)
+        .await
+        .unwrap();
+    assert_eq!(page.events.len(), 1, "a duplicate enqueue appends nothing");
+    let event = &page.events[0];
+    assert_eq!(event.ty, EventType::OutboxEnqueued);
+    assert_eq!(event.subject.as_str(), enqueued.action.id.to_string());
+    assert_eq!(event.project_id, Some(project()));
+    assert_eq!(event.actor, Actor::new(ActorKind::Guardian, "guardian"));
+    assert_eq!(event.causation_id, Some(causation));
+    assert_eq!(event.correlation_id.as_deref(), Some(DELIVERY));
+    let action = &event.data["action"];
+    assert_eq!(action["kind"], json!("create_pr"));
+    assert_eq!(action["target"], json!("pr:gantry/dlv-12->main"));
+    assert_eq!(action["intent"], create_pr_intent());
+    assert_eq!(action["payload"], create_pr_payload());
+    assert_eq!(
+        action["idempotency_key"],
+        json!(enqueued.action.idempotency_key.to_string())
+    );
+    assert_eq!(action["requires_approval"], Value::Null);
+    assert_eq!(action["not_before"], Value::Null);
+    assert_eq!(action["coalesce_key"], Value::Null);
+    assert_eq!(
+        action["enqueued_by"],
+        json!({"module": "guardian", "causation_id": causation})
+    );
+
+    // intent 与 payload 不一致：事件校验失败，入队整体失败，不留行也不留事件。
+    let mut tx = store.begin_write().await.unwrap();
+    let mut bad = request();
+    bad.epoch = 1;
+    bad.intent["title"] = json!("other");
+    let error = tx.outbox().enqueue(bad).await.unwrap_err();
+    assert!(matches!(error, StoreError::InvalidEvent(_)), "{error:?}");
+    assert_eq!(tx.read().outbox_list().len(), 1);
+    tx.commit().await.unwrap();
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 1);
+
+    // 入队方必须是 actor 类别（engine / guardian）。
+    let mut tx = store.begin_write().await.unwrap();
+    let mut unknown = request();
+    unknown.epoch = 2;
+    unknown.enqueued_by.module = "nobody".to_owned();
+    assert!(matches!(
+        tx.outbox().enqueue(unknown).await.unwrap_err(),
+        StoreError::PreconditionFailed(_)
+    ));
+    tx.rollback().await.unwrap();
 }
