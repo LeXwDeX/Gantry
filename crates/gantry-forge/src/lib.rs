@@ -5,11 +5,12 @@
 //! 本 crate 按 issue #92 分片交付。已有：
 //! - Outbox 入队面：[`Forge`] 实现 `core::ports::OutboxPort`（入队、取消），按
 //!   forge-actions §3.2 推导 `target` / `intent`，做入队时的机械校验（§7.8）。
-//! - Outbox 执行器：[`Executor`] 按 FA §2.3"先查后做"执行 `create_pr` / `update_pr` /
-//!   `close_issue` / `merge_pr`，执行前经 `PolicyPort` 消费审批（P-54），临时错误留在
-//!   `queued` 退避（P-53）。GitHub 客户端是 crate 私有的（I2）。
+//! - Outbox 执行器：[`Executor`] 按 FA §2.3"先查后做"执行 M1 的 5 个动作（`push_branch`
+//!   走 git 传输），执行前经 `PolicyPort` 消费审批（P-54），临时错误留在 `queued` 退避
+//!   （P-53）。GitHub 客户端是 crate 私有的（I2）。
+//! - 镜像仓拉取：[`Executor::sync_mirror`]（forge.md §7.10）。
 //!
-//! App 鉴权、webhook、归一化、对账、镜像仓与推送在后续切片。
+//! App 鉴权、webhook、归一化、对账在后续切片。
 //!
 //! 已知限制（M1 切片内）：
 //! - 只接受 M1 的 5 个动作（forge.md §1.1）；其余 9 个动作在 M2 起开放，入队时拒绝。
@@ -18,6 +19,7 @@
 
 mod auth;
 mod config;
+mod git;
 mod github;
 mod outbox;
 

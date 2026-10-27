@@ -1,0 +1,44 @@
+# Gantry 引导配置（deploy.md §10）。由 install.sh 渲染，重启生效。
+# 本文件不含任何密钥：密钥只在 /var/lib/gantry/secrets（secrets 模块的加密存储）。
+
+[server]
+data_dir = "/var/lib/gantry"
+secrets_dir = "/var/lib/gantry/secrets"
+control_socket = "/run/gantry/control.sock"
+
+[server.api]
+listen = "0.0.0.0:8443"
+public_url = "https://gantry.example.internal:8443"
+san = "gantry.example.internal,192.0.2.10"
+
+[server.pair]
+listen = "0.0.0.0:8444"
+
+[forge.webhook]
+# 只在回环地址以明文 HTTP 监听；公网经终止 TLS 的反向代理或隧道转入（P-65）。
+listen = "127.0.0.1:8787"
+ingress = "tunnel"
+public_url = "https://hooks.example.com/webhook"
+max_body_bytes = 26214400
+ip_allowlist = false
+dedupe_retention = "30d"
+payload_retention = "7d"
+
+[sandbox]
+runtime_user = "gantry-sbx"
+runtime_socket = "/run/gantry-sbx/podman.sock"
+
+[egress]
+control_socket = "/run/gantry/egress.sock"
+
+[backup]
+dest = "/var/backups/gantry"
+recipients = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+post_hook = ""
+journal_target = "/mnt/offsite/gantry/revocations.journal"
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 6
+
+[upgrade]
+health_timeout_s = 120

@@ -162,7 +162,9 @@ pub struct IssueJobToken {
     pub groups: Vec<GroupName>,           // 创建时固化的分组集合；有效集合 = 此快照 ∩ 当前配置（config §2.6）
     pub tokens_total: u64,                // 封顶（加权口径）
     pub weights: TokenWeights,            // levels.token_weights 的生效值（P-70）：{input, output, cache_read, cache_write}
-}
+    pub wall_time_s: u64,                 // 令牌硬上限 = 签发时刻 + wall_time_s + 600 s（egress-control §3.1）
+    pub config_rev: Seq,                  // weights 所属配置修订，写入该尝试用量记录的 weight_rev（egress-control §4.5）
+}                                         // 会话台账的 day 取签发当天（UTC，P-58）
 pub struct JobTokenGrant {
     pub job_token: JobToken,              // 不透明随机串（≥ 128 位熵）；Debug 脱敏；只写进沙盒环境，不进事件、日志
     pub model_base_urls: BTreeMap<ProviderId, Url>,   // http://<egress>/j/<job_token>/<provider_id>

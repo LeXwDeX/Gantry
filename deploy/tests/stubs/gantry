@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# 测试替身：只模拟 gantry-backup 用到的两个子命令，记录调用到 $STUB_LOG。
+set -euo pipefail
+printf '%s\n' "$*" >>"${STUB_LOG:-/dev/null}"
+case "$1 $2" in
+  "store info")
+    [ "${STUB_STORE_INFO_FAIL:-}" != 1 ] || exit 3
+    printf '{"schema_version":1,"log_id":"log_test","log_epoch":1,"seq_head":42}\n'
+    ;;
+  "secrets export")
+    # 真实实现输出 secrets 自己加密后的包；替身只输出固定标记，绝不回显目录里的内容。
+    printf 'STUB-ENCRYPTED-EXPORT %s\n' "$4"
+    ;;
+  *)
+    echo "stub gantry: unsupported $*" >&2
+    exit 2
+    ;;
+esac

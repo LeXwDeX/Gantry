@@ -1,0 +1,16 @@
+# 备份（deploy.md §7.10）：root 运行，由 gantry-backup.timer 触发，也可手动 `systemctl start`。
+[Unit]
+Description=Gantry backup
+Documentation=https://github.com/LeXwDeX/gantry/blob/main/docs/modules/deploy.md
+After=gantryd.service gantry-egress.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/gantry/current/deploy/bin/gantry-backup --config /etc/gantry/gantry.toml
+UMask=0077
+LimitCORE=0
+Nice=10
+IOSchedulingClass=idle
+PrivateTmp=yes
+ProtectHome=read-only
+SyslogIdentifier=gantry-backup

@@ -3,7 +3,9 @@
 //! 全部对 `FakeGitHub`（回环 HTTP）与内存 store（A 级）运行。"崩溃"用故障注入点模拟：
 //! 执行器在注入点立刻返回，不再写 store；随后拨快时钟越过租约，用新的执行器实例重放。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,17 +17,19 @@ use gantry_core::entities::{
 use gantry_core::events::{EventType, Subject};
 use gantry_core::forge::{
     ActionPayload, CloseIssuePayload, CreatePrPayload, IssueStateReason, MergeMode, MergePrPayload,
-    UpdatePrPayload,
+    PushBranchPayload, PushTransport, UpdatePrPayload,
 };
 use gantry_core::ids::{ActionId, ApprovalId, Id, IdGen, IdKind, Prj, Ulid};
 use gantry_core::ports::{
-    ActorCtx, ApprovalSpec, EnqueueRequest, EnqueuedBy, EnqueuedByModule, OutboxPort, PolicyPort,
+    ActorCtx, ApprovalSpec, CommitRecord, EnqueueRequest, EnqueuedBy, EnqueuedByModule, ForgeError,
+    MirrorWant, OutboxPort, PolicyPort,
 };
 use gantry_core::secret::SecretString;
 use gantry_core::testing::{FakeClock, SeqEntropy};
 use gantry_core::time::Timestamp;
 use gantry_fakes::github::{FakeGitHub, ScriptedFailure};
 use gantry_fakes::policy::FakePolicy;
+use gantry_fakes::repo::FakeRepo;
 use gantry_forge::{
     CrashPoint, ExecError, Executor, ExecutorDeps, ExecutorOptions, FaultInjector, Forge,
     ForgeConfig, Permission, ProjectBinding, StaticTokenProvider, StepOutcome,
@@ -74,8 +78,33 @@ impl FaultInjector for CrashOnce {
     }
 }
 
+/// 测试结束时删除的临时目录。
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "gantry-forge-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 struct Harness {
     github: FakeGitHub,
+    repo: Arc<FakeRepo>,
+    root: TempDir,
     store: Store,
     clock: Arc<FakeClock>,
     ids: Arc<IdGen>,
@@ -126,6 +155,8 @@ impl Harness {
         let policy = Arc::new(FakePolicy::new_in(store.clone()));
         Self {
             github,
+            repo: Arc::new(FakeRepo::new(Timestamp::from_millis(MS))),
+            root: TempDir::new(),
             store,
             clock,
             ids,
@@ -135,17 +166,21 @@ impl Harness {
     }
 
     fn executor(&self, faults: Option<Arc<dyn FaultInjector>>) -> Executor {
-        self.forge.executor(ExecutorDeps {
-            policy: self.policy.clone(),
-            tokens: Arc::new(StaticTokenProvider::new(SecretString::new(TOKEN.into()))),
-            api_base: self.github.base_url(),
-            ids: self.ids.clone(),
-            options: ExecutorOptions {
-                http_timeout: Duration::from_secs(5),
-                ..ExecutorOptions::default()
-            },
-            faults,
-        })
+        self.forge
+            .executor(ExecutorDeps {
+                policy: self.policy.clone(),
+                tokens: Arc::new(StaticTokenProvider::new(SecretString::new(TOKEN.into()))),
+                api_base: self.github.base_url(),
+                ids: self.ids.clone(),
+                options: ExecutorOptions {
+                    http_timeout: Duration::from_secs(5),
+                    ..ExecutorOptions::default()
+                },
+                faults,
+                repo: self.repo.clone(),
+                git_base: format!("file://{}", self.root.0.display()),
+            })
+            .unwrap()
     }
 
     fn crashing(&self, point: CrashPoint) -> Executor {
@@ -944,6 +979,314 @@ async fn secret_in_outbound_text_fails_without_writing() {
         "secret_detected"
     );
     assert_eq!(h.github.write_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// push_branch 与镜像仓拉取（forge.md §7.10；§12 A 第 4、13、16 条）
+//
+// 远端是本机的裸仓（`file://{root}/acme/shop-api.git`，代替 GitHub 的 git-http），镜像仓是
+// 另一个裸仓；FakeRepo 指向它并登记提交溯源。
+// ---------------------------------------------------------------------------
+
+const BRANCH: &str = "gantry/42-fix-pagination";
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args([
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+struct PushFixture {
+    work: PathBuf,
+    remote: PathBuf,
+    mirror: PathBuf,
+    base: GitOid,
+    local: GitOid,
+    tree: GitOid,
+}
+
+impl PushFixture {
+    /// `touch` 是本地提交新增的文件路径。
+    fn new(h: &Harness, touch: &str) -> Self {
+        let root = &h.root.0;
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q"]);
+        std::fs::write(work.join("a.txt"), "base\n").unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", "base"]);
+        let base = GitOid::parse(&git(&work, &["rev-parse", "HEAD"])).unwrap();
+        let path = work.join(touch);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "change\n").unwrap();
+        git(&work, &["add", "."]);
+        git(
+            &work,
+            &["commit", "-q", "-m", "change\n\nGantry-Attempt: att_x"],
+        );
+        let local = GitOid::parse(&git(&work, &["rev-parse", "HEAD"])).unwrap();
+        let tree = GitOid::parse(&git(&work, &["rev-parse", "HEAD^{tree}"])).unwrap();
+
+        let remote = root.join("acme/shop-api.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare"]);
+        let remote_url = remote.to_str().unwrap().to_owned();
+        git(
+            &work,
+            &[
+                "push",
+                "-q",
+                &remote_url,
+                &format!("{base}:refs/heads/main"),
+            ],
+        );
+        let mirror = root.join("mirror.git");
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                "mirror.git",
+            ],
+        );
+
+        h.repo.set_mirror(id::<Prj>(1), slug(), mirror.clone());
+        h.repo.set_ref(id::<Prj>(1), "refs/mirror/heads/main", base);
+        Self {
+            work,
+            remote,
+            mirror,
+            base,
+            local,
+            tree,
+        }
+    }
+
+    fn record_provenance(&self, h: &Harness) {
+        h.repo.insert_provenance(
+            id::<Prj>(1),
+            CommitRecord {
+                commit_oid: self.local,
+                tree_oid: self.tree,
+                parent: self.base,
+                patch_sha256: sha256(b"patch"),
+                job_id: id(7),
+                worktree_id: id(8),
+            },
+        );
+    }
+
+    fn push_payload(&self) -> PushBranchPayload {
+        PushBranchPayload {
+            repo: slug(),
+            branch: BRANCH.into(),
+            base_ref: "main".into(),
+            worktree_id: id(8),
+            local_head_oid: self.local,
+            expected_tree_oid: self.tree,
+            expected_remote_oid: None,
+            validation_ref: sha256(b"patch"),
+            transport: PushTransport::Git,
+            force: false,
+        }
+    }
+
+    fn payload(&self) -> ActionPayload {
+        ActionPayload::PushBranch(self.push_payload())
+    }
+
+    fn remote_branch(&self) -> Option<String> {
+        let output = Command::new("git")
+            .arg("--git-dir")
+            .arg(&self.remote)
+            .args([
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{BRANCH}"),
+            ])
+            .output()
+            .unwrap();
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    fn push_remote(&self, oid: GitOid, branch: &str) {
+        let remote = self.remote.to_str().unwrap().to_owned();
+        git(
+            &self.work,
+            &["push", "-q", &remote, &format!("{oid}:refs/heads/{branch}")],
+        );
+    }
+}
+
+#[tokio::test]
+async fn push_branch_pushes_the_validated_commit() {
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    fx.record_provenance(&h);
+    let act = h.enqueue(fx.payload(), None).await;
+    let step = h.executor(None).run_once().await.unwrap().unwrap();
+    assert_eq!(step.outcome, StepOutcome::Succeeded);
+    assert_eq!(fx.remote_branch(), Some(fx.local.to_string()));
+    let action = h.action(&act);
+    assert_eq!(action.expected_effects[0].event, "pull_request.synchronize");
+    // 推送的就是镜像仓里的对象：远端 tree 与校验记录一致。
+    let tree = git(
+        &fx.remote,
+        &["rev-parse", &format!("{}^{{tree}}", fx.local)],
+    );
+    assert_eq!(tree, fx.tree.to_string());
+}
+
+/// §12 A 第 4 条（push_branch 行）：各崩溃点重放后结果一致。
+#[tokio::test]
+async fn push_branch_crash_points_replay_to_the_same_result() {
+    for point in [
+        CrashPoint::AfterClaim,
+        CrashPoint::AfterRecordEffects,
+        CrashPoint::AfterApply,
+    ] {
+        let h = Harness::new();
+        let fx = PushFixture::new(&h, "src/lib.rs");
+        fx.record_provenance(&h);
+        let act = h.enqueue(fx.payload(), None).await;
+        assert!(h.crashing(point).run_once().await.is_err(), "{point:?}");
+        h.advance(LEASE_MS + 1);
+        let step = h.executor(None).run_once().await.unwrap().unwrap();
+        assert!(step.replay);
+        assert_eq!(step.outcome, StepOutcome::Succeeded, "{point:?}");
+        assert_eq!(fx.remote_branch(), Some(fx.local.to_string()));
+        assert_eq!(h.events(&act, EventType::OutboxSucceeded).await, 1);
+    }
+}
+
+#[tokio::test]
+async fn push_branch_remote_diverged_is_terminal_and_does_not_push() {
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    fx.record_provenance(&h);
+    // 有人先在远端建了同名分支（指向 base），payload 却期望分支不存在。
+    fx.push_remote(fx.base, BRANCH);
+    let act = h.enqueue(fx.payload(), None).await;
+    let step = h.executor(None).run_once().await.unwrap().unwrap();
+    assert_eq!(
+        step.outcome,
+        StepOutcome::Failed {
+            code: "precondition_failed"
+        }
+    );
+    assert_eq!(
+        h.action(&act).last_error.unwrap().message,
+        "remote_diverged"
+    );
+    assert_eq!(fx.remote_branch(), Some(fx.base.to_string()));
+}
+
+/// §12 A 第 13 条：I8 机械复核不过 → 不推送。
+#[tokio::test]
+async fn push_branch_requires_matching_provenance() {
+    // 没有溯源记录。
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    let act = h.enqueue(fx.payload(), None).await;
+    h.executor(None).run_once().await.unwrap();
+    assert_eq!(
+        h.action(&act).last_error.unwrap().message,
+        "provenance_missing"
+    );
+    assert_eq!(fx.remote_branch(), None);
+
+    // 溯源存在，但 payload 的 tree 与校验记录不一致。
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    fx.record_provenance(&h);
+    let mut payload = fx.push_payload();
+    payload.expected_tree_oid = oid("other-tree");
+    let act = h.enqueue(ActionPayload::PushBranch(payload), None).await;
+    h.executor(None).run_once().await.unwrap();
+    assert_eq!(h.action(&act).last_error.unwrap().message, "tree_mismatch");
+    assert_eq!(fx.remote_branch(), None);
+
+    // validation_ref 不一致。
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    fx.record_provenance(&h);
+    let mut payload = fx.push_payload();
+    payload.validation_ref = sha256(b"another patch");
+    let act = h.enqueue(ActionPayload::PushBranch(payload), None).await;
+    h.executor(None).run_once().await.unwrap();
+    assert_eq!(
+        h.action(&act).last_error.unwrap().message,
+        "validation_ref_mismatch"
+    );
+    assert_eq!(fx.remote_branch(), None);
+}
+
+/// §12 A 第 16 条（P-48）：触及 `.github/workflows/` 的提交不推送，远端零写入。
+#[tokio::test]
+async fn push_branch_refuses_workflow_changes() {
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, ".github/workflows/x.yml");
+    fx.record_provenance(&h);
+    let act = h.enqueue(fx.payload(), None).await;
+    let step = h.executor(None).run_once().await.unwrap().unwrap();
+    assert_eq!(
+        step.outcome,
+        StepOutcome::Failed {
+            code: "validation_failed"
+        }
+    );
+    assert_eq!(h.action(&act).last_error.unwrap().message, "workflows_path");
+    assert_eq!(fx.remote_branch(), None);
+    assert_eq!(h.github.write_count(), 0);
+}
+
+#[tokio::test]
+async fn sync_mirror_fetches_upstream_into_mirror_refs() {
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    // 上游 main 前进到 local。
+    fx.push_remote(fx.local, "main");
+    let exec = h.executor(None);
+    exec.sync_mirror(&id::<Prj>(1), &MirrorWant::All)
+        .await
+        .unwrap();
+    let mirrored = git(&fx.mirror, &["rev-parse", "refs/mirror/heads/main"]);
+    assert_eq!(mirrored, fx.local.to_string());
+
+    // 想要的 OID 不在镜像仓（FakeRepo 的 has_commit 只认登记过的提交）→ NotFound。
+    assert_eq!(
+        exec.sync_mirror(&id::<Prj>(1), &MirrorWant::Oid(oid("absent")))
+            .await
+            .unwrap_err(),
+        ForgeError::NotFound
+    );
 }
 
 #[tokio::test]

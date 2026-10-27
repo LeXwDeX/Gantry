@@ -200,6 +200,8 @@ fn job_token_request() -> IssueJobToken {
         groups: vec![gantry_core::ports::sandbox::GroupName::new("model_api")],
         tokens_total: 10_000,
         weights: TokenWeights::default(),
+        wall_time_s: 1800,
+        config_rev: gantry_core::entities::Seq::from_wire(1).expect("valid rev"),
     }
 }
 

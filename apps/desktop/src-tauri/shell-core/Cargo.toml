@@ -1,0 +1,30 @@
+[package]
+name = "gantry-desktop-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 桌面外壳（desktop-shell.md）中与 Tauri 无关的可信逻辑：设备密钥、配对、mTLS、事件流、审批签名"
+
+[features]
+# 软件密钥替身（desktop-shell.md §6.5 TestSoftwareKeys）。只给测试与 CI 用；正式外壳不得启用。
+test-software-keys = ["dep:p256", "dep:rand_core"]
+
+[dependencies]
+thiserror.workspace = true
+sha2.workspace = true
+base64 = "0.22"
+getrandom = "0.2"
+p256 = { version = "0.13", features = ["ecdsa"], optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+security-framework-sys = "2.17"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext"] }
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa"] }
