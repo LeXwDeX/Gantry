@@ -6,7 +6,8 @@
 //! - [`ApiCore::complete`]：步骤 8–10、13、14（拿到请求体之后）。
 //!
 //! 传输层（TLS 监听器，后续切片）按 [`Admitted::body_limit`] 读至多 `limit + 1`
-//! 字节交给 `complete`。步骤 11（幂等登记）与 12（请求体 schema）在后续切片接入。
+//! 字节交给 `complete`。步骤 12（请求体 schema）由各处理程序按路由的请求体组件
+//! 执行（[`crate::validate`]）。
 
 use std::sync::Arc;
 
@@ -14,10 +15,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use gantry_core::entities::Seq;
 use gantry_core::ids::{Clock, IdGen};
+use gantry_core::ports::conversation::ConversationService;
+use gantry_core::ports::engine::DeliveryControl;
 use gantry_store::Store;
 use http::header::{
-    HeaderName, HeaderValue, ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING,
-    X_CONTENT_TYPE_OPTIONS,
+    HeaderName, HeaderValue, ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG,
+    TRANSFER_ENCODING, X_CONTENT_TYPE_OPTIONS,
 };
 use http::{HeaderMap, Method, Response, StatusCode, Uri};
 use serde_json::Value;
@@ -25,6 +28,7 @@ use serde_json::Value;
 use crate::auth::{self, AuthContext, DeviceLookup, PeerCert};
 use crate::consts::{IDEMPOTENCY_KEY_MAX, IDEMPOTENCY_KEY_MIN};
 use crate::handlers;
+use crate::idempotency::{self, Begin, IdempotencyStore, StoredResponse};
 use crate::problem::{Problem, ProblemCode};
 use crate::query::{self, Query};
 use crate::rate::{RateLimiter, RateState};
@@ -37,6 +41,7 @@ pub const RATELIMIT_LIMIT: HeaderName = HeaderName::from_static("ratelimit-limit
 pub const RATELIMIT_REMAINING: HeaderName = HeaderName::from_static("ratelimit-remaining");
 pub const RATELIMIT_RESET: HeaderName = HeaderName::from_static("ratelimit-reset");
 pub const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key");
+pub const IDEMPOTENT_REPLAYED: HeaderName = HeaderName::from_static("idempotent-replayed");
 
 const PROBLEM_JSON: &str = "application/problem+json";
 const JSON: &str = "application/json";
@@ -66,6 +71,12 @@ pub struct Services {
     pub ids: Arc<IdGen>,
     pub store: Store,
     pub devices: Arc<dyn DeviceLookup>,
+    /// 交付单元控制 #8 #43–#45（P-56）。
+    pub engine: Arc<dyn DeliveryControl>,
+    /// 发消息 #12。
+    pub conversation: Arc<dyn ConversationService>,
+    /// `api_idempotency`（本文 §7.6）。
+    pub idempotency: Arc<dyn IdempotencyStore>,
 }
 
 /// 传输层交来的请求头部分。
@@ -384,7 +395,30 @@ impl ApiCore {
             Err(problem) => return fail(problem),
         };
 
-        // 13. 处理
+        // 11. 幂等登记：重放 / 冲突 / 进行中
+        let device_id = a.auth.device.id;
+        let mut lease = None;
+        if let Some(key) = key {
+            let print = idempotency::fingerprint(a.route.method, &a.instance, parsed.as_ref());
+            match self.svc.idempotency.begin(&device_id, key, print) {
+                Begin::Proceed(held) => lease = Some(held),
+                Begin::Replay(stored) => return replay_response(stored, a.log_epoch, a.rate),
+                Begin::InProgress => {
+                    return fail(Problem::new(
+                        ProblemCode::IdempotencyInProgress,
+                        "a request with this Idempotency-Key is still in progress",
+                    ))
+                }
+                Begin::Reuse => {
+                    return fail(Problem::new(
+                        ProblemCode::IdempotencyKeyReuse,
+                        "Idempotency-Key was used with a different request",
+                    ))
+                }
+            }
+        }
+
+        // 12–13. 请求体 schema 校验（在处理程序里，按路由的请求体组件）与处理
         let req = HandlerRequest {
             route: a.route,
             params: &a.params,
@@ -395,11 +429,54 @@ impl ApiCore {
             idempotency_key: key,
             body: parsed,
         };
-        match self.handler.handle(self, req).await {
+        let resp = match self.handler.handle(self, req).await {
             Ok(reply) => success_response(reply, &a.request_id, a.log_epoch, a.rate),
             Err(problem) => fail(problem),
+        };
+        if let (Some(key), Some(lease)) = (key, lease) {
+            // 首次响应是 5xx 不登记，允许同键重试；4xx 登记并重放。
+            if resp.status().is_server_error() {
+                self.svc.idempotency.abandon(&device_id, key, lease);
+            } else {
+                self.svc
+                    .idempotency
+                    .finish(&device_id, key, lease, stored(&resp));
+            }
         }
+        resp
     }
+}
+
+/// 重放时原样保留的头；`X-Log-Epoch`、`RateLimit-*` 按重放时刻重新计算。
+const REPLAYED_HEADERS: [HeaderName; 4] = [CONTENT_TYPE, X_REQUEST_ID, X_EVENT_SEQ, ETAG];
+
+fn stored(resp: &ApiResponse) -> StoredResponse {
+    StoredResponse {
+        status: resp.status(),
+        headers: REPLAYED_HEADERS
+            .iter()
+            .filter_map(|name| resp.headers().get(name).map(|v| (name.clone(), v.clone())))
+            .collect(),
+        body: resp.body().to_vec(),
+    }
+}
+
+fn replay_response(stored: StoredResponse, log_epoch: u64, rate: RateState) -> ApiResponse {
+    let mut resp = Response::new(Bytes::from(stored.body));
+    *resp.status_mut() = stored.status;
+    let request_id = stored
+        .headers
+        .iter()
+        .find(|(name, _)| name == X_REQUEST_ID)
+        .and_then(|(_, v)| v.to_str().ok().map(str::to_owned))
+        .unwrap_or_default();
+    let headers = resp.headers_mut();
+    for (name, value) in stored.headers {
+        headers.insert(name, value);
+    }
+    headers.insert(IDEMPOTENT_REPLAYED, HeaderValue::from_static("true"));
+    common_headers(headers, &request_id, log_epoch, Some(rate));
+    resp
 }
 
 fn content_type_ok(headers: &HeaderMap, route: &RouteSpec) -> bool {

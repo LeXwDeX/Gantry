@@ -4,7 +4,8 @@
 //!
 //! 只实现单进程、单写者的最小一致性行为：追加事件、`dedup_key` 去重、投影、
 //! Outbox 表、游标与 `log_epoch`。内置 `inbox_items` 投影是收件箱状态的唯一
-//! 来源（store.md §7.2），`TxReader` / `ReadSnapshot` 的 `inbox_*` 方法按 §6.2 读取。SQLite、模块投影器、CAS、备份与完整
+//! 来源（store.md §7.2），`TxReader` / `ReadSnapshot` 的 `inbox_*` 方法按 §6.2 读取；
+//! 内置 `devices` 投影同理，读取方法为 `device` / `device_by_cert_serial` / `devices`。SQLite、模块投影器、CAS、备份与完整
 //! `ProjectionRead` 留给 M1；未实现的入口在这里显式返回错误或记录到
 //! `unprojected`，不静默吞掉。缺口清单见 `docs/m0-contract-gaps.md`。
 //!
@@ -26,8 +27,9 @@ use std::time::Duration;
 
 use gantry_core::canon::IdempotencyKey;
 use gantry_core::entities::{
-    Actor, ActorKind, ForgeActionKind, GithubRef, InboxItem, InboxKind, InboxStatus, OutboxAction,
-    OutboxError, OutboxStatus, Priority, Seq, SettingsResource, SettingsScope, Severity,
+    Actor, ActorKind, Device, ForgeActionKind, GithubRef, InboxItem, InboxKind, InboxStatus,
+    OutboxAction, OutboxError, OutboxStatus, Priority, Seq, SettingsResource, SettingsScope,
+    Severity,
 };
 use gantry_core::events::{
     Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NewEvent,
@@ -35,11 +37,13 @@ use gantry_core::events::{
 };
 use gantry_core::forge::ActionPayload;
 use gantry_core::ids::{
-    Act, ActionId, Clock, DeliveryId, Dlv, EventId, Evt, IdError, IdGen, Inb, InboxId, ProjectId,
+    Act, ActionId, Clock, DeliveryId, DeviceId, Dlv, EventId, Evt, IdError, IdGen, Inb, InboxId,
+    ProjectId,
 };
 use gantry_core::time::Timestamp;
 use serde_json::Value;
 
+mod devices;
 use module::{ModuleRegistry, ModuleTables};
 
 pub mod module;
@@ -343,6 +347,8 @@ struct Inner {
     deliveries: BTreeMap<DeliveryId, DeliveryRow>,
     /// 内置 `inbox_items` 投影（store.md §7.2）；收件箱状态的唯一来源。
     inbox: BTreeMap<InboxId, InboxItem>,
+    /// 内置 `devices` 投影（store.md §7.2）。
+    devices: devices::DeviceTable,
     /// 模块私有表（§7.10）；不是投影，重建投影时不动。
     module_tables: ModuleTables,
     unprojected: Vec<UnprojectedEvent>,
@@ -369,6 +375,7 @@ impl Clone for Inner {
             next_enqueue_seq: self.next_enqueue_seq,
             deliveries: self.deliveries.clone(),
             inbox: self.inbox.clone(),
+            devices: self.devices.clone(),
             module_tables: self.module_tables.clone(),
             unprojected: self.unprojected.clone(),
             #[cfg(feature = "testing")]
@@ -900,6 +907,12 @@ impl WriteTx {
                     decode_data::<InboxDismissedData>(event).map_err(StoreError::InvalidEvent)?;
                 self.project_inbox_transition(event, data.inbox_id, InboxStatus::Dismissed)?;
             }
+            ty if devices::DeviceTable::folds(ty) => {
+                // 先在副本上折叠：前置条件失败时投影保持不变。
+                let mut next = self.snapshot.devices.clone();
+                next.apply(event)?;
+                self.snapshot.devices = next;
+            }
             _ => {
                 self.snapshot.unprojected.push(UnprojectedEvent {
                     seq: event.seq,
@@ -1238,6 +1251,21 @@ impl TxReader<'_> {
         Ok(inbox_summary_in(self.inner))
     }
 
+    pub async fn device(&mut self, id: &DeviceId) -> Result<Option<Device>, StoreError> {
+        Ok(self.inner.devices.get(id))
+    }
+
+    pub async fn device_by_cert_serial(
+        &mut self,
+        serial: &str,
+    ) -> Result<Option<Device>, StoreError> {
+        Ok(self.inner.devices.by_cert_serial(serial))
+    }
+
+    pub async fn devices(&mut self, p: &Page) -> Result<Paged<Device>, StoreError> {
+        self.inner.devices.list(p)
+    }
+
     fn settings_at(
         &self,
         scope: &SettingsScope,
@@ -1389,6 +1417,21 @@ impl ReadSnapshot {
 
     pub async fn inbox_summary(&mut self) -> Result<Vec<InboxProjectCount>, StoreError> {
         Ok(inbox_summary_in(&self.inner))
+    }
+
+    pub async fn device(&mut self, id: &DeviceId) -> Result<Option<Device>, StoreError> {
+        Ok(self.inner.devices.get(id))
+    }
+
+    pub async fn device_by_cert_serial(
+        &mut self,
+        serial: &str,
+    ) -> Result<Option<Device>, StoreError> {
+        Ok(self.inner.devices.by_cert_serial(serial))
+    }
+
+    pub async fn devices(&mut self, p: &Page) -> Result<Paged<Device>, StoreError> {
+        self.inner.devices.list(p)
     }
 }
 

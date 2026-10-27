@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::auth::profile_str;
 use crate::consts::{API_VERSION, RENEW_AFTER_DEN, RENEW_AFTER_NUM};
+use crate::control;
 use crate::problem::Problem;
 use crate::server::{ApiCore, HandlerRequest, Reply, RouteHandler};
 
@@ -19,6 +20,11 @@ impl RouteHandler for Builtin {
     async fn handle(&self, core: &ApiCore, req: HandlerRequest<'_>) -> Result<Reply, Problem> {
         match req.route.operation_id {
             "getMe" => get_me(core, &req).await,
+            "pauseDelivery" | "resumeDelivery" | "abandonDelivery" => {
+                control::delivery_control(core, &req).await
+            }
+            "retryNode" => control::retry_node(core, &req).await,
+            "postMessage" => control::post_message(core, &req).await,
             _ => Err(Problem::not_found()),
         }
     }
