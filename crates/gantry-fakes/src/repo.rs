@@ -305,10 +305,11 @@ impl RepoService for FakeRepo {
         let state = self.lock();
         let (_, info, _) = state.mirrors.get(project).ok_or(RepoError::MirrorMissing)?;
         let _ = mode;
-        Ok(MirrorGuard {
-            git_dir: info.git_dir.clone(),
-            fetch_refspecs: info.fetch_refspecs.clone(),
-        })
+        Ok(MirrorGuard::new(
+            info.git_dir.clone(),
+            info.fetch_refspecs.clone(),
+            (),
+        ))
     }
 
     async fn commit_info(

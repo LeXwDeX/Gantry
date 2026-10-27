@@ -1,6 +1,6 @@
 import { createRoot, type Root } from "react-dom/client";
 import type { ConnectionState, StreamFrame } from "@/api/shell";
-import { createIpcAdapter, isScenarioAdapter } from "@/ipc";
+import { createIpcAdapter, isMockAdapter, isScenarioAdapter } from "@/ipc";
 import { DesktopController } from "@/store/controller";
 import { App } from "./App";
 import "@/theme/index.css";
@@ -15,6 +15,19 @@ declare global {
       setConnection(phase: ConnectionState["phase"]): void;
       setRole(role: "viewer" | "operator" | "approver"): void;
       bumpLogEpoch(): void;
+      ackedSeq(): number | null;
+    };
+    /** 仅 mock 构建安装；供 Playwright 模拟外壳侧的网络与身份变化，不提供签名入口。 */
+    __GANTRY_MOCK__?: {
+      disconnect(): void;
+      reconnect(): void;
+      dropStream(): void;
+      revoke(): void;
+      expireCertificate(): void;
+      swallowNextWriteResponse(): void;
+      calls(): ReadonlyArray<{ command: string; args: Record<string, unknown> }>;
+      externalOpens(): ReadonlyArray<{ url: string }>;
+      githubOpens(): ReadonlyArray<unknown>;
       ackedSeq(): number | null;
     };
   }
@@ -45,6 +58,21 @@ async function main(root: Root): Promise<void> {
       setConnection: (phase) => adapter.setConnection(phase),
       setRole: (role) => adapter.setRole(role),
       bumpLogEpoch: () => adapter.bumpLogEpoch(),
+      ackedSeq: () => adapter.ackedSeq,
+    };
+  }
+
+  if (import.meta.env.MODE === "mock" && isMockAdapter(adapter)) {
+    window.__GANTRY_MOCK__ = {
+      disconnect: () => adapter.disconnect(),
+      reconnect: () => adapter.reconnect(),
+      dropStream: () => adapter.dropStream(),
+      revoke: () => adapter.revoke(),
+      expireCertificate: () => adapter.expireCertificate(),
+      swallowNextWriteResponse: () => adapter.swallowNextWriteResponse(),
+      calls: () => adapter.calls,
+      externalOpens: () => adapter.externalOpens,
+      githubOpens: () => adapter.githubOpens,
       ackedSeq: () => adapter.ackedSeq,
     };
   }
