@@ -89,6 +89,7 @@ fn expected_low_path() -> DeliveryState {
             id: id(DELIVERY),
             project_id: id(PROJECT),
             title: "fix login timeout".to_owned(),
+            user_text: "修复登录超时".to_owned(),
             origin: v(json!("conversation")),
             level_cap: Level::Medium,
             level_effective: Level::Low,
@@ -114,6 +115,7 @@ fn expected_low_path() -> DeliveryState {
         pr: Some(v(
             json!({"number": 12, "node_id": "PR_x", "head_sha": BASE_SHA}),
         )),
+        pr_snapshot: None,
         worktree: Some(WorktreeInfo {
             id: id(WORKTREE),
             branch: "gantry/dlv-12".to_owned(),
@@ -167,6 +169,7 @@ fn expected_low_path() -> DeliveryState {
         )]),
         // worktree.unlocked 已释放。
         locks: BTreeMap::new(),
+        lock_owner: BTreeMap::new(),
         round_history: vec![],
         last_seq: seq(27),
     }

@@ -30,6 +30,8 @@ pub struct DeliveryRow {
     pub id: DeliveryId,
     pub project_id: ProjectId,
     pub title: String,
+    /// 用户亲手输入的原文（可信，engine.md §6）；重放时重建 `instructions`（#70 B）。
+    pub user_text: String,
     pub origin: DeliveryOrigin,
     pub level_cap: Level,
     pub level_effective: Level,
@@ -72,6 +74,7 @@ impl DeliveryRow {
                 ))
             })?,
             title: data.title,
+            user_text: data.user_text,
             origin: data.origin,
             level_cap: data.level_cap,
             level_effective: data.level_effective,
