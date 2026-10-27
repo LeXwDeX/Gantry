@@ -278,13 +278,13 @@ pub trait ApprovalService: Send + Sync {
     // ---- 内部动作的审批（客户端经 POST /v1/approvals）----
     /// action 必须是 InternalAction，否则 PolicyError::NotInternalAction（api 映射 422）。
     /// 有效期 policies.approval.ttl_s（含内部动作，api.md §3.7，C27）；同 (action, target, digest) 已有 pending 则返回它。
-    async fn create_internal(&self, spec: InternalApprovalSpec, creator: Actor) -> Result<Approval, PolicyError>;
+    async fn create_internal(&self, spec: InternalApprovalSpec, ctx: &ActorCtx /* P-78 */) -> Result<Approval, PolicyError>;
 
     // ---- challenge / grant / deny（api.md §6.2–§6.4）----
     /// 同一 (approval, device) 在有效期内重复调用返回同一份；用掉或过期后换新 nonce。
     async fn challenge(&self, id: &ApprovalId, device: &DeviceKey) -> Result<Challenge, ChallengeError>;
-    async fn grant(&self, req: GrantRequest) -> Result<Approval, GrantError>;
-    async fn deny(&self, id: &ApprovalId, device: &DeviceKey, reason: Option<String>) -> Result<Approval, GrantError>;
+    async fn grant(&self, req: GrantRequest, ctx: &ActorCtx) -> Result<Approval, GrantError>;
+    async fn deny(&self, id: &ApprovalId, device: &DeviceKey, reason: Option<String>, ctx: &ActorCtx) -> Result<Approval, GrantError>;
 
     // ---- 内部动作的消费：必须与业务写入同一事务 ----
     async fn consume_internal(&self, tx: &mut WriteTx, req: ConsumeInternal) -> Result<(), ConsumeError>;
@@ -310,6 +310,7 @@ pub struct ConsumeInternal {
     pub expected_target: ApprovalTarget,     // 由路径参数 / 路由推出
     pub body_digest: SubjectDigest,          // api 用 signing::request_digest 对本次请求体算出
     pub rev_check: Option<RevCheck>,         // settings：{ if_match_rev, current_rev }
+    pub request_id: String,                  // consumed_by = "req:<request_id>"
     pub actor: Actor,                     // {kind: device, id}
 }
 pub enum GrantError {
@@ -319,10 +320,12 @@ pub enum GrantError {
     SignatureInvalid,
     StaleHead { current_head_sha: GitOid },    // 审批已被置为 invalidated 并落盘
 }
-pub enum ConsumeError { Mismatch { reason: MismatchReason }, Store(StoreError) }
+pub enum ConsumeError { NotFound, Mismatch { reason: MismatchReason }, Store(StoreError) }
 /// = api.md §3.1 approval_mismatch 的 reason 集合
 pub enum MismatchReason { NotGranted, Consumed, Expired, ActionMismatch, TargetMismatch, DigestMismatch, BaseRevMismatch }
 ```
+
+实现：`gantry_policy::PolicyApprovals`（复用 `PolicyEngine` 的存储、时钟与规则，另需一个 CSPRNG `Entropy` 生成 nonce）。`Store` 打开时须注册 `gantry_policy::POLICY_MODULE`（`policy_challenges`、`policy_consumed`），否则上述方法返回存储错误（失败即关闭）。
 
 ### 6.5 执行前消费审批：`PolicyPort::consume_for_execution`（`forge`）
 
@@ -403,7 +406,7 @@ pub struct PolicyBuild { pub patch_approvals: bool, pub settings: SettingsSource
 
 | 表 | 列与约束 | 说明 |
 | --- | --- | --- |
-| `policy_challenges` | `approval_id`、`device_id`、`nonce`、`payload_canonical`（待签字节）、`issued_at`、`expires_at`、`used_at?`；主键 `(approval_id, device_id, nonce)`；部分唯一索引保证每个 `(approval_id, device_id)` 至多一个"未用且未过期"的行 | **用过的行保留**（审计：可凭它复原当时的待签字节与设备公钥指纹），保留期同事件日志 |
+| `policy_challenges` | `approval_id`、`device_id`、`nonce`、`payload_canonical`（待签字节）、`issued_at`、`expires_at`、`used_at?`、`signature?`（grant 通过时写入，`Approval.signature` 的来源）；主键 `(approval_id, device_id, nonce)`；部分唯一索引保证每个 `(approval_id, device_id)` 至多一个"未用且未过期"的行 | **用过的行保留**（审计：可凭它复原当时的待签字节与设备公钥指纹），保留期同事件日志 |
 | `policy_consumed` | `approval_id` 主键、`consumed_by`（`act_…`、`att_…`（补丁审批）或 `req:<request_id>`）、`consumed_at` | 让崩溃重放的 `consume_for_execution` / `consume_patch_approval` 幂等（§6.5）；**不在 API 表示里**。`approval.consumed` 事件的 `data.consumed_by` 与它一致 |
 
 审批创建时的 `config_rev` 记在 `approval.requested` 事件的 `data` 里（config.md §2.6），不另存列。
@@ -501,7 +504,7 @@ stateDiagram-v2
 2. 审批 `pending`（懒过期）→ 否则 `NotPending{status}`。
 3. 取该设备的 challenge：无 → `ChallengeInvalid{None}`；`nonce` 不等（常量时间比较）→ `Mismatch`；已用 → `Used`；已过期 → `Expired`。
 4. 用**服务端保存的** `payload_canonical` 重建待签字节（客户端不能提交 payload），`verify_es256`，不通过 → `SignatureInvalid`。签名串必须是严格 base64url、无填充、长度 86，解码后恰为 64 字节；其余一律 `SignatureInvalid`。
-5. PR 类动作：`payload.subject_digest == current_subject.head_sha`（`current_subject` 由 `api` 在调用前让 `forge` 强制对账一次后传入，其 `repo` / `number` 须与审批 `target` 一致，否则视为未提供；缺失则退回读 `store` 快照）。不等 → **先落盘** `pending → invalidated`（`approval.invalidated`，`data` 含新旧 head），**再**返回 `StaleHead{current_head_sha}`（这次调用不回滚状态转移）。补丁与内部动作的主体在消费时核对。
+5. PR 类动作：`payload.subject_digest == current_subject.head_sha`（`current_subject` 由 `api` 在调用前让 `forge` 强制对账一次后传入，其 `repo` / `number` 须与审批 `target` 一致，否则视为未提供；缺失则退回读 `store` 快照；**M1 实现**：未提供时跳过本步，主体由消费时的权威检查兜底，回读快照待 #150 的快照投影接入 `ForgeReader` 后补上）。不等 → **先落盘** `pending → invalidated`（`approval.invalidated`，`data` 含新旧 head），**再**返回 `StaleHead{current_head_sha}`（这次调用不回滚状态转移）。补丁与内部动作的主体在消费时核对。
 6. 通过：同一事务写 `device_id`、`signature`、`status = granted`，标记 challenge `used_at`，追加 `approval.granted`（`data`：`approval_id`、`device_id`、`approval_pubkey_fpr`、`payload_sha256`），`200`。
 
 **`consume_internal(tx, req)`** 对应 api.md §6.6 第 4 步的 #2–#5（#1 缺头与 #6 角色由 `api` 判）：`status` 不是 `granted` → `NotGranted`（`consumed` → `Consumed`，过期 → `Expired`）；`action` / `target` 与路由推出的不一致 → `ActionMismatch` / `TargetMismatch`；`body_digest ≠ subject_digest` → `DigestMismatch`；`rev_check`（settings）：`target.base_rev` 须等于 `if_match_rev` 且等于 `current_rev` → 否则 `BaseRevMismatch`（`if_match_rev ≠ current_rev` 的 `412` 由 `api` 在此之前判，优先级更高）。全部通过则 `consumed` + `approval.consumed`（`data.consumed_by = "req:<request_id>"`），与调用方传入的 `tx` 同事务。

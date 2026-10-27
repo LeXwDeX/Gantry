@@ -976,6 +976,7 @@ dependencies = [
  "gantry-fakes",
  "gantry-store",
  "p256",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
