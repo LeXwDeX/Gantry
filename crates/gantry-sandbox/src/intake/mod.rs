@@ -50,7 +50,7 @@ impl Artifact {
 }
 
 /// `out/` 的取舍参数，由 `sandbox.io.artifacts.*` 与 JobSpec 合成。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IntakePlan {
     pub result_max_bytes: u64,
     pub report_max_bytes: u64,

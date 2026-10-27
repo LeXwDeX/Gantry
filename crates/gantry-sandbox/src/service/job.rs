@@ -3,6 +3,9 @@
 //! `Accepted → Queued → Creating → Created → Staging → Staged → Starting → Running →
 //! Stopping → Stopped → Collecting → Collected → Destroying → Destroyed`；前置阶段失败 →
 //! `Failed`，清理容器、staging 与令牌后返回 `Err(Infra{…})` / `InvalidSpec`。
+//!
+//! 崩溃恢复（§7.10）用 [`JobActor::recovered`] 建 actor：没有 `SandboxSpec`，监督与 collect
+//! 只依赖 `meta.json` 里的 [`Resume`] 参数。
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -15,12 +18,13 @@ use gantry_core::entities::{SandboxStatus, Tier, TokenUsage, WorktreeSnapshot};
 use gantry_core::events::{
     AttemptProgressKind, EventType, NewEvent, SandboxCreatedData, SandboxDestroyedData, Subject,
 };
+use gantry_core::ids::ProjectId;
 use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::egress::{IssueJobToken, JobTokenGrant, ProviderId};
 use gantry_core::ports::repo::PrepareWorkspace;
 use gantry_core::ports::sandbox::{
-    EgressFlags, InfraDetail, JobOutcome, ProgressSample, SandboxError, SandboxSpec, TerminalCause,
-    TerminalFacts, TimerKind, Timings, WorkspaceMode,
+    CasObject, EgressFlags, InfraDetail, JobOutcome, ProgressSample, SandboxError, SandboxSpec,
+    TerminalCause, TerminalFacts, TimerKind, Timings, WorkspaceMode,
 };
 use gantry_core::time::Timestamp;
 use gantry_store::Appended;
@@ -28,11 +32,11 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit};
 use tokio::time::Instant;
 
-use super::meta::{Meta, Phase, TerminalReason};
+use super::meta::{CasRef, Meta, Phase, Resume, TailsRecord, TerminalReason};
 use super::seams::CasKind;
 use super::{infra, Command, Inner, Occupancy, Outcome};
 use crate::driver::{DriverError, ExitFacts, LogCursor, SandboxDriver};
-use crate::intake::IntakePlan;
+use crate::intake::{IntakePlan, IntakeResult};
 use crate::invariants::{validate_invariants, InvariantContext};
 use crate::progress::{LineOutcome, ProgressCollector, ProgressLimits};
 use crate::spec::{
@@ -102,7 +106,9 @@ fn driver_infra(detail: InfraDetail) -> impl Fn(DriverError) -> SandboxError {
 pub(super) struct JobActor<D> {
     inner: Arc<Inner<D>>,
     ctx: ActorCtx,
-    spec: SandboxSpec,
+    /// 新提交的 job 才有；恢复出的 job 只有 `meta.resume`。
+    spec: Option<SandboxSpec>,
+    project_id: ProjectId,
     layout: StagingLayout,
     commands: mpsc::UnboundedReceiver<Command>,
     progress: broadcast::Sender<ProgressSample>,
@@ -129,6 +135,29 @@ enum LogSignal {
     Gone,
 }
 
+/// 恢复出的 job 从哪一步接着走（§7.10）。
+pub(super) enum RecoverMode {
+    /// 容器还在：继续监督，从头重读日志按 seq 去重，然后 collect。`exited` 时不再起
+    /// 计时器（沿用已写盘的原因，没有就是 `RuntimeExit`），只等退出事实。
+    /// `permit` 为空表示恢复时已超出并发上限：这份占用记在 `Inner::debt` 上。
+    Supervise {
+        id: ContainerId,
+        exited: bool,
+        permit: Option<OwnedSemaphorePermit>,
+    },
+    /// 容器已不在、`out/` 已读出：直接 collect。`lost` 为假表示容器是本服务在
+    /// `Destroying` 相位自己删的（终止事实取 `meta.json`），否则 `cause = Lost`。
+    Collect {
+        id: ContainerId,
+        intake: IntakeResult,
+        lost: bool,
+    },
+    /// 启动前已请求取消：重出取消结果。
+    CancelledBeforeStart,
+    /// 受理后丢失：吊销、记 `sandbox.destroyed(lost)`，`wait` 返回 `Infra{Lost}`。
+    Lost,
+}
+
 /// 运行结束时的事实。
 struct Run {
     reason: TerminalReason,
@@ -147,11 +176,25 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         progress: broadcast::Sender<ProgressSample>,
         occupancy: Arc<Mutex<Occupancy>>,
     ) -> Self {
-        let meta = Meta::new(spec.job_id, spec.sandbox_id);
+        let mut meta = Meta::new(spec.job_id, spec.sandbox_id);
+        meta.resume = Some(Resume {
+            project_id: spec.project_id,
+            io: spec.io.clone(),
+            intake: IntakePlan::new(
+                &spec.io.artifacts,
+                spec.job.output.patch,
+                spec.job.constraints.patch.as_ref(),
+                inner.config.out_quota_bytes,
+            ),
+            wall_time_s: spec.limits.wall_time_s,
+            idle_timeout_s: spec.timers.idle_timeout_s,
+            kill_grace_s: spec.timers.kill_grace_s,
+        });
         Self {
             inner,
             ctx,
-            spec,
+            project_id: spec.project_id,
+            spec: Some(spec),
             layout,
             commands,
             progress,
@@ -166,8 +209,54 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         }
     }
 
+    /// 恢复出的 job（没有 `SandboxSpec`）。`meta.resume` 必须存在。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn recovered(
+        inner: Arc<Inner<D>>,
+        ctx: ActorCtx,
+        project_id: ProjectId,
+        layout: StagingLayout,
+        meta: Meta,
+        container: Option<ContainerId>,
+        created_event: bool,
+        commands: mpsc::UnboundedReceiver<Command>,
+        progress: broadcast::Sender<ProgressSample>,
+        occupancy: Arc<Mutex<Occupancy>>,
+    ) -> Self {
+        Self {
+            inner,
+            ctx,
+            spec: None,
+            project_id,
+            layout,
+            commands,
+            progress,
+            occupancy,
+            timings: meta.timings.into(),
+            cancel_requested: meta.cancel_requested,
+            meta,
+            container,
+            created_event,
+            revoked: None,
+            cleaned: false,
+        }
+    }
+
     fn driver(&self) -> &D {
         &self.inner.deps.driver
+    }
+
+    fn resume(&self) -> &Resume {
+        self.meta
+            .resume
+            .as_ref()
+            .expect("resume parameters are written at accept")
+    }
+
+    fn fresh_spec(&self) -> &SandboxSpec {
+        self.spec
+            .as_ref()
+            .expect("only freshly submitted jobs prepare")
     }
 
     fn now(&self) -> Timestamp {
@@ -181,6 +270,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
     fn phase(&mut self, phase: Phase) -> Result<(), SandboxError> {
         self.meta.phase = phase;
         self.meta.cancel_requested = self.cancel_requested;
+        self.meta.timings = self.timings.into();
         self.meta
             .save(&self.layout.meta_json())
             .map_err(|err| infra(InfraDetail::WorkspacePrep, format!("meta.json: {err}")))
@@ -202,6 +292,93 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         }
         self.set_occupancy(Occupancy::Done);
         result
+    }
+
+    /// 恢复出的 job 的入口（§7.10）。
+    pub(super) async fn run_recovered(mut self, mode: RecoverMode) -> Outcome {
+        let result = self.recover_inner(mode).await;
+        if let Err(err) = &result {
+            self.cleanup_failed(err).await;
+        }
+        self.set_occupancy(Occupancy::Done);
+        result
+    }
+
+    async fn recover_inner(&mut self, mode: RecoverMode) -> Outcome {
+        match mode {
+            RecoverMode::Supervise { id, exited, permit } => {
+                self.set_occupancy(Occupancy::Holding);
+                let wall_time = Duration::from_secs(self.resume().wall_time_s);
+                let now = self.now().as_millis();
+                let deadline_ms = *self
+                    .meta
+                    .deadline_ms
+                    .get_or_insert(now + wall_time.as_millis() as i64);
+                if self.timings.started.is_none() {
+                    self.timings.started = Some(self.now());
+                }
+                self.phase(Phase::Running)?;
+                // deadline 按持久化的 UTC 时刻重建，不因重启而延长。
+                let wall = Duration::from_millis(deadline_ms.saturating_sub(now).max(0) as u64);
+                let preset = if exited {
+                    Some(self.meta.record_reason(TerminalReason::RuntimeExit))
+                } else {
+                    self.meta.terminal_reason
+                };
+                let outcome = match self.supervise(&id, wall, preset).await {
+                    Ok(run) => self.collect_and_destroy(&id, run, None).await,
+                    Err(err) => Err(err),
+                };
+                match permit {
+                    Some(permit) => drop(permit),
+                    None => self.inner.settle_overdraft(),
+                }
+                outcome
+            }
+            RecoverMode::Collect { id, intake, lost } => {
+                let reason = self.meta.record_reason(TerminalReason::RuntimeExit);
+                let collector = self.resumed_collector();
+                let run = Run {
+                    reason,
+                    exit: self.meta.exit,
+                    lost,
+                    collector,
+                };
+                self.collect_and_destroy(&id, run, Some(intake)).await
+            }
+            RecoverMode::CancelledBeforeStart => self.finish_without_start().await,
+            RecoverMode::Lost => Err(infra(
+                InfraDetail::Lost,
+                "sandbox lost across a restart (container and out/ unavailable)",
+            )),
+        }
+    }
+
+    fn progress_limits(&self) -> ProgressLimits {
+        let io = &self.resume().io;
+        ProgressLimits::new(
+            &io.progress,
+            io.logs_tail_bytes,
+            self.inner.config.progress_sample,
+        )
+    }
+
+    /// 从 `progress.spool.jsonl` 重建 seq 与计数；新 job 的 spool 为空，等同新建。
+    /// 崩溃留下的半条末行先截掉，之后的追加才能接在完整记录后面。
+    fn resumed_collector(&self) -> ProgressCollector {
+        let path = self.layout.progress_spool();
+        let mut spool = std::fs::read(&path).unwrap_or_default();
+        if !spool.is_empty() && spool.last() != Some(&b'\n') {
+            let keep = spool
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |at| at + 1);
+            spool.truncate(keep);
+            if let Ok(file) = OpenOptions::new().write(true).open(&path) {
+                let _ = file.set_len(keep as u64).and_then(|()| file.sync_all());
+            }
+        }
+        ProgressCollector::resume_from_spool(self.meta.job_id, self.progress_limits(), &spool)
     }
 
     async fn run_inner(&mut self, permit: oneshot::Receiver<OwnedSemaphorePermit>) -> Outcome {
@@ -233,22 +410,23 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             return self.finish_without_start().await;
         }
         let id = self.container.clone().expect("prepared container");
+        // deadline 在 start 之前落盘：start 之后、Running 写盘之前崩溃，恢复也不会重发整段墙钟。
+        let wall = Duration::from_secs(self.resume().wall_time_s);
+        self.meta.deadline_ms = Some(self.now().as_millis() + wall.as_millis() as i64);
         self.phase(Phase::Starting)?;
         self.driver()
             .start(&id)
             .await
             .map_err(driver_infra(InfraDetail::SandboxCreate))?;
         self.timings.started = Some(self.now());
-        let wall = Duration::from_secs(self.spec.limits.wall_time_s);
-        self.meta.deadline_ms = Some(self.now().as_millis() + wall.as_millis() as i64);
         self.phase(Phase::Running)?;
-        let run = self.supervise(&id, wall).await?;
-        self.collect_and_destroy(&id, run).await
+        let run = self.supervise(&id, wall, None).await?;
+        self.collect_and_destroy(&id, run, None).await
     }
 
     /// 签发令牌 → 建目录 → 准备工作区 → 建容器（未启动）→ staging。
     async fn prepare(&mut self) -> Result<JobTokenGrant, SandboxError> {
-        let spec = self.spec.clone();
+        let spec = self.fresh_spec().clone();
         self.phase(Phase::Creating)?;
         let image = ImageDigest::local_id(spec.exec.image_digest);
         let present = self
@@ -395,7 +573,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         grant: &JobTokenGrant,
         provider: &str,
     ) -> Result<ContainerSpec, SandboxError> {
-        let spec = &self.spec;
+        let spec = self.fresh_spec();
         let config = &self.inner.config;
         let mut env = spec.exec.env.clone();
         for (provider_id, var) in &spec.exec.token_env.model_base_url {
@@ -493,7 +671,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             .append(NewEvent {
                 ty,
                 subject,
-                project_id: Some(self.spec.project_id),
+                project_id: Some(self.project_id),
                 actor: self.ctx.actor.clone(),
                 causation_id: self.ctx.causation_id,
                 correlation_id: None,
@@ -509,7 +687,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
     }
 
     async fn append_created(&mut self) -> Result<(), SandboxError> {
-        let spec = &self.spec;
+        let spec = self.fresh_spec();
         let data = SandboxCreatedData {
             sandbox_id: spec.sandbox_id,
             attempt_id: spec.job_id,
@@ -541,7 +719,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             return;
         }
         let data = SandboxDestroyedData {
-            sandbox_id: self.spec.sandbox_id,
+            sandbox_id: self.meta.sandbox_id,
             final_status,
             reason: reason.to_owned(),
         };
@@ -549,68 +727,76 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         let _ = self
             .append_event(
                 EventType::SandboxDestroyed,
-                self.spec.sandbox_id.to_string(),
+                self.meta.sandbox_id.to_string(),
                 &data,
-                format!("sandbox.destroyed:{}", self.spec.sandbox_id),
+                format!("sandbox.destroyed:{}", self.meta.sandbox_id),
             )
             .await;
     }
 
-    /// 监督运行：容器退出、墙钟、空闲、取消，先写入者胜。
-    async fn supervise(&mut self, id: &ContainerId, wall: Duration) -> Result<Run, SandboxError> {
-        let limits = ProgressLimits::new(
-            &self.spec.io.progress,
-            self.spec.io.logs_tail_bytes,
-            self.inner.config.progress_sample,
-        );
-        let collector = Arc::new(Mutex::new(ProgressCollector::new(self.spec.job_id, limits)));
+    /// 监督运行：容器退出、墙钟、空闲、取消，先写入者胜。`preset` 是崩溃前已写盘的
+    /// 终止原因：直接按它停（补发信号），不再等计时器。
+    async fn supervise(
+        &mut self,
+        id: &ContainerId,
+        wall: Duration,
+        preset: Option<TerminalReason>,
+    ) -> Result<Run, SandboxError> {
+        let collector = Arc::new(Mutex::new(self.resumed_collector()));
         let (activity_tx, mut activity_rx) = mpsc::unbounded_channel::<LogSignal>();
         let reader = self.spawn_log_reader(id, Arc::clone(&collector), activity_tx);
 
-        let idle = Duration::from_secs(self.spec.timers.idle_timeout_s);
+        let idle = Duration::from_secs(self.resume().idle_timeout_s);
         let started = Instant::now();
         let deadline = started + wall;
         let mut idle_deadline = started + idle;
         let mut idle_enabled = true;
         let driver = Arc::clone(&self.inner.deps.driver);
         let wait_id = id.clone();
-        let mut exit_wait = tokio::spawn(async move { driver.wait(&wait_id).await });
+        let mut exit_wait = self.inner.spawn(async move { driver.wait(&wait_id).await });
         let mut exit = None;
         let mut lost = false;
-        let reason = loop {
-            tokio::select! {
-                biased;
-                result = &mut exit_wait => {
-                    match result {
-                        Ok(Ok(facts)) => exit = Some(facts),
-                        _ => lost = true,
+        let reason = if let Some(reason) = preset {
+            reason
+        } else {
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut exit_wait => {
+                        match result {
+                            Ok(Ok(facts)) => exit = Some(facts),
+                            _ => lost = true,
+                        }
+                        break TerminalReason::RuntimeExit;
                     }
-                    break TerminalReason::RuntimeExit;
-                }
-                command = self.commands.recv() => {
-                    if command == Some(Command::Cancel) {
-                        self.cancel_requested = true;
-                        break TerminalReason::Cancel;
+                    command = self.commands.recv() => {
+                        if command == Some(Command::Cancel) {
+                            self.cancel_requested = true;
+                            break TerminalReason::Cancel;
+                        }
                     }
+                    _ = tokio::time::sleep_until(deadline) => break TerminalReason::WallTimer,
+                    _ = tokio::time::sleep_until(idle_deadline), if idle_enabled => {
+                        break TerminalReason::IdleTimer
+                    }
+                    Some(signal) = activity_rx.recv() => match signal {
+                        LogSignal::Activity => idle_deadline = Instant::now() + idle,
+                        LogSignal::Gone => idle_enabled = false,
+                    },
                 }
-                _ = tokio::time::sleep_until(deadline) => break TerminalReason::WallTimer,
-                _ = tokio::time::sleep_until(idle_deadline), if idle_enabled => {
-                    break TerminalReason::IdleTimer
-                }
-                Some(signal) = activity_rx.recv() => match signal {
-                    LogSignal::Activity => idle_deadline = Instant::now() + idle,
-                    LogSignal::Gone => idle_enabled = false,
-                },
             }
         };
         // 原因先写盘（fsync）再发信号：崩溃重启不会丢「为什么杀它」。
         let reason = self.meta.record_reason(reason);
         self.phase(Phase::Stopping)?;
         if reason != TerminalReason::RuntimeExit {
-            let grace = Duration::from_secs(self.spec.timers.kill_grace_s);
+            let grace = Duration::from_secs(self.resume().kill_grace_s);
             if self.driver().stop(id, grace).await.is_err() {
                 let _ = self.driver().kill(id).await;
             }
+        }
+        // 循环里没等到退出（计时器 / 取消，或恢复时沿用已写盘的原因）：现在等。
+        if exit.is_none() && !lost {
             match exit_wait.await {
                 Ok(Ok(facts)) => exit = Some(facts),
                 _ => lost = true,
@@ -626,6 +812,8 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         // 停止期间（含等日志排空）到达的取消只记 cancel_requested，不改原因。
         self.poll_cancel();
         self.timings.stopped = Some(self.now());
+        self.meta.exit = exit;
+        self.meta.lost = lost;
         self.phase(Phase::Stopped)?;
         let collector = collector.lock().unwrap_or_else(|p| p.into_inner()).clone();
         Ok(Run {
@@ -648,10 +836,10 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         let spool_path = self.layout.progress_spool();
         let store = self.inner.deps.store.clone();
         let clock = Arc::clone(&self.inner.deps.clock);
-        let job_id = self.spec.job_id;
-        let project_id = self.spec.project_id;
+        let job_id = self.meta.job_id;
+        let project_id = self.project_id;
         let actor = self.ctx.actor.clone();
-        tokio::spawn(async move {
+        self.inner.spawn(async move {
             let mut spool = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -706,19 +894,24 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         })
     }
 
-    async fn collect_and_destroy(&mut self, id: &ContainerId, run: Run) -> Outcome {
+    async fn collect_and_destroy(
+        &mut self,
+        id: &ContainerId,
+        run: Run,
+        intake: Option<IntakeResult>,
+    ) -> Outcome {
         self.phase(Phase::Collecting)?;
-        let plan = IntakePlan::new(
-            &self.spec.io.artifacts,
-            self.spec.job.output.patch,
-            self.spec.job.constraints.patch.as_ref(),
-            self.inner.config.out_quota_bytes,
-        );
-        let intake = self
-            .driver()
-            .read_out(id, &self.layout, &plan)
-            .await
-            .map_err(driver_infra(InfraDetail::Collect))?;
+        let intake_was_preread = intake.is_some();
+        let intake = match intake {
+            Some(intake) => intake,
+            None => {
+                let plan = self.resume().intake;
+                self.driver()
+                    .read_out(id, &self.layout, &plan)
+                    .await
+                    .map_err(driver_infra(InfraDetail::Collect))?
+            }
+        };
         let put = |bytes: &[u8], kind: CasKind| {
             self.inner
                 .deps
@@ -736,16 +929,41 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         } else {
             Some(put(&spool, CasKind::Progress)?)
         };
-        let stdout_tail = put(&run.collector.stdout_tail().contents(), CasKind::Artifact)?;
-        let stderr_tail = put(&run.collector.stderr_tail().contents(), CasKind::Artifact)?;
+        // 容器已删、日志无从重读时，沿用崩溃前记下的尾部。
+        let (stdout_tail, stderr_tail) = match self.meta.tails {
+            Some(tails) if intake_was_preread => (
+                CasObject {
+                    sha256: tails.stdout.sha256,
+                    bytes: tails.stdout.bytes,
+                },
+                CasObject {
+                    sha256: tails.stderr.sha256,
+                    bytes: tails.stderr.bytes,
+                },
+            ),
+            _ => (
+                put(&run.collector.stdout_tail().contents(), CasKind::Artifact)?,
+                put(&run.collector.stderr_tail().contents(), CasKind::Artifact)?,
+            ),
+        };
+        self.meta.tails = Some(TailsRecord {
+            stdout: CasRef {
+                sha256: stdout_tail.sha256,
+                bytes: stdout_tail.bytes,
+            },
+            stderr: CasRef {
+                sha256: stderr_tail.sha256,
+                bytes: stderr_tail.bytes,
+            },
+        });
         self.timings.collected = Some(self.now());
         self.phase(Phase::Collected)?;
 
         let (usage, weighted, egress) = self.revoke().await;
         let terminal = terminal_facts(&run, self.cancel_requested);
         let outcome = JobOutcome {
-            job_id: self.spec.job_id,
-            sandbox_id: self.spec.sandbox_id,
+            job_id: self.meta.job_id,
+            sandbox_id: self.meta.sandbox_id,
             partial: terminal.cause != TerminalCause::Exited,
             terminal,
             files,
@@ -786,7 +1004,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             .inner
             .deps
             .egress
-            .revoke_job_token(&self.spec.job_id, &self.ctx)
+            .revoke_job_token(&self.meta.job_id, &self.ctx)
             .await
         {
             Ok(usage) => (
@@ -826,8 +1044,8 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             .put(b"", CasKind::Artifact)
             .map_err(|err| infra(InfraDetail::Collect, err))?;
         Ok(JobOutcome {
-            job_id: self.spec.job_id,
-            sandbox_id: self.spec.sandbox_id,
+            job_id: self.meta.job_id,
+            sandbox_id: self.meta.sandbox_id,
             terminal: TerminalFacts {
                 cause: TerminalCause::KilledCancel,
                 exit_code: None,
@@ -864,7 +1082,14 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         }
         let _ = self.revoke().await;
         let _ = self.driver().purge_staging(&self.layout).await;
-        self.append_destroyed(SandboxStatus::Destroyed, &format!("failed: {err}"))
+        let final_status = match err {
+            SandboxError::Infra {
+                detail: InfraDetail::Lost,
+                ..
+            } => SandboxStatus::Lost,
+            _ => SandboxStatus::Destroyed,
+        };
+        self.append_destroyed(final_status, &format!("failed: {err}"))
             .await;
     }
 }

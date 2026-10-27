@@ -217,10 +217,28 @@ impl ProgressCollector {
 
     /// 重启恢复：从 spool 里已接受的事件重建 seq 与计数（§7.10「从头重读日志，按 seq 去重」）。
     pub fn resume(job_id: AttemptId, limits: ProgressLimits, spool: &[AcceptedEvent]) -> Self {
+        Self::resume_seqs(job_id, limits, spool.iter().map(AcceptedEvent::seq))
+    }
+
+    /// 同 [`Self::resume`]，直接读 `progress.spool.jsonl` 的字节（每行取 `event.seq`；
+    /// 写到一半的末行与坏行跳过）。
+    pub fn resume_from_spool(job_id: AttemptId, limits: ProgressLimits, spool: &[u8]) -> Self {
+        let seqs = spool.split(|b| *b == b'\n').filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+            value.get("event")?.get("seq")?.as_u64()
+        });
+        Self::resume_seqs(job_id, limits, seqs)
+    }
+
+    fn resume_seqs(
+        job_id: AttemptId,
+        limits: ProgressLimits,
+        seqs: impl IntoIterator<Item = u64>,
+    ) -> Self {
         let mut collector = Self::new(job_id, limits);
-        for event in spool {
-            if event.seq() > collector.last_seq {
-                collector.last_seq = event.seq();
+        for seq in seqs {
+            if seq > collector.last_seq {
+                collector.last_seq = seq;
                 collector.accepted += 1;
                 collector.legal += 1;
             }
