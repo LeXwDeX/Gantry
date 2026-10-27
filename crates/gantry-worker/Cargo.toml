@@ -9,9 +9,13 @@ description = "Gantry Worker 适配：服务端侧 WorkerAdapter 声明与沙盒
 # 二进制只依赖 core 与少量通用库，不得引入 store / sqlx / axum / secrets 等服务端 crate（worker.md §3、§12.J）。
 [dependencies]
 gantry-core = { path = "../gantry-core" }
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 # 只用于核对挂载约定与 sandbox 的常量一致。
 gantry-sandbox = { path = "../gantry-sandbox" }
+# 用 schemas/worker/ 校验 worker 写出的产物（与 xtask 同版本）。
+jsonschema = { version = "0.59", default-features = false }
