@@ -14,6 +14,7 @@
 #![cfg(unix)]
 #![forbid(unsafe_code)]
 
+mod backup;
 mod envelope;
 mod fsx;
 mod key;
@@ -21,6 +22,7 @@ mod namespace;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -33,6 +35,10 @@ use gantry_core::ports::ActorCtx;
 use gantry_core::secret::{Consumer, SecretName};
 use serde::{Deserialize, Serialize};
 
+pub use backup::{
+    BackupEntry, BackupEntryKind, BackupIdentity, BackupManifest, BackupRecipient, ImportMode,
+    ImportReport,
+};
 pub use key::{KeyFile, MasterKey, MasterKeySource, StaticMasterKey, SystemdCredential};
 
 use namespace::{Namespace, Root};
@@ -381,9 +387,24 @@ impl SecretSink for ScopedSecrets {
     }
 }
 
-/// 跨使用方的管理操作（M1：列出全部暂存项；备份与恢复见后续切片；`rewrap` 属 M3）。
+/// 跨使用方的管理操作：列出全部暂存项、加密备份与恢复（`rewrap` 属 M3）。
 pub trait SecretAdminOps: Send + Sync {
     fn staged_all(&self) -> Result<Vec<StagedSecret>, SecretsError>;
+
+    /// 把本实例每个使用方的当前版本与墓碑导出为一个 age 加密流（§7.6）。
+    fn export_backup(
+        &self,
+        to: &[BackupRecipient],
+        out: &mut dyn Write,
+    ) -> Result<BackupManifest, SecretsError>;
+
+    /// 先完整解密校验，再以原版本号、本机主密钥重新加密写入。
+    fn import_backup(
+        &self,
+        id: &BackupIdentity,
+        input: &mut dyn Read,
+        mode: ImportMode,
+    ) -> Result<ImportReport, SecretsError>;
 }
 
 /// 管理句柄：持有本实例全部使用方的命名空间。
@@ -409,6 +430,28 @@ impl SecretAdminOps for SecretAdmin {
             out.extend(ns.staged()?);
         }
         Ok(out)
+    }
+
+    fn export_backup(
+        &self,
+        to: &[BackupRecipient],
+        out: &mut dyn Write,
+    ) -> Result<BackupManifest, SecretsError> {
+        let instance_id = self
+            .namespaces
+            .first()
+            .map(|ns| ns.root.instance_id.clone())
+            .unwrap_or_default();
+        backup::export(&self.namespaces, &instance_id, to, out)
+    }
+
+    fn import_backup(
+        &self,
+        id: &BackupIdentity,
+        input: &mut dyn Read,
+        mode: ImportMode,
+    ) -> Result<ImportReport, SecretsError> {
+        backup::import(&self.namespaces, id, input, mode)
     }
 }
 
