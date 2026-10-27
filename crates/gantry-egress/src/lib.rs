@@ -7,8 +7,10 @@
 //! （`netdeny`）、配置视图的防御性复核（`review`）、能力令牌的铸造与哈希（`token`）。
 //! 登记表与控制面、模型反向代理、`CONNECT` 隧道、审计与进程入口在后续切片落地（#94）。
 
+pub mod db;
 pub mod host;
 pub mod netdeny;
+pub mod registry;
 pub mod review;
 pub mod token;
 

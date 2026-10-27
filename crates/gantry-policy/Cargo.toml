@@ -10,10 +10,14 @@ description = "Gantry 策略与审计（M1：policy v0，内置规则、失败�
 gantry-core = { path = "../gantry-core" }
 gantry-store = { path = "../gantry-store" }
 async-trait.workspace = true
+base64 = "0.22"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+base64 = "0.22"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std", "pem"] }
 async-trait.workspace = true
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }

@@ -25,7 +25,9 @@ use gantry_core::settings::{
     EgressPatch, GithubPatch, GuardianPatch, LevelsPatch, ModelsPatch, NotifyPatch, PoliciesPatch,
     SandboxPatch,
 };
-use gantry_core::worker::{JobSpec, ProgressEvent, Proposals, ResultJson, StructuredOutput};
+use gantry_core::worker::{
+    JobSpec, ProgressEvent, Proposals, ResultBundle, ResultJson, StructuredOutput,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,6 +47,9 @@ pub fn check_annotation(kind: &str, data: &Value) -> Result<(), String> {
         "none" => Ok(()),
         "worker::JobSpec" => roundtrip::<JobSpec>(data),
         "worker::ResultJson" => roundtrip::<ResultJson>(data),
+        "worker::ResultBundle" => checked_roundtrip::<ResultBundle>(data, |bundle| {
+            bundle.validate().map_err(|error| error.to_string())
+        }),
         "worker::Proposals" => roundtrip::<Proposals>(data),
         "worker::StructuredOutput" => roundtrip::<StructuredOutput>(data),
         "worker::ProgressEvent" => roundtrip::<ProgressEvent>(data),

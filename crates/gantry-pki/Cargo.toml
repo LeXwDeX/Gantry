@@ -19,6 +19,8 @@ zeroize = "1"
 rand_core = "0.6"
 pem = "3"
 base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
