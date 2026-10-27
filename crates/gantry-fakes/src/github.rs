@@ -980,6 +980,25 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 return not_found();
             };
             let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+            // 同 GitHub：令牌不能获得安装未获批的权限，多请求一项整次被拒。
+            let rank = |level: Option<&str>| match level {
+                Some("write") | Some("admin") => 2,
+                Some("read") => 1,
+                _ => 0,
+            };
+            if let Some(requested) = body.get("permissions").and_then(Value::as_object) {
+                let exceeds = requested.iter().any(|(name, level)| {
+                    rank(level.as_str()) > rank(granted.get(name).and_then(Value::as_str))
+                });
+                if exceeds {
+                    return Response {
+                        status: 422,
+                        body: json!({"message": "The permissions requested are not granted to this installation."})
+                            .to_string(),
+                        retry_after_s: None,
+                    };
+                }
+            }
             state.issued_tokens += 1;
             Response {
                 status: 201,

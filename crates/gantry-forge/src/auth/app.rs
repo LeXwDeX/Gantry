@@ -133,6 +133,23 @@ const HIGH_RISK: [&str; 8] = [
     "packages",
 ];
 
+/// 组织级（`organization_*`、`members`）与账户级（用户安装才有）的权限键。
+fn is_org_or_account_level(name: &str) -> bool {
+    name.starts_with("organization_")
+        || matches!(
+            name,
+            "members"
+                | "email_addresses"
+                | "followers"
+                | "gpg_keys"
+                | "git_ssh_keys"
+                | "profile"
+                | "starring"
+                | "interaction_limits"
+                | "codespaces_user_secrets"
+        )
+}
+
 impl AppTokenProvider {
     pub fn new(config: Arc<ForgeConfig>, deps: AppAuthDeps) -> Self {
         Self {
@@ -176,11 +193,18 @@ impl AppTokenProvider {
         .filter(|(name, _)| level(name) == Some("write"))
         .map(|(_, permission)| permission)
         .collect();
-        let high_risk: Vec<String> = HIGH_RISK
+        let mut high_risk: Vec<String> = HIGH_RISK
             .iter()
             .filter(|name| level(name).is_some())
             .map(|name| (*name).to_owned())
             .collect();
+        // 组织 / 账户级权限（FA §9.2「等」）：一律不申请，出现即高危。键名需核实。
+        high_risk.extend(
+            permissions
+                .keys()
+                .filter(|name| is_org_or_account_level(name))
+                .cloned(),
+        );
         Ok(PermissionReport {
             granted,
             write_denied: deny_extra_high_risk && !high_risk.is_empty(),
@@ -237,7 +261,7 @@ impl AppTokenProvider {
         let name = repo.split_once('/').map_or(repo, |(_, name)| name);
         let body = json!({
             "repositories": [name],
-            "permissions": scope(purpose),
+            "permissions": scope(purpose, &binding.granted),
         });
         let jwt = self.app_jwt()?;
         let value = self
@@ -292,22 +316,41 @@ impl TokenProvider for AppTokenProvider {
 }
 
 /// 按用途收窄的权限集（FA §9.4）：都不含 `workflows` / `administration`。
-fn scope(purpose: TokenPurpose) -> Value {
-    let level = match purpose {
-        TokenPurpose::Read => "read",
-        TokenPurpose::Write => "write",
-    };
+///
+/// 写令牌只请求安装**实际获批**的写权限（`ProjectBinding.granted`，来自权限自检）：GitHub
+/// 不给安装未获批的权限，多请求一项整次换令牌就会被拒，连带其他本可执行的动作。缺的那项
+/// 由入队时的 `PermissionMissing` 挡住。
+fn scope(purpose: TokenPurpose, granted: &BTreeSet<Permission>) -> Value {
     let mut permissions = BTreeMap::new();
     permissions.insert("metadata", "read");
-    permissions.insert("checks", "read");
-    for name in ["contents", "pull_requests", "issues"] {
-        permissions.insert(name, level);
+    for (name, permission) in [
+        ("contents", Permission::ContentsWrite),
+        ("pull_requests", Permission::PullRequestsWrite),
+        ("issues", Permission::IssuesWrite),
+    ] {
+        match purpose {
+            TokenPurpose::Read => {
+                permissions.insert(name, "read");
+            }
+            TokenPurpose::Write if granted.contains(&permission) => {
+                permissions.insert(name, "write");
+            }
+            TokenPurpose::Write => {}
+        }
+    }
+    if purpose == TokenPurpose::Read {
+        permissions.insert("checks", "read");
     }
     json!(permissions)
 }
 
 fn auth_error(error: ApiError) -> AuthError {
     match error {
+        ApiError::Status {
+            rate_limited: true,
+            retry_after,
+            ..
+        } => AuthError::RateLimited { retry_after },
         ApiError::Status {
             status: 401 | 403 | 404,
             ..
