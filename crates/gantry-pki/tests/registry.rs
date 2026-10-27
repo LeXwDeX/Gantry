@@ -295,13 +295,19 @@ async fn redeem_issues_chain_and_writes_device_rows_in_one_transaction() {
     assert_eq!(device.status, DeviceStatus::Active);
     assert_eq!(device.platform, DevicePlatform::Macos);
     assert_eq!(device.pubkey_fpr, keys.client_public().fingerprint());
-    assert_eq!(device.approval_pubkey_fpr, Some(keys.approval.fingerprint()));
+    assert_eq!(
+        device.approval_pubkey_fpr,
+        Some(keys.approval.fingerprint())
+    );
     assert!(device.id.to_string().starts_with("dev_"));
 
     // 恰好一条 device.paired（开会话不产生事件）。
     let mut snapshot = env.store.snapshot().await.unwrap();
     assert_eq!(snapshot.head_seq().as_u64(), 1);
-    assert_eq!(snapshot.device(&device.id).await.unwrap().as_ref(), Some(device));
+    assert_eq!(
+        snapshot.device(&device.id).await.unwrap().as_ref(),
+        Some(device)
+    );
 
     // 模块表：证书行 active、状态行带 SPKI；会话 redeemed 且确认码一致。
     let cert = env.cert_row(&device.cert_serial).await.unwrap();
@@ -314,12 +320,15 @@ async fn redeem_issues_chain_and_writes_device_rows_in_one_transaction() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        fingerprint(
-            &base64_decode(&state.pubkey_spki)
-        ),
+        fingerprint(&base64_decode(&state.pubkey_spki)),
         device.pubkey_fpr
     );
-    let session = env.sessions().await.get(ticket.session_id).cloned().unwrap();
+    let session = env
+        .sessions()
+        .await
+        .get(ticket.session_id)
+        .cloned()
+        .unwrap();
     assert_eq!(session.state, SessionState::Redeemed);
     assert_eq!(session.redeemed_device_id, Some(device.id));
     assert_eq!(
@@ -684,7 +693,12 @@ async fn directory_maps_serials_and_returns_the_approval_key() {
         .unwrap();
     let serial: CertSerial = paired.device.cert_serial.parse().unwrap();
 
-    let found = env.directory.by_cert_serial(&serial).await.unwrap().unwrap();
+    let found = env
+        .directory
+        .by_cert_serial(&serial)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(found.id, paired.device.id);
     let unknown: CertSerial = "7f".parse().unwrap();
     assert_eq!(env.directory.by_cert_serial(&unknown).await.unwrap(), None);
@@ -704,7 +718,10 @@ async fn directory_maps_serials_and_returns_the_approval_key() {
     // 吊销后：verifying_key 为 None；by_cert_serial 仍返回设备（status = revoked）。
     env.revoke_event(&paired).await;
     assert_eq!(
-        env.directory.verifying_key(&paired.device.id).await.unwrap(),
+        env.directory
+            .verifying_key(&paired.device.id)
+            .await
+            .unwrap(),
         None
     );
     assert_eq!(
@@ -733,10 +750,7 @@ async fn handshake_lookup_reads_the_cert_table_without_caching() {
     assert_eq!(record.device_id, paired.device.id);
     assert_eq!(record.status, DeviceCertStatus::Active);
     assert!(record.device_active);
-    assert_eq!(
-        env.directory.lookup(&"7f".parse().unwrap()).unwrap(),
-        None
-    );
+    assert_eq!(env.directory.lookup(&"7f".parse().unwrap()).unwrap(), None);
 
     // 证书被取代：握手查询照实返回，by_cert_serial 在原 notAfter 之后不再映射。
     let mut row = env.cert_row(serial.as_str()).await.unwrap();
@@ -750,13 +764,24 @@ async fn handshake_lookup_reads_the_cert_table_without_caching() {
         env.directory.lookup(&serial).unwrap().unwrap().status,
         DeviceCertStatus::Superseded
     );
-    assert!(env.directory.by_cert_serial(&serial).await.unwrap().is_some());
+    assert!(env
+        .directory
+        .by_cert_serial(&serial)
+        .await
+        .unwrap()
+        .is_some());
     env.clock.set(row.not_after);
     assert_eq!(env.directory.by_cert_serial(&serial).await.unwrap(), None);
 
     // 设备吊销对下一次查询立即可见。
     env.revoke_event(&paired).await;
-    assert!(!env.directory.lookup(&serial).unwrap().unwrap().device_active);
+    assert!(
+        !env.directory
+            .lookup(&serial)
+            .unwrap()
+            .unwrap()
+            .device_active
+    );
 }
 
 #[tokio::test]
@@ -776,7 +801,8 @@ async fn last_seen_is_throttled_to_once_per_minute() {
     let seen = env.directory.get(&id).await.unwrap().unwrap().last_seen;
     assert_eq!(seen, Some(t0));
 
-    env.clock.set(Timestamp::from_millis(t0.as_millis() + 61_000));
+    env.clock
+        .set(Timestamp::from_millis(t0.as_millis() + 61_000));
     env.directory.touch_last_seen(&id).await;
     let seen = env.directory.get(&id).await.unwrap().unwrap().last_seen;
     assert_eq!(seen, Some(Timestamp::from_millis(t0.as_millis() + 61_000)));

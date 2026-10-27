@@ -22,8 +22,8 @@ use crate::csr::{parse_approval_pubkey, validate_csr};
 use crate::directory::{desktop_ever_paired, encode_spki, is_desktop, store_error};
 use crate::keys::{CertSerial, P256PublicKey};
 use crate::pairing::{
-    confirmation_code, initial_role, PairingSession, PairingSessionId, PairingWindow,
-    SessionError, SessionTable, TokenInvalidReason,
+    confirmation_code, initial_role, PairingSession, PairingSessionId, PairingWindow, SessionError,
+    SessionTable, TokenInvalidReason,
 };
 use crate::store_schema::{
     CertRowStatus, DeviceCertRow, DeviceStateRow, DEVICE_CERTS, DEVICE_STATE, MODULE,
@@ -275,7 +275,10 @@ impl PairingService {
             now,
             &self.config.cert_policy,
         )?;
-        let approval_pubkey_fpr = validated.approval_key.as_ref().map(P256PublicKey::fingerprint);
+        let approval_pubkey_fpr = validated
+            .approval_key
+            .as_ref()
+            .map(P256PublicKey::fingerprint);
         let data = DevicePairedData {
             device_id,
             name: req.device.name.clone(),
@@ -397,7 +400,10 @@ impl PairingService {
         }
         if let Some(approval) = &approval_key {
             let fpr = Some(approval.fingerprint());
-            if active.iter().any(|device| device.approval_pubkey_fpr == fpr) {
+            if active
+                .iter()
+                .any(|device| device.approval_pubkey_fpr == fpr)
+            {
                 errors.push(field("/approval_pubkey", "duplicate_key"));
             }
         }
