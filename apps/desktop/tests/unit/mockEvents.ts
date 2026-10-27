@@ -50,12 +50,12 @@ function forgeEnvelopeData(kind: string, data: Record<string, unknown>, number =
 }
 
 export const events = {
-  messagePosted(message: Message): InjectedEvent {
+  messagePosted(message: Message, projectId: string = WEB): InjectedEvent {
     return {
       type: "message.posted",
       subject: message.id,
       data: message,
-      project_id: WEB,
+      project_id: projectId,
       correlation_id: message.conversation_id,
     };
   },

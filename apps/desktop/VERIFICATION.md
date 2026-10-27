@@ -45,7 +45,7 @@
 | 徽标来自 `inbox.summary` | `shared-modes.test.tsx` 第 1 项 | 两种模式 |
 | 各 kind 内联操作 | `overlays-inbox-pairing.test.tsx`「选项来自 payload，选择只调 choose」；`mock-api.spec.ts` 策略拒绝（`decision_needed` 选项来自 payload） | 两种模式 |
 | E2E-19 外部变化 | `mock-api.spec.ts`「E2E-19」 | Mock |
-| E2E-00 端到端 | `mock-api.spec.ts`「E2E-00」（发消息 → 回复 → 闸门满足 → 签名 → 合并 → Issue 关闭 → 最近完成）；`full-flow.spec.ts` | 两种模式 |
+| E2E-00 端到端 | `mock-api.spec.ts`「E2E-00」：在没有对话、交付、PR、审批的空项目上，用户选 Low 发任务（请求体带 `level_cap = Low`）→ 新交付与计划卡 → implement → review → PR 创建 → CI 与 review 通过 → 新审批与上报项、审批卡 → 签名 → 合并 → Issue 关闭、移入最近完成，每一步都断言界面；`full-flow.spec.ts` | 两种模式 |
 | 策略拒绝上报 | `mock-api.spec.ts`「策略拒绝上报」 | Mock |
 | E2E-08 签名成功流 | `mock-api.spec.ts`「E2E-08 / E2E-09」「E2E-00」（已签名 · 等待合并 → 已合并 {sha7} → Issue 已关闭 · 交付完成）；`sign.test.ts` | 两种模式 |
 | E2E-03 新推送使审批单禁用 | `mock-api.spec.ts`「E2E-03」（含之后直接 grant 得 409）；`overlays-approval.test.tsx` | 两种模式 |

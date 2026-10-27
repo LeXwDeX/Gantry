@@ -109,9 +109,9 @@ async function openWeb(page: Page) {
 }
 
 /** 服务端（engine / conversation）发出的一条消息：写入 Mock 并发 message.posted。 */
-async function postServerMessage(page: Page, message: Message) {
+async function postServerMessage(page: Page, message: Message, projectId = WEB) {
   await control(page, '/mutate', { collection: 'messages', push: message });
-  await emit(page, events.messagePosted(message));
+  await emit(page, events.messagePosted(message, projectId));
 }
 
 /** 连续 ≥ 2 条事件行会折叠成“后台处理了 n 件事”（desktop-ui §12）；展开后再找具体的事件行。 */
@@ -347,49 +347,318 @@ test('challenge 过期：审批单提示过期并可重新载入', async ({ page
   expect((await operations(page)).filter((op) => op === 'getApprovalChallenge').length).toBeGreaterThanOrEqual(2);
 });
 
-test('E2E-00：Low 任务从对话到合并、Issue 关闭，界面随事件推进，无需手动刷新', async ({ page }) => {
-  await openWorkspace(page);
-  await openWeb(page);
-  // 1. 用户发出任务消息（真实 POST，Mock 产生 message.posted）。
-  await page.getByLabel('给 agent 发消息').fill('把登录接口超时改成 30 秒');
-  await page.getByRole('button', { name: '发送', exact: true }).click();
-  await expect(page.getByRole('main').getByText('把登录接口超时改成 30 秒').last()).toBeVisible();
+// E2E-00 在空项目 acme/api 上从零开始：没有对话、交付、PR、审批，全部由任务消息之后的事件逐步产生。
+const API = 'prj_01JB7K2N0R5X9V4P6S7T2W1YZB';
+const E0 = {
+  conversation: 'cnv_01JB7R00000000000000000001',
+  delivery: 'dlv_01JB7R00000000000000000002',
+  workflow: 'wfl_01JB7R00000000000000000003',
+  approval: 'apr_01JB7R00000000000000000004',
+  inbox: 'inb_01JB7R00000000000000000005',
+  head: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00',
+  merge: '1405df66cbe219b0bf6355bc3d60361a8376b6b4',
+};
+const engine = { kind: 'engine', id: 'engine' };
+const forgeActor = { login: 'gantry-bot', github_id: 9988776, type: 'bot', association: 'NONE' };
 
-  // 2. agent 回复；交付进入评审。
+function forgeData(kind: string, data: Record<string, unknown>, target: { type: string; number: number }) {
+  return {
+    schema: 'forge.event.v1',
+    kind,
+    dedup_key: `dedup:${kind}:e2e00`,
+    source: 'webhook',
+    delivery_ids: [E0.delivery],
+    project_id: API,
+    repo: 'acme/api',
+    installation_id: 1,
+    delivery_id: E0.delivery,
+    target: { ...target, node_id: 'PR_e2e00' },
+    actor: forgeActor,
+    origin: 'self_unattributed',
+    caused_by_action: null,
+    occurred_at: '2026-10-24T12:50:00.000Z',
+    observed_at: '2026-10-24T12:50:00.000Z',
+    stale: false,
+    data,
+  };
+}
+
+async function emitFor(page: Page, type: string, subject: string, data: unknown, actor = engine) {
+  await emit(page, { type, subject, data, project_id: API, correlation_id: E0.delivery, actor });
+}
+
+test('E2E-00：从空项目发起 Low 任务 → 新交付与计划卡 → 阶段推进 → PR → CI → 审批签名 → 合并 → Issue 关闭', async ({ page }) => {
+  const ts = '2026-10-24T12:45:00.000Z';
+  await control(page, '/mutate', {
+    collection: 'conversations',
+    push: { id: E0.conversation, project_id: API, created_at: ts, updated_at: ts },
+  });
+  await openWorkspace(page);
+  const nav = page.getByRole('navigation', { name: '项目' });
+  await expect(nav.getByRole('button', { name: /api/ })).toHaveAttribute('aria-current', 'page');
+  const left = page.getByRole('complementary', { name: '项目信息' });
+  const main = page.getByRole('main');
+  await expect(left.getByRole('button', { name: /^进行中 Issue 0/ })).toBeVisible();
+  await expect(nav.getByRole('button', { name: /api/ }).getByLabel(/需要你/)).toHaveCount(0);
+
+  // 1. 用户选 Low 上限并发出任务：请求体带 level_cap = Low。
+  await page.getByRole('radio', { name: 'Low' }).click();
+  await page.getByLabel('给 agent 发消息').fill('给健康检查接口加上版本号');
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await expect(main.getByText('给健康检查接口加上版本号')).toBeVisible();
+  const posted = await getJson<{ items: Message[] }>(page, `/v1/conversations/${E0.conversation}/messages?limit=10`);
+  const userMessage = posted.items.find((m) => m.role === 'user');
+  expect(userMessage?.level_cap).toBe('Low');
+
+  // 2. conversation 建交付（Low：跳过计划，直接实现），agent 回复计划卡。
+  const delivery = {
+    id: E0.delivery,
+    project_id: API,
+    title: '健康检查接口加版本号',
+    level_cap: 'Low',
+    level_effective: 'Low',
+    stage: 'implement',
+    stage_status: 'running',
+    issues: [
+      {
+        repo: 'acme/api',
+        number: 7,
+        node_id: 'I_e2e00',
+        title: { text: 'Health check should report version', source: 'github:issue.title', truncated: false },
+        state: 'open',
+        state_reason: null,
+        synced_at: ts,
+      },
+    ],
+    pr: null,
+    worktree_id: null,
+    parent_id: null,
+    depends_on: [],
+    origin: 'conversation',
+    created_at: ts,
+    updated_at: ts,
+  };
+  await control(page, '/mutate', { collection: 'deliveries', push: delivery });
+  await emitFor(page, 'delivery.created', E0.delivery, {
+    title: delivery.title,
+    level_cap: 'Low',
+    level_effective: 'Low',
+    origin: 'conversation',
+    source_message_id: userMessage?.id,
+    user_text: '给健康检查接口加上版本号',
+    issues: [],
+    config_rev: 18238,
+    budget: {
+      template: 'low.single',
+      limits: {
+        tokens_by_tier: { utility: 100000, planner: 50000, worker: 1000000 },
+        tokens: null,
+        nodes: 4,
+        rounds: 1,
+        wall_time: 3600,
+        concurrency: 1,
+        forge_writes: 20,
+      },
+    },
+  });
   await postServerMessage(
     page,
-    mockMessage(1, { text: '已开始实现，PR #12 正在评审。', delivery_id: DELIVERY, refs: [{ kind: 'pr', repo: 'acme/web', number: 12 }] }),
+    mockMessage(60, {
+      conversation_id: E0.conversation,
+      text: 'Low 档：单节点实现后开 PR。',
+      delivery_id: E0.delivery,
+      cards: [
+        {
+          kind: 'plan',
+          delivery_id: E0.delivery,
+          workflow_id: E0.workflow,
+          summary: { text: '实现 → 开 PR → CI → 合并', source: 'agent:planner', truncated: false },
+        },
+      ],
+    } as Partial<Message>),
+    API,
   );
-  await expect(page.getByRole('main').getByText('已开始实现，PR #12 正在评审。')).toBeVisible({ timeout: 15_000 });
+  await expect(main.getByText('Low 档：单节点实现后开 PR。')).toBeVisible({ timeout: 15_000 });
+  await expect(main.getByText('实现 → 开 PR → CI → 合并')).toBeVisible();
+  await expect(left.getByRole('button', { name: /^#7 / })).toBeVisible();
 
-  // 3. CI 通过、review 通过：签名入口可用。
-  await satisfyGates(page);
-  const sheet = await openApprovalSheet(page);
+  // 3. 实现完成，开 PR，进入评审。
+  const pr = {
+    repo: 'acme/api',
+    number: 13,
+    node_id: 'PR_e2e00',
+    title: { text: 'feat: report version in health check', source: 'github:pr.title', truncated: false },
+    state: 'open',
+    head_sha: E0.head,
+    base_ref: 'main',
+    base_sha: E0.merge,
+    draft: false,
+    mergeable_state: 'blocked',
+    in_merge_queue: false,
+    checks: { passed: 0, failed: 0, pending: 3, required_ok: false },
+    review_state: 'none',
+    synced_at: later(ts, 60),
+  };
+  await mutate(page, 'deliveries', E0.delivery, { stage: 'review', pr });
+  await emitFor(
+    page,
+    'forge.pr_opened',
+    E0.delivery,
+    forgeData(
+      'pr_opened',
+      {
+        number: 13,
+        node_id: 'PR_e2e00',
+        title: pr.title.text,
+        body: 'Closes #7',
+        head: { ref: 'gantry/7-health-version', sha: E0.head, repo: 'acme/api' },
+        base: { ref: 'main' },
+        draft: false,
+        labels: [],
+        author: forgeActor,
+        closing_issues: [7],
+        created_by_gantry: true,
+      },
+      { type: 'pr', number: 13 },
+    ),
+    { kind: 'forge', id: 'forge' },
+  );
+  await emitFor(page, 'delivery.stage_changed', E0.delivery, { from: 'implement', to: 'review', stage_status: 'running' });
+  await expect(left.getByRole('button', { name: /^PR #13 / })).toBeVisible({ timeout: 15_000 });
+
+  // 4. CI 通过、review 通过；policy 发起 merge 审批，上报“需要你”，agent 发审批卡。
+  await mutate(page, 'deliveries', E0.delivery, {
+    stage: 'merge',
+    pr: {
+      ...pr,
+      checks: { passed: 3, failed: 0, pending: 0, required_ok: true },
+      mergeable_state: 'clean',
+      review_state: 'approved',
+      synced_at: later(ts, 120),
+    },
+  });
+  await emitFor(
+    page,
+    'forge.synced',
+    E0.delivery,
+    {
+      target: { type: 'pr', number: 13, node_id: 'PR_e2e00' },
+      source: 'webhook',
+      changes: [{ field: 'mergeable_state', from: 'blocked', to: 'clean' }],
+      synced_at: later(ts, 120),
+    },
+    { kind: 'forge', id: 'forge' },
+  );
+  await emitFor(page, 'delivery.stage_changed', E0.delivery, { from: 'review', to: 'merge', stage_status: 'waiting_human' });
+  const approval = {
+    id: E0.approval,
+    delivery_id: E0.delivery,
+    action: 'merge_pr',
+    target: { kind: 'pr', repo: 'acme/api', number: 13 },
+    subject_digest: E0.head,
+    device_id: null,
+    signature: null,
+    status: 'pending',
+    expires_at: later(ts, 86_400),
+    consumed_by: null,
+    created_at: later(ts, 130),
+    updated_at: later(ts, 130),
+  };
+  await control(page, '/mutate', { collection: 'approvals', push: approval });
+  await emitFor(page, 'approval.requested', E0.approval, {
+    action: 'merge_pr',
+    target: approval.target,
+    subject_digest: E0.head,
+    expires_at: approval.expires_at,
+    config_rev: 18238,
+    requested_by: engine,
+  });
+  const item = {
+    id: E0.inbox,
+    project_id: API,
+    delivery_id: E0.delivery,
+    kind: 'approval_needed',
+    severity: 'blocker',
+    summary: 'PR #13 可以合并，需要你的审批。',
+    payload: { approval_id: E0.approval },
+    status: 'open',
+    dedup_key: `approval:${E0.approval}`,
+    created_at: later(ts, 131),
+    updated_at: later(ts, 131),
+  } as unknown as InboxItem;
+  await raiseInbox(page, item);
+  await postServerMessage(
+    page,
+    mockMessage(61, {
+      conversation_id: E0.conversation,
+      text: 'PR #13 已就绪，合并前需要你的审批。',
+      delivery_id: E0.delivery,
+      cards: [{ kind: 'approval', approval_id: E0.approval }],
+    } as Partial<Message>),
+    API,
+  );
+  await expect(nav.getByRole('button', { name: /api/ }).getByLabel('需要你 1 项')).toBeVisible({ timeout: 15_000 });
+  await expect(left.getByText(/! 需要你/).first()).toBeVisible();
+
+  // 5. 在审批单签名。
+  await main.getByRole('button', { name: '审阅审批…' }).last().click();
+  const sheet = page.getByRole('dialog');
+  await expect(sheet.getByText(E0.head)).toBeVisible();
   await sheet.getByRole('button', { name: SIGN }).click({ timeout: 15_000 });
   await expect(sheet.getByRole('status').filter({ hasText: '已签名 · 等待合并' })).toBeVisible();
   await sheet.getByRole('button', { name: '关闭' }).click();
+  await expect(main.getByText('已签名 · 等待合并', { exact: true }).first()).toBeVisible();
 
-  // 4. Outbox 执行 merge：审批消费、PR 合并、审批上报项解决。
-  const pr = await currentPr(page);
-  const mergeSha = '1405df66cbe219b0bf6355bc3d60361a8376b6b4';
-  await mutate(page, 'approvals', APPROVAL, { status: 'consumed', consumed_by: 'act_merge' });
-  await emit(page, events.approvalConsumed('act_merge'));
-  await mutate(page, 'deliveries', DELIVERY, { stage: 'merge', pr: { ...pr, state: 'merged', synced_at: later(pr.synced_at, 300) } });
-  await emit(page, events.prMerged(mergeSha));
-  await mutate(page, 'inbox', APPROVAL_INBOX, { status: 'resolved' });
-  await emit(page, events.inboxResolved(APPROVAL_INBOX, 'approval_settled', { approval_id: APPROVAL }));
-  const main = page.getByRole('main');
-  await expect(main.getByText(`已合并 ${PR_HEAD.slice(0, 7)}`, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByRole('button', { name: '需要你 · 1', exact: true })).toBeVisible();
+  // 6. Outbox 执行 merge：审批被消费、PR 合并、上报项随审批了结。
+  await mutate(page, 'approvals', E0.approval, { status: 'consumed', consumed_by: 'act_merge' });
+  await emitFor(page, 'approval.consumed', E0.approval, {
+    approval_id: E0.approval,
+    consumed_by: 'act_merge',
+    subject_digest: E0.head,
+  });
+  await mutate(page, 'deliveries', E0.delivery, {
+    pr: { ...pr, state: 'merged', checks: { passed: 3, failed: 0, pending: 0, required_ok: true }, synced_at: later(ts, 300) },
+  });
+  await emitFor(
+    page,
+    'forge.pr_merged',
+    E0.delivery,
+    forgeData(
+      'pr_merged',
+      {
+        merge_commit_sha: E0.merge,
+        head_sha: E0.head,
+        base_ref: 'main',
+        merged_by: forgeActor,
+        via_merge_queue: false,
+        merge_method: 'squash',
+      },
+      { type: 'pr', number: 13 },
+    ),
+    { kind: 'forge', id: 'forge' },
+  );
+  await mutate(page, 'inbox', E0.inbox, { status: 'resolved' });
+  await emitFor(page, 'inbox.resolved', E0.inbox, {
+    inbox_id: E0.inbox,
+    resolution: 'approval_settled',
+    approval_id: E0.approval,
+  });
+  await expect(main.getByText(`已合并 ${E0.head.slice(0, 7)}`, { exact: true }).first()).toBeVisible({ timeout: 15_000 });
+  await expect(nav.getByRole('button', { name: /api/ }).getByLabel(/需要你/)).toHaveCount(0);
 
-  // 5. Issue 关闭，交付完成并移入“最近完成”。
-  await mutate(page, 'deliveries', DELIVERY, { stage: 'closed', stage_status: 'done' });
-  await emit(page, events.issueClosed(5));
-  await emit(page, events.stageChanged('merge', 'closed', 'done'));
+  // 7. Issue 关闭，交付完成并移入“最近完成”。
+  await mutate(page, 'deliveries', E0.delivery, { stage: 'closed', stage_status: 'done' });
+  await emitFor(
+    page,
+    'forge.issue_closed',
+    E0.delivery,
+    forgeData('issue_closed', { number: 7, state_reason: 'completed', closed_by: forgeActor, closed_via_pr: 13 }, { type: 'issue', number: 7 }),
+    { kind: 'forge', id: 'forge' },
+  );
+  await emitFor(page, 'delivery.stage_changed', E0.delivery, { from: 'merge', to: 'closed', stage_status: 'done' });
   await expect(main.getByText('Issue 已关闭 · 交付完成', { exact: true }).first()).toBeVisible({ timeout: 15_000 });
-  const done = page.getByRole('region', { name: '最近完成' });
-  await expect(done.getByRole('button', { name: /PR #12|#5/ }).first()).toBeVisible();
-  await expect(page.getByRole('region', { name: '进行中 PR' }).getByRole('button', { name: /^PR #12 / })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: '最近完成' }).getByRole('button', { name: /PR #13|#7/ }).first()).toBeVisible();
+  await expect(page.getByRole('region', { name: '进行中 PR' }).getByRole('button', { name: /^PR #13 / })).toHaveCount(0);
 });
 
 test('E2E-19：GitHub 上直接合并 → 事件行出现，上报项消失，审批卡显示最终状态', async ({ page }) => {
