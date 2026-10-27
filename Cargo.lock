@@ -829,6 +829,7 @@ dependencies = [
  "base64 0.22.1",
  "core-foundation",
  "core-foundation-sys",
+ "gantry-core",
  "getrandom 0.2.17",
  "objc2",
  "objc2-foundation",

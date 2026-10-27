@@ -37,7 +37,7 @@ use super::{marker, sanitize};
 /// `Closes #N` 的空间。
 const TITLE_MAX_CHARS: usize = 256;
 const BODY_MAX_CHARS: usize = 60_000;
-use crate::auth::{TokenProvider, TokenPurpose};
+use crate::auth::{AuthError, TokenProvider, TokenPurpose};
 use crate::config::{ForgeConfig, Permission, ProjectBinding};
 use crate::git::{ls_remote_sha, GitRunner};
 use crate::github::{ApiError, GithubClient, PullView};
@@ -328,6 +328,14 @@ impl Executor {
             .await
         {
             Ok(token) => token,
+            // 换令牌被限流：等到期再领取，不扣尝试次数（FA §10.3）。
+            Err(AuthError::RateLimited { retry_after }) => {
+                return Ok(Disposition::RateLimited {
+                    wait: retry_after
+                        .unwrap_or(self.opts.min_rate_limit_wait)
+                        .max(Duration::from_secs(1)),
+                })
+            }
             Err(error) => {
                 return Ok(Disposition::Retry {
                     detail: format!("token: {error}"),

@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use gantry_core::secret::SecretString;
@@ -38,12 +39,18 @@ pub(crate) struct GitRunner {
 
 impl GitRunner {
     pub fn new(timeout: Duration) -> std::io::Result<Self> {
+        // 同一进程里可能并行构造多个执行器：纳秒时间戳会撞名，一个 drop 时会删掉另一个的
+        // askpass。加进程内计数器保证唯一。
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
             .unwrap_or_default();
-        let root =
-            std::env::temp_dir().join(format!("gantry-forge-git-{}-{nonce:x}", std::process::id()));
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "gantry-forge-git-{}-{nonce:x}-{seq}",
+            std::process::id()
+        ));
         let home = root.join("home");
         std::fs::create_dir_all(&home)?;
         let askpass = root.join("askpass.sh");

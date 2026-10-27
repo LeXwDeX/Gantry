@@ -32,6 +32,11 @@ pub enum AuthError {
     Malformed,
     #[error("project not bound")]
     ProjectUnknown,
+    /// 换令牌被限流（403 / 429 + retry-after 等，FA §10.3）：调用方应等待，不扣尝试次数。
+    #[error("token endpoint rate limited")]
+    RateLimited {
+        retry_after: Option<std::time::Duration>,
+    },
 }
 
 #[async_trait]

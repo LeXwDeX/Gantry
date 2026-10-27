@@ -28,5 +28,18 @@ export default defineConfig({
       url: 'http://127.0.0.1:4174',
       reuseExistingServer: false,
     },
+    // 真实 API 模式：Mock API（8797）+ 场景控制（8798），再由 mock 模式的 Vite（4177）代理 /v1。
+    {
+      command: 'node scripts/mock-harness.mjs',
+      url: 'http://127.0.0.1:8797/v1/me',
+      env: { MOCK_PORT: '8797', MOCK_CONTROL_PORT: '8798', MOCK_SSE_HEARTBEAT_MS: '2000' },
+      reuseExistingServer: false,
+    },
+    {
+      command: 'npx vite --mode mock --host 127.0.0.1 --port 4177 --strictPort',
+      url: 'http://127.0.0.1:4177',
+      env: { MOCK_PORT: '8797' },
+      reuseExistingServer: false,
+    },
   ],
 });
