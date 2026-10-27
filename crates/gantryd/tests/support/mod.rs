@@ -153,7 +153,7 @@ async fn assemble_variant(
         .await
         .expect("release forge setup write lease");
     let repo = Arc::new(FakeRepo::new(now));
-    repo.set_ref(project_id(), "main", base);
+    repo.set_ref(project_id(), "refs/mirror/heads/main", base);
     let evented = Arc::new(EventedRepo::new(repo.clone(), store.clone()));
     let sandbox = Arc::new(GoldenSandbox::new(store.cas(), base, clock.clone()));
     let (policy, fake_policy, approvals): (Arc<dyn PolicyPort>, _, _) = if real_policy {

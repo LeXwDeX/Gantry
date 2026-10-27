@@ -857,7 +857,11 @@ impl World {
             .await
             .unwrap();
         let repo = Arc::new(FakeRepo::new(ts(T0)));
-        repo.set_ref(project_id(), "main", GitOid::parse(BASE).unwrap());
+        repo.set_ref(
+            project_id(),
+            "refs/mirror/heads/main",
+            GitOid::parse(BASE).unwrap(),
+        );
         let gate = Arc::new(Gate::default());
         let policy = Arc::new(FakePolicy::new_in(store.clone()));
         Self {
