@@ -9,3 +9,6 @@ description = "Gantry 策略与审计（M1：policy v0，内置规则、失败�
 [dependencies]
 gantry-core = { path = "../gantry-core" }
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
