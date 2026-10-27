@@ -285,7 +285,7 @@ fn heartbeat_and_usage_storm_stays_under_ten_lines_per_second() {
     // 10 秒的风暴：每类每秒至多一行。
     let seconds = 10;
     assert!(out.len() - 1 <= 2 * seconds, "{} lines", out.len());
-    assert!(out.len() - 1 >= seconds, "{} lines", out.len());
+    assert!(out.len() > seconds, "{} lines", out.len());
 }
 
 #[test]
