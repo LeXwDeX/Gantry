@@ -2,7 +2,8 @@
 //!
 //! - 同步部分（`post_user_message`）只校验 refs 并追加 `message.posted(user)`；
 //! - 异步部分由 [`Conversation::run_once`] 驱动：先消费 `project.added`（建对话），
-//!   再按 `seq` 依次处理用户消息。每条被消费事件的全部输出与 `advance_cursor`
+//!   再按 `seq` 依次处理用户消息，最后把引擎 / forge / policy 事件投影成事件行
+//!   （[`crate::rows`]）。每条被消费事件的全部输出与 `advance_cursor`
 //!   在同一个 `WriteTx` 里提交；崩溃后从游标重放，只会重复调用幂等接口。
 //!
 //! 调用对方（引擎 / 模型）发生在写事务之外，避免模型调用期间占住单写者。
@@ -39,10 +40,12 @@ use crate::ports::{DeliveryHandle, EngineApi, ModelsPort};
 use crate::projection::{self, ConversationLog};
 use crate::reply::{self, Reply};
 use crate::route::{resolve_cap, route, Cap, RouteCx, RouteDecision, UnsupportedReason};
+use crate::rows::{self, RowSpec, Snapshots};
 
 /// 消费者游标（store.md §6.1）。
 pub const CURSOR_PROJECTS: &str = "conv:projects";
 pub const CURSOR_USER_MESSAGES: &str = "conv:user_msgs";
+pub const CURSOR_EVENTS: &str = "conv:events";
 
 /// 交付单元标题截断（§10 `TITLE_MAX_CHARS`）。
 pub const TITLE_MAX_CHARS: usize = 80;
@@ -134,10 +137,11 @@ impl Conversation {
         self
     }
 
-    /// 处理游标之后的全部待办：先 `project.added`，再用户消息。返回处理条数。
+    /// 处理游标之后的全部待办：`project.added`、用户消息、事件行。返回处理条数。
     pub async fn run_once(&self) -> Result<usize, ProcessError> {
         let mut done = self.consume_projects().await?;
         done += self.consume_user_messages().await?;
+        done += self.consume_event_rows().await?;
         Ok(done)
     }
 
@@ -255,6 +259,106 @@ impl Conversation {
             self.commit(tx, CURSOR_USER_MESSAGES, event.seq).await?;
         }
         Ok(done)
+    }
+
+    // -----------------------------------------------------------------------
+    // 事件行（§7.7）
+    // -----------------------------------------------------------------------
+
+    async fn consume_event_rows(&self) -> Result<usize, ProcessError> {
+        let after = self.store.cursors().load(CURSOR_EVENTS).await?;
+        let head = self.store.events().head().await?;
+        let events = projection::scan(&self.store, None, rows::ROW_EVENT_TYPES, head).await?;
+        let mut done = 0;
+        for event in events.into_iter().filter(|event| event.seq > after) {
+            let row = self.row_for(&event).await?;
+            let mut tx = self.store.begin_write().await?;
+            if let Some((conversation, row)) = row {
+                self.append_row(&mut tx, &event, conversation, row).await?;
+            }
+            self.commit(tx, CURSOR_EVENTS, event.seq).await?;
+            done += 1;
+        }
+        Ok(done)
+    }
+
+    async fn row_for(
+        &self,
+        event: &Event<Value>,
+    ) -> Result<Option<(ConversationId, RowSpec)>, ProcessError> {
+        let Some(project) = event.project_id else {
+            return Ok(None);
+        };
+        let Some(conversation) =
+            projection::conversation_of_project(&self.store, &project, event.seq).await?
+        else {
+            return Ok(None);
+        };
+        let mut snap = Snapshots {
+            repo: projection::project_repo(&self.store, &project, event.seq).await?,
+            ..Snapshots::default()
+        };
+        match event.ty {
+            EventType::OutboxSucceeded | EventType::OutboxFailed => {
+                if let Ok(action) = event.subject.as_str().parse() {
+                    snap.outbox = self.store.snapshot().await?.outbox_action(&action);
+                }
+            }
+            EventType::ApprovalInvalidated
+            | EventType::ApprovalExpired
+            | EventType::ApprovalDenied => {
+                snap.approval = self
+                    .store
+                    .events()
+                    .by_subject(&event.subject)
+                    .await?
+                    .into_iter()
+                    .find(|past| past.ty == EventType::ApprovalRequested)
+                    .map(|past| past.data);
+            }
+            _ => {}
+        }
+        Ok(rows::render(event, &snap).map(|row| (conversation.id, row)))
+    }
+
+    async fn append_row(
+        &self,
+        tx: &mut WriteTx,
+        source: &Event<Value>,
+        conversation: ConversationId,
+        row: RowSpec,
+    ) -> Result<(), ProcessError> {
+        let id = self
+            .ids
+            .next::<Msg>()
+            .map_err(|error| ProcessError::Id(error.to_string()))?;
+        let now = tx.now();
+        let posted = Message {
+            id,
+            conversation_id: conversation,
+            role: MessageRole::Event,
+            agent_kind: None,
+            text: row.text,
+            tone: Some(row.tone),
+            level_cap: None,
+            refs: row.refs,
+            cards: Vec::new(),
+            delivery_id: row.delivery_id,
+            created_at: now,
+            updated_at: now,
+        };
+        tx.append(NewEvent {
+            ty: EventType::MessagePosted,
+            subject: subject(&conversation.to_string())?,
+            project_id: source.project_id,
+            actor: system_actor(),
+            causation_id: Some(source.id),
+            correlation_id: None,
+            data: to_value(&posted)?,
+            dedup_key: Some(format!("conv:row:{}", source.id)),
+        })
+        .await?;
+        Ok(())
     }
 
     async fn append_reply(
