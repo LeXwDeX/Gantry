@@ -279,12 +279,7 @@ fn check_refs_reports_missing(h: Box<dyn Harness>) {
 }
 
 /// 规格 §7.4：墓碑占用 `c + 1`，之后 `put` 从 `c + 2` 继续。
-///
-/// `gantry-fakes` 的 `MemorySecrets` 不为墓碑占号（删除 v2 后再写得 v3），
-/// 与规格不一致，所以这条只对文件实现断言精确值；两者共同保证的是"不回退"。
-#[test]
-fn file_tombstone_takes_its_own_version() {
-    let h = file();
+fn tombstone_takes_its_own_version(h: Box<dyn Harness>) {
     let s = h.sink(Consumer::Forge);
     let c = ctx();
     let n = name("k");
@@ -300,10 +295,48 @@ fn file_tombstone_takes_its_own_version() {
     );
 }
 
-/// `gantry-fakes` 自带的一致性用例（固化替身语义，含上面那处差异）只对替身跑。
-#[test]
-fn memory_passes_fakes_conformance() {
-    let h = memory();
+/// OQ-6 已决：空值 → `EmptyValue`，不留任何痕迹；任意二进制字节照常往返。
+fn empty_value_is_rejected(h: Box<dyn Harness>) {
+    let s = h.sink(Consumer::Forge);
+    let c = ctx();
+    let n = name("empty");
+    let empty = || SecretValue::from_bytes(Vec::new());
+    assert!(matches!(
+        s.put(&n, empty(), Expect::Any, &c),
+        Err(SecretsError::EmptyValue)
+    ));
+    assert!(matches!(
+        s.stage(&n, empty(), Expect::Any, &c),
+        Err(SecretsError::EmptyValue)
+    ));
+    assert!(!s.present(&n).unwrap());
+    assert!(s.staged().unwrap().is_empty());
+    s.put(&n, val("x"), Expect::Any, &c).unwrap();
+    assert!(matches!(
+        s.put(&n, empty(), Expect::Any, &c),
+        Err(SecretsError::EmptyValue)
+    ));
+    assert_eq!(s.version(&n).unwrap(), Some(v(1)));
+}
+
+fn binary_values_round_trip(h: Box<dyn Harness>) {
+    let s = h.sink(Consumer::Forge);
+    let binary: Vec<u8> = (0..=255).collect();
+    s.put(
+        &name("bin"),
+        SecretValue::from_bytes(binary.clone()),
+        Expect::Any,
+        &ctx(),
+    )
+    .unwrap();
+    assert_eq!(
+        s.get(&name("bin")).unwrap().unwrap().value.expose(),
+        &binary[..]
+    );
+}
+
+/// `gantry-fakes` 自带的一致性用例；两种实现都要通过。
+fn fakes_conformance(h: Box<dyn Harness>) {
     let s = h.sink(Consumer::Forge);
     secrets_conformance(&*s, &name("conformance"), &ctx()).unwrap();
 }
@@ -328,4 +361,8 @@ secrets_contract_tests!(
     namespaces_are_isolated,
     retains_two_versions,
     check_refs_reports_missing,
+    tombstone_takes_its_own_version,
+    empty_value_is_rejected,
+    binary_values_round_trip,
+    fakes_conformance,
 );
