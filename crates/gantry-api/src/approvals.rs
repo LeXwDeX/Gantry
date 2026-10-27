@@ -10,6 +10,7 @@ use gantry_core::entities::{
     Approval, ApprovalAction, ApprovalStatus, ApprovalTarget, Device, DevicePlatform, DeviceRole,
     DeviceStatus, Seq,
 };
+use gantry_core::events::{ApprovalDeniedData, EventData, Subject};
 use gantry_core::ids::{ApprovalId, DeliveryId, DeviceId};
 use gantry_core::ports::{ActorCtx, MismatchReason, PageQuery, PolicyError};
 use gantry_pki::admin::RevokeOutcome;
@@ -54,6 +55,23 @@ fn path_id<T: std::str::FromStr>(req: &HandlerRequest<'_>, name: &str) -> Result
 
 fn body(req: &HandlerRequest<'_>) -> Value {
     req.body.clone().unwrap_or(Value::Null)
+}
+
+/// 写响应的 `X-Event-Seq`：所属模块在自己的事务里追加事件，api 拿不到提交结果；
+/// 取该主体（审批 / 设备）最后一条事件的 `seq`，而不是提交后的全局 head——
+/// 否则并发写入时会指向别的请求的事件（api.md §3.6）。没有事件时退回 head。
+pub(crate) async fn subject_seq(core: &ApiCore, subject: &str) -> Result<Seq, Problem> {
+    let events = core.services().store.events();
+    if let Ok(subject) = Subject::parse(subject) {
+        let found = events
+            .by_subject(&subject)
+            .await
+            .map_err(|_| unavailable())?;
+        if let Some(last) = found.last() {
+            return Ok(last.seq);
+        }
+    }
+    events.head().await.map_err(|_| unavailable())
 }
 
 async fn head(core: &ApiCore) -> Result<Seq, Problem> {
@@ -312,6 +330,12 @@ pub async fn create(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, P
         }
     }
     let ctx = actor_ctx(req);
+    // 业务已提交、幂等完成记录丢失后的同键重试：按 dedup_key 找回首次创建的审批
+    // （本文 §7.6），而不是依赖"同主体仍 pending 才复用"。
+    if let Some(existing) = recover_by_dedup_key(core, &ctx).await? {
+        let seq = subject_seq(core, &existing.id.to_string()).await?;
+        return Ok(Reply::json(StatusCode::CREATED, to_json(&existing)?, seq));
+    }
     let approval = core
         .services()
         .approvals
@@ -325,8 +349,29 @@ pub async fn create(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, P
         )
         .await
         .map_err(policy_error)?;
-    let seq = head(core).await?;
+    let seq = subject_seq(core, &approval.id.to_string()).await?;
     Ok(Reply::json(StatusCode::CREATED, to_json(&approval)?, seq))
+}
+
+async fn recover_by_dedup_key(core: &ApiCore, ctx: &ActorCtx) -> Result<Option<Approval>, Problem> {
+    let Some(key) = &ctx.dedup_key else {
+        return Ok(None);
+    };
+    let events = core.services().store.events();
+    let Some(seq) = events.by_dedup_key(key).await.map_err(|_| unavailable())? else {
+        return Ok(None);
+    };
+    let Some(event) = events.get_by_seq(seq).await.map_err(|_| unavailable())? else {
+        return Ok(None);
+    };
+    let Ok(id) = event.subject.as_str().parse::<ApprovalId>() else {
+        return Ok(None);
+    };
+    core.services()
+        .approvals
+        .get(&id)
+        .await
+        .map_err(policy_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +431,7 @@ pub async fn grant(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Pr
         )
         .await
         .map_err(grant_error)?;
-    let seq = head(core).await?;
+    let seq = subject_seq(core, &approval.id.to_string()).await?;
     Ok(Reply::json(StatusCode::OK, to_json(&approval)?, seq))
 }
 
@@ -422,6 +467,18 @@ pub async fn deny(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Pro
     let raw = body(req);
     validate::body("ApprovalDenyRequest", &raw)?;
     let Deny { reason } = serde_json::from_value(raw).map_err(|_| Problem::internal())?;
+    // 备注进 approval.denied 事件，按纯文本约束（无控制字符、无双向覆盖符）在边界校验，
+    // 确定性的输入错误是 422，不能落成存储层的 503。
+    let data = ApprovalDeniedData {
+        reason: reason.clone(),
+    };
+    if data.validate().is_err() {
+        return Err(Problem::validation(vec![crate::problem::FieldError::new(
+            "/reason",
+            "type",
+            "text contains characters that are not allowed",
+        )]));
+    }
     let id: ApprovalId = path_id(req, "approval_id")?;
     let key = device_key(core, req).await?;
     let approval = core
@@ -430,7 +487,7 @@ pub async fn deny(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Pro
         .deny(&id, &key, reason, &actor_ctx(req))
         .await
         .map_err(grant_error)?;
-    let seq = head(core).await?;
+    let seq = subject_seq(core, &approval.id.to_string()).await?;
     Ok(Reply::json(StatusCode::OK, to_json(&approval)?, seq))
 }
 
@@ -485,7 +542,7 @@ async fn target_device(core: &ApiCore, id: &DeviceId) -> Result<Device, Problem>
 }
 
 /// 同一写事务：`policy.consume_internal` → `write`（pki）→ 提交；任一失败整体回滚，
-/// 审批保持 `granted`（api.md §6.6）。
+/// 审批保持 `granted`（api.md §6.6）。返回业务结果与本事务最后一个事件的 `seq`。
 async fn consume_and_write<T, F>(
     core: &ApiCore,
     req: &HandlerRequest<'_>,
@@ -494,7 +551,7 @@ async fn consume_and_write<T, F>(
     target: ApprovalTarget,
     raw: &Value,
     write: F,
-) -> Result<T, Problem>
+) -> Result<(T, Seq), Problem>
 where
     F: for<'t> FnOnce(
         &'t mut gantry_store::WriteTx,
@@ -526,8 +583,9 @@ where
     }
     match write(&mut tx).await {
         Ok(value) => {
-            tx.commit().await.map_err(|_| unavailable())?;
-            Ok(value)
+            let committed = tx.commit().await.map_err(|_| unavailable())?;
+            let seq = Seq::from_wire(committed.last_seq).map_err(|_| Problem::internal())?;
+            Ok((value, seq))
         }
         Err(problem) => {
             let _ = tx.rollback().await;
@@ -566,7 +624,7 @@ pub async fn set_role(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply,
     };
     let admin = core.services().admin.clone();
     let actor = actor_ctx(req).actor;
-    let device = consume_and_write(
+    let (device, seq) = consume_and_write(
         core,
         req,
         approval_id,
@@ -583,7 +641,6 @@ pub async fn set_role(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply,
         },
     )
     .await?;
-    let seq = head(core).await?;
     Ok(Reply::json(StatusCode::OK, device_view(&device), seq))
 }
 
@@ -608,7 +665,7 @@ pub async fn revoke(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, P
     };
     let admin = core.services().admin.clone();
     let actor = actor_ctx(req).actor;
-    let outcome = consume_and_write(
+    let (outcome, seq) = consume_and_write(
         core,
         req,
         approval_id,
@@ -623,6 +680,5 @@ pub async fn revoke(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, P
     let device = match outcome {
         RevokeOutcome::Revoked(d) | RevokeOutcome::AlreadyRevoked(d) => d,
     };
-    let seq = head(core).await?;
     Ok(Reply::json(StatusCode::OK, device_view(&device), seq))
 }
