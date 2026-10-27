@@ -705,6 +705,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gantry-worker"
+version = "0.1.0"
+dependencies = [
+ "gantry-core",
+ "gantry-sandbox",
+ "serde_json",
+]
+
+[[package]]
 name = "gantry-xtask"
 version = "0.1.0"
 dependencies = [
