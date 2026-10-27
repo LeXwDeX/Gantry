@@ -49,6 +49,7 @@ pub struct Shell {
     conn: Mutex<ConnState>,
     stream: Mutex<Option<StreamHandle>>,
     events_config: EventsConfig,
+    guarded: crate::guarded::GuardedWrites,
 }
 
 impl Shell {
@@ -69,7 +70,32 @@ impl Shell {
             conn: Mutex::new(ConnState::default()),
             stream: Mutex::new(None),
             events_config: EventsConfig::default(),
+            guarded: Default::default(),
         }
+    }
+
+    pub(crate) fn guarded(&self) -> &crate::guarded::GuardedWrites {
+        &self.guarded
+    }
+
+    pub(crate) fn phase(&self) -> Phase {
+        self.conn.lock().unwrap().phase
+    }
+
+    pub(crate) fn server_now_ms_pub(&self) -> i64 {
+        self.server_now_ms()
+    }
+
+    pub(crate) async fn me_pub(&self, c: &Connected) -> Result<Value, ShellError> {
+        self.me(c).await
+    }
+
+    pub(crate) async fn get_json_pub(
+        &self,
+        c: &Connected,
+        path: &str,
+    ) -> Result<(u16, Value), ShellError> {
+        self.get_json(c, path).await
     }
 
     /// 测试用：缩短空闲判定与退避。
@@ -262,6 +288,7 @@ impl Shell {
         self.store.delete_identity()?;
         self.store.ui_state_clear()?;
         self.signer.clear();
+        self.guarded.clear();
         *self.connected.write().unwrap() = None;
         self.stream.lock().unwrap().take();
         *self.conn.lock().unwrap() = ConnState::default();
@@ -293,6 +320,7 @@ impl Shell {
         }
         if changed {
             self.signer.clear();
+            self.guarded.clear();
         }
         Ok(changed)
     }
@@ -391,6 +419,7 @@ impl Shell {
             let _ = self.store.save_identity(&identity);
         }
         self.signer.clear();
+        self.guarded.clear();
         *self.connected.write().unwrap() = None;
         self.set_phase(Phase::Revoked, sink);
     }

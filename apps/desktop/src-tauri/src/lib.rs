@@ -153,34 +153,38 @@ fn approval_discard(shell: State<'_, Arc<Shell>>, prepared_id: String) -> CmdRes
     Ok(())
 }
 
-/// `kind` 决定哪些参数必带（§7.4.2）；严格校验放在 shell-core，骨架阶段尚未接上。
-#[allow(clippy::too_many_arguments)]
+/// `kind` 决定哪些参数必带（§7.4.2）；按 `kind` 严格解析，多余参数一律拒绝（shell-core `guarded`）。
 #[tauri::command(rename_all = "snake_case")]
-fn guarded_write_prepare(
-    kind: String,
-    scope: Option<String>,
-    project_id: Option<String>,
-    resource: Option<String>,
-    value: Option<Value>,
-    if_match: Option<String>,
-    device_id: Option<String>,
-    role: Option<String>,
+async fn guarded_write_prepare(
+    shell: State<'_, Arc<Shell>>,
+    request: tauri::ipc::Request<'_>,
 ) -> CmdResult<Value> {
-    let _ = (
-        kind, scope, project_id, resource, value, if_match, device_id, role,
-    );
-    Err(ShellError::not_paired())
+    let tauri::ipc::InvokeBody::Json(args) = request.body() else {
+        return Err(ShellError::bad_argument("args"));
+    };
+    shell.guarded_write_prepare(args).await
+}
+
+/// 只接受句柄：请求体由外壳持有，UI 无法在 prepare 之后替换（S-3）。
+#[tauri::command(rename_all = "snake_case")]
+async fn guarded_write_submit(
+    shell: State<'_, Arc<Shell>>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<Value> {
+    let tauri::ipc::InvokeBody::Json(args) = request.body() else {
+        return Err(ShellError::bad_argument("args"));
+    };
+    approval::exact_args(args, &["pending_id"])?;
+    let pending_id = args["pending_id"]
+        .as_str()
+        .ok_or_else(|| ShellError::bad_argument("pending_id"))?
+        .to_string();
+    shell.guarded_write_submit(&pending_id).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn guarded_write_submit(pending_id: String) -> CmdResult<Value> {
-    let _ = pending_id;
-    Err(ShellError::not_paired())
-}
-
-#[tauri::command(rename_all = "snake_case")]
-fn guarded_write_discard(pending_id: String) -> CmdResult<()> {
-    let _ = pending_id;
+fn guarded_write_discard(shell: State<'_, Arc<Shell>>, pending_id: String) -> CmdResult<()> {
+    shell.guarded_write_discard(&pending_id);
     Ok(())
 }
 
