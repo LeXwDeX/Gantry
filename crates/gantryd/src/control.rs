@@ -279,10 +279,12 @@ impl Control {
             Ok(head) => head.as_u64(),
             Err(error) => return Response::err("store", error.to_string()),
         };
+        let degraded = self.assembly.engine.degraded().await;
         Response::ok(json!({
             "profile": self.assembly.profile,
             "head_seq": head,
             "modules": self.assembly.modules,
+            "engine": { "degraded": degraded },
         }))
     }
 }

@@ -13,12 +13,30 @@ use gantry_store::EventFilter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use gantry_core::canon::{sha256, GitOid, SubjectDigest};
+use gantry_core::entities::{
+    ApprovalAction, ApprovalStatus, ForgeActionKind, GithubPrRef, GithubRef, PolicyActionId, Seq,
+    Stage,
+};
+use gantry_core::events::{ApprovalGrantedData, EventType, NewEvent, Subject};
+use gantry_core::ids::ApprovalId;
+use gantry_core::ports::policy::{ActionDecision, ApprovalSpec};
+use gantry_engine::decide::{Input, InputIdentity, TickReason};
+use gantry_engine::engine::load_delivery_state;
+use gantry_fakes::policy::FakePolicy;
+use gantry_store::ClaimOpts;
+
+use super::engine_cfg;
 
 use gantry_core::ids::{Clock, Entropy};
-use gantry_deploy::manifest::Stage;
+use gantry_deploy::manifest::Stage as ManifestStage;
 use gantryd::assembly::{OsEntropy, SystemClock};
 
+use super::FakeHandles;
 use gantryd::assembly::Assembly;
 use gantryd::control::{CommandSet, Response};
 
@@ -27,7 +45,9 @@ const FAKE_ACTOR: &str = "gantryd_fake";
 
 pub struct FakeCommands {
     pub assembly: Arc<Assembly>,
+    fakes: FakeHandles,
     setup: Mutex<SetupState>,
+    drive: Mutex<DriveState>,
 }
 
 /// `github.setup.*` 与 `settings.bootstrap_set` 的替身状态（deploy/README.md
@@ -41,10 +61,12 @@ struct SetupState {
 }
 
 impl FakeCommands {
-    pub fn new(assembly: Arc<Assembly>) -> Self {
+    pub fn new(assembly: Arc<Assembly>, fakes: FakeHandles) -> Self {
         Self {
             assembly,
+            fakes,
             setup: Mutex::new(SetupState::default()),
+            drive: Mutex::new(DriveState::default()),
         }
     }
 
@@ -99,7 +121,7 @@ impl FakeCommands {
         if *polls == 1 {
             return Response::ok(json!({ "status": "pending" }));
         }
-        let permissions: serde_json::Map<String, Value> = Stage::M1
+        let permissions: serde_json::Map<String, Value> = ManifestStage::M1
             .permissions()
             .into_iter()
             .map(|(key, level)| (key.to_owned(), Value::from(level)))
@@ -111,7 +133,7 @@ impl FakeCommands {
                 "slug": "gantry-test",
                 "html_url": "https://github.com/apps/gantry-test",
                 "permissions": permissions,
-                "events": Stage::M1.events(),
+                "events": ManifestStage::M1.events(),
             },
         }))
     }
@@ -146,6 +168,7 @@ impl CommandSet for FakeCommands {
         Some(match cmd {
             "fake.create_delivery" => create_delivery(&self.assembly, args).await,
             "fake.events" => events(&self.assembly, args).await,
+            "fake.drive" => self.drive(args).await,
             "fake.end_bootstrap" => {
                 self.setup().bootstrap_over = true;
                 Response::ok(json!({}))
@@ -198,7 +221,7 @@ async fn create_delivery(assembly: &Assembly, args: Value) -> Response {
         config_rev,
         actor: Actor::new(ActorKind::System, FAKE_ACTOR),
     };
-    match assembly.engine.create_delivery(delivery).await {
+    match assembly.engine.engine().create_delivery(delivery).await {
         Ok(id) => Response::ok(json!({ "delivery_id": DeliveryId::to_string(&id) })),
         Err(error) => Response::err("engine", error.to_string()),
     }
@@ -232,5 +255,211 @@ async fn events(assembly: &Assembly, args: Value) -> Response {
             "events": page.events,
         })),
         Err(error) => Response::err("store", error.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fake.drive：扮演 forge 执行器、GitHub 与审批设备（engine.md §12.2「端到端（替身）」）
+// ---------------------------------------------------------------------------
+
+/// 跨多次 `fake.drive` 调用保留的驱动状态（单个交付单元）。
+#[derive(Default)]
+struct DriveState {
+    merged: bool,
+    granted: Option<ApprovalId>,
+}
+
+impl FakeCommands {
+    /// 推进一步，返回当前阶段：
+    /// 1. 补丁提交后，按审批状态给 `merge_pr` 脚本化 policy 的判定；
+    /// 2. 认领并完成排队的 Outbox 动作（`create_pr` 绑定 PR [`PR_NUMBER`]）；
+    /// 3. 有待决审批时以设备身份授予；
+    /// 4. 有 PR 后写入 PR 快照（合并后为 `merged`），并给执行体一个 `Tick(Settle)`。
+    ///
+    /// 引擎本身只经端口与事件被驱动，这里不调用执行体的内部入口。
+    async fn drive(&self, args: Value) -> Response {
+        let delivery: DeliveryId = match args
+            .get("delivery_id")
+            .and_then(Value::as_str)
+            .map(str::parse)
+        {
+            Some(Ok(id)) => id,
+            _ => return Response::err("bad_request", "expected {delivery_id}"),
+        };
+        let store = &self.fakes.store;
+        let head = self
+            .fakes
+            .sandbox
+            .jobs()
+            .iter()
+            .find_map(|job| self.fakes.repo.commit_record(job))
+            .map(|record| record.commit_oid);
+        let granted = self.drive_state().granted;
+        if let Some(head) = head {
+            script_merge(&self.fakes.policy, delivery, head, granted);
+        }
+        let done = match execute_outbox(store, head).await {
+            Ok(done) => done,
+            Err(error) => return Response::err("store", error),
+        };
+        if done.contains(&ForgeActionKind::MergePr) {
+            self.drive_state().merged = true;
+        }
+        let state = match load_delivery_state(store, &delivery).await {
+            Ok(Some(state)) => state,
+            Ok(None) => return Response::err("not_found", "no such delivery"),
+            Err(error) => return Response::err("engine", error.to_string()),
+        };
+        if state.delivery.stage == Stage::Closed && state.worktree.is_none() {
+            return Response::ok(json!({ "stage": state.delivery.stage, "done": true }));
+        }
+        if granted.is_none() {
+            let pending = state
+                .approvals
+                .iter()
+                .find(|(_, approval)| approval.status == ApprovalStatus::Pending)
+                .map(|(id, _)| *id);
+            if let (Some(id), Some(head)) = (pending, head) {
+                script_merge(&self.fakes.policy, delivery, head, Some(id));
+                if let Err(error) = self.grant(delivery, id).await {
+                    return Response::err("policy", error);
+                }
+                self.drive_state().granted = Some(id);
+            }
+        }
+        if let (Some(_), Some(head)) = (&state.pr, head) {
+            let merged = self.drive_state().merged;
+            let pr = engine_cfg::snapshot(if merged { "merged" } else { "open" }, head);
+            *self
+                .fakes
+                .snapshots
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pr);
+            // 生产里快照变化随 forge.* 事件路由进来；替身直接投一个 Settle。
+            (self.assembly.engine.mailbox())(
+                delivery,
+                Input::Tick(TickReason::Settle),
+                InputIdentity::Tick(TickReason::Settle),
+            );
+        }
+        Response::ok(json!({ "stage": state.delivery.stage, "done": false }))
+    }
+
+    fn drive_state(&self) -> std::sync::MutexGuard<'_, DriveState> {
+        self.drive
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 设备签名授予：policy 状态置 granted，并写 `approval.granted`（生产里由 policy 在同一事务写）。
+    async fn grant(&self, delivery: DeliveryId, id: ApprovalId) -> Result<(), String> {
+        self.fakes
+            .policy
+            .grant(&id)
+            .map_err(|error| error.to_string())?;
+        let digest = sha256(b"approval");
+        let data = ApprovalGrantedData {
+            approval_id: id,
+            device_id: "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().expect("fixture"),
+            approval_pubkey_fpr: digest,
+            payload_sha256: digest,
+        };
+        let event = NewEvent {
+            ty: EventType::ApprovalGranted,
+            subject: Subject::parse(&id.to_string()).map_err(|error| error.to_string())?,
+            project_id: Some(super::project_id()),
+            actor: Actor::new(ActorKind::System, "policy"),
+            causation_id: None,
+            correlation_id: Some(delivery.to_string()),
+            data: serde_json::to_value(data).map_err(|error| error.to_string())?,
+            dedup_key: None,
+        };
+        event.validate().map_err(|error| error.to_string())?;
+        let store = &self.fakes.store;
+        let mut tx = store
+            .begin_write()
+            .await
+            .map_err(|error| error.to_string())?;
+        tx.append(event).await.map_err(|error| error.to_string())?;
+        tx.commit().await.map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
+
+/// merge_pr 需要审批（I8）：未授予时 `NeedsApproval`，授予后 `Allow` 带审批 ID。
+fn script_merge(
+    policy: &FakePolicy,
+    delivery: DeliveryId,
+    head: GitOid,
+    granted: Option<ApprovalId>,
+) {
+    let config_rev = Seq::new(1).expect("seq 1");
+    let decision = match granted {
+        None => ActionDecision::NeedsApproval {
+            spec: ApprovalSpec {
+                action: ApprovalAction::Forge(ForgeActionKind::MergePr),
+                target: serde_json::from_value(json!({
+                    "kind": "pr", "repo": "acme/web", "number": engine_cfg::PR_NUMBER,
+                }))
+                .expect("fixture"),
+                subject_digest: SubjectDigest::git(head),
+                delivery_id: Some(delivery),
+                ttl: Duration::from_secs(3600),
+            },
+            pending: None,
+            config_rev,
+        },
+        Some(id) => ActionDecision::Allow {
+            action_id: PolicyActionId::from(ForgeActionKind::MergePr),
+            approval: Some(id),
+            config_rev,
+        },
+    };
+    policy.script_decision(ForgeActionKind::MergePr, decision);
+}
+
+/// 扮演 forge 执行器：认领并完成全部排队动作，返回完成的动作种类。
+async fn execute_outbox(
+    store: &gantry_store::Store,
+    head: Option<GitOid>,
+) -> Result<Vec<ForgeActionKind>, String> {
+    let text = |error: gantry_store::StoreError| error.to_string();
+    let mut done = Vec::new();
+    loop {
+        let mut tx = store.begin_write().await.map_err(text)?;
+        let claimed = tx
+            .outbox()
+            .claim(ClaimOpts {
+                lease: Duration::from_secs(60),
+                exclude_deliveries: BTreeSet::new(),
+            })
+            .await
+            .map_err(text)?;
+        let Some(claimed) = claimed else {
+            tx.rollback().await.map_err(text)?;
+            return Ok(done);
+        };
+        let action = claimed.action;
+        let pr = match (action.kind, head) {
+            (ForgeActionKind::CreatePr, Some(head)) => Some(GithubPrRef {
+                number: engine_cfg::PR_NUMBER,
+                node_id: "PR_x".into(),
+                head_sha: head,
+            }),
+            _ => None,
+        };
+        let github_ref = GithubRef {
+            bot: None,
+            pr,
+            marker: None,
+            recorded_at: None,
+        };
+        tx.outbox()
+            .complete(&action.id, github_ref)
+            .await
+            .map_err(text)?;
+        tx.commit().await.map_err(text)?;
+        done.push(action.kind);
     }
 }
