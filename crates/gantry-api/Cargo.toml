@@ -1,0 +1,23 @@
+[package]
+name = "gantry-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry API 网关（api.md）：设备鉴权、路由注册表、统一错误、事件流与签名审批的 HTTP 外壳"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+async-trait.workspace = true
+bytes = "1"
+http = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
+jsonschema = { version = "0.59", default-features = false }
+tokio.workspace = true

@@ -963,6 +963,7 @@ pub struct FindingFingerprint(Sha256Digest);
 | 字段 | 类型 | 来源 |
 | --- | --- | --- |
 | `title` | `String` | `delivery.created` |
+| `user_text` | `String` | `delivery.created.user_text`：组装 `AttemptPlan.instructions` 的用户原文（可信，§6；#70 B） |
 | `abandon_cause` | `Option<AbandonCause>` | `delivery.abandoned.reason`：`pr_closed` → `PrClosedUnmerged`，`issue_not_planned` → `IssueNotPlanned`，其余 → `UserAbandoned`；T15 只认 `PrClosedUnmerged`（core `next_stage_with_abandon`） |
 | `stage_entered` | `(Seq, Timestamp, Option<String>)` | 最近一次 `delivery.stage_changed`（或 `delivery.created`）的 `seq`、`ts` 与 `reason`；"本阶段内"类前置条件都以它为界 |
 | `pr_snapshot` | `Option<PullRequestRef>` | **只读，不由引擎折叠**：加载 `DeliveryState` 时从 `store` 的 GitHub 快照投影读取（#150；加载归 #71）。T8 的 `head_sha`、T10 的 `checks.required_ok` 与 PR 是否 open、合并入队的 `mergeable_state` 都读它。`decide` 的测试直接构造 |
@@ -1200,7 +1201,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 
 | 事件 | 最小字段 |
 | --- | --- |
-| `delivery.created` | `title`、`level_cap`、`level_effective`、`origin`、`source_message_id`、`issues[]`、`budget = {template, limits}`、`config_rev` |
+| `delivery.created` | `title`、`level_cap`、`level_effective`、`origin`、`source_message_id`、`user_text`（`CreateDelivery.user_text` 原文，可信，≤ 16384 字符；重放时重建 `instructions`，#70 B）、`issues[]`、`budget = {template, limits}`、`config_rev` |
 | `delivery.stage_changed` | `from`、`to`、`reason`、`stage_status` |
 | `delivery.level_changed` | `from`、`to`、`kind`（`cap` / `effective`）、`reason`（`user` / `initial_risk` / `escalation:<rule_id>`）。`kind = effective` 只升（P-57，`core` 校验拒绝 `to < from`）。`kind = cap` 可升可降；应用时 `level_effective` 派生为 min(当前 `level_effective`, `to`)——这是用户压低上限时 `level_effective` 随之下调（api.md §4.4 PATCH、P-82）的**唯一**表达，不另写 `effective` 下降事件；所有投影（`store`、引擎、客户端）必须按同一规则派生（#48） |
 | `delivery.paused` / `delivery.resumed` | `by`、`status_before`（paused）/ `status_after`（resumed）（P-56） |

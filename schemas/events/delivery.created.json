@@ -25,6 +25,11 @@
       ],
       "default": null
     },
+    "user_text": {
+      "type": "string",
+      "description": "`CreateDelivery.user_text`：用户亲手输入的原文，可信，`task.instructions` 唯一的文字来源\n（engine.md §6、§7.8；worker-protocol W5）。落盘是为了重放时重建同一份 `instructions`（#70 B）。\n长度上限沿用 api 消息正文（≤ 16384 字符，api.md §5）。",
+      "maxLength": 16384
+    },
     "issues": {
       "type": "array",
       "items": {
@@ -43,6 +48,7 @@
     "level_cap",
     "level_effective",
     "origin",
+    "user_text",
     "issues",
     "budget",
     "config_rev"
