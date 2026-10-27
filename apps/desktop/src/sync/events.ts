@@ -75,6 +75,7 @@ const KNOWN_TYPES = new Set<string>([
   "forge.drift_detected",
   "budget.charged",
   "budget.exhausted",
+  "budget.limit_raised",
   "policy.denied",
   "device.paired",
   "device.updated",

@@ -180,7 +180,7 @@ erDiagram
 | `decision_needed` | `kind = review_dispute`，`reason_code` ∈ `guardian.human_feedback` / `guardian.scope_expanding_fix` / `guardian.design_or_api_change` | `fix`（**primary**）/ `keep` | `guardian` | `fix`：交回前台改代码（`review → implement`，[engine §7.6](modules/engine.md#76-阶段推进条件) T9）；`keep`：保持现状，只关闭该项 |
 | `decision_needed` | `kind = other`，`reason_code` ∈ `github_state_changed` / `approval_denied` [提议，裁决未覆盖] | `continue` / `abandon` | `engine` | `continue`：解除阻塞并重新求值；`abandon`：放弃 |
 | `spec_needed` | — | 无（自由文本答复，走发消息） | `engine` | `conversation` 调 `supply_spec` 后关闭该项 |
-| `budget_exhausted` | — | `raise_cap`（仅桌面，D-19）/ `abandon` | `engine`、`guardian`（T-07 补写） | `raise_cap`：按 D-19 追加额度后继续；`abandon`：放弃 |
+| `budget_exhausted` | — | `raise_cap`（仅桌面，D-19）/ `abandon` | `engine`、`guardian`（T-07 补写） | `raise_cap`：按 D-19 给耗尽维度追加一份该档模板原值，写 `budget.limit_raised`（`{dimension, from, to, by}`），然后继续；`abandon`：放弃 |
 | `approval_needed` | — | 无（只能经审批路由处理，`choose` 返回 `409`） | `engine` / `guardian` | — |
 | `security_finding` | — | 无 | `guardian` | — |
 | `escalation` | `outbox_failed:<code>`（Outbox 动作终态失败，`payload.action_id` 为该动作；`<code>` 取 forge-actions 的失败码，映射见 [engine §9](modules/engine.md#9-错误与恢复)） | `retry`（**primary**）/ `abandon`（#67） | `engine` | `retry`：对 `action_id` 那个动作的期望意图以 `epoch + 1` 重新判定并入队（新幂等键）；需要审批的动作同时需要新审批（P-54），已消费的旧审批不复用；意图已不在当前阶段的期望动作集合里时不入队，只关闭该项；`abandon`：放弃 |
@@ -378,9 +378,10 @@ stateDiagram-v2
 | `forge.synced` | 对账得到的 GitHub 交付事实变化 |
 | `forge.drift_detected` | 本地预期与 GitHub 不一致 |
 | `budget.charged` / `budget.exhausted` | 预算（交付台账或会话台账；`data.subject` 区分） |
+| `budget.limit_raised` | 用户对 `budget_exhausted` 选 `raise_cap` 后，引擎给耗尽维度追加一份该档模板原值：`{dimension, from, to, by}`，`to = from + by`，`by > 0`（decisions D-19，#129） |
 | `policy.denied` | `policy` 的规则判定为拒绝（路径规则、大小上限、敏感文件、动作处置）；机械拒绝不发此事件，只发 `patch.rejected`（P-69） |
 | `device.paired` / `device.updated` / `device.revoked` | 设备（`device.updated`：改名、改角色、续期换证）。注册推送令牌（`PUT /v1/devices/self/push-token`，P-77）不产生事件，令牌不进事件日志 |
 
 每个事件 `data` 的 JSON Schema 放在 `schemas/events/<type>.json`（M0 产出）。
 
-其中 `attempt.progress`、`guardian.*` 三事件、`approval.*` 三事件、`outbox.*` 三事件、`forge.synced`、`budget.charged`、`policy.denied` 共 13 个事件的 `data` 字段见 [event-data.md](interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））；`forge.drift_detected` 由独立 drift 契约定义。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。
+其中 `attempt.progress`、`guardian.*` 三事件、`approval.*` 三事件、`outbox.*` 三事件、`forge.synced`、`budget.charged`、`policy.denied` 共 13 个事件，以及增补的 `budget.limit_raised`（#129）的 `data` 字段见 [event-data.md](interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））；`forge.drift_detected` 由独立 drift 契约定义。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。

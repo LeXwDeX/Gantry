@@ -94,7 +94,8 @@ impl Router {
             | T::DeliveryPaused
             | T::DeliveryResumed
             | T::BudgetCharged
-            | T::BudgetExhausted => fold_only(subject(event)),
+            | T::BudgetExhausted
+            | T::BudgetLimitRaised => fold_only(subject(event)),
             T::WorkflowCreated => {
                 let data: WorkflowCreatedData = decode(event)?;
                 let owner = data.delivery_id;
