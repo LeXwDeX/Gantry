@@ -15,6 +15,21 @@ npm run dev
 
 URL 的 `scenario` 参数选择初始场景：`default`、`offline`、`viewer`、`operator`、`unpaired`、`revoked`、`expired`、`unsafe`、`error`、`stale`。默认是 `default`。
 
+### 真实 API 模式（Mock）
+
+`dev:mock` 让浏览器经 `MockIpcAdapter` 直连 [`tools/mock-api`](../../tools/mock-api)。界面走与正式外壳相同的 `IpcAdapter` 接口和 HTTP / SSE 契约，不显示“示例数据”标记。
+
+```sh
+npm ci --prefix ../../tools/mock-api
+node scripts/mock-harness.mjs          # Mock API 监听 8787，场景控制监听 8788
+npm run dev:mock                       # 另开终端；/v1 经 Vite 代理转发到 MOCK_PORT（默认 8787）
+```
+
+- `?paired=0` 从未配对状态启动，用于走配对向导。
+- `MockIpcAdapter` 模拟外壳的可见行为：路由白名单、`ApprovalSheetModel`、`approval_sign` 只收 `preparedId`、受保护写入的签名链、游标续流与 `log_epoch` 重同步。它**不持有任何密钥**，签名是随机占位串，只用来推动 Mock 的 grant 状态机。
+- `window.__GANTRY_MOCK__` 只在 mock 构建中安装，供 e2e 模拟断网、断流、吊销、吞掉写响应，并读取 IPC 录制。
+- `scripts/mock-harness.mjs` 是测试侧的场景控制，提供新建实例、注入事件、断流、改状态和请求日志。Mock 自身缺这些能力（[#224](https://github.com/LeXwDeX/Gantry/issues/224)），Mock 补上后删除。
+
 ## 可操作流程
 
 工作区顶部始终显示“示例数据”。对话上方的“开发场景”工具区可以折叠，所有按钮只修改当前页面内存。
@@ -44,7 +59,8 @@ npm run test:e2e
 - `lint` 是静态边界检查，包含规则自检；不是安全沙盒，不能替代原生 CSP、命令白名单或签名校验。
 - `build` 输出正式前端资源到 `dist/`。普通浏览器打开时应显示外壳不可用，不回落示例。
 - `build:scenario` 输出独立演示资源到 `dist-scenario/`，不作为正式包分发。
-- `test:e2e` 需要先完成 `build`，启动 `4173`（dev scenario）和 `4174`（正式产物预览），在 1440×900 与 390×844 两种窗口执行。报告位于 `playwright-report/`，截图和追踪位于 `test-results/`。
+- `test:e2e` 需要先完成 `build`，启动 `4173`（dev scenario）、`4174`（正式产物预览）、`4177`（dev mock）以及 mock-harness（Mock API `8797`、场景控制 `8798`），在 1440×900 与 390×844 两种窗口执行。`e2e/mock-api.spec.ts` 的所有用例共享一个 Mock 实例，所以串行执行、每例前重置，并且只在 1440×900 下跑。报告位于 `playwright-report/`，截图和追踪位于 `test-results/`。
+- `npm test` 的 `pretest` 会在 `tools/mock-api` 缺依赖时执行一次 `npm ci`：共用组件测试（`tests/unit/shared-modes.test.tsx`）在场景模式和 Mock 模式下各跑一遍，Mock 实例由 `tests/unit/globalSetup.ts` 启动的 mock-harness 提供。
 - 字体随包提供 Inter、JetBrains Mono 和 Noto Sans SC 中文回退；构建输出 `FONT-LICENSES.txt`，无远程字体请求。
 
 ## 数据与安全边界
@@ -52,10 +68,11 @@ npm run test:e2e
 ```text
 React 组件 → DesktopController / IpcAdapter → Tauri 外壳 → 服务端
                                           ↘ 显式开发场景替身（仅 scenario 构建）
+                                          ↘ Mock API 外壳替身（仅 mock 构建）→ Vite 代理 → tools/mock-api
 ```
 
 - 正式实体（Message、Card、EventEnvelope、Attempt、Workflow、配置文档）通过 `IpcAdapter` 读取。工具活动、公开执行摘要和分段生成只存在于 `src/demo/types.ts` 定义的演示视图模型，不加入正式协议。
-- 组件不读取 fixture，不直接联网；场景事实由 `ScenarioIpcAdapter.simulation` 统一提供，各视图共享同一份内存状态。
+- 组件不读取 fixture，不直接联网。只有 `src/ipc/mock/` 可以调用 `fetch`（lint 强制），而且它不进入正式包：工厂按构建 mode 静态折叠，`dist/assets/*.js` 中不含 mock 适配器。场景事实由 `ScenarioIpcAdapter.simulation` 统一提供，各视图共享同一份内存状态。
 - “模拟批准”“模拟拒绝”“模拟配对”“模拟应用设置”只修改开发场景内存，不产生 signature、密钥、证书或网络写入。生产审批仍走 `approvalSign`，场景中始终拒绝。
 - 模型凭据和配对串只在表单局部状态短暂存在；准备/开始后清空，不进入全局状态、界面持久化或日志。凭据输入只接受测试占位值。
 - 审批单的模拟批准只在当前设备为审批设备、连接 live、审批 pending、确认窗口有效且 PR head 与审批载荷一致时可用。
