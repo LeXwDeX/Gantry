@@ -311,6 +311,7 @@ pub enum EventType {
     ForgeDriftDetected,
     BudgetCharged,
     BudgetExhausted,
+    BudgetLimitRaised,
     PolicyDenied,
     DevicePaired,
     DeviceUpdated,
@@ -318,7 +319,7 @@ pub enum EventType {
 }
 
 impl EventType {
-    pub const ALL: [EventType; 78] = [
+    pub const ALL: [EventType; 79] = [
         EventType::ProjectAdded,
         EventType::ProjectUpdated,
         EventType::SettingsUpdated,
@@ -393,6 +394,7 @@ impl EventType {
         EventType::ForgeDriftDetected,
         EventType::BudgetCharged,
         EventType::BudgetExhausted,
+        EventType::BudgetLimitRaised,
         EventType::PolicyDenied,
         EventType::DevicePaired,
         EventType::DeviceUpdated,
@@ -453,6 +455,7 @@ impl EventType {
             EventType::ForgeDriftDetected => "forge.drift_detected",
             EventType::BudgetCharged => "budget.charged",
             EventType::BudgetExhausted => "budget.exhausted",
+            EventType::BudgetLimitRaised => "budget.limit_raised",
             EventType::PolicyDenied => "policy.denied",
             EventType::DevicePaired => "device.paired",
             EventType::DeviceUpdated => "device.updated",
@@ -646,6 +649,7 @@ pub const EVENT_TYPES: &[EventTypeInfo] = &[
     info!("forge.drift_detected", ["forge"], Undefined),
     info!("budget.charged", ["engine", "models"], Undefined),
     info!("budget.exhausted", ["engine", "models"], Undefined),
+    info!("budget.limit_raised", ["engine"], Undefined),
     info!("policy.denied", ["policy"], Undefined),
     info!("device.paired", ["pki"], Device),
     info!("device.updated", ["pki"], Device),
@@ -2281,6 +2285,31 @@ pub struct BudgetExhaustedData {
 
 impl EventData for BudgetExhaustedData {
     const TYPES: &'static [EventType] = &[EventType::BudgetExhausted];
+}
+
+/// `budget.limit_raised`（decisions D-19，#129）：用户对 `budget_exhausted` 选
+/// `raise_cap` 后，引擎给耗尽维度追加一份该档模板的原值。`to = from + by`，`by > 0`。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetLimitRaisedData {
+    pub dimension: BudgetDimension,
+    pub from: u64,
+    pub to: u64,
+    pub by: u64,
+}
+
+impl EventData for BudgetLimitRaisedData {
+    const TYPES: &'static [EventType] = &[EventType::BudgetLimitRaised];
+
+    fn validate(&self) -> Result<(), SchemaError> {
+        if self.by == 0 {
+            return Err(SchemaError::consistency("/by", "by must be greater than 0"));
+        }
+        if self.from.checked_add(self.by) != Some(self.to) {
+            return Err(SchemaError::consistency("/to", "to must equal from + by"));
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5645,6 +5674,7 @@ pub fn validate_event_data(ty: &EventType, data: &Value) -> Result<(), SchemaErr
             decode::<PolicyDeniedData>(data)?.validate()
         }
         EventType::BudgetExhausted => decode::<BudgetExhaustedData>(data)?.validate(),
+        EventType::BudgetLimitRaised => decode::<BudgetLimitRaisedData>(data)?.validate(),
         EventType::DevicePaired => decode::<DevicePairedData>(data)?.validate(),
         EventType::DeviceUpdated => decode::<DeviceUpdatedData>(data)?.validate(),
         EventType::DeviceRevoked => decode::<DeviceRevokedData>(data)?.validate(),
@@ -5811,8 +5841,8 @@ mod tests {
 
     #[test]
     fn catalog_covers_every_type_once() {
-        assert_eq!(EVENT_TYPES.len(), 78);
-        assert_eq!(EventType::ALL.len(), 78);
+        assert_eq!(EVENT_TYPES.len(), 79);
+        assert_eq!(EventType::ALL.len(), 79);
         for ty in EventType::ALL {
             assert_eq!(
                 EVENT_TYPES

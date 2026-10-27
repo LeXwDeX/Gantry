@@ -19,6 +19,7 @@
 | `approval.*` | `docs/modules/policy.md` §6.1、§7.3、§7.5 |
 | `outbox.succeeded` / `failed` | `docs/data-model.md` §5.2；`docs/interfaces/forge-actions.md` §2.6、§4.2 |
 | `budget.exhausted` | `docs/modules/core.md` §7.5 |
+| `budget.limit_raised` | `docs/decisions.md` D-19；`docs/interfaces/event-data.md` §2.2.6.6（#129） |
 | `device.*` | `docs/modules/pki.md` §7.4.3、§7.5 |
 | `forge.*` | `docs/interfaces/forge-actions.md` §6.2–§6.4；结构以 `crates/gantry-core/src/forge.rs` 为准 |
 
