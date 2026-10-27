@@ -13,9 +13,11 @@
 //! - [`store_schema`]：本模块在 `store` 里的私有表（§7.2）；
 //! - [`directory`]：设备目录 `DeviceDirectory` 与握手在册查询（§6.2、§7.3 第 4 步）；
 //! - [`pairing_service`]：配对会话的开关与 `redeem` 单一写事务（§6.3、§7.4.3）；
-//! - [`admin`]：改名、改角色、吊销（含吊销日志）、设备证书续期与恢复后重放（§6.2、§7.5–§7.7）。
+//! - [`admin`]：改名、改角色、吊销（含吊销日志）、设备证书续期与恢复后重放（§6.2、§7.5–§7.7）；
+//! - [`open`]：总入口 [`Pki`]——启动自检、CA 登记、TLS 材料与服务端证书续签（§6.1、§6.4、§7.7）；
+//! - [`recover`]：主机应急命令 `gantry device recover` 与控制面 `PkiControl`（§7.8）。
 //!
-//! `Pki::open`、服务端证书续签与应急命令在后续切片中加入。
+//! 中间 CA 轮换与 `RevocationNotifier` 属于 M3。
 
 pub mod admin;
 pub mod bootstrap;
@@ -25,8 +27,10 @@ pub mod csr;
 pub mod directory;
 pub mod journal;
 pub mod keys;
+pub mod open;
 pub mod pairing;
 pub mod pairing_service;
+pub mod recover;
 mod rng;
 pub mod store_schema;
 pub mod text;
@@ -35,6 +39,7 @@ pub mod verifier;
 pub use ca::{Authority, IssuedCert};
 pub use config::CertPolicy;
 pub use keys::{fingerprint, CertSerial, KeyError, P256PublicKey};
+pub use open::{Pki, PkiConfig};
 
 use std::path::PathBuf;
 
@@ -61,6 +66,14 @@ pub enum PkiError {
     NotFound,
     #[error("revocation journal: {0}")]
     Journal(String),
+    #[error("secrets: {0}")]
+    Secrets(String),
+    /// 启动自检：服务端上发现与根证书公钥匹配的私钥（§8）。根私钥必须离线保存。
+    #[error("root CA private key found on the server at {0:?}; it must be kept offline")]
+    RootKeyPresent(PathBuf),
+    /// 吊销日志里有 `n` 台设备在库里仍是 active：先运行恢复命令重放（P-67）。
+    #[error("{0} journaled revocations are not applied; run the restore command first")]
+    PendingRevocations(usize),
 }
 
 impl From<rcgen::Error> for PkiError {
