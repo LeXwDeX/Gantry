@@ -345,7 +345,7 @@ pub enum StoreError {
 
 **连接模型（单写者多读者）**：一个写连接，由 `tokio::sync::Mutex`（FIFO 公平）保护，事务一律 `BEGIN IMMEDIATE`；`read_connections` 个读连接组成池，每个读事务是一个 WAL 快照。写事务持有期间读者照常读旧快照。
 
-**M1 已落地（#88 SQLite 切片）**：`Store::open(StoreConfig::new(dir), deps, modules)` 与 testing 的 `Store::open_temp`。按 #88 评论里的方案，SQLite 只持久化事实源与非投影状态：`meta`、`events`（列与触发器同 §7.2）、`consumer_cursors`、`outbox`、各模块私有表；**投影不落表**，`open` 时按 `seq` 用同一套纯折叠函数重放（`Outbox` 是主表，重放时 `outbox.*` 事件不再改行），之后由 `append` 增量维护。`WriteTx::commit` 先在一个 `BEGIN IMMEDIATE` 事务里写入增量，SQLite 成功后才替换内存状态。与上表的差异：`outbox` 先存 `(id, idempotency_key, status, enqueued_seq, action JSON)`，其余列随投影落表时展开；读连接池、`snapshot_max_age_s`、`write_tx_max_hold_ms` 暂不需要（读走内存快照）。单实例用 `locking_mode = EXCLUSIVE` 实现，第二个 `open` 得到 `AlreadyRunning`，未引入 `gantry.lock` 文件。`GANTRY_STORE_BACKEND=sqlite` 让 store 的全部用例改用 `open_temp` 再跑一遍（`testing::open_for_tests`）。
+**M1 已落地（#88 SQLite 切片）**：`Store::open(StoreConfig::new(dir), deps, modules)` 与 testing 的 `Store::open_temp`。按 #88 评论里的方案，SQLite 只持久化事实源与非投影状态：`meta`、`events`（列与触发器同 §7.2）、`consumer_cursors`、`outbox`、各模块私有表；**投影不落表**，`open` 时按 `seq` 用同一套纯折叠函数重放（`Outbox` 是主表，重放时 `outbox.*` 事件不再改行），之后由 `append` 增量维护。`WriteTx::commit` 先在一个 `BEGIN IMMEDIATE` 事务里写入增量，SQLite 成功后才替换内存状态。与上表的差异：`outbox` 先存 `(id, idempotency_key, status, enqueued_seq, action JSON)`，其余列随投影落表时展开；读连接池、`snapshot_max_age_s`、`write_tx_max_hold_ms` 暂不需要（读走内存快照）。单实例由数据目录锁 `gantry.lock` 保证（一个只用来持锁的小 SQLite 库，`locking_mode = EXCLUSIVE`，跨进程与同进程都互斥，`Store::open` 与 `restore_from` 共用），第二个 `open` 得到 `AlreadyRunning`。`GANTRY_STORE_BACKEND=sqlite` 让 store 的全部用例改用 `open_temp` 再跑一遍（`testing::open_for_tests`）。
 
 ### 7.2 表结构草案
 
@@ -539,7 +539,7 @@ LIMIT 1;
 - `verify(Quick)`：`PRAGMA quick_check`；`meta.projected_seq == head`；`outbox` 与 `events` 的 ID 前缀 / 枚举合法。`verify(Full)`：在临时库里全量折叠事件，与现有投影表逐表比较哈希；CAS 抽样重算摘要。
 - 发现 `SQLITE_CORRUPT`：拒绝启动并输出"从备份恢复"的指引；**不自动修复**。
 
-**M1 已落地（#88）**：`Store::backup_to(dest_dir) -> BackupReport` 写 `gantry-<ts>.db`（`VACUUM INTO`，与提交共用连接锁，副本恰为某次提交后的前缀）与清单 `gantry-<ts>.json`（`schema_version`、`log_id`、`log_epoch`、`head_seq`、`events`、`outbox_rows`、`cas_objects`、`created_at`），并对副本做 `integrity_check`、确认日志从 1 起无空洞。`Store::restore_from(backup_db, data_dir) -> LogIdentity` 是离线操作：校验副本 → 数据目录有实例在跑则 `AlreadyRunning` → 复制到临时名 → `log_epoch = max(副本, 现有库) + 1`、`log_id` 保持 → 删除旧 WAL → 原子替换。`Store::verify(VerifyLevel)`：`Quick` 为 `quick_check` 与 `projected_seq == head`；`Full` 为 `integrity_check`，从磁盘（内存版从日志）重建全部状态与当前内存状态逐项比较，再跑 `Cas::verify()`。outbox 的"ID 前缀 / 枚举合法"由类型化载入保证（载入失败即 `Corrupt`）。尚未做：`verify_sample()` 抽样校验 CAS 副本、`pki` 吊销日志重放的编排（归 `deploy`）。
+**M1 已落地（#88）**：`Store::backup_to(dest_dir) -> BackupReport` 写 `gantry-<ts>.db`（`VACUUM INTO`，与提交共用连接锁，副本恰为某次提交后的前缀）与清单 `gantry-<ts>.json`（`schema_version`、`log_id`、`log_epoch`、`head_seq`、`events`、`outbox_rows`、`cas_objects`、`created_at`），并对副本做 `integrity_check`、确认日志从 1 起无空洞。`Store::restore_from(backup_db, data_dir) -> LogIdentity` 是离线操作：校验副本 → 取数据目录锁 `gantry.lock`（与 `Store::open` 共用，持有到替换结束；被占用则 `AlreadyRunning`，不依赖旧库可读）→ 复制到临时名 → `log_epoch = max(副本, 现有库) + 1`、`log_id` 保持 → 删除旧 WAL → 原子替换。`Store::verify(VerifyLevel)`：`Quick` 为 `quick_check` 与 `projected_seq == head`；`Full` 为 `integrity_check`，从磁盘（内存版从日志）重建全部状态与当前内存状态逐项比较，再跑 `Cas::verify()`。outbox 的"ID 前缀 / 枚举合法"由类型化载入保证（载入失败即 `Corrupt`）。尚未做：`verify_sample()` 抽样校验 CAS 副本、`pki` 吊销日志重放的编排（归 `deploy`）。
 
 ### 7.9 迁移与投影重建
 

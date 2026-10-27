@@ -318,25 +318,31 @@ impl Store {
     /// 比较；CAS 重算摘要并为孤儿补行。只报告，不修复。
     pub async fn verify(&self, level: VerifyLevel) -> Result<VerifyReport, StoreError> {
         let mut report = VerifyReport::default();
-        let inner = self.inner.read().map_err(|_| StoreError::Poisoned)?.clone();
-        if let Some(durable) = &self.durable {
-            report
-                .problems
-                .extend(durable.check(level == VerifyLevel::Full)?);
-            let projected = durable.projected_seq()?;
-            if projected != inner.head {
-                report.problems.push(format!(
-                    "meta.projected_seq {projected} != head {}",
-                    inner.head
-                ));
+        {
+            // 提交与游标推进都在持有 `inner` 写锁时落盘；这里持读锁直到磁盘读取与比较
+            // 结束，内存与磁盘处于同一一致性边界，并发写不会造成误报。
+            let inner = self.inner.read().map_err(|_| StoreError::Poisoned)?;
+            if let Some(durable) = &self.durable {
+                report
+                    .problems
+                    .extend(durable.check(level == VerifyLevel::Full)?);
+                let projected = durable.projected_seq()?;
+                if projected != inner.head {
+                    report.problems.push(format!(
+                        "meta.projected_seq {projected} != head {}",
+                        inner.head
+                    ));
+                }
+            }
+            if level == VerifyLevel::Full {
+                let rebuilt = match &self.durable {
+                    Some(durable) => durable.reload(&self.modules)?,
+                    None => inner.rebuilt()?,
+                };
+                report.problems.extend(inner.differences(&rebuilt));
             }
         }
         if level == VerifyLevel::Full {
-            let rebuilt = match &self.durable {
-                Some(durable) => durable.reload(&self.modules)?,
-                None => inner.rebuilt()?,
-            };
-            report.problems.extend(inner.differences(&rebuilt));
             let cas = self.cas.verify().await?;
             for digest in &cas.corrupt {
                 report

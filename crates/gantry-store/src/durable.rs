@@ -93,6 +93,28 @@ impl StoreConfig {
 
 pub(crate) struct Durable {
     conn: Mutex<Connection>,
+    /// 数据目录锁（`gantry.lock`），持有到 `Durable` 释放；字段顺序保证主库先关。
+    _lock: Mutex<Connection>,
+}
+
+const LOCK_FILE: &str = "gantry.lock";
+
+/// 取数据目录的排他锁（store.md §7.1 的 `gantry.lock`）。锁文件是一个只用来持锁的小
+/// SQLite 库：`locking_mode = EXCLUSIVE` 下第一次写事务取得的锁保持到连接关闭，跨进程、
+/// 同进程都互斥，也不依赖主库能否读出。`Store::open` 与 `restore_from` 共用它，并都持有
+/// 到操作结束；被占用即 `AlreadyRunning`。
+fn lock_data_dir(dir: &Path) -> Result<Connection, StoreError> {
+    let lock = Connection::open(dir.join(LOCK_FILE)).map_err(sqlite)?;
+    lock.busy_timeout(std::time::Duration::ZERO)
+        .map_err(sqlite)?;
+    lock.execute_batch(
+        "PRAGMA locking_mode = EXCLUSIVE;
+         BEGIN EXCLUSIVE;
+         CREATE TABLE IF NOT EXISTS lock (id INTEGER PRIMARY KEY);
+         COMMIT;",
+    )
+    .map_err(open_error)?;
+    Ok(lock)
 }
 
 impl Durable {
@@ -103,6 +125,7 @@ impl Durable {
         new_log_id: impl FnOnce() -> Result<String, StoreError>,
     ) -> Result<(Durable, Inner), StoreError> {
         create_dir(&cfg.dir)?;
+        let lock = lock_data_dir(&cfg.dir)?;
         let mut conn = Connection::open(cfg.dir.join(DB_FILE)).map_err(sqlite)?;
         conn.busy_timeout(std::time::Duration::ZERO)
             .map_err(sqlite)?;
@@ -132,6 +155,7 @@ impl Durable {
         Ok((
             Durable {
                 conn: Mutex::new(conn),
+                _lock: Mutex::new(lock),
             },
             inner,
         ))
@@ -716,20 +740,18 @@ pub(crate) fn restore(backup: &Path, data_dir: &Path) -> Result<(String, u64), S
     let facts = inspect_backup(backup)?;
     create_dir(data_dir)?;
     let db = data_dir.join(DB_FILE);
-    let mut current_epoch = 0;
-    if db.exists() {
-        // 取排他锁确认没有实例在跑；同时读出现有的 log_epoch。
-        let conn = Connection::open(&db).map_err(sqlite)?;
-        conn.busy_timeout(std::time::Duration::ZERO)
-            .map_err(sqlite)?;
-        conn.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
-            .map_err(open_error)?;
-        current_epoch = get_meta(&conn, "log_epoch")
+    // 目录锁持有到替换完成：恢复期间任何 `Store::open` 都得到 AlreadyRunning。
+    let _lock = lock_data_dir(data_dir)?;
+    // 现有库可能正是因为损坏才要恢复：读不出 epoch 就当 0，不阻止恢复。
+    let current_epoch = if db.exists() {
+        Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()
-            .flatten()
+            .and_then(|conn| get_meta(&conn, "log_epoch").ok().flatten())
             .and_then(|text| text.parse().ok())
-            .unwrap_or(0);
-    }
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let epoch = facts.log_epoch.max(current_epoch) + 1;
 
     let staging = data_dir.join(format!("{DB_FILE}.restoring"));

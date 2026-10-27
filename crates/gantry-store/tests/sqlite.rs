@@ -645,3 +645,24 @@ async fn verify_reports_divergence_between_disk_and_memory() {
         vec!["module tables differs from a rebuild".to_owned()]
     );
 }
+
+/// 现有库损坏（读不出来）时仍能从备份恢复：互斥靠 `gantry.lock`，不依赖旧库可读（§7.8）。
+#[tokio::test]
+async fn restore_replaces_an_unreadable_database() {
+    let dir = Dir::new("restore-corrupt");
+    let backups = Dir::new("restore-corrupt-files");
+    let report = {
+        let store = open(&dir, 1_700_000_000_000).await.unwrap();
+        let mut tx = store.begin_write().await.unwrap();
+        tx.append(delivery_created()).await.unwrap();
+        tx.commit().await.unwrap();
+        store.backup_to(&backups.0).await.unwrap()
+    };
+    std::fs::write(dir.0.join("gantry.db"), b"garbage, not a database").unwrap();
+    assert!(open(&dir, 1_700_000_100_000).await.is_err());
+
+    let identity = Store::restore_from(&report.db, &dir.0).unwrap();
+    assert_eq!(identity.log_epoch, 2);
+    let store = open(&dir, 1_700_000_200_000).await.unwrap();
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 1);
+}
