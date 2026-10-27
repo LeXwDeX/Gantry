@@ -193,6 +193,7 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
     let clock = Arc::new(FakeClock::new(T0));
     let entropy = Arc::new(SeqEntropy::new(7));
     let ids = Arc::new(IdGen::new(clock.clone(), entropy));
+    let ids_for_policy = ids.clone();
     let store = Store::open_in_memory_sync(StoreDeps {
         clock: clock.clone(),
         ids: ids.clone(),
@@ -208,6 +209,11 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
         store: store.clone(),
         devices: devices.clone(),
         admin: Arc::new(NoAdmin),
+        approvals: {
+            let forge = Arc::new(gantry_fakes::forge::FakeForge::new_in(store.clone()));
+            policy_approvals(&store, clock.clone(), ids_for_policy.clone(), forge).1
+        },
+        forge: Arc::new(gantry_fakes::forge::FakeForge::new_in(store.clone())),
         engine: engine.clone(),
         conversation: conversation.clone(),
         idempotency: idempotency.clone(),
@@ -304,4 +310,30 @@ pub fn rebuild_with_idempotency(h: &Harness, idempotency: Arc<MemoryIdempotency>
         conversation: h.conversation.clone(),
         idempotency,
     }
+}
+
+/// 真实 policy 的审批服务（FakeForge 作 ForgeReader）。store 需注册 `POLICY_MODULE`
+/// 才能使用 challenge / consume；管线测试不触及这些路径。
+pub fn policy_approvals(
+    store: &Store,
+    clock: Arc<FakeClock>,
+    ids: Arc<IdGen>,
+    forge: Arc<gantry_fakes::forge::FakeForge>,
+) -> (
+    Arc<gantry_policy::PolicyEngine>,
+    Arc<gantry_policy::PolicyApprovals>,
+) {
+    let engine = Arc::new(gantry_policy::PolicyEngine::new(
+        gantry_policy::PolicyDeps {
+            store: store.clone(),
+            forge,
+            clock,
+            ids,
+        },
+    ));
+    let approvals = Arc::new(gantry_policy::PolicyApprovals::new(
+        engine.clone(),
+        Arc::new(SeqEntropy::new(99)),
+    ));
+    (engine, approvals)
 }

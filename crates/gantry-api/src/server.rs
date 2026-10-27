@@ -17,6 +17,8 @@ use gantry_core::entities::Seq;
 use gantry_core::ids::{Clock, IdGen};
 use gantry_core::ports::conversation::ConversationService;
 use gantry_core::ports::engine::DeliveryControl;
+use gantry_core::ports::forge::PrRefresher;
+use gantry_policy::ApprovalService;
 use gantry_store::Store;
 use http::header::{
     HeaderName, HeaderValue, ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG,
@@ -81,6 +83,10 @@ pub struct Services {
     pub devices: Arc<dyn DeviceDirectory>,
     /// `pki` 的设备管理（改名、改角色、吊销、续期）。
     pub admin: Arc<dyn DeviceAdmin>,
+    /// 审批服务（policy，同泳道接口）：#24–#29 与内部动作的消费。
+    pub approvals: Arc<dyn ApprovalService>,
+    /// grant 前对 PR 强制对账一次（forge）。
+    pub forge: Arc<dyn PrRefresher>,
     /// 交付单元控制 #8 #43–#45（P-56）。
     pub engine: Arc<dyn DeliveryControl>,
     /// 发消息 #12。

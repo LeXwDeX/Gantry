@@ -16,6 +16,7 @@
 //!
 //! TLS 监听器、读路由、事件流、审批与 settings 在后续切片加入（issue #99）。
 
+pub mod approvals;
 pub mod auth;
 pub mod consts;
 pub mod control;

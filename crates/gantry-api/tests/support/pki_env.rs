@@ -100,6 +100,8 @@ pub struct PkiEnv {
     pub pairing: PairingService,
     pub admin: Arc<StoreAdmin>,
     pub root_pem: String,
+    pub forge: Arc<gantry_fakes::forge::FakeForge>,
+    pub policy: Arc<gantry_policy::PolicyEngine>,
 }
 
 /// 由 PEM 叶子证书得到握手层交给 api 的字段。
@@ -151,7 +153,7 @@ impl PkiEnv {
                 clock: clock.clone(),
                 ids: ids.clone(),
             },
-            &[store_schema::module_spec()],
+            &[store_schema::module_spec(), gantry_policy::POLICY_MODULE],
         )
         .await
         .unwrap();
@@ -172,12 +174,17 @@ impl PkiEnv {
             CertPolicy::default(),
         ));
         let directory = Arc::new(StoreDirectory::new(store.clone(), clock.clone()));
+        let forge = Arc::new(gantry_fakes::forge::FakeForge::new_in(store.clone()));
+        let (policy, approvals) =
+            super::policy_approvals(&store, clock.clone(), ids.clone(), forge.clone());
         let svc = Services {
             clock: clock.clone(),
-            ids,
+            ids: ids.clone(),
             store: store.clone(),
             devices: directory,
             admin: admin.clone(),
+            approvals: approvals.clone(),
+            forge: forge.clone(),
             engine: Arc::new(gantry_fakes::engine::FakeEngine::new()),
             conversation: Arc::new(gantry_fakes::conversation::FakeConversation::new()),
             idempotency: Arc::new(MemoryIdempotency::new(clock.clone())),
@@ -189,6 +196,8 @@ impl PkiEnv {
             pairing,
             admin,
             root_pem,
+            forge,
+            policy,
         }
     }
 

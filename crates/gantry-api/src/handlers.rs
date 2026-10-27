@@ -7,6 +7,7 @@ use gantry_core::time::Timestamp;
 use http::StatusCode;
 use serde_json::{json, Value};
 
+use crate::approvals;
 use crate::auth::profile_str;
 use crate::consts::{API_VERSION, RENEW_AFTER_DEN, RENEW_AFTER_NUM};
 use crate::control;
@@ -33,6 +34,14 @@ impl RouteHandler for Builtin {
             "getInboxSummary" => reads::inbox_summary(core, &req).await,
             "streamEvents" => sse::stream_events(core, &req).await,
             "listDevices" => devices::list(core, &req).await,
+            "listApprovals" => approvals::list(core, &req).await,
+            "getApproval" => approvals::get(core, &req).await,
+            "createApproval" => approvals::create(core, &req).await,
+            "getApprovalChallenge" => approvals::challenge(core, &req).await,
+            "grantApproval" => approvals::grant(core, &req).await,
+            "denyApproval" => approvals::deny(core, &req).await,
+            "setDeviceRole" => approvals::set_role(core, &req).await,
+            "revokeDevice" => approvals::revoke(core, &req).await,
             "renameDevice" => devices::rename(core, &req).await,
             "renewDeviceCertificate" => devices::renew(core, &req).await,
             _ => Err(Problem::not_found()),
