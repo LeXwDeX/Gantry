@@ -513,7 +513,7 @@ impl GitRepo {
         }
         let request = worktree_lock::LockRequest {
             holder,
-            delivery_id: *delivery,
+            delivery_id: holder.bound_delivery(*delivery),
             lease_until: until,
             max_lease: None,
         };
@@ -521,7 +521,7 @@ impl GitRepo {
             .as_ref()
             .map(|lock| gantry_core::entities::WorktreeLock {
                 holder: lock.holder,
-                delivery_id: lock.delivery_id,
+                delivery_id: lock.holder.bound_delivery(lock.delivery_id),
                 acquired_at: lock.acquired_at,
                 lease_until: lock.lease_until,
             });
@@ -537,7 +537,7 @@ impl GitRepo {
                 &WorktreeLockedData {
                     worktree_id: *id,
                     holder,
-                    delivery_id: *delivery,
+                    delivery_id: holder.bound_delivery(*delivery),
                     lease_until: until,
                 },
             )
@@ -571,7 +571,7 @@ impl GitRepo {
         let until = lease_until(now, lease);
         let core_lock = gantry_core::entities::WorktreeLock {
             holder: lock.holder,
-            delivery_id: lock.delivery_id,
+            delivery_id: lock.holder.bound_delivery(lock.delivery_id),
             acquired_at: lock.acquired_at,
             lease_until: lock.lease_until,
         };
@@ -587,7 +587,7 @@ impl GitRepo {
                 &WorktreeLockedData {
                     worktree_id: token.worktree_id,
                     holder: token.holder,
-                    delivery_id: token.delivery_id,
+                    delivery_id: token.holder.bound_delivery(token.delivery_id),
                     lease_until: until,
                 },
             )
@@ -1031,7 +1031,9 @@ fn machine_error(error: worktree_lock::LockError) -> RepoError {
             max: HUMAN_LEASE_MAX,
         },
         worktree_lock::LockError::NotHolder => RepoError::StaleLock,
-        worktree_lock::LockError::LockConflict | worktree_lock::LockError::InvalidLease => {
+        worktree_lock::LockError::LockConflict
+        | worktree_lock::LockError::InvalidLease
+        | worktree_lock::LockError::DeliveryBinding => {
             RepoError::Lock(LockError::Store(PortStoreError::InvalidState {
                 message: error.to_string(),
             }))

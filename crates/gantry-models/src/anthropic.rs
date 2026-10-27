@@ -26,12 +26,6 @@ use crate::http::{post, HttpError, LoopbackUrl};
 /// Messages API 版本头。
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 
-/// Egress 拒绝 `svc_token`（`403 token_invalid`）时的错误消息；路由据此换新令牌
-/// 重试一次（§7.5）。`ProviderError` 暂无专门变体，见 issue #93 的契约跟进。
-pub const EGRESS_TOKEN_INVALID: &str = "egress:token_invalid";
-/// 模型不存在（404）时的错误消息；M2 起据此直接换下一个降级候选（§7.6）。
-pub const MODEL_NOT_FOUND: &str = "model_not_found";
-
 /// 模型 → 抽象推理深度 → 该模型的 `output_config.effort` 取值。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EffortTable(BTreeMap<String, BTreeMap<Effort, ProviderEffort>>);
@@ -191,13 +185,9 @@ impl ModelProvider for AnthropicProvider {
         match response.status {
             200 => parse_success(&response.body),
             403 if error_code(&response.body).as_deref() == Some("token_invalid") => {
-                Err(ProviderError::InvalidRequest {
-                    message: EGRESS_TOKEN_INVALID.into(),
-                })
+                Err(ProviderError::EgressTokenInvalid)
             }
-            404 => Err(ProviderError::Unavailable {
-                message: MODEL_NOT_FOUND.into(),
-            }),
+            404 => Err(ProviderError::ModelNotFound),
             429 => Err(ProviderError::RateLimited {
                 retry_after: response
                     .header("retry-after")

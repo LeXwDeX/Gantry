@@ -35,6 +35,7 @@ fn delivery() -> NewDelivery {
             .parse::<ProjectId>()
             .unwrap(),
         title: "fix login timeout".to_owned(),
+        user_text: "修复登录超时".to_owned(),
         level_cap: Level::Low,
         level_effective: Level::Low,
         origin: DeliveryOrigin::Conversation,

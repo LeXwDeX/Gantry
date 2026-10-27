@@ -516,6 +516,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
+name = "gantry-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "gantry-core",
+ "gantry-store",
+ "http",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "gantry-conversation"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gantry-core",
+ "gantry-fakes",
+ "gantry-models",
+ "gantry-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "gantry-core"
 version = "0.1.0"
 dependencies = [
@@ -723,6 +754,18 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "gantry-worker"
+version = "0.1.0"
+dependencies = [
+ "gantry-core",
+ "gantry-sandbox",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
