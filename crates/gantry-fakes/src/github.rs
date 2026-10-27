@@ -1,8 +1,11 @@
 //! `FakeGitHub`：进程内 HTTP 级 GitHub 替身。
 //!
-//! 只覆盖被测路径需要的最小子集：REST（仓库 / PR / Issue）、GraphQL、webhook
-//! 投递与 `429` / `5xx` 脚本。状态保存在内存；webhook 目标由测试注册。所有
-//! 请求（含被脚本拦截的请求）都可从 `recorded_calls()` 读取。
+//! 只覆盖被测路径需要的最小子集：REST（仓库 / PR / Issue / 分支 ref / 合并）、
+//! GraphQL、webhook 投递与 `429` / `5xx` 脚本。状态保存在内存；webhook 目标由测试
+//! 注册。所有请求（含被脚本拦截的请求）都可从 `recorded_calls()` 读取。
+//!
+//! 创建类调用以 App 机器人身份（`bot()`）落对象；`lose_next_response()` 注入
+//! "变更已生效但响应丢失"（forge.md §12 的响应丢失场景）。
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -78,6 +81,12 @@ struct GithubState {
     webhooks: Vec<WebhookTarget>,
     deliveries: Vec<WebhookDelivery>,
     next_delivery: u64,
+    /// `(repo, branch) -> sha`。
+    refs: HashMap<(String, String), String>,
+    bot_login: String,
+    bot_id: i64,
+    /// 还要丢弃多少条变更类请求的响应（请求照常处理，连接直接关闭）。
+    lose_responses: u32,
 }
 
 /// M0 的 GitHub 替身。
@@ -103,6 +112,10 @@ impl FakeGitHub {
             webhooks: Vec::new(),
             deliveries: Vec::new(),
             next_delivery: 1,
+            refs: HashMap::new(),
+            bot_login: DEFAULT_BOT_LOGIN.to_owned(),
+            bot_id: DEFAULT_BOT_ID,
+            lose_responses: 0,
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -135,6 +148,134 @@ impl FakeGitHub {
             body: format!(r#"{{"message":"scripted {status}"}}"#),
             retry_after_s: (status == 429).then_some(1),
         });
+    }
+
+    /// 下一条**变更类**请求（非 GET）照常处理（含状态变更），但不写回响应、直接关闭连接。
+    pub fn lose_next_write_response(&self) {
+        self.lock().lose_responses += 1;
+    }
+
+    /// 创建类调用使用的 App 机器人身份 `(login, user id)`。
+    pub fn set_bot(&self, login: impl Into<String>, id: i64) {
+        let mut state = self.lock();
+        state.bot_login = login.into();
+        state.bot_id = id;
+    }
+
+    pub fn bot(&self) -> (String, i64) {
+        let state = self.lock();
+        (state.bot_login.clone(), state.bot_id)
+    }
+
+    /// 设置远端分支 head（模拟推送）。
+    pub fn set_branch(&self, repo: &str, branch: &str, sha: &str) {
+        self.lock()
+            .refs
+            .insert((repo.to_owned(), branch.to_owned()), sha.to_owned());
+    }
+
+    pub fn branch(&self, repo: &str, branch: &str) -> Option<String> {
+        self.lock()
+            .refs
+            .get(&(repo.to_owned(), branch.to_owned()))
+            .cloned()
+    }
+
+    /// 以给定作者创建一个 PR（模拟人手开的 PR）。返回 PR 号。
+    pub fn insert_pull(
+        &self,
+        repo: &str,
+        head: &str,
+        base: &str,
+        author: (&str, i64),
+        body: &str,
+    ) -> u64 {
+        let mut state = self.lock();
+        let number = state.next_number;
+        state.next_number += 1;
+        let sha = state
+            .refs
+            .get(&(repo.to_owned(), head.to_owned()))
+            .cloned()
+            .unwrap_or_else(|| format!("{number:040x}"));
+        let pull = pull_json(number, "", body, false, head, &sha, base, author);
+        state.pulls.insert((repo.to_owned(), number), pull);
+        number
+    }
+
+    pub fn insert_issue(&self, repo: &str, title: &str) -> u64 {
+        let mut state = self.lock();
+        let number = state.next_number;
+        state.next_number += 1;
+        let issue = json!({
+            "id": number,
+            "number": number,
+            "state": "open",
+            "state_reason": null,
+            "title": title,
+            "body": "",
+            "labels": [],
+            "user": {"login": "octocat", "id": 1}
+        });
+        state.issues.insert((repo.to_owned(), number), issue);
+        number
+    }
+
+    pub fn pull(&self, repo: &str, number: u64) -> Option<Value> {
+        self.lock().pulls.get(&(repo.to_owned(), number)).cloned()
+    }
+
+    pub fn pulls(&self, repo: &str) -> Vec<Value> {
+        let state = self.lock();
+        let mut pulls: Vec<(u64, Value)> = state
+            .pulls
+            .iter()
+            .filter(|((name, _), _)| name == repo)
+            .map(|((_, number), pull)| (*number, pull.clone()))
+            .collect();
+        pulls.sort_by_key(|(number, _)| *number);
+        pulls.into_iter().map(|(_, pull)| pull).collect()
+    }
+
+    pub fn issue(&self, repo: &str, number: u64) -> Option<Value> {
+        self.lock().issues.get(&(repo.to_owned(), number)).cloned()
+    }
+
+    /// 改 PR 的 head（模拟有人推送了新提交）。分支 ref 同步移动。
+    pub fn set_pull_head(&self, repo: &str, number: u64, sha: &str) {
+        let mut state = self.lock();
+        let Some(pull) = state.pulls.get_mut(&(repo.to_owned(), number)) else {
+            return;
+        };
+        pull["head"]["sha"] = json!(sha);
+        let head_ref = pull["head"]["ref"].as_str().unwrap_or_default().to_owned();
+        state
+            .refs
+            .insert((repo.to_owned(), head_ref), sha.to_owned());
+    }
+
+    /// 改 PR 的 `state`（`open` / `closed`），不动合并标记。
+    pub fn set_pull_state(&self, repo: &str, number: u64, pr_state: &str) {
+        if let Some(pull) = self.lock().pulls.get_mut(&(repo.to_owned(), number)) {
+            pull["state"] = json!(pr_state);
+        }
+    }
+
+    /// 把 PR 置为已合并（模拟在 GitHub 上手动合并）。
+    pub fn set_pull_merged(&self, repo: &str, number: u64) {
+        let mut state = self.lock();
+        if let Some(pull) = state.pulls.get_mut(&(repo.to_owned(), number)) {
+            merge_in_place(pull);
+        }
+    }
+
+    /// 变更类调用（POST / PATCH / PUT / DELETE）的次数。
+    pub fn write_count(&self) -> usize {
+        self.lock()
+            .calls
+            .iter()
+            .filter(|call| call.method != "GET" && call.path != "/graphql")
+            .count()
     }
 
     pub fn register_webhook(&self, url: impl Into<String>) {
@@ -287,7 +428,11 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<GithubState>>) -> s
             Ok(())
         }
         ReadOutcome::Request(request) => {
-            let response = route(&request, &state);
+            let (response, lose) = route(&request, &state);
+            if lose {
+                // 变更已生效，响应丢失：直接关闭连接。
+                return Ok(());
+            }
             write_response(&mut stream, &response)
         }
     }
@@ -420,7 +565,12 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Resul
         201 => "Created",
         202 => "Accepted",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        422 => "Unprocessable Entity",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         _ => "Error",
@@ -440,7 +590,7 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Resul
     stream.flush()
 }
 
-fn route(request: &HttpRequest, shared: &Arc<Mutex<GithubState>>) -> Response {
+fn route(request: &HttpRequest, shared: &Arc<Mutex<GithubState>>) -> (Response, bool) {
     let path = request
         .path
         .split('?')
@@ -469,7 +619,11 @@ fn route(request: &HttpRequest, shared: &Arc<Mutex<GithubState>>) -> Response {
         body: String::from_utf8_lossy(&request.body).to_string(),
         status: response.status,
     });
-    response
+    let lose = state.lose_responses > 0 && request.method != "GET" && path != "/graphql";
+    if lose {
+        state.lose_responses -= 1;
+    }
+    (response, lose)
 }
 
 fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Response {
@@ -502,34 +656,174 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 None => not_found(),
             }
         }
+        ("GET", ["repos", owner, repo, "pulls"]) => {
+            let full = format!("{owner}/{repo}");
+            let query = parse_query(&request.path);
+            let head = query.get("head").cloned();
+            let base = query.get("base").cloned();
+            let wanted_state = query.get("state").cloned().unwrap_or_else(|| "open".into());
+            let mut pulls: Vec<(u64, Value)> = state
+                .pulls
+                .iter()
+                .filter(|((name, _), _)| *name == full)
+                .filter(|(_, pull)| {
+                    let head_ok = head.as_ref().is_none_or(|head| {
+                        let branch = head.split_once(':').map(|(_, b)| b).unwrap_or(head);
+                        pull["head"]["ref"] == json!(branch)
+                    });
+                    let base_ok = base
+                        .as_ref()
+                        .is_none_or(|base| pull["base"]["ref"] == json!(base));
+                    let state_ok = wanted_state == "all" || pull["state"] == json!(wanted_state);
+                    head_ok && base_ok && state_ok
+                })
+                .map(|((_, number), pull)| (*number, pull.clone()))
+                .collect();
+            pulls.sort_by_key(|(number, _)| *number);
+            let list: Vec<Value> = pulls.into_iter().map(|(_, pull)| pull).collect();
+            Response {
+                status: 200,
+                body: Value::Array(list).to_string(),
+                retry_after_s: None,
+            }
+        }
         ("POST", ["repos", owner, repo, "pulls"]) => {
             let full = format!("{owner}/{repo}");
             let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
-            let number = state.next_number;
-            state.next_number = state.next_number.saturating_add(1);
             let head_ref = string_field(&body, "head").unwrap_or_default();
             let base_ref = string_field(&body, "base").unwrap_or_else(|| "main".into());
+            // 分支未经 `set_branch` 登记时沿用旧行为：生成确定性的 head sha。
+            let sha = state
+                .refs
+                .get(&(full.clone(), head_ref.clone()))
+                .cloned()
+                .unwrap_or_else(|| format!("{:040x}", state.next_number));
+            let duplicate = state.pulls.iter().any(|((name, _), pull)| {
+                *name == full
+                    && pull["state"] == json!("open")
+                    && pull["head"]["ref"] == json!(head_ref)
+                    && pull["base"]["ref"] == json!(base_ref)
+            });
+            if duplicate {
+                return unprocessable("A pull request already exists");
+            }
+            let number = state.next_number;
+            state.next_number = state.next_number.saturating_add(1);
             let title = string_field(&body, "title").unwrap_or_default();
             let body_text = string_field(&body, "body").unwrap_or_default();
             let draft = body.get("draft").and_then(Value::as_bool).unwrap_or(false);
-            let pull = json!({
-                "id": number,
-                "number": number,
-                "node_id": format!("PR_{number}"),
-                "state": "open",
-                "title": title,
-                "body": body_text,
-                "draft": draft,
-                "head": {"ref": head_ref, "sha": format!("{:040x}", number)},
-                "base": {"ref": base_ref},
-                "user": {"login": "gantry-test-bot"},
-                "mergeable_state": "clean"
-            });
+            let author = (state.bot_login.clone(), state.bot_id);
+            let pull = pull_json(
+                number,
+                &title,
+                &body_text,
+                draft,
+                &head_ref,
+                &sha,
+                &base_ref,
+                (&author.0, author.1),
+            );
             state.pulls.insert((full, number), pull.clone());
             Response {
                 status: 201,
                 body: pull.to_string(),
                 retry_after_s: None,
+            }
+        }
+        ("PATCH", ["repos", owner, repo, "pulls", number]) => {
+            let full = format!("{owner}/{repo}");
+            let Some(number) = number.parse::<u64>().ok() else {
+                return not_found();
+            };
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+            let Some(pull) = state.pulls.get_mut(&(full, number)) else {
+                return not_found();
+            };
+            for field in ["title", "body", "state"] {
+                if let Some(value) = body.get(field) {
+                    pull[field] = value.clone();
+                }
+            }
+            if let Some(base) = body.get("base") {
+                pull["base"]["ref"] = base.clone();
+            }
+            Response {
+                status: 200,
+                body: pull.to_string(),
+                retry_after_s: None,
+            }
+        }
+        ("PUT", ["repos", owner, repo, "pulls", number, "merge"]) => {
+            let full = format!("{owner}/{repo}");
+            let Some(number) = number.parse::<u64>().ok() else {
+                return not_found();
+            };
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+            let Some(pull) = state.pulls.get_mut(&(full, number)) else {
+                return not_found();
+            };
+            if pull["merged"] == json!(true) || pull["state"] != json!("open") {
+                return Response {
+                    status: 405,
+                    body: json!({"message": "Pull Request is not mergeable"}).to_string(),
+                    retry_after_s: None,
+                };
+            }
+            if let Some(sha) = body.get("sha") {
+                if pull["head"]["sha"] != *sha {
+                    return Response {
+                        status: 409,
+                        body: json!({"message": "Head branch was modified"}).to_string(),
+                        retry_after_s: None,
+                    };
+                }
+            }
+            merge_in_place(pull);
+            Response {
+                status: 200,
+                body: json!({
+                    "sha": pull["merge_commit_sha"],
+                    "merged": true,
+                    "message": "Pull Request successfully merged"
+                })
+                .to_string(),
+                retry_after_s: None,
+            }
+        }
+        ("PATCH", ["repos", owner, repo, "issues", number]) => {
+            let full = format!("{owner}/{repo}");
+            let Some(number) = number.parse::<u64>().ok() else {
+                return not_found();
+            };
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or_else(|_| json!({}));
+            let Some(issue) = state.issues.get_mut(&(full, number)) else {
+                return not_found();
+            };
+            for field in ["title", "body", "state", "state_reason", "labels"] {
+                if let Some(value) = body.get(field) {
+                    issue[field] = value.clone();
+                }
+            }
+            Response {
+                status: 200,
+                body: issue.to_string(),
+                retry_after_s: None,
+            }
+        }
+        ("GET", ["repos", owner, repo, "git", "ref", "heads", branch @ ..]) => {
+            let full = format!("{owner}/{repo}");
+            let branch = branch.join("/");
+            match state.refs.get(&(full, branch.clone())) {
+                Some(sha) => Response {
+                    status: 200,
+                    body: json!({
+                        "ref": format!("refs/heads/{branch}"),
+                        "object": {"type": "commit", "sha": sha}
+                    })
+                    .to_string(),
+                    retry_after_s: None,
+                },
+                None => not_found(),
             }
         }
         ("POST", ["repos", owner, repo, "issues"]) => {
@@ -544,7 +838,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 "title": string_field(&body, "title").unwrap_or_default(),
                 "body": string_field(&body, "body").unwrap_or_default(),
                 "labels": body.get("labels").cloned().unwrap_or_else(|| json!([])),
-                "user": {"login": "gantry-test-bot"}
+                "user": {"login": state.bot_login.clone(), "id": state.bot_id}
             });
             state.issues.insert((full, number), issue.clone());
             Response {
@@ -596,6 +890,82 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
         }
         _ => not_found(),
     }
+}
+
+const DEFAULT_BOT_LOGIN: &str = "gantry-test-bot[bot]";
+const DEFAULT_BOT_ID: i64 = 9;
+
+#[allow(clippy::too_many_arguments)]
+fn pull_json(
+    number: u64,
+    title: &str,
+    body: &str,
+    draft: bool,
+    head_ref: &str,
+    head_sha: &str,
+    base_ref: &str,
+    author: (&str, i64),
+) -> Value {
+    json!({
+        "id": number,
+        "number": number,
+        "node_id": format!("PR_{number}"),
+        "state": "open",
+        "merged": false,
+        "merge_commit_sha": null,
+        "title": title,
+        "body": body,
+        "draft": draft,
+        "head": {"ref": head_ref, "sha": head_sha},
+        "base": {"ref": base_ref},
+        "user": {"login": author.0, "id": author.1},
+        "mergeable_state": "clean"
+    })
+}
+
+fn merge_in_place(pull: &mut Value) {
+    let number = pull["number"].as_u64().unwrap_or_default();
+    pull["merged"] = json!(true);
+    pull["state"] = json!("closed");
+    pull["merge_commit_sha"] = json!(format!("{:040x}", 0xfeed_0000_u64 + number));
+}
+
+fn unprocessable(message: &str) -> Response {
+    Response {
+        status: 422,
+        body: json!({ "message": message }).to_string(),
+        retry_after_s: None,
+    }
+}
+
+/// 解析查询串（只做 `%XX` 解码，足够替身使用）。
+fn parse_query(path: &str) -> BTreeMap<String, String> {
+    let Some((_, query)) = path.split_once('?') else {
+        return BTreeMap::new();
+    };
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (percent_decode(key), percent_decode(value)))
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn repo_json(full_name: &str) -> Value {

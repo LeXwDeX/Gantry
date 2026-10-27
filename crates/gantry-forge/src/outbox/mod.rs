@@ -1,6 +1,8 @@
 //! Outbox 入队面：`OutboxPort` 的真实实现（forge.md §6、§7.8"入队时的机械校验"）。
 
+pub(crate) mod executor;
 pub(crate) mod key;
+pub(crate) mod marker;
 
 use std::sync::Arc;
 
@@ -39,6 +41,11 @@ impl Forge {
             store,
             config: Arc::new(config),
         }
+    }
+
+    /// 共享本实例的 store 与配置的执行器（forge.md §7.2：每个安装一个写任务）。
+    pub fn executor(&self, deps: executor::ExecutorDeps) -> executor::Executor {
+        executor::Executor::new(self.store.clone(), self.config.clone(), deps)
     }
 
     /// 入队时的机械校验 + 落行。不读 `policies.*`（P-62）：是否需要审批由入队方决定，
