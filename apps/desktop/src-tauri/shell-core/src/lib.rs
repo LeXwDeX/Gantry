@@ -6,4 +6,5 @@
 pub mod ipc;
 pub mod keys;
 pub mod links;
+pub mod pairing;
 pub mod storage;
