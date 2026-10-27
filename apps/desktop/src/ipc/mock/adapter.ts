@@ -145,6 +145,7 @@ export class MockIpcAdapter implements IpcAdapter {
   private acked: number | null = null;
   private cursor: number | null = null;
   private offline = false;
+  private streamHeld = false;
   private swallowNext = false;
 
   private prepared = new Map<string, PreparedSigning>();
@@ -596,9 +597,17 @@ export class MockIpcAdapter implements IpcAdapter {
     this.setPhase("reconnecting");
   }
 
+  /** 只中断事件流（HTTP 仍可达），直到 `reconnect()`：对应流已断、尚未重连成功的窗口。 */
+  interruptStream(): void {
+    this.streamHeld = true;
+    this.streamAbort?.abort();
+    this.setPhase("reconnecting");
+  }
+
   /** 恢复网络：从已 ack 的游标续流（desktop-shell §7.3）。 */
   reconnect(): void {
     this.offline = false;
+    this.streamHeld = false;
     if (this.onFrame && !this.revoked && !this.certExpired) {
       const gen = ++this.streamGen;
       void this.runStream(gen);
@@ -632,7 +641,7 @@ export class MockIpcAdapter implements IpcAdapter {
 
   private async runStream(gen: number): Promise<void> {
     while (gen === this.streamGen) {
-      if (this.offline) return;
+      if (this.offline || this.streamHeld) return;
       const abort = new AbortController();
       this.streamAbort = abort;
       const query: RouteQuery = this.cursor === null ? {} : { after: this.cursor };
