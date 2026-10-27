@@ -372,3 +372,24 @@ fn responses_are_shaped() {
     let garbage = shape_response(502, &[], b"<html>bad gateway</html>");
     assert_eq!(garbage["problem"]["code"], "http_502");
 }
+
+#[test]
+fn operation_lookup_for_logging() {
+    use gantry_desktop_shell::routes::operation_for;
+    assert_eq!(operation_for("GET", "/v1/me"), "getMe");
+    assert_eq!(
+        operation_for("PUT", "/v1/settings/models?dry_run=true"),
+        "putSettings"
+    );
+    assert_eq!(operation_for("POST", "/v1/approvals"), "createApproval");
+    assert_eq!(operation_for("GET", "/v1/approvals"), "listApprovals");
+    assert_eq!(
+        operation_for("POST", &format!("/v1/approvals/{APR}/grant")),
+        "grantApproval"
+    );
+    assert_eq!(
+        operation_for("POST", "/v1/devices/self/renew"),
+        "renewDeviceCertificate"
+    );
+    assert_eq!(operation_for("DELETE", "/v1/me"), "other");
+}

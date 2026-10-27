@@ -52,6 +52,7 @@ pub struct Shell {
     guarded: crate::guarded::GuardedWrites,
     /// `/v1/me` 的 `certificate.renew_after`（毫秒）；以它为准，缺省时按剩余 1/3 推算。
     server_renew_after: Mutex<Option<i64>>,
+    diag: crate::diag::Diagnostics,
 }
 
 impl Shell {
@@ -74,7 +75,69 @@ impl Shell {
             events_config: EventsConfig::default(),
             guarded: Default::default(),
             server_renew_after: Mutex::new(None),
+            diag: crate::diag::Diagnostics::new(None),
         }
+    }
+
+    /// 日志写到应用数据目录的 `logs/`（Tauri 层调用；测试也可指定）。
+    pub fn with_log_dir(mut self, dir: &std::path::Path) -> Self {
+        self.diag = crate::diag::Diagnostics::new(Some(dir));
+        self
+    }
+
+    pub fn diag(&self) -> &crate::diag::Diagnostics {
+        &self.diag
+    }
+
+    /// IPC 命令的结果记账：`ipc_rejected{reason}`、最近错误码与一行日志（只记码与原因）。
+    pub fn track<T>(&self, command: &str, result: Result<T, ShellError>) -> Result<T, ShellError> {
+        if let Err(e) = &result {
+            let code = crate::diag::intern(&error_code(e), crate::diag::SHELL_CODES);
+            let reason = e
+                .reason
+                .as_deref()
+                .map(|r| crate::diag::intern(r, crate::diag::REASONS));
+            self.diag.count("ipc_rejected", &[("reason", code)]);
+            if code == "shell.self_check_failed" {
+                self.diag.count(
+                    "self_check_failures",
+                    &[("reason", reason.unwrap_or("other"))],
+                );
+            }
+            self.diag.error_code(code);
+            self.diag.log(
+                crate::diag::LogEntry {
+                    event: "ipc_error",
+                    route: Some(crate::diag::intern(command, crate::ipc::COMMANDS)),
+                    code: Some(code),
+                    reason,
+                    ..Default::default()
+                },
+                self.now_ms(),
+            );
+        }
+        result
+    }
+
+    /// `diagnostics_snapshot`（§11）：非敏感诊断，不含任何服务端业务内容。
+    pub fn diagnostics_snapshot(&self) -> Value {
+        let identity = self.store.identity();
+        let cert = identity
+            .as_ref()
+            .and_then(|i| leaf_validity(&i.cert_chain_pem))
+            .map(|(serial, _, na)| json!({ "serial": serial, "not_after": rfc3339(na) }));
+        let conn = self.conn.lock().unwrap().clone();
+        json!({
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "connection": self.connection_state(),
+            "events_cursor": self.events_cursor(),
+            "last_bytes_age_ms": conn.last_bytes_at.map(|t| t.elapsed().as_millis() as u64),
+            "key_backend": self.keys.backend().as_str(),
+            "cert": cert,
+            "clock_skew_ms": conn.clock_skew_ms,
+            "counters": self.diag.counters(),
+            "recent_errors": self.diag.recent_errors(),
+        })
     }
 
     pub(crate) fn guarded(&self) -> &crate::guarded::GuardedWrites {
@@ -263,7 +326,10 @@ impl Shell {
         self.store.save_identity(&identity)?;
         // 用新证书发 `GET /v1/me` 确认可用并记下 `log_epoch`；暂时连不上不影响已配对。
         if let Ok(connected) = self.connected() {
-            if let Ok(resp) = connected.client.send("GET", "/v1/me", None, &[]).await {
+            if let Ok(resp) = self
+                .send_logged(&connected, "GET", "/v1/me", None, &[])
+                .await
+            {
                 let epoch = resp.log_epoch().or_else(|| {
                     serde_json::from_slice::<Value>(&resp.body).ok()?["server"]["log_epoch"]
                         .as_u64()
@@ -351,7 +417,9 @@ impl Shell {
     /// `events_ack`：UI 已应用到 `seq`。乱序或回退被忽略。
     pub fn events_ack(&self, seq: u64) {
         if let Some(h) = self.stream.lock().unwrap().as_ref() {
-            h.state.lock().unwrap().ack(seq);
+            if h.state.lock().unwrap().ack(seq) {
+                self.diag.count("events_acked", &[]);
+            }
         }
     }
 
@@ -498,9 +566,8 @@ impl Shell {
             body: Some(body),
             idempotency_key: None,
         };
-        let resp = c
-            .client
-            .send_prepared(&request)
+        let resp = self
+            .send_prepared_logged(&c, &request)
             .await
             .map_err(|_| not_connected())?;
         if resp.status == 401 {
@@ -541,9 +608,8 @@ impl Shell {
 
     /// `GET /v1/me`：顺带校正时钟偏差（本地 − 服务端）并比对纪元号。
     async fn me(&self, c: &Connected) -> Result<Value, ShellError> {
-        let resp = c
-            .client
-            .send("GET", "/v1/me", None, &[])
+        let resp = self
+            .send_logged(c, "GET", "/v1/me", None, &[])
             .await
             .map_err(|_| not_connected())?;
         if let Some(epoch) = resp.log_epoch() {
@@ -573,9 +639,8 @@ impl Shell {
     }
 
     async fn get_json(&self, c: &Connected, path: &str) -> Result<(u16, Value), ShellError> {
-        let resp = c
-            .client
-            .send("GET", path, None, &[])
+        let resp = self
+            .send_logged(c, "GET", path, None, &[])
             .await
             .map_err(|_| not_connected())?;
         if let Some(epoch) = resp.log_epoch() {
@@ -718,10 +783,16 @@ impl Shell {
         }
         // 用户在场会阻塞（Touch ID / Windows Hello），放到阻塞线程。
         let (signer, keys, id) = (self.signer.clone(), c.keys.clone(), prepared_id.to_string());
-        let grant =
+        let signed =
             tokio::task::spawn_blocking(move || signer.sign(&id, keys.as_ref(), now, |_| Ok(())))
                 .await
-                .map_err(|_| ShellError::new(ShellErrorCode::PresenceFailed, "签名中断"))??;
+                .map_err(|_| ShellError::new(ShellErrorCode::PresenceFailed, "签名中断"))?;
+        let outcome = match &signed {
+            Ok(_) => "signed",
+            Err(e) => crate::diag::intern(&error_code(e), crate::diag::SHELL_CODES),
+        };
+        self.diag.count("signing_attempts", &[("result", outcome)]);
+        let grant = signed?;
         let body = serde_json::to_vec(&grant.body).expect("grant 体可序列化");
         let request = routes::PreparedRequest {
             operation_id: "grantApproval",
@@ -730,7 +801,7 @@ impl Shell {
             body: Some(body),
             idempotency_key: Some(grant.idempotency_key),
         };
-        match c.client.send_prepared(&request).await {
+        match self.send_prepared_logged(&c, &request).await {
             Ok(resp) => {
                 if let Some(epoch) = resp.log_epoch() {
                     self.observe_log_epoch(epoch)?;
@@ -750,6 +821,77 @@ impl Shell {
         self.signer.discard(prepared_id);
     }
 
+    /// 外壳发出的每个请求都经这里：发送并记一行请求日志（§11）。
+    pub(crate) async fn send_logged(
+        &self,
+        c: &Connected,
+        method: &str,
+        path_and_query: &str,
+        body: Option<&[u8]>,
+        headers: &[(&str, &str)],
+    ) -> Result<crate::http::HttpResponse, crate::http::NetError> {
+        let started = std::time::Instant::now();
+        let result = c.client.send(method, path_and_query, body, headers).await;
+        self.log_request(
+            routes::operation_for(method, path_and_query),
+            &result,
+            started,
+        );
+        result
+    }
+
+    pub(crate) async fn send_prepared_logged(
+        &self,
+        c: &Connected,
+        request: &routes::PreparedRequest,
+    ) -> Result<crate::http::HttpResponse, crate::http::NetError> {
+        let started = std::time::Instant::now();
+        let result = c.client.send_prepared(request).await;
+        self.log_request(request.operation_id, &result, started);
+        result
+    }
+
+    /// 每条请求日志只含：路由、状态码、耗时、`request_id`、`Idempotent-Replayed`（§11）。
+    pub(crate) fn log_request(
+        &self,
+        operation_id: &str,
+        result: &Result<crate::http::HttpResponse, crate::http::NetError>,
+        started: std::time::Instant,
+    ) {
+        let route = crate::diag::route_label(operation_id);
+        let duration_ms = Some(started.elapsed().as_millis() as u64);
+        let entry = match result {
+            Ok(resp) => {
+                let status = resp.status.to_string();
+                self.diag
+                    .count("api_requests", &[("route", route), ("status", &status)]);
+                crate::diag::LogEntry {
+                    event: "api_request",
+                    route: Some(route),
+                    status: Some(resp.status),
+                    duration_ms,
+                    idempotent_replayed: resp
+                        .header("idempotent-replayed")
+                        .map(|v| v.eq_ignore_ascii_case("true")),
+                    ..Default::default()
+                }
+                .with_request_id(resp.header("x-request-id"))
+            }
+            Err(e) => {
+                self.diag
+                    .count("api_requests", &[("route", route), ("status", e.as_str())]);
+                crate::diag::LogEntry {
+                    event: "api_request",
+                    route: Some(route),
+                    duration_ms,
+                    code: Some(e.as_str()),
+                    ..Default::default()
+                }
+            }
+        };
+        self.diag.log(entry, self.now_ms());
+    }
+
     // ---- API ----
 
     /// `api_request`（§7.1）。本地校验不通过的请求不会发出。
@@ -763,7 +905,7 @@ impl Shell {
     ) -> Result<Value, ShellError> {
         let connected = self.connected()?;
         let prepared = routes::prepare(route, path, query, body, idempotency_key)?;
-        match connected.client.send_prepared(&prepared).await {
+        match self.send_prepared_logged(&connected, &prepared).await {
             Ok(resp) => {
                 if let Some(epoch) = resp.log_epoch() {
                     self.observe_log_epoch(epoch)?;
@@ -781,6 +923,14 @@ impl Shell {
 
 /// §10 `cert_warn_days`：续期失败且距到期不足 7 天时 `cert_expiring = true`。
 const CERT_WARN_MS: i64 = 7 * 86_400_000;
+
+/// `ShellError` 的线上错误码（`shell.*` 或 `pair_token_invalid`）。
+fn error_code(e: &ShellError) -> String {
+    serde_json::to_value(e.code)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
 
 fn not_connected() -> ShellError {
     ShellError::new(ShellErrorCode::NotConnected, "连接中断")

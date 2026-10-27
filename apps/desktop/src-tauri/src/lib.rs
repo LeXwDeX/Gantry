@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gantry_desktop_shell::approval;
+use gantry_desktop_shell::diag;
 use gantry_desktop_shell::events::FrameSink;
 use gantry_desktop_shell::http::HttpPairTransport;
 use gantry_desktop_shell::ipc::{ShellError, ShellErrorCode};
@@ -30,7 +31,7 @@ type CmdResult<T> = Result<T, ShellError>;
 
 #[tauri::command(rename_all = "snake_case")]
 fn identity_status(shell: State<'_, Arc<Shell>>) -> CmdResult<Value> {
-    shell.identity_status()
+    shell.track("identity_status", shell.identity_status())
 }
 
 /// `platform` 由外壳填，不接受 UI 传入（§6.1）。
@@ -40,12 +41,14 @@ async fn pairing_begin(
     pairing_string: String,
     device_name: String,
 ) -> CmdResult<Value> {
-    shell.pairing_begin(&pairing_string, &device_name).await
+    let r = shell.pairing_begin(&pairing_string, &device_name).await;
+    shell.track("pairing_begin", r)
 }
 
 #[tauri::command(rename_all = "snake_case")]
 async fn pairing_confirm(shell: State<'_, Arc<Shell>>, matches: bool) -> CmdResult<Value> {
-    shell.pairing_confirm(matches).await
+    let r = shell.pairing_confirm(matches).await;
+    shell.track("pairing_confirm", r)
 }
 
 /// 先弹原生确认框（WebView 不参与），确认后才删除本机密钥、证书与身份文件。
@@ -61,7 +64,7 @@ async fn identity_reset(app: AppHandle, shell: State<'_, Arc<Shell>>) -> CmdResu
     if !confirmed {
         return Err(ShellError::new(ShellErrorCode::UserCancelled, "用户取消"));
     }
-    shell.identity_reset()
+    shell.track("identity_reset", shell.identity_reset())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -81,7 +84,7 @@ async fn api_request(
     body: Option<Value>,
     idempotency_key: Option<String>,
 ) -> CmdResult<Value> {
-    shell
+    let r = shell
         .api_request(
             &route,
             &path,
@@ -89,7 +92,8 @@ async fn api_request(
             body.as_ref(),
             idempotency_key.as_deref(),
         )
-        .await
+        .await;
+    shell.track("api_request", r)
 }
 
 /// Tauri `Channel` 作为事件流的帧出口；WebView 关闭通道后 `send` 失败，运行器随之停止。
@@ -108,7 +112,8 @@ async fn events_open(
     on_frame: Channel<Value>,
     after_seq: Option<u64>,
 ) -> CmdResult<()> {
-    shell.events_open(after_seq, Arc::new(ChannelSink(on_frame)))
+    let r = shell.events_open(after_seq, Arc::new(ChannelSink(on_frame)));
+    shell.track("events_open", r)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -127,7 +132,8 @@ fn events_close(shell: State<'_, Arc<Shell>>) -> CmdResult<()> {
 
 #[tauri::command(rename_all = "snake_case")]
 async fn approval_prepare(shell: State<'_, Arc<Shell>>, approval_id: String) -> CmdResult<Value> {
-    shell.approval_prepare(&approval_id).await
+    let r = shell.approval_prepare(&approval_id).await;
+    shell.track("approval_prepare", r)
 }
 
 /// 只接受 `prepared_id`：参数里夹带 `payload` / `signature` 等一律拒绝（S-3、§12）。
@@ -144,7 +150,8 @@ async fn approval_sign(
         .as_str()
         .ok_or_else(|| ShellError::bad_argument("prepared_id"))?
         .to_string();
-    shell.approval_sign(&prepared_id).await
+    let r = shell.approval_sign(&prepared_id).await;
+    shell.track("approval_sign", r)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -162,7 +169,8 @@ async fn guarded_write_prepare(
     let tauri::ipc::InvokeBody::Json(args) = request.body() else {
         return Err(ShellError::bad_argument("args"));
     };
-    shell.guarded_write_prepare(args).await
+    let r = shell.guarded_write_prepare(args).await;
+    shell.track("guarded_write_prepare", r)
 }
 
 /// 只接受句柄：请求体由外壳持有，UI 无法在 prepare 之后替换（S-3）。
@@ -179,7 +187,8 @@ async fn guarded_write_submit(
         .as_str()
         .ok_or_else(|| ShellError::bad_argument("pending_id"))?
         .to_string();
-    shell.guarded_write_submit(&pending_id).await
+    let r = shell.guarded_write_submit(&pending_id).await;
+    shell.track("guarded_write_submit", r)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -197,17 +206,20 @@ fn prefs_get(shell: State<'_, Arc<Shell>>) -> CmdResult<Prefs> {
 
 #[tauri::command(rename_all = "snake_case")]
 fn prefs_set(shell: State<'_, Arc<Shell>>, patch: Value) -> CmdResult<Prefs> {
-    shell.store().set_prefs(&patch)
+    shell.track("prefs_set", shell.store().set_prefs(&patch))
 }
 
 #[tauri::command(rename_all = "snake_case")]
 fn ui_state_get(shell: State<'_, Arc<Shell>>, project_id: String) -> CmdResult<Option<Value>> {
-    shell.store().ui_state_get(&project_id)
+    shell.track("ui_state_get", shell.store().ui_state_get(&project_id))
 }
 
 #[tauri::command(rename_all = "snake_case")]
 fn ui_state_set(shell: State<'_, Arc<Shell>>, project_id: String, state: Value) -> CmdResult<()> {
-    shell.store().ui_state_set(&project_id, &state)
+    shell.track(
+        "ui_state_set",
+        shell.store().ui_state_set(&project_id, &state),
+    )
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -271,8 +283,8 @@ fn open_in_browser(app: &AppHandle, url: &str) -> CmdResult<()> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn diagnostics_snapshot() -> CmdResult<Value> {
-    Err(ShellError::unavailable("diagnostics_snapshot"))
+fn diagnostics_snapshot(shell: State<'_, Arc<Shell>>) -> CmdResult<Value> {
+    Ok(shell.diagnostics_snapshot())
 }
 
 /// WebView 只能停留在打包进应用的来源（§7.6"导航"）。
@@ -295,31 +307,45 @@ pub fn run() {
         // 两个插件只给外壳的 Rust 代码用；能力文件不授予它们的任何 JS 侧权限（S-5）。
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![
-            identity_status,
-            pairing_begin,
-            pairing_confirm,
-            identity_reset,
-            connection_state,
-            api_request,
-            events_open,
-            events_ack,
-            events_close,
-            approval_prepare,
-            approval_sign,
-            approval_discard,
-            guarded_write_prepare,
-            guarded_write_submit,
-            guarded_write_discard,
-            prefs_get,
-            prefs_set,
-            ui_state_get,
-            ui_state_set,
-            ui_state_list,
-            open_external,
-            open_github,
-            diagnostics_snapshot,
-        ])
+        // 每次 IPC 调用计数 `ipc_calls{command}`（§11 指标）；命令名收敛到白名单，其余记 `other`。
+        .invoke_handler({
+            let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
+                Box::new(tauri::generate_handler![
+                    identity_status,
+                    pairing_begin,
+                    pairing_confirm,
+                    identity_reset,
+                    connection_state,
+                    api_request,
+                    events_open,
+                    events_ack,
+                    events_close,
+                    approval_prepare,
+                    approval_sign,
+                    approval_discard,
+                    guarded_write_prepare,
+                    guarded_write_submit,
+                    guarded_write_discard,
+                    prefs_get,
+                    prefs_set,
+                    ui_state_get,
+                    ui_state_set,
+                    ui_state_list,
+                    open_external,
+                    open_github,
+                    diagnostics_snapshot,
+                ]);
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                if let Some(shell) = invoke.message.webview().try_state::<Arc<Shell>>() {
+                    let command = diag::intern(
+                        invoke.message.command(),
+                        gantry_desktop_shell::ipc::COMMANDS,
+                    );
+                    shell.diag().count("ipc_calls", &[("command", command)]);
+                }
+                handler(invoke)
+            }
+        })
         // main 窗口在 tauri.conf.json 里 `create: false`，这里带上导航限制再创建。
         .setup(|app| {
             // 应用数据目录：identity.json、prefs.json、ui-state/（§7.5），仅当前用户可访问。
@@ -329,12 +355,15 @@ pub fn run() {
                 Ok(store) => store,
                 Err(e) => Box::new(UnavailableKeyStore(e.to_string())),
             };
-            let shell = Arc::new(Shell::new(
-                AppStore::open(&data_dir)?,
-                keys,
-                Box::new(HttpPairTransport::default()),
-                system_clock(),
-            ));
+            let shell = Arc::new(
+                Shell::new(
+                    AppStore::open(&data_dir)?,
+                    keys,
+                    Box::new(HttpPairTransport::default()),
+                    system_clock(),
+                )
+                .with_log_dir(&data_dir.join("logs")),
+            );
             // 证书自动续期（P-64）：每 10 分钟检查一次 [建议值]，到剩余 1/3 有效期时后台续期。
             {
                 let shell = shell.clone();

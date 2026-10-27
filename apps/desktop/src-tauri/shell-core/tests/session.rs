@@ -15,7 +15,8 @@ use gantry_desktop_shell::storage::AppStore;
 use serde_json::{json, Value};
 use support::{serve_simple, Handler, Pki, Seen};
 
-const TOKEN: &str = "gp1_4Ww9rX0b2sQ7hYk1";
+/// 配对 token 兼作脱敏哨兵：日志与诊断快照里都不得出现。
+const TOKEN: &str = "gp1_SENTINELtoken0123";
 const PRJ: &str = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA";
 
 struct Env {
@@ -50,13 +51,14 @@ async fn env(name: &str, clock: Clock) -> Env {
                 ("content-type".to_string(), "application/json".to_string()),
                 ("x-log-epoch".to_string(), epoch.to_string()),
                 ("etag".to_string(), "\"r1\"".to_string()),
+                ("x-request-id".to_string(), "req_01ABC".to_string()),
             ];
             match seen.path.as_str() {
                 "/v1/me" => (200, headers, serde_json::to_vec(&json!({"server": {"log_epoch": epoch}})).unwrap()),
                 p if p.starts_with("/v1/projects/") => (
                     404,
                     headers,
-                    br#"{"code":"not_found","title":"Not Found","request_id":"req_1","detail":"secret internals"}"#.to_vec(),
+                    br#"{"code":"not_found","title":"Not Found","request_id":"req_1","detail":"secret internals SENTINEL_DETAIL"}"#.to_vec(),
                 ),
                 _ => (200, headers, serde_json::to_vec(&json!({"items": [], "next_cursor": null})).unwrap()),
             }
@@ -110,7 +112,8 @@ async fn env(name: &str, clock: Clock) -> Env {
         Box::new(keys.clone()),
         Box::new(HttpPairTransport::default()),
         clock,
-    );
+    )
+    .with_log_dir(&dir.join("logs"));
     Env {
         pki,
         pairing_string,
@@ -340,4 +343,75 @@ async fn log_epoch_change_clears_prepared_signings() {
         .unwrap();
     assert_eq!(e.shell.store().identity().unwrap().log_epoch, Some(2));
     assert!(e.shell.signer().is_empty());
+}
+
+fn all_logs(dir: &std::path::Path) -> String {
+    let mut out = String::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        out.push_str(&std::fs::read_to_string(e.path()).unwrap_or_default());
+    }
+    out
+}
+
+#[tokio::test]
+async fn logs_and_diagnostics_carry_no_secrets() {
+    let e = env("redact", system_clock()).await;
+    let shell = &e.shell;
+    shell.pairing_begin(&e.pairing_string, "mac").await.unwrap();
+    shell.pairing_confirm(true).await.unwrap();
+    shell
+        .api_request(
+            "messages.post",
+            "/v1/conversations/cnv_01JB7K2M9Q4X8V3N5R6T1W0YZA/messages",
+            None,
+            Some(&json!({"text": "正文 SENTINEL_BODY"})),
+            Some("idem_SENTINELkey012345"),
+        )
+        .await
+        .unwrap();
+    shell
+        .api_request(
+            "projects.get",
+            &format!("/v1/projects/{PRJ}"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // 失败的命令也只记错误码。
+    let _ = shell.track(
+        "pairing_begin",
+        shell.pairing_begin(&e.pairing_string, "again").await,
+    );
+
+    let logs = all_logs(&shell.store().dir().join("logs"));
+    assert!(logs.contains("\"event\":\"api_request\""), "{logs}");
+    assert!(logs.contains("\"route\":\"postMessage\""));
+    assert!(logs.contains("\"request_id\""));
+    let snapshot = shell.diagnostics_snapshot().to_string();
+    for sentinel in [
+        TOKEN,
+        "SENTINEL_BODY",
+        "SENTINEL_DETAIL",
+        "idem_SENTINELkey012345",
+        "BEGIN CERTIFICATE",
+    ] {
+        assert!(!logs.contains(sentinel), "日志里出现了 {sentinel}");
+        assert!(!snapshot.contains(sentinel), "诊断快照里出现了 {sentinel}");
+    }
+    let snap = shell.diagnostics_snapshot();
+    assert_eq!(snap["key_backend"], "test_software");
+    assert!(
+        snap["counters"]["api_requests{route=postMessage,status=200}"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(snap["recent_errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "shell.bad_argument"));
+    assert!(snap["cert"]["serial"].is_string());
 }
