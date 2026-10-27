@@ -1773,6 +1773,10 @@ pub struct AttemptFinishedData {
     pub result_commit: Option<GitOid>,
     #[serde(default)]
     pub served_by: Option<ServedBy>,
+    /// 被 `policy` 接受的 `open_pr` 提议的 `proposal_id`（engine.md §7.14.6 E5）。
+    /// 执行器据 `result_ref` 从 CAS 取出提议原文填入 `create_pr` 意图，所以必须有 `result_ref`。
+    #[serde(default)]
+    pub accepted_open_pr: Option<String>,
 }
 
 impl EventData for AttemptFinishedData {
@@ -1823,6 +1827,15 @@ impl EventData for AttemptFinishedData {
                 "/result_tree",
                 "result_commit requires result_tree",
             ));
+        }
+        if let Some(proposal_id) = &self.accepted_open_pr {
+            require_non_empty(proposal_id, "/accepted_open_pr")?;
+            if self.result_ref.is_none() {
+                return Err(SchemaError::consistency(
+                    "/result_ref",
+                    "accepted_open_pr requires result_ref",
+                ));
+            }
         }
         Ok(())
     }
