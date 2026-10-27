@@ -1,0 +1,10 @@
+{
+  "kind": "create_pr",
+  "expected_effects": [
+    {
+      "event": "pull_request.opened",
+      "match": { "head_ref": "gantry/42-fix-pagination", "base_ref": "main" },
+      "matched_webhook_deliveries": ["72d3162e-cc78-11e3-81ab-4c9367dc0958"]
+    }
+  ]
+}

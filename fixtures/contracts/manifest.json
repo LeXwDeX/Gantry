@@ -941,27 +941,41 @@
       "error": null
     },
     {
-      "id": "forge-actions-L520",
+      "id": "forge-actions-L522",
       "source": "docs/interfaces/forge-actions.md",
-      "line": 520,
+      "line": 522,
       "context": "### 4.2 `github_ref` 的形状",
-      "sha256": "4a29a75c0a4e2e436c4cc0b0ca65308a3332db54e2d82f605fc5491647c8367c",
-      "bytes": 524,
-      "file": "fixtures/contracts/blocks/forge-actions/L520.json",
-      "status": "skipped",
-      "schema": "schemas/forge/forge.event.v1.json",
+      "sha256": "1567894a1dc1b0c164df2a6054cff61e100be804ef46c41c0bb74cd4b77e483e",
+      "bytes": 260,
+      "file": "fixtures/contracts/blocks/forge-actions/L522.json",
+      "status": "partial",
+      "schema": "schemas/forge/outbox-action.json",
       "rust": "none",
-      "note": "github_ref 与 expected_effects 的组合展示；无单一 core 类型",
+      "note": "forge-actions §4.2 执行前写入的 expected_effects；OutboxAction 行只列 kind 与该字段，其余省略",
       "error": null
     },
     {
-      "id": "forge-actions-L747",
+      "id": "forge-actions-L537",
       "source": "docs/interfaces/forge-actions.md",
-      "line": 747,
+      "line": 537,
+      "context": "### 4.2 `github_ref` 的形状",
+      "sha256": "35fbfe0b4314d8abb75d3961b501c0c14131bfe1d2d1161a7ac53c02b07b12ab",
+      "bytes": 319,
+      "file": "fixtures/contracts/blocks/forge-actions/L537.json",
+      "status": "verified",
+      "schema": "schemas/events/outbox.succeeded.json",
+      "rust": "event:outbox.succeeded",
+      "note": "forge-actions §4.2 成功后写入的 github_ref，按 outbox.succeeded data 完整验证",
+      "error": null
+    },
+    {
+      "id": "forge-actions-L759",
+      "source": "docs/interfaces/forge-actions.md",
+      "line": 759,
       "context": "### 6.4 示例",
       "sha256": "0c737ad40319adafa3a231db59b13827a02fc3f3cb9e04d14c574ce06be9d7f8",
       "bytes": 948,
-      "file": "fixtures/contracts/blocks/forge-actions/L747.json",
+      "file": "fixtures/contracts/blocks/forge-actions/L759.json",
       "status": "verified",
       "schema": "schemas/forge/forge.event.v1.json",
       "rust": "forge::ForgeEventEnvelope",
@@ -969,13 +983,13 @@
       "error": null
     },
     {
-      "id": "forge-actions-L778",
+      "id": "forge-actions-L790",
       "source": "docs/interfaces/forge-actions.md",
-      "line": 778,
+      "line": 790,
       "context": "### 6.4 示例",
       "sha256": "7d3ab92de9bf4b258f40fb05693e3766722c22eb7639b983e6ea1c336c128e13",
       "bytes": 1251,
-      "file": "fixtures/contracts/blocks/forge-actions/L778.json",
+      "file": "fixtures/contracts/blocks/forge-actions/L790.json",
       "status": "verified",
       "schema": "schemas/forge/forge.event.v1.json",
       "rust": "forge::ForgeEventEnvelope",
@@ -983,13 +997,13 @@
       "error": null
     },
     {
-      "id": "forge-actions-L873",
+      "id": "forge-actions-L885",
       "source": "docs/interfaces/forge-actions.md",
-      "line": 873,
+      "line": 885,
       "context": "### 7.4 drift 目录",
       "sha256": "32a37a78e3033a458ac22cdc0c47c3d0820442bd2c7be1a6f66794b65d1338d4",
       "bytes": 552,
-      "file": "fixtures/contracts/blocks/forge-actions/L873.json",
+      "file": "fixtures/contracts/blocks/forge-actions/L885.json",
       "status": "verified",
       "schema": "schemas/forge/drift.json",
       "rust": "forge::DriftPayload",
@@ -997,17 +1011,17 @@
       "error": null
     },
     {
-      "id": "forge-actions-L990",
+      "id": "forge-actions-L1002",
       "source": "docs/interfaces/forge-actions.md",
-      "line": 990,
+      "line": 1002,
       "context": "### 9.6 App Manifest 片段（供 `deploy` 使用）",
       "sha256": "9911a924ae311ede157cdec544883b47658407b10d3b0d341fb1e98f4ed5a927",
       "bytes": 471,
-      "file": "fixtures/contracts/blocks/forge-actions/L990.json",
+      "file": "fixtures/contracts/blocks/forge-actions/L1002.json",
       "status": "skipped",
       "schema": "schemas/forge/forge.event.v1.json",
       "rust": "none",
-      "note": "GitHub App manifest；不属 Gantry 协议类型",
+      "note": "GitHub App manifest；GitHub 的外部格式，不属 Gantry 协议类型（理由见 unverified.json）",
       "error": null
     },
     {
@@ -1110,9 +1124,9 @@
     }
   ],
   "summary": {
-    "partial": 21,
+    "partial": 22,
     "schema-only": 15,
-    "skipped": 3,
-    "verified": 40
+    "skipped": 2,
+    "verified": 41
   }
 }
