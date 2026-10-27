@@ -77,6 +77,7 @@ fn recorded_success_maps_to_protocol_events() {
         Some(&Mapped::Init(CliInit {
             agent_version: "2.1.303".into(),
             model: "claude-sonnet-5-5".into(),
+            session_id: Some("697f657b-4bf1-43d2-aef0-5fd38bbedfe4".into()),
         }))
     );
     let starts: Vec<&Event> = mapped
