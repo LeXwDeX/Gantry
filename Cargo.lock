@@ -516,6 +516,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gantry-conversation"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gantry-core",
+ "gantry-fakes",
+ "gantry-models",
+ "gantry-store",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "gantry-core"
 version = "0.1.0"
 dependencies = [
@@ -726,7 +741,10 @@ version = "0.1.0"
 dependencies = [
  "gantry-core",
  "gantry-sandbox",
+ "jsonschema",
+ "serde",
  "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
