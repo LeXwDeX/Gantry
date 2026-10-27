@@ -354,8 +354,11 @@ describe("F7：模型降级列表清空", () => {
           )}
         </Live>,
       );
-      await screen.findByRole("button", { name: "模型覆盖" });
-      const fallback = screen.getByLabelText("大脑 降级模型 项目覆盖") as HTMLTextAreaElement;
+      // 本用例只用标签 / 文本查询（按钮用 selector 限定为 <button>）：ByRole 每次都要对整棵树
+      // 重算角色与可访问名称，findByRole 还会在每次 DOM 变化时重跑，负载高时整项会超时（#179）。
+      const fallback = (await screen.findByLabelText(
+        "大脑 降级模型 项目覆盖",
+      )) as HTMLTextAreaElement;
       expect(fallback.value).toBe("");
       expect(fallback.placeholder).toContain("anthropic/claude-opus-4-1");
 
@@ -372,12 +375,11 @@ describe("F7：模型降级列表清空", () => {
       expect(fallback.value).toBe("");
       expect(await screen.findByText("有未保存的改动")).toBeInTheDocument();
 
-      fireEvent.click(screen.getByRole("button", { name: "保存模型覆盖" }));
-      await screen.findByRole("button", { name: "模拟应用设置" });
-      const preview = screen.getByLabelText("覆盖写入预览");
+      fireEvent.click(screen.getByText("保存模型覆盖", { selector: "button" }));
+      const preview = await screen.findByLabelText("覆盖写入预览");
       expect(preview.textContent).toContain('"fallback": []');
       expect(screen.queryByText(/恢复继承（DELETE）/)).toBeNull();
-      const apply = screen.getByRole("button", { name: "模拟应用设置" });
+      const apply = screen.getByText("模拟应用设置", { selector: "button" });
       await waitFor(() => expect(apply).toBeEnabled());
       fireEvent.click(apply);
       await screen.findByText(/模拟设置已应用/);
@@ -389,14 +391,13 @@ describe("F7：模型降级列表清空", () => {
       expect(Object.hasOwn(planner as object, "fallback")).toBe(true);
       expect(planner?.fallback).toEqual([]);
 
-      const group = screen.getByRole("group", { name: "大脑 降级模型 覆盖行" });
+      const group = screen.getByLabelText("大脑 降级模型 覆盖行");
       fireEvent.click(within(group).getByRole("button", { name: "恢复继承" }));
-      fireEvent.click(screen.getByRole("button", { name: "保存模型覆盖" }));
-      await screen.findByRole("button", { name: "模拟应用设置" });
-      expect(screen.getByLabelText("覆盖写入预览").textContent).not.toContain(
+      fireEvent.click(screen.getByText("保存模型覆盖", { selector: "button" }));
+      expect((await screen.findByLabelText("覆盖写入预览")).textContent).not.toContain(
         '"fallback"',
       );
-      fireEvent.click(screen.getByRole("button", { name: "模拟应用设置" }));
+      fireEvent.click(screen.getByText("模拟应用设置", { selector: "button" }));
       await screen.findByText(/模拟设置已应用/);
       const inherited = await readOverride(adapter, "prj_gantry", "models");
       const inheritedPlanner = (
