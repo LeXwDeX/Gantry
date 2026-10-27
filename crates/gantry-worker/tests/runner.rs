@@ -371,6 +371,22 @@ fn golden_run_produces_the_four_artifacts() {
     // stderr 每阶段一行，记录前言版本。
     assert!(outcome.stderr.contains("phase=prepare"));
     assert!(outcome.stderr.contains("gantry-preamble/1"));
+    // worker 不创建 socket 文件（§12.F）：整个沙盒目录树里没有。
+    assert_eq!(sockets_under(&sbx.root), Vec::<PathBuf>::new());
+}
+
+fn sockets_under(dir: &Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).unwrap().flatten() {
+        let kind = entry.file_type().unwrap();
+        if kind.is_socket() {
+            found.push(entry.path());
+        } else if kind.is_dir() {
+            found.extend(sockets_under(&entry.path()));
+        }
+    }
+    found
 }
 
 #[test]

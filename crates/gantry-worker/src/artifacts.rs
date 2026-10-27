@@ -28,22 +28,30 @@ pub fn write_atomic(
     name: &'static str,
     bytes: &[u8],
 ) -> Result<ArtifactRef, ArtifactError> {
-    let io_err = |err| ArtifactError::Io(name, err);
-    let tmp = out.join(format!("{name}.tmp"));
-    let mut file = File::create(&tmp).map_err(io_err)?;
-    file.write_all(bytes).map_err(io_err)?;
-    file.sync_all().map_err(io_err)?;
-    drop(file);
-    fs::rename(&tmp, out.join(name)).map_err(io_err)?;
-    // 目录项也要落盘，否则崩溃后 rename 可能丢失。
-    File::open(out)
-        .and_then(|dir| dir.sync_all())
-        .map_err(io_err)?;
+    write_tmp(out, name, bytes)?;
+    commit_tmp(out, name)?;
     Ok(ArtifactRef {
         path: name.to_owned(),
         sha256: sha256(bytes),
         bytes: bytes.len() as u64,
     })
+}
+
+/// 原子写的第一步：写 `<name>.tmp` 并 `fsync`。此后崩溃，`out/` 里只有 `.tmp`。
+pub fn write_tmp(out: &Path, name: &'static str, bytes: &[u8]) -> Result<(), ArtifactError> {
+    let io_err = |err| ArtifactError::Io(name, err);
+    let mut file = File::create(out.join(format!("{name}.tmp"))).map_err(io_err)?;
+    file.write_all(bytes).map_err(io_err)?;
+    file.sync_all().map_err(io_err)
+}
+
+/// 原子写的第二步：`rename` 为正式文件名，并让目录项落盘（否则崩溃后 rename 可能丢失）。
+pub fn commit_tmp(out: &Path, name: &'static str) -> Result<(), ArtifactError> {
+    let io_err = |err| ArtifactError::Io(name, err);
+    fs::rename(out.join(format!("{name}.tmp")), out.join(name)).map_err(io_err)?;
+    File::open(out)
+        .and_then(|dir| dir.sync_all())
+        .map_err(io_err)
 }
 
 pub fn write_proposals(out: &Path, proposals: &Proposals) -> Result<ArtifactRef, ArtifactError> {
