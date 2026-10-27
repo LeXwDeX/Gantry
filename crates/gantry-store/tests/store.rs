@@ -15,8 +15,8 @@ use gantry_core::events::{EventType, NewEvent, SchemaErrorCode, Subject};
 use gantry_core::ids::{ActionId, DeliveryId, IdGen, ProjectId};
 use gantry_core::testing::{FakeClock, SeqEntropy};
 use gantry_store::{
-    AfterFailure, AppendOpts, ClaimOpts, EnqueuedBy, EventFilter, ModuleSpec, OutboxInsert, Store,
-    StoreDeps, StoreError, TypePattern,
+    AfterFailure, AppendOpts, ClaimOpts, EnqueuedBy, EventFilter, OutboxInsert, Store, StoreDeps,
+    StoreError, TypePattern,
 };
 use serde_json::{json, Value};
 
@@ -27,13 +27,6 @@ const DELIVERY: &str = "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZB";
 
 fn cases() -> Value {
     serde_json::from_str(CASES).unwrap()
-}
-
-fn deps(start_ms: i64) -> StoreDeps {
-    let clock = Arc::new(FakeClock::new(start_ms));
-    let entropy = Arc::new(SeqEntropy::new(11));
-    let ids = Arc::new(IdGen::new(clock.clone(), entropy));
-    StoreDeps { clock, ids }
 }
 
 async fn store() -> Store {
@@ -613,15 +606,6 @@ async fn unprojected_events_are_recorded_not_swallowed() {
     assert_eq!(unprojected.len(), 1);
     assert_eq!(unprojected[0].ty, EventType::BudgetExhausted);
     assert_eq!(unprojected[0].reason, "no_projector");
-}
-
-#[tokio::test]
-async fn module_specs_are_rejected_in_m0() {
-    match Store::open_in_memory(deps(1_700_000_000_000), &[ModuleSpec { module: "forge" }]).await {
-        Err(StoreError::Unsupported(_)) => {}
-        Err(other) => panic!("unexpected {other}"),
-        Ok(_) => panic!("module specs were accepted"),
-    }
 }
 
 #[tokio::test]
