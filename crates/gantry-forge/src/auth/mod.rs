@@ -1,7 +1,10 @@
 //! 令牌来源（forge.md §7.12）。
 //!
-//! 本切片只定义执行器依赖的接口；App JWT 与安装令牌缓存在后续切片实现。
+//! [`TokenProvider`] 是执行器依赖的接口；[`app::AppTokenProvider`] 是 GitHub App 实现
+//! （App JWT → 安装令牌 → 缓存，以及权限自检）。
 //! 令牌用 `SecretString` 承载：`Debug` 脱敏、不实现 `Serialize` / `Clone`。
+
+pub(crate) mod app;
 
 use std::sync::Arc;
 
@@ -19,8 +22,16 @@ pub enum TokenPurpose {
 pub enum AuthError {
     #[error("installation unreachable")]
     Unreachable,
+    /// App 私钥缺失或无法解析（forge.md §7.13：不崩溃，写路径关闭）。
     #[error("credentials unavailable")]
     CredentialsMissing,
+    /// GitHub 拒绝 App JWT 或安装不存在（401 / 403 / 404）。
+    #[error("credentials rejected")]
+    Rejected,
+    #[error("malformed github response")]
+    Malformed,
+    #[error("project not bound")]
+    ProjectUnknown,
 }
 
 #[async_trait]
@@ -35,7 +46,7 @@ pub trait TokenProvider: Send + Sync {
     fn invalidate(&self, project: &ProjectId);
 }
 
-/// 固定令牌：用于测试与 App 鉴权切片落地之前的装配。
+/// 固定令牌：用于测试。
 pub struct StaticTokenProvider {
     token: Arc<SecretString>,
 }

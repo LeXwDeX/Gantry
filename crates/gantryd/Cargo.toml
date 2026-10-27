@@ -1,0 +1,32 @@
+[package]
+name = "gantryd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 服务端单进程：配置加载、模块装配与本机控制通道"
+
+[[bin]]
+name = "gantryd"
+path = "src/main.rs"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+gantry-engine = { path = "../gantry-engine" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
+toml = "1"
+rustix = { version = "1", features = ["fs"] }
+getrandom = "0.3"
+
+# 替身装配只在进程级测试里（tests/support），不进服务端二进制（AGENTS.md：fakes 只作 dev-dependency）。
+[dev-dependencies]
+gantry-fakes = { path = "../gantry-fakes" }
+gantry-notify = { path = "../gantry-notify" }
+gantry-policy = { path = "../gantry-policy" }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
