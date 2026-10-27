@@ -32,7 +32,7 @@
 
 **远端 CI**：GitHub Actions 因账户计费问题全部在数秒内失败，#77、#78、#79 是在没有 CI 的情况下按本机检查合入的。最近一次可追溯的全绿远端结果是 M0 时期 PR #17 的 run 40334369717。
 
-**未实现或未验证**：Outbox 执行与审批消费（`PolicyPort` 尚未接入引擎）；终结管线与 `waiting_human` / `blocked` 自动切换；`attempt.*`、`budget.charged` 的事件写入；真实 GitHub App、模型、Podman、目标主机与代码签名。M1 端到端退出标准全部未验证，取证分级见 [M1 验收证据分级（提议）](docs/m1-acceptance.md)。
+**未实现或未验证**：Outbox 执行与审批消费（`PolicyPort` 尚未接入引擎）；终结管线与 `waiting_human` / `blocked` 自动切换；`attempt.*`、`budget.charged` 的事件写入；真实 GitHub App、模型、Podman、目标主机与代码签名。M1 端到端退出标准全部未验证，取证分级见 [M1 验收证据分级](docs/m1-acceptance.md)。
 
 **M0 遗留**（里程碑 [M0.9 M0 遗留收口](https://github.com/LeXwDeX/gantry/milestone/2)）：
 
@@ -42,16 +42,17 @@
 
 ## 待拍板
 
-以下事项需要用户决定，不自行拍板。M1 宣布方式、Q-10、Q-11 汇总在 #87。
+以下事项需要用户决定，不自行拍板。2026-10-27 用户授权协调会话代为拍板，已决的事项保留在表中，拍板内容见各 issue。
 
-| 事项 | 阻塞什么 |
-| --- | --- |
-| #66 E3：`Deny { report: None }` 的上报码（`needs-decision`） | #72（decide 切片 4，终结管线） |
-| #67 E6：Outbox 终态失败后的重做入口（`needs-decision`） | #73（decide 切片 5，控制面与异常路径） |
-| #87 M1 宣布方式：单步还是两步（[m1-acceptance.md §5](docs/m1-acceptance.md#5-建议的推进方式待用户确认)） | M1 对外的中间状态怎么说；不阻塞开发 |
-| GitHub 账户计费（#86，由用户处理） | 远端 CI；恢复前所有 PR 只能靠本机检查合入 |
-| #87 `decisions.md` 待决的 Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算） | 分别阻塞 `pki` 的安装引导期、`notify` 的选项与引擎预算追加 |
-| Q-12（结果对象读取路由） | M2 的补丁签名审批；不在 M1 范围 |
+| 事项 | 阻塞什么 | 状态 |
+| --- | --- | --- |
+| #66 E3：`Deny { report: None }` 的上报码 | #72（decide 切片 4，终结管线） | 已决：方案 A，见 [#66](https://github.com/LeXwDeX/gantry/issues/66) |
+| #67 E6：Outbox 终态失败后的重做入口 | #73（decide 切片 5，控制面与异常路径） | 已决：方案 A，见 [#67](https://github.com/LeXwDeX/gantry/issues/67) |
+| #125 `create_pr` 的 `ActionKey` 与 CAS 提议原文如何衔接（#68 遗留） | #69、#70 | 已决：方案 1，见 [#125](https://github.com/LeXwDeX/gantry/issues/125) |
+| #87 M1 宣布方式：单步还是两步（[m1-acceptance.md §5](docs/m1-acceptance.md#5-推进方式与宣布方式已确定)） | M1 对外的中间状态怎么说；不阻塞开发 | 已决：两步，见 [#87](https://github.com/LeXwDeX/gantry/issues/87) |
+| #87 `decisions.md` 待决的 Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算） | 分别阻塞 `pki` 的安装引导期、`notify` 的选项与引擎预算追加 | 已决：见 [#87](https://github.com/LeXwDeX/gantry/issues/87)，写入 decisions.md D-18、D-19；`budget.limit_raised` 的契约见 #129 |
+| GitHub 账户计费（#86，由用户处理） | 远端 CI；恢复前所有 PR 只能靠本机检查合入 | 待用户处理 |
+| Q-12（结果对象读取路由） | M2 的补丁签名审批；不在 M1 范围 | 待决 |
 
 M0 契约文本已由用户在 2026-10-27 统一批准，状态标注已在 #85 更新。
 
