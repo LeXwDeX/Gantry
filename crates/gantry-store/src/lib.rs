@@ -938,6 +938,8 @@ impl Inner {
     fn project(&mut self, event: &Event<Value>, mode: Fold) -> Result<(), StoreError> {
         match event.ty {
             EventType::OutboxSucceeded | EventType::OutboxFailed if mode == Fold::Replay => {}
+            // 行由 `OutboxTx::enqueue` 在同一事务写入；事件本身不再改表。
+            EventType::OutboxEnqueued => {}
             EventType::SettingsUpdated => {
                 let data: SettingsUpdatedData =
                     decode_data(event).map_err(StoreError::InvalidEvent)?;
@@ -2068,10 +2070,58 @@ impl OutboxTx<'_> {
             .map_err(StoreError::Id)?;
         let now = self.tx.now();
         let enqueued_seq = Seq::new(self.tx.snapshot.next_enqueue_seq).map_err(StoreError::Seq)?;
-        self.tx.snapshot.next_enqueue_seq += 1;
-        let payload = ActionPayload::from_value(req.kind, req.payload).map_err(|error| {
-            StoreError::PreconditionFailed(format!("invalid outbox payload: {error}"))
+        let payload =
+            ActionPayload::from_value(req.kind, req.payload.clone()).map_err(|error| {
+                StoreError::PreconditionFailed(format!("invalid outbox payload: {error}"))
+            })?;
+
+        // 同一事务先追加 `outbox.enqueued`（event-data §2.2.4、forge.md §5）：校验失败时
+        // 整次入队失败，行不落地。入队方的 actor 由 `enqueued_by.module` 给出——入队方是
+        // 闭集 engine / guardian（`core::ports::EnqueuedByModule`），各自就是一个 `ActorKind`。
+        let actor_kind: ActorKind = serde_json::from_value(Value::String(
+            req.enqueued_by.module.clone(),
+        ))
+        .map_err(|_| {
+            StoreError::PreconditionFailed(format!(
+                "enqueued_by.module {} is not an actor kind",
+                req.enqueued_by.module
+            ))
         })?;
+        let data = serde_json::json!({
+            "action": {
+                "delivery_id": req.delivery_id,
+                "kind": req.kind,
+                "payload": req.payload,
+                "target": req.target,
+                "intent": req.intent,
+                "idempotency_key": key,
+                "requires_approval": req.requires_approval,
+                "depends_on": req.depends_on,
+                "priority": req.priority,
+                "not_before": req.not_before,
+                "epoch": req.epoch,
+                "coalesce_key": req.coalesce_key,
+                "enqueued_by": {
+                    "module": req.enqueued_by.module,
+                    "causation_id": req.enqueued_by.causation_id,
+                },
+            }
+        });
+        self.tx
+            .append(NewEvent {
+                ty: EventType::OutboxEnqueued,
+                subject: Subject::parse(&id.to_string()).map_err(|error| {
+                    StoreError::PreconditionFailed(format!("action id subject: {error}"))
+                })?,
+                project_id: Some(req.project_id),
+                actor: Actor::new(actor_kind, req.enqueued_by.module.clone()),
+                causation_id: req.enqueued_by.causation_id,
+                correlation_id: Some(req.delivery_id.to_string()),
+                data,
+                dedup_key: None,
+            })
+            .await?;
+        self.tx.snapshot.next_enqueue_seq += 1;
         let action = OutboxAction {
             id,
             project_id: req.project_id,
@@ -2093,8 +2143,6 @@ impl OutboxTx<'_> {
             created_at: now,
             updated_at: now,
         };
-        let _ = &req.coalesce_key;
-        let _ = &req.enqueued_by;
         self.tx.snapshot.outbox.insert(
             id,
             OutboxRow {

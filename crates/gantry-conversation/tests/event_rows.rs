@@ -411,6 +411,20 @@ async fn enqueue(
     kind: ForgeActionKind,
     payload: Value,
 ) -> gantry_core::ids::ActionId {
+    // store 入队时同事务写 `outbox.enqueued`，会核对 target / intent 与 payload 一致。
+    let decoded = gantry_core::forge::ActionPayload::from_value(kind, payload.clone()).unwrap();
+    let (target, intent) = match gantry_core::forge::derive_target_intent(&decoded) {
+        Ok(key) => (key.target, key.intent),
+        // create_comment 不在 M1 的推导里，按 forge-actions §3.2 手写。
+        Err(_) => (
+            format!(
+                "comment:pr:{}:{}",
+                payload["target"]["number"],
+                payload["client_ref"].as_str().unwrap()
+            ),
+            json!({"body": payload["body"]}),
+        ),
+    };
     let mut tx = h.store.begin_write().await.unwrap();
     let enqueued = tx
         .outbox()
@@ -418,8 +432,8 @@ async fn enqueue(
             project_id: h.project,
             delivery_id: delivery,
             kind,
-            target: format!("conv-test:{kind:?}"),
-            intent: json!({}),
+            target,
+            intent,
             payload,
             requires_approval: None,
             depends_on: Vec::new(),
