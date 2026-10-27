@@ -4,7 +4,7 @@
 //! - 审批签名密钥：单独生成，密钥级访问控制要求用户在场；签名返回 IEEE P1363 `r ‖ s`。
 //!
 //! 两把私钥都不可导出，本模块没有任何导出私钥的接口。平台后端：
-//! [`SecureEnclaveKeyStore`]（macOS）；Windows TPM 尚未实现，与其他平台一样 fail-closed。
+//! [`SecureEnclaveKeyStore`]（macOS）、`TpmKeyStore`（Windows，CNG；实机待验证，#107）；其他平台 fail-closed。
 //! 软件替身 [`software::TestSoftwareKeyStore`] 只在 `test-software-keys` feature 下存在，
 //! [`platform_key_store`] 永远不会返回它（不降级为软件密钥，OQ-S2）。
 
@@ -13,6 +13,8 @@ mod der;
 mod secure_enclave;
 #[cfg(feature = "test-software-keys")]
 pub mod software;
+#[cfg(windows)]
+mod tpm;
 
 use std::fmt;
 use std::path::Path;
@@ -21,9 +23,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
-pub use der::{der_to_p1363, DerError};
+pub use der::{der_to_p1363, p1363_to_der, DerError};
 #[cfg(target_os = "macos")]
 pub use secure_enclave::SecureEnclaveKeyStore;
+#[cfg(windows)]
+pub use tpm::TpmKeyStore;
 
 /// P-256 公钥，未压缩点（`0x04 ‖ X ‖ Y`，65 字节）。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -260,10 +264,15 @@ pub fn platform_key_store(key_dir: &Path) -> Result<Box<dyn KeyStore>, KeyError>
     {
         Ok(Box::new(SecureEnclaveKeyStore::open(key_dir)?))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // TPM 密钥由 CNG 持久化，不用 key_dir。
+        let _ = key_dir;
+        Ok(Box::new(TpmKeyStore::open()?))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = key_dir;
-        // Windows TPM（CNG + Windows Hello）尚未实现（#102）。
         Err(KeyError::HardwareUnavailable(
             "本平台尚无硬件密钥后端".into(),
         ))
