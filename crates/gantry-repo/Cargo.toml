@@ -1,0 +1,25 @@
+[package]
+name = "gantry-repo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 仓库与工作树：裸镜像仓、工作树与写权锁、补丁闸门与提交（repo.md）"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+gantry-store = { path = "../gantry-store" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "fs", "io-util"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+gantry-core = { path = "../gantry-core", features = ["testing"] }
+gantry-store = { path = "../gantry-store", features = ["testing"] }
+gantry-fakes = { path = "../gantry-fakes" }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
