@@ -11,6 +11,7 @@
 
 pub mod git;
 pub mod mirror;
+pub mod workspace;
 pub mod worktree;
 
 use std::collections::BTreeMap;
@@ -871,12 +872,31 @@ impl RepoService for GitRepo {
         self.release_impl(ctx, token).await
     }
 
+    /// 准备工作区期间持镜像仓共享锁：gc / 重建持独占锁时在此等待，而不是失败。
     async fn prepare_workspace(
         &self,
         _ctx: &ActorCtx,
-        _req: PrepareWorkspace,
+        req: PrepareWorkspace,
     ) -> Result<PreparedWorkspace, RepoError> {
-        Err(io_error("prepare_workspace lands in a later #91 slice"))
+        let entry = self.mirror_entry(&req.project_id)?;
+        let _lock = mirror::lock(&entry.git_dir, false).await?;
+        for oid in std::iter::once(&req.base_sha).chain(req.pr_base_sha.as_ref()) {
+            if !mirror::has_commit(&self.inner.env, &entry.git_dir, oid).await? {
+                return Err(RepoError::BaseNotInMirror { oid: *oid });
+            }
+        }
+        let slot = self.slot(&req.project_id);
+        let _permit = slot
+            .acquire()
+            .await
+            .map_err(|_| io_error("git slots closed"))?;
+        workspace::prepare(
+            &self.inner.env,
+            &entry.git_dir,
+            &self.inner.cfg.template_dir(),
+            &req,
+        )
+        .await
     }
 
     async fn validate_patch(
