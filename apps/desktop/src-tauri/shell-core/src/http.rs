@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
+use hyper::body::{Bytes, Incoming};
 use hyper::Request;
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
@@ -76,6 +76,80 @@ impl HttpResponse {
         let secs: u64 = self.header("retry-after")?.trim().parse().ok()?;
         Some(Duration::from_secs(secs).min(MAX_RETRY_AFTER))
     }
+}
+
+/// 流式响应：响应头已到，响应体逐块读取。丢弃即断开连接。
+pub struct StreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Incoming,
+    driver: tokio::task::JoinHandle<()>,
+}
+
+impl StreamResponse {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// 下一块响应体；`Ok(None)` 表示流结束。
+    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, NetError> {
+        loop {
+            match self.body.frame().await {
+                None => return Ok(None),
+                Some(Err(_)) => return Err(NetError::Aborted),
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        return Ok(Some(data));
+                    }
+                }
+            }
+        }
+    }
+
+    /// 读完整个响应体（非 200 时取 problem）。
+    pub async fn collect(mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(Some(chunk)) = self.next_chunk().await {
+            if out.len() + chunk.len() > MAX_RESPONSE_BYTES {
+                break;
+            }
+            out.extend_from_slice(&chunk);
+        }
+        out
+    }
+}
+
+impl Drop for StreamResponse {
+    fn drop(&mut self) {
+        self.driver.abort();
+    }
+}
+
+fn header_pairs<B>(response: &hyper::Response<B>) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .filter_map(|(n, v)| Some((n.as_str().to_string(), v.to_str().ok()?.to_string())))
+        .collect()
+}
+
+fn is_tls_alert(e: &hyper::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(err) = source {
+        if err.downcast_ref::<rustls::Error>().is_some() {
+            return true;
+        }
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            if io.kind() == std::io::ErrorKind::InvalidData {
+                return true;
+            }
+        }
+        source = err.source();
+    }
+    false
 }
 
 /// `https://host:port` 形式的服务端地址。
@@ -167,6 +241,53 @@ impl HttpClient {
         body: Option<&[u8]>,
         headers: &[(&str, &str)],
     ) -> Result<HttpResponse, NetError> {
+        let (response, driver) = self.exchange(method, path_and_query, body, headers).await?;
+        let status = response.status().as_u16();
+        let headers = header_pairs(&response);
+        let limited = http_body_util::Limited::new(response.into_body(), MAX_RESPONSE_BYTES);
+        let body = limited
+            .collect()
+            .await
+            .map_err(|_| NetError::Aborted)?
+            .to_bytes()
+            .to_vec();
+        driver.abort();
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    /// 流式 `GET`（事件流）：只等到响应头，响应体由调用方逐块读。不受请求总超时约束（§7.1"超时"），
+    /// 也不占在途请求名额（事件流是长连接）。
+    pub async fn open_stream(
+        &self,
+        path_and_query: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<StreamResponse, NetError> {
+        let (response, driver) = tokio::time::timeout(
+            self.request_timeout,
+            self.exchange("GET", path_and_query, None, headers),
+        )
+        .await
+        .map_err(|_| NetError::Timeout)??;
+        Ok(StreamResponse {
+            status: response.status().as_u16(),
+            headers: header_pairs(&response),
+            body: response.into_body(),
+            driver,
+        })
+    }
+
+    /// TCP → TLS → HTTP/1.1，发出请求并拿到响应头。
+    async fn exchange(
+        &self,
+        method: &str,
+        path_and_query: &str,
+        body: Option<&[u8]>,
+        headers: &[(&str, &str)],
+    ) -> Result<(hyper::Response<Incoming>, tokio::task::JoinHandle<()>), NetError> {
         let tcp = tokio::time::timeout(
             self.connect_timeout,
             TcpStream::connect((self.origin.host.as_str(), self.origin.port)),
@@ -183,7 +304,9 @@ impl HttpClient {
         let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
             .await
             .map_err(|_| NetError::Aborted)?;
-        let driver = tokio::spawn(conn);
+        let driver = tokio::spawn(async move {
+            let _ = conn.await;
+        });
 
         let authority = format!("{}:{}", self.origin.host, self.origin.port);
         let mut builder = Request::builder()
@@ -200,29 +323,16 @@ impl HttpClient {
         let request = builder
             .body(Full::new(Bytes::copy_from_slice(body.unwrap_or_default())))
             .map_err(|_| NetError::Aborted)?;
-        let response = sender
-            .send_request(request)
-            .await
-            .map_err(|_| NetError::Aborted)?;
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(n, v)| Some((n.as_str().to_string(), v.to_str().ok()?.to_string())))
-            .collect();
-        let limited = http_body_util::Limited::new(response.into_body(), MAX_RESPONSE_BYTES);
-        let body = limited
-            .collect()
-            .await
-            .map_err(|_| NetError::Aborted)?
-            .to_bytes()
-            .to_vec();
-        driver.abort();
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        let response = sender.send_request(request).await.map_err(|e| {
+            // TLS 1.3 下服务端拒绝客户端证书（吊销、过期）的告警在握手"完成"之后才到，
+            // 表现为发送失败；按 TLS 层失败归类，供连接状态机计数（§7.3"握手失败"）。
+            if is_tls_alert(&e) {
+                NetError::Tls
+            } else {
+                NetError::Aborted
+            }
+        })?;
+        Ok((response, driver))
     }
 
     /// `api_request` 的发送：按 §7.1 的重试规则。

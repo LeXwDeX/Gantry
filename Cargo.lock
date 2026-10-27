@@ -846,6 +846,7 @@ dependencies = [
  "base64 0.22.1",
  "core-foundation",
  "core-foundation-sys",
+ "futures-util",
  "gantry-core",
  "gantry-fakes",
  "gantry-pki",

@@ -7,14 +7,15 @@
 //! 命令参数一律 `snake_case`（`rename_all`），与 `apps/desktop/src/ipc/tauri.ts` 一致。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use gantry_desktop_shell::events::FrameSink;
 use gantry_desktop_shell::http::HttpPairTransport;
 use gantry_desktop_shell::ipc::{ShellError, ShellErrorCode};
 use gantry_desktop_shell::keys::{platform_key_store, KeyStore, UnavailableKeyStore};
 use gantry_desktop_shell::links;
 use gantry_desktop_shell::session::{system_clock, Shell};
 use gantry_desktop_shell::storage::{AppStore, Prefs};
-use serde::Serialize;
 use serde_json::Value;
 use tauri::ipc::Channel;
 use tauri::webview::NewWindowResponse;
@@ -24,28 +25,17 @@ use tauri_plugin_opener::OpenerExt;
 
 type CmdResult<T> = Result<T, ShellError>;
 
-#[derive(Serialize)]
-struct ConnectionState {
-    phase: &'static str,
-    epoch: u64,
-    last_bytes_age_ms: Option<u64>,
-    cert_not_after: Option<String>,
-    cert_expiring: bool,
-    log_epoch: Option<u64>,
-    clock_skew_ms: Option<i64>,
-}
-
 // ---- 身份与配对 ----
 
 #[tauri::command(rename_all = "snake_case")]
-fn identity_status(shell: State<'_, Shell>) -> CmdResult<Value> {
+fn identity_status(shell: State<'_, Arc<Shell>>) -> CmdResult<Value> {
     shell.identity_status()
 }
 
 /// `platform` 由外壳填，不接受 UI 传入（§6.1）。
 #[tauri::command(rename_all = "snake_case")]
 async fn pairing_begin(
-    shell: State<'_, Shell>,
+    shell: State<'_, Arc<Shell>>,
     pairing_string: String,
     device_name: String,
 ) -> CmdResult<Value> {
@@ -53,13 +43,13 @@ async fn pairing_begin(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn pairing_confirm(shell: State<'_, Shell>, matches: bool) -> CmdResult<Value> {
+async fn pairing_confirm(shell: State<'_, Arc<Shell>>, matches: bool) -> CmdResult<Value> {
     shell.pairing_confirm(matches).await
 }
 
 /// 先弹原生确认框（WebView 不参与），确认后才删除本机密钥、证书与身份文件。
 #[tauri::command(rename_all = "snake_case")]
-async fn identity_reset(app: AppHandle, shell: State<'_, Shell>) -> CmdResult<Value> {
+async fn identity_reset(app: AppHandle, shell: State<'_, Arc<Shell>>) -> CmdResult<Value> {
     let confirmed = confirm(
         &app,
         "重置设备身份",
@@ -74,16 +64,8 @@ async fn identity_reset(app: AppHandle, shell: State<'_, Shell>) -> CmdResult<Va
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn connection_state() -> CmdResult<ConnectionState> {
-    Ok(ConnectionState {
-        phase: "unpaired",
-        epoch: 0,
-        last_bytes_age_ms: None,
-        cert_not_after: None,
-        cert_expiring: false,
-        log_epoch: None,
-        clock_skew_ms: None,
-    })
+fn connection_state(shell: State<'_, Arc<Shell>>) -> CmdResult<Value> {
+    Ok(shell.connection_state())
 }
 
 // ---- API 与事件流（需要已配对）----
@@ -91,7 +73,7 @@ fn connection_state() -> CmdResult<ConnectionState> {
 /// `route` 是枚举 ID，`path` 必须与该路由的模板逐段吻合；UI 不能传任何头（§7.1）。
 #[tauri::command(rename_all = "snake_case")]
 async fn api_request(
-    shell: State<'_, Shell>,
+    shell: State<'_, Arc<Shell>>,
     route: String,
     path: String,
     query: Option<Value>,
@@ -109,20 +91,34 @@ async fn api_request(
         .await
 }
 
+/// Tauri `Channel` 作为事件流的帧出口；WebView 关闭通道后 `send` 失败，运行器随之停止。
+struct ChannelSink(Channel<Value>);
+
+impl FrameSink for ChannelSink {
+    fn send(&self, frame: Value) -> bool {
+        self.0.send(frame).is_ok()
+    }
+}
+
+/// 打开唯一事件流，已打开则替换旧流（§6.1）。
 #[tauri::command(rename_all = "snake_case")]
-fn events_open(on_frame: Channel<Value>, after_seq: Option<u64>) -> CmdResult<()> {
-    let _ = (on_frame, after_seq);
-    Err(ShellError::not_paired())
+async fn events_open(
+    shell: State<'_, Arc<Shell>>,
+    on_frame: Channel<Value>,
+    after_seq: Option<u64>,
+) -> CmdResult<()> {
+    shell.events_open(after_seq, Arc::new(ChannelSink(on_frame)))
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn events_ack(seq: u64) -> CmdResult<()> {
-    let _ = seq;
-    Err(ShellError::not_paired())
+fn events_ack(shell: State<'_, Arc<Shell>>, seq: u64) -> CmdResult<()> {
+    shell.events_ack(seq);
+    Ok(())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn events_close() -> CmdResult<()> {
+fn events_close(shell: State<'_, Arc<Shell>>) -> CmdResult<()> {
+    shell.events_close();
     Ok(())
 }
 
@@ -180,27 +176,27 @@ fn guarded_write_discard(pending_id: String) -> CmdResult<()> {
 // ---- 本机存储（§7.5）----
 
 #[tauri::command(rename_all = "snake_case")]
-fn prefs_get(shell: State<'_, Shell>) -> CmdResult<Prefs> {
+fn prefs_get(shell: State<'_, Arc<Shell>>) -> CmdResult<Prefs> {
     Ok(shell.store().prefs())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn prefs_set(shell: State<'_, Shell>, patch: Value) -> CmdResult<Prefs> {
+fn prefs_set(shell: State<'_, Arc<Shell>>, patch: Value) -> CmdResult<Prefs> {
     shell.store().set_prefs(&patch)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_get(shell: State<'_, Shell>, project_id: String) -> CmdResult<Option<Value>> {
+fn ui_state_get(shell: State<'_, Arc<Shell>>, project_id: String) -> CmdResult<Option<Value>> {
     shell.store().ui_state_get(&project_id)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_set(shell: State<'_, Shell>, project_id: String, state: Value) -> CmdResult<()> {
+fn ui_state_set(shell: State<'_, Arc<Shell>>, project_id: String, state: Value) -> CmdResult<()> {
     shell.store().ui_state_set(&project_id, &state)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn ui_state_list(shell: State<'_, Shell>) -> CmdResult<BTreeMap<String, Value>> {
+fn ui_state_list(shell: State<'_, Arc<Shell>>) -> CmdResult<BTreeMap<String, Value>> {
     shell.store().ui_state_list()
 }
 
@@ -318,12 +314,12 @@ pub fn run() {
                 Ok(store) => store,
                 Err(e) => Box::new(UnavailableKeyStore(e.to_string())),
             };
-            app.manage(Shell::new(
+            app.manage(Arc::new(Shell::new(
                 AppStore::open(&data_dir)?,
                 keys,
                 Box::new(HttpPairTransport::default()),
                 system_clock(),
-            ));
+            )));
             let config = app
                 .config()
                 .app

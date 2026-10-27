@@ -27,8 +27,9 @@ cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
 - 命令都已注册。状态与编排集中在 `shell-core::session::Shell`（Tauri 只转发参数，原生确认框在 Tauri 层弹）。已有实际行为的命令：
   - `identity_status`、`pairing_begin` / `pairing_confirm`（单向 TLS 固定根 → 待确认身份 → 写 `identity.json` 并用 mTLS 取 `/v1/me`）、`identity_reset`（先弹原生确认框）；
   - `api_request`（路由表校验 → mTLS 发送与重试 → 响应整形；`X-Log-Epoch` 变化时丢弃待签内容）；
-  - `prefs_*`、`ui_state_*`、`open_external`、`open_github`；三个 `*_discard` 和 `events_close`。
-  - 其余命令（事件流、审批签名、受保护写入、诊断）返回 `shell.not_paired` 或 `shell.unavailable`，不伪造成功。
+  - `events_open` / `events_ack` / `events_close` / `connection_state`（唯一事件流：游标、退避重连、45 s 空闲、`close` 帧、`409 cursor_ahead`、`log_epoch` 重同步、连续 3 次 TLS 失败 → `handshake_failed`、吊销即删密钥）；
+  - `prefs_*`、`ui_state_*`、`open_external`、`open_github`；三个 `*_discard`。
+  - 其余命令（审批签名、受保护写入、诊断）返回 `shell.not_paired` 或 `shell.unavailable`，不伪造成功。
 - 硬件密钥库不可用时用 `UnavailableKeyStore`：配对失败并给出 `shell.key_unavailable`，不降级为软件密钥。
 - 导航只放行应用自己的来源（`tauri://localhost`、`http(s)://tauri.localhost`），新窗口一律拒绝。
 
