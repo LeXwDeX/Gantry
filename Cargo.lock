@@ -296,6 +296,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gantry-sandbox"
+version = "0.1.0"
+dependencies = [
+ "gantry-core",
+ "thiserror",
+]
+
+[[package]]
 name = "gantry-store"
 version = "0.1.0"
 dependencies = [
