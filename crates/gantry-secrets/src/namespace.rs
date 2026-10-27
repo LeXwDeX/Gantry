@@ -13,12 +13,18 @@ use gantry_core::time::Timestamp;
 use crate::envelope::{self, Binding, EnvelopeError, Kind, PREFIX_LEN, TAG_LEN};
 use crate::fsx::{self, FileKind};
 use crate::key::{Dek, KeyId};
+use zeroize::Zeroizing;
+
+/// 解密后的明文与文件头里的写入时间（毫秒）。
+pub(crate) type Plain = (Zeroizing<Vec<u8>>, i64);
+
+/// 导出用：名字、版本、种类、明文（墓碑为 `None`）、写入时间。
+pub(crate) type ExportEntry = (SecretName, u64, FileKind, Option<Zeroizing<Vec<u8>>>, i64);
 
 /// 实例级共享参数（不含任何密钥）。
 #[derive(Debug)]
 pub(crate) struct Root {
     pub dir: PathBuf,
-    #[allow(dead_code)] // 备份清单用（下一个切片）
     pub instance_id: String,
     pub key_id: KeyId,
     pub retain: usize,
@@ -150,6 +156,21 @@ impl Namespace {
 
     /// 读一个已提交版本；文件不存在返回 `Ok(None)`。
     fn read_sec(&self, name: &SecretName, v: u64) -> Result<Option<(Secret, i64)>, SecretsError> {
+        let Some((mut plain, created_at)) = self.read_plain(name, v)? else {
+            return Ok(None);
+        };
+        let value = SecretValue::from_bytes(std::mem::take(&mut *plain));
+        Ok(Some((
+            Secret {
+                value,
+                version: version(v),
+            },
+            created_at,
+        )))
+    }
+
+    /// 解密一个已提交版本，明文留在 `Zeroizing` 缓冲里；文件不存在返回 `Ok(None)`。
+    fn read_plain(&self, name: &SecretName, v: u64) -> Result<Option<Plain>, SecretsError> {
         let path = self.path(name, v, FileKind::Sec);
         let Some(data) = fsx::read_file(&path, self.root.file_limit())? else {
             return Ok(None);
@@ -159,17 +180,9 @@ impl Namespace {
             name,
             version: v,
         };
-        let (mut plain, created_at) =
-            envelope::open(&self.dek, self.root.key_id, Kind::Secret, &binding, &data)
-                .map_err(|error| self.map_env(path, error))?;
-        let value = SecretValue::from_bytes(std::mem::take(&mut *plain));
-        Ok(Some((
-            Secret {
-                value,
-                version: version(v),
-            },
-            created_at,
-        )))
+        envelope::open(&self.dek, self.root.key_id, Kind::Secret, &binding, &data)
+            .map(Some)
+            .map_err(|error| self.map_env(path, error))
     }
 
     /// 只读头部取 `created_at`（不解密）。用于元数据。
@@ -464,6 +477,69 @@ impl Namespace {
             }
         }
         Ok(missing)
+    }
+
+    // ---- 备份（持锁调用） -------------------------------------------------
+
+    /// 每个名字的当前状态：最大版本是 `.sec` 则带明文，是墓碑则无值。暂存项与旧版本不导出。
+    pub(crate) fn export_current(&self) -> Result<Vec<ExportEntry>, SecretsError> {
+        let mut latest: std::collections::BTreeMap<SecretName, (u64, FileKind)> =
+            std::collections::BTreeMap::new();
+        for (name, v, kind) in fsx::list_entries(&self.dir())? {
+            if kind == FileKind::Staged {
+                continue;
+            }
+            let slot = latest.entry(name).or_insert((v, kind));
+            if v > slot.0 {
+                *slot = (v, kind);
+            }
+        }
+        let mut out = Vec::with_capacity(latest.len());
+        for (name, (v, kind)) in latest {
+            if kind == FileKind::Sec {
+                let (plain, at) = self
+                    .read_plain(&name, v)?
+                    .ok_or_else(|| SecretsError::Io(std::io::ErrorKind::NotFound.into()))?;
+                out.push((name, v, kind, Some(plain), at));
+            } else {
+                let at = self.header_time(&name, v, kind)?.unwrap_or(0);
+                out.push((name, v, kind, None, at));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 以原版本号写入一个恢复的条目（`.sec` 或墓碑），再做保留清理。
+    pub(crate) fn write_restored(
+        &self,
+        name: &SecretName,
+        v: u64,
+        kind: FileKind,
+        at: i64,
+        plaintext: &[u8],
+    ) -> Result<(), SecretsError> {
+        let envelope_kind = if kind == FileKind::Tomb {
+            Kind::Tombstone
+        } else {
+            Kind::Secret
+        };
+        let data = self.seal(name, v, envelope_kind, at, plaintext);
+        fsx::write_new(&self.dir(), &fsx::file_name(name, v, kind), &data)?;
+        self.retain(name);
+        Ok(())
+    }
+
+    /// 删除一个名字的全部文件（`Overwrite` 恢复用）。
+    pub(crate) fn remove_all(&self, name: &SecretName) -> Result<(), SecretsError> {
+        let scan = self.scan(name)?;
+        for (v, kind) in &scan.files {
+            std::fs::remove_file(self.path(name, *v, *kind))?;
+        }
+        for v in &scan.staged {
+            std::fs::remove_file(self.path(name, *v, FileKind::Staged))?;
+        }
+        fsx::sync_dir(&self.dir())?;
+        Ok(())
     }
 
     /// 保留清理（持锁调用）：保留最大版本的文件，以及最近一个墓碑之后最新的
