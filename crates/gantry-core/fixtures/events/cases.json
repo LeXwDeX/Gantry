@@ -54,6 +54,7 @@
       "level_effective": "Medium",
       "origin": "conversation",
       "source_message_id": "msg_01JBX2E3G5J7K9N1Q3S5T7W9YA",
+      "user_text": "修复登录超时：把会话过期时间改为 30 分钟",
       "issues": [],
       "config_rev": 10,
       "budget": {
@@ -2363,6 +2364,35 @@
         "lease_until": "2026-10-24T12:45:00.000Z"
       },
       "pointer_contains": "/delivery_id"
+    },
+    {
+      "type": "delivery.created",
+      "data": {
+        "title": "fix timeout",
+        "level_cap": "High",
+        "level_effective": "Medium",
+        "origin": "conversation",
+        "source_message_id": "msg_01JBX2E3G5J7K9N1Q3S5T7W9YA",
+        "issues": [],
+        "config_rev": 10,
+        "budget": {
+          "template": "high.multi_review",
+          "limits": {
+            "tokens_by_tier": {
+              "utility": 400000,
+              "planner": 300000,
+              "worker": 8000000
+            },
+            "tokens": null,
+            "nodes": 40,
+            "rounds": 4,
+            "wall_time": 10800,
+            "concurrency": 3,
+            "forge_writes": 120
+          }
+        }
+      },
+      "pointer_contains": "user_text"
     }
   ],
   "contract_undefined": []
