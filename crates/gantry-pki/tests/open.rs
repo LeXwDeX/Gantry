@@ -58,6 +58,7 @@ fn ctx() -> ActorCtx {
 struct FlakySecrets {
     inner: MemorySecrets,
     fail_stage: AtomicBool,
+    fail_commit: AtomicBool,
 }
 
 impl SecretSource for FlakySecrets {
@@ -102,6 +103,9 @@ impl SecretSink for FlakySecrets {
         self.inner.stage(name, value, expect, ctx)
     }
     fn commit(&self, staged: &StagedSecret, ctx: &ActorCtx) -> Result<SecretMeta, SecretsError> {
+        if self.fail_commit.load(Ordering::SeqCst) {
+            return Err(SecretsError::KeyUnavailable("injected".into()));
+        }
         self.inner.commit(staged, ctx)
     }
     fn abort(&self, staged: &StagedSecret, ctx: &ActorCtx) -> Result<(), SecretsError> {
@@ -190,6 +194,7 @@ impl Host {
             secrets: Arc::new(FlakySecrets {
                 inner: scoped,
                 fail_stage: AtomicBool::new(false),
+                fail_commit: AtomicBool::new(false),
             }),
             store,
             clock,
@@ -491,8 +496,8 @@ async fn server_certificate_renews_within_thirty_days_and_hot_swaps() {
 
 #[tokio::test]
 async fn san_change_triggers_reissue() {
+    // 首次启动的配置就与引导时的证书 SAN 不同：登记证书里实际的 SAN，下一次节拍即重签。
     let host = Host::new().await;
-    host.open().await.unwrap();
     let pki = host
         .open_with(&[SERVER_NAME, "gantry.internal.test"])
         .await
@@ -731,4 +736,117 @@ async fn pair_wait_reports_redeem_cancel_and_timeout() {
             .unwrap(),
         PairingOutcome::Closed(gantry_pki::pairing::SessionState::Voided)
     );
+}
+
+// ---------------------------------------------------------------------------
+// 证书入库与私钥提交之间失败的对账（OQ-K10）
+// ---------------------------------------------------------------------------
+
+/// 拨到续签窗口内，让 secrets 的 commit 失败一次：库里已是新证书，私钥仍在暂存。
+async fn half_renewed(host: &Host, pki: &Pki) -> (IssuedCert, Client) {
+    let (_, client) = pair(pki, DevicePlatform::Macos).await;
+    let before = handshake(pki, &host.clock, &client).unwrap();
+    host.clock.set(Timestamp::from_millis(
+        before.not_after.as_millis() - 29 * DAY_MS,
+    ));
+    host.secrets.fail_commit.store(true, Ordering::SeqCst);
+    assert!(pki.renew_server_cert_if_due().await.is_err());
+    host.secrets.fail_commit.store(false, Ordering::SeqCst);
+    let (_, client) = pair(pki, DevicePlatform::Windows).await;
+    // 运行中的实例仍用旧证书与旧私钥服务。
+    assert_eq!(
+        handshake(pki, &host.clock, &client).unwrap().serial,
+        before.serial
+    );
+    (before, client)
+}
+
+#[tokio::test]
+async fn next_tick_commits_the_staged_key_after_a_failed_commit() {
+    let host = Host::new().await;
+    let pki = host.open().await.unwrap();
+    let (before, client) = half_renewed(&host, &pki).await;
+    let ServerRenewal::Renewed { serial, .. } = pki.tick().await.unwrap() else {
+        panic!("expected reconciliation");
+    };
+    assert_ne!(serial, before.serial);
+    assert_eq!(
+        handshake(&pki, &host.clock, &client).unwrap().serial,
+        serial
+    );
+    assert!(host.secrets.staged().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn restart_reconciles_a_half_finished_renewal() {
+    let host = Host::new().await;
+    let pki = host.open().await.unwrap();
+    let (before, client) = half_renewed(&host, &pki).await;
+    drop(pki);
+    let reopened = host.open().await.unwrap();
+    let serial = handshake(&reopened, &host.clock, &client).unwrap().serial;
+    assert_ne!(serial, before.serial);
+    assert!(host.secrets.staged().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn lost_staged_key_falls_back_to_the_previous_certificate() {
+    let host = Host::new().await;
+    let pki = host.open().await.unwrap();
+    let (before, client) = half_renewed(&host, &pki).await;
+    for staged in host.secrets.staged().unwrap() {
+        host.secrets.abort(&staged, &ctx()).unwrap();
+    }
+    drop(pki);
+    let reopened = host.open().await.unwrap();
+    assert_eq!(
+        handshake(&reopened, &host.clock, &client).unwrap().serial,
+        before.serial
+    );
+    // 回退后仍在续签窗口内：下一次节拍重新续签。
+    assert!(matches!(
+        reopened.tick().await.unwrap(),
+        ServerRenewal::Renewed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn replacing_the_intermediate_outside_rotation_is_refused() {
+    let host = Host::new().await;
+    host.open().await.unwrap();
+
+    // 用同一根签发另一张中间 CA，替换 ca_dir 里的证书与 secrets 里的私钥。
+    use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+    let enc = fs::read_to_string(host.ca_dir.join("root.key.enc")).unwrap();
+    let root_key = p256::SecretKey::from_pkcs8_encrypted_pem(&enc, b"pw")
+        .unwrap()
+        .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+        .unwrap();
+    let root = gantry_pki::Authority::load(
+        &fs::read_to_string(host.ca_dir.join("root.crt")).unwrap(),
+        &root_key,
+    )
+    .unwrap();
+    let (other, other_key) = root
+        .issue_intermediate(
+            2,
+            Timestamp::from_millis(NOW_MS),
+            &CertPolicy::default(),
+            &SeqEntropy::new(500),
+        )
+        .unwrap();
+    fs::write(
+        host.ca_dir.join("intermediate.crt"),
+        &other.certificate().pem,
+    )
+    .unwrap();
+    host.secrets
+        .put(
+            &SecretName::parse(INTERMEDIATE_KEY_SECRET).unwrap(),
+            SecretValue::from_bytes(other_key.as_bytes().to_vec()),
+            Expect::Any,
+            &ctx(),
+        )
+        .unwrap();
+    assert!(matches!(host.open().await, Err(PkiError::Config(_))));
 }

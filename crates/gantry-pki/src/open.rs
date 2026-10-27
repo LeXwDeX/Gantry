@@ -117,6 +117,10 @@ pub struct ServerCertRow {
     pub chain_pem: Vec<String>,
     pub server_names: Vec<String>,
     pub status: CaStatus,
+    /// 这张证书对应的私钥在 `secrets` 里的版本（`tls.server.key`）。证书入库与私钥提交之间
+    /// 失败时，启动与下一次节拍据此对账（OQ-K10）。
+    #[serde(default)]
+    pub key_version: Option<u64>,
 }
 
 /// `api` 构造 `ServerConfig` 用（§6.4）。
@@ -199,6 +203,7 @@ impl Pki {
             PkiError::Config("intermediate CA key is missing from secrets"),
         )?;
         let intermediate = Authority::load(&intermediate_pem, &intermediate_key)?;
+        let ids = IdGen::new(clock.clone(), entropy.clone());
         let intermediate_der = intermediate.certificate().der.clone();
         let issuer = Arc::new(Issuer::new(intermediate, root.clone()));
 
@@ -213,19 +218,27 @@ impl Pki {
             let row = match current_server_row(&mut tx)? {
                 Some(row) => row,
                 None => {
+                    // 记录证书里实际的 SAN，而不是配置：两者不同则下一次节拍重新签发。
                     let row = ServerCertRow {
                         serial: initial_server.serial.clone(),
                         not_before: initial_server.not_before,
                         not_after: initial_server.not_after,
                         chain_pem: issuer.chain(&initial_server).to_vec(),
-                        server_names: config.server_names.clone(),
+                        server_names: cert_server_names(&initial_server.der)?,
                         status: CaStatus::Current,
+                        key_version: committed_key_version(secrets.as_ref())?,
                     };
                     tx.module_conn(MODULE)
                         .put(SERVER_CERT, row.serial.as_str(), &row)
                         .map_err(store_error)?;
                     row
                 }
+            };
+            let row = if reconcile_server_key(&mut tx, secrets.as_ref(), &system_ctx(&ids)?)? {
+                current_server_row(&mut tx)?
+                    .ok_or(PkiError::Config("no current server certificate"))?
+            } else {
+                row
             };
             tx.commit().await.map_err(store_error)?;
             row
@@ -268,7 +281,6 @@ impl Pki {
             root_cert_pem: root.pem.clone(),
             ca_fingerprint: issuer.ca_fingerprint(),
         };
-        let ids = IdGen::new(clock.clone(), entropy.clone());
         Ok(Pki {
             store,
             clock,
@@ -343,8 +355,24 @@ impl Pki {
     /// 剩余不超过 `server_cert_renew_before` 或 SAN 配置变化时签发新的服务端叶子（§7.7）：
     /// 新私钥先 `stage` 进 `secrets`，证书入库后 `commit`，再热替换 resolver。
     pub async fn renew_server_cert_if_due(&self) -> Result<ServerRenewal, PkiError> {
-        let now = self.clock.now();
         let mut tx = self.store.begin_write().await.map_err(store_error)?;
+        let now = self.clock.now();
+        let ctx = self.system_ctx()?;
+        if reconcile_server_key(&mut tx, self.secrets.as_ref(), &ctx)? {
+            // 上一次续签的私钥提交没完成：这次先把它补完（或回退），再按新的当前证书判断。
+            let current = current_server_row(&mut tx)?
+                .ok_or(PkiError::Config("no current server certificate"))?;
+            let key = read_secret(self.secrets.as_ref(), SERVER_KEY_SECRET)?
+                .ok_or(PkiError::Config("server key is missing from secrets"))?;
+            let certified = certified_key(&current.chain_pem, &key)?;
+            tx.commit().await.map_err(store_error)?;
+            self.tls.server_cert_resolver.replace(certified);
+            tracing::info!(serial = %current.serial, "server certificate key reconciled");
+            return Ok(ServerRenewal::Renewed {
+                serial: current.serial,
+                not_after: current.not_after,
+            });
+        }
         let current = current_server_row(&mut tx)?
             .ok_or(PkiError::Config("no current server certificate"))?;
         let renew_before =
@@ -364,7 +392,6 @@ impl Pki {
             self.entropy.as_ref(),
         )?;
         let name = secret_name(SERVER_KEY_SECRET)?;
-        let ctx = self.system_ctx()?;
         let staged = self
             .secrets
             .stage(
@@ -381,6 +408,7 @@ impl Pki {
             chain_pem: self.issuer.chain(&leaf).to_vec(),
             server_names: self.config.server_names.clone(),
             status: CaStatus::Current,
+            key_version: Some(staged.version.get()),
         };
         let written = (|| -> Result<(), PkiError> {
             let mut conn = tx.module_conn(MODULE);
@@ -405,6 +433,7 @@ impl Pki {
             let _ = self.secrets.abort(&staged, &ctx);
             return Err(store_error(error));
         }
+        // 库里已是新证书；私钥提交失败时保留暂存，下一次节拍或重启时对账补提交。
         self.secrets
             .commit(&staged, &ctx)
             .map_err(|error| PkiError::Secrets(error.to_string()))?;
@@ -432,19 +461,7 @@ impl Pki {
     }
 
     fn system_ctx(&self) -> Result<ActorCtx, PkiError> {
-        Ok(ActorCtx {
-            actor: Actor::new(ActorKind::System, "pki"),
-            device: None,
-            role: None,
-            client_profile: None,
-            request_id: self
-                .ids
-                .next_ulid()
-                .map_err(|error| PkiError::Crypto(format!("request id: {error}")))?,
-            idempotency_key: None,
-            dedup_key: None,
-            causation_id: None,
-        })
+        system_ctx(&self.ids)
     }
 }
 
@@ -456,13 +473,27 @@ fn register_ca(tx: &mut WriteTx, cert: &IssuedCert, kind: CaKind) -> Result<(), 
     let row = CaRow {
         kind,
         serial: cert.serial.clone(),
-        fingerprint: format!("sha256:{}", cert.fingerprint().to_hex()),
+        fingerprint: new_fingerprint(cert),
         not_before: cert.not_before,
         not_after: cert.not_after,
         status: CaStatus::Current,
         cert_pem: cert.pem.clone(),
     };
     let mut conn = tx.module_conn(MODULE);
+    if kind == CaKind::Intermediate {
+        // 中间 CA 只能经轮换流程更换（M3）：与已登记的当前中间 CA 不同 → 拒绝启动，
+        // 否则原中间 CA 签发的在册设备会全部钉扎失败。
+        let registered: Vec<(String, CaRow)> = conn
+            .scan(CA, "intermediate/", None, gantry_store::MODULE_SCAN_MAX)
+            .map_err(store_error)?;
+        if registered.iter().any(|(_, row)| {
+            row.status == CaStatus::Current && row.fingerprint != new_fingerprint(cert)
+        }) {
+            return Err(PkiError::Config(
+                "intermediate CA in ca_dir differs from the registered current one",
+            ));
+        }
+    }
     if let Some(existing) = conn.get::<CaRow>(CA, &key).map_err(store_error)? {
         if existing.fingerprint != row.fingerprint {
             return Err(PkiError::Config(
@@ -476,25 +507,9 @@ fn register_ca(tx: &mut WriteTx, cert: &IssuedCert, kind: CaKind) -> Result<(), 
 }
 
 fn current_server_row(tx: &mut WriteTx) -> Result<Option<ServerCertRow>, PkiError> {
-    let conn = tx.module_conn(MODULE);
-    let mut after: Option<String> = None;
-    loop {
-        let page: Vec<(String, ServerCertRow)> = conn
-            .scan(
-                SERVER_CERT,
-                "",
-                after.as_deref(),
-                gantry_store::MODULE_SCAN_MAX,
-            )
-            .map_err(store_error)?;
-        if let Some((_, row)) = page.iter().find(|(_, row)| row.status == CaStatus::Current) {
-            return Ok(Some(row.clone()));
-        }
-        if page.len() < gantry_store::MODULE_SCAN_MAX as usize {
-            return Ok(None);
-        }
-        after = page.last().map(|(key, _)| key.clone());
-    }
+    Ok(server_rows(tx)?
+        .into_iter()
+        .find(|row| row.status == CaStatus::Current))
 }
 
 fn certified_key(chain_pem: &[String], key_pem: &str) -> Result<Arc<CertifiedKey>, PkiError> {
@@ -592,4 +607,133 @@ fn key_matches(bytes: &[u8], root_spki: &[u8]) -> bool {
             .and_then(|secret| secret.public_key().to_public_key_der().ok())
             .is_some_and(|spki| spki.as_bytes() == root_spki)
     })
+}
+
+fn new_fingerprint(cert: &IssuedCert) -> String {
+    format!("sha256:{}", cert.fingerprint().to_hex())
+}
+
+fn system_ctx(ids: &IdGen) -> Result<ActorCtx, PkiError> {
+    Ok(ActorCtx {
+        actor: Actor::new(ActorKind::System, "pki"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: ids
+            .next_ulid()
+            .map_err(|error| PkiError::Crypto(format!("request id: {error}")))?,
+        idempotency_key: None,
+        dedup_key: None,
+        causation_id: None,
+    })
+}
+
+fn committed_key_version(secrets: &dyn SecretSink) -> Result<Option<u64>, PkiError> {
+    Ok(secrets
+        .version(&secret_name(SERVER_KEY_SECRET)?)
+        .map_err(|error| PkiError::Secrets(error.to_string()))?
+        .map(|version| version.get()))
+}
+
+/// 证书入库与私钥提交之间失败后的对账（OQ-K10）。返回是否改动了什么。
+///
+/// - 当前证书绑定的私钥版本已是已提交版本 → 无事可做；
+/// - 该版本仍在暂存 → 提交它；
+/// - 暂存已丢失 → 回退到私钥仍匹配的上一张证书（新证书置 `retired`），下一次节拍重新续签。
+fn reconcile_server_key(
+    tx: &mut WriteTx,
+    secrets: &dyn SecretSink,
+    ctx: &ActorCtx,
+) -> Result<bool, PkiError> {
+    let Some(current) = current_server_row(tx)? else {
+        return Ok(false);
+    };
+    let committed = committed_key_version(secrets)?;
+    let Some(wanted) = current.key_version else {
+        return Ok(false);
+    };
+    if committed == Some(wanted) {
+        return Ok(false);
+    }
+    let name = secret_name(SERVER_KEY_SECRET)?;
+    let staged = secrets
+        .staged()
+        .map_err(|error| PkiError::Secrets(error.to_string()))?
+        .into_iter()
+        .find(|staged| staged.name == name && staged.version.get() == wanted);
+    if let Some(staged) = staged {
+        secrets
+            .commit(&staged, ctx)
+            .map_err(|error| PkiError::Secrets(error.to_string()))?;
+        return Ok(true);
+    }
+    let fallback = server_rows(tx)?
+        .into_iter()
+        .find(|row| row.status == CaStatus::Previous && row.key_version == committed)
+        .ok_or(PkiError::Config(
+            "server certificate and its key cannot be reconciled",
+        ))?;
+    let mut conn = tx.module_conn(MODULE);
+    let mut retired = current;
+    retired.status = CaStatus::Retired;
+    conn.put(SERVER_CERT, retired.serial.as_str(), &retired)
+        .map_err(store_error)?;
+    let mut restored = fallback;
+    restored.status = CaStatus::Current;
+    conn.put(SERVER_CERT, restored.serial.as_str(), &restored)
+        .map_err(store_error)?;
+    Ok(true)
+}
+
+fn server_rows(tx: &mut WriteTx) -> Result<Vec<ServerCertRow>, PkiError> {
+    let conn = tx.module_conn(MODULE);
+    let mut out = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page: Vec<(String, ServerCertRow)> = conn
+            .scan(
+                SERVER_CERT,
+                "",
+                after.as_deref(),
+                gantry_store::MODULE_SCAN_MAX,
+            )
+            .map_err(store_error)?;
+        let done = page.len() < gantry_store::MODULE_SCAN_MAX as usize;
+        after = page.last().map(|(key, _)| key.clone());
+        out.extend(page.into_iter().map(|(_, row)| row));
+        if done {
+            return Ok(out);
+        }
+    }
+}
+
+/// 证书里实际的 SAN（DNS 名与 IP），与 `pki.server_names` 的写法一致。
+fn cert_server_names(der: &[u8]) -> Result<Vec<String>, PkiError> {
+    use x509_parser::extensions::GeneralName;
+    let (_, parsed) = X509Certificate::from_der(der)
+        .map_err(|error| PkiError::Crypto(format!("parse server certificate: {error}")))?;
+    let Some(san) = parsed
+        .subject_alternative_name()
+        .map_err(|error| PkiError::Crypto(format!("server certificate SAN: {error}")))?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(san
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::DNSName(dns) => Some(dns.to_string()),
+            GeneralName::IPAddress(bytes) => match bytes.len() {
+                4 => <[u8; 4]>::try_from(*bytes)
+                    .ok()
+                    .map(|octets| std::net::IpAddr::from(octets).to_string()),
+                16 => <[u8; 16]>::try_from(*bytes)
+                    .ok()
+                    .map(|octets| std::net::IpAddr::from(octets).to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect())
 }
