@@ -14,7 +14,18 @@ const integerFormats = {
   int64: (value) => Number.isSafeInteger(value),
 };
 
-export async function loadEventSchemas() {
+let cached = null;
+
+/** 编译约 80 份事件 schema 较慢；同一进程内的所有 Mock 实例共用一份编译结果。 */
+export function loadEventSchemas() {
+  cached ??= compileEventSchemas().catch((error) => {
+    cached = null;
+    throw error;
+  });
+  return cached;
+}
+
+async function compileEventSchemas() {
   const ajv = new Ajv2020({ allErrors: true, strict: false, allowUnionTypes: true });
   addFormats(ajv);
   for (const [name, validate] of Object.entries(integerFormats)) {
