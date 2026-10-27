@@ -440,6 +440,28 @@ async fn renew_keeps_or_rotates_the_client_key_and_supersedes_the_old_certificat
 }
 
 #[tokio::test]
+async fn renew_with_an_expired_active_certificate_is_rejected() {
+    let env = Env::new().await;
+    let paired = env.pair(DevicePlatform::Macos).await;
+    let row = env.cert_row(&paired.device.cert_serial).await.unwrap();
+    assert_eq!(row.status, CertRowStatus::Active);
+    // 证书到期之后，即使经到期前建立的连接发起续期，也拒绝。
+    env.clock.set(row.not_after);
+    assert!(matches!(
+        env.admin
+            .renew(
+                &paired.device.id,
+                &serial_of(&paired),
+                RenewRequest {
+                    csr_pem: Keys::new().csr()
+                }
+            )
+            .await,
+        Err(RenewError::Revoked)
+    ));
+}
+
+#[tokio::test]
 async fn renew_rejects_bad_csrs_and_foreign_serials() {
     let env = Env::new().await;
     let keys = Keys::new();

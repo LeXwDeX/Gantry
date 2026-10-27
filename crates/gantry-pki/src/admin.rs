@@ -283,10 +283,15 @@ impl StoreAdmin {
             .module_conn(MODULE)
             .get(DEVICE_CERTS, presented.as_str())
             .map_err(store_error)?;
+        // 出示的证书必须仍然有效（api.md §4.10）：握手时有效不代表请求时有效，
+        // 保留到期前建立的长连接不能绕过到期限制。
         let usable = presented_row.as_ref().is_some_and(|row| {
             row.device_id == *id
-                && (row.status == CertRowStatus::Active
-                    || (row.status == CertRowStatus::Superseded && now < row.not_after))
+                && matches!(
+                    row.status,
+                    CertRowStatus::Active | CertRowStatus::Superseded
+                )
+                && now < row.not_after
         });
         let device = tx.read().device(id).await.map_err(store_error)?;
         let device = match device {
