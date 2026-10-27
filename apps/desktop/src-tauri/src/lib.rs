@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use gantry_desktop_shell::approval;
 use gantry_desktop_shell::events::FrameSink;
 use gantry_desktop_shell::http::HttpPairTransport;
 use gantry_desktop_shell::ipc::{ShellError, ShellErrorCode};
@@ -125,20 +126,30 @@ fn events_close(shell: State<'_, Arc<Shell>>) -> CmdResult<()> {
 // ---- 审批签名与受保护写入：只接受句柄，不接受待签内容（S-3）----
 
 #[tauri::command(rename_all = "snake_case")]
-fn approval_prepare(approval_id: String) -> CmdResult<Value> {
-    let _ = approval_id;
-    Err(ShellError::not_paired())
+async fn approval_prepare(shell: State<'_, Arc<Shell>>, approval_id: String) -> CmdResult<Value> {
+    shell.approval_prepare(&approval_id).await
+}
+
+/// 只接受 `prepared_id`：参数里夹带 `payload` / `signature` 等一律拒绝（S-3、§12）。
+#[tauri::command(rename_all = "snake_case")]
+async fn approval_sign(
+    shell: State<'_, Arc<Shell>>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<Value> {
+    let tauri::ipc::InvokeBody::Json(args) = request.body() else {
+        return Err(ShellError::bad_argument("args"));
+    };
+    approval::exact_args(args, &["prepared_id"])?;
+    let prepared_id = args["prepared_id"]
+        .as_str()
+        .ok_or_else(|| ShellError::bad_argument("prepared_id"))?
+        .to_string();
+    shell.approval_sign(&prepared_id).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn approval_sign(prepared_id: String) -> CmdResult<Value> {
-    let _ = prepared_id;
-    Err(ShellError::not_paired())
-}
-
-#[tauri::command(rename_all = "snake_case")]
-fn approval_discard(prepared_id: String) -> CmdResult<()> {
-    let _ = prepared_id;
+fn approval_discard(shell: State<'_, Arc<Shell>>, prepared_id: String) -> CmdResult<()> {
+    shell.approval_discard(&prepared_id);
     Ok(())
 }
 
