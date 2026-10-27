@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! gantry-worker run        # 读 $GANTRY_JOB / $GANTRY_WORK / $GANTRY_OUT，按 Worker 协议执行
+//! gantry-worker selftest   # 镜像自检（构建 / CI 用）
 //! gantry-worker version
 //! ```
 
@@ -40,11 +41,24 @@ fn main() {
             let code = run(&env, &abort, io::stdout().lock(), io::stderr().lock());
             std::process::exit(code as i32);
         }
+        "selftest" => {
+            use gantry_worker::selftest::{run_checks, SystemProbe};
+            let checks = run_checks(&SystemProbe::default());
+            for check in &checks {
+                println!(
+                    "{} {} {}",
+                    if check.ok { "ok  " } else { "FAIL" },
+                    check.name,
+                    check.detail
+                );
+            }
+            std::process::exit(if checks.iter().all(|c| c.ok) { 0 } else { 1 });
+        }
         "version" => {
             println!("gantry-worker {}", env!("CARGO_PKG_VERSION"));
         }
         _ => {
-            eprintln!("usage: gantry-worker run | version");
+            eprintln!("usage: gantry-worker run | selftest | version");
             std::process::exit(Exit::BadJob as i32);
         }
     }
