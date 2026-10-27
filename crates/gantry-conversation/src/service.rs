@@ -839,10 +839,10 @@ impl ConversationService for Conversation {
         project: &ProjectId,
         page: PageQuery,
     ) -> Result<PageWithSeq<ConversationRow>, ConvError> {
-        if page.order.is_some() {
+        if page.cursor.is_some() {
             return Err(ConvError::InvalidRequest {
-                pointer: "/order".into(),
-                message: "conversation ordering is not supported".into(),
+                pointer: "/cursor".into(),
+                message: "unknown cursor".into(),
             });
         }
         let head = self.store.events().head().await.map_err(port_error)?;
@@ -858,47 +858,59 @@ impl ConversationService for Conversation {
         })
     }
 
-    /// 默认 `order = desc`；游标是最后一条的 `seq`，不随新消息漂移（§7.11）。
+    /// 默认 `order = desc`，按消息 ID 做键集分页（§7.11）。
     async fn list_messages(
         &self,
         cnv: &ConversationId,
         page: PageQuery,
     ) -> Result<PageWithSeq<Message>, ConvError> {
-        if page.order == Some(PageOrder::Asc) {
-            return Err(ConvError::InvalidRequest {
-                pointer: "/order".into(),
-                message: "ascending message ordering is not supported".into(),
-            });
-        }
-        let before = match page.cursor.as_deref() {
-            None => None,
-            Some(cursor) => Some(parse_cursor(cursor)?),
-        };
+        let order = page.order.unwrap_or(PageOrder::Desc);
         let limit = match page.limit {
             0 => 50,
             limit => limit.min(200),
         } as usize;
         let (head, log) = self.log(cnv).await?;
-        let mut newest_first: Vec<_> = log
+        let boundary = page
+            .cursor
+            .as_deref()
+            .map(|cursor| parse_cursor(cursor, cnv, order, &log.messages))
+            .transpose()?;
+        let mut messages: Vec<_> = log
             .messages
             .into_iter()
-            .rev()
-            .filter(|(seq, _)| before.is_none_or(|before| seq.as_u64() < before))
+            .filter(|(seq, message)| {
+                boundary.is_none_or(|boundary| match boundary {
+                    MessageCursor::LegacySeq(before) => *seq < before,
+                    MessageCursor::Id(id) => match order {
+                        PageOrder::Asc => message.id > id,
+                        PageOrder::Desc => message.id < id,
+                    },
+                })
+            })
             .collect();
-        let more = newest_first.len() > limit;
-        newest_first.truncate(limit);
+        if matches!(boundary, Some(MessageCursor::LegacySeq(_))) {
+            messages.sort_by_key(|(seq, _)| *seq);
+        } else {
+            messages.sort_by_key(|(_, message)| message.id);
+        }
+        if order == PageOrder::Desc {
+            messages.reverse();
+        }
+        let more = messages.len() > limit;
+        messages.truncate(limit);
         let next_cursor = if more {
-            newest_first
+            messages
                 .last()
-                .map(|(seq, _)| format!("seq:{}", seq.as_u64()))
+                .map(|(seq, message)| match (boundary, order) {
+                    (Some(MessageCursor::LegacySeq(_)), _) => format!("seq:{}", seq.as_u64()),
+                    (_, PageOrder::Asc) => format!("messages:{cnv}:asc:{}", message.id),
+                    (_, PageOrder::Desc) => format!("messages:{cnv}:desc:{}", message.id),
+                })
         } else {
             None
         };
         Ok(PageWithSeq {
-            items: newest_first
-                .into_iter()
-                .map(|(_, message)| message)
-                .collect(),
+            items: messages.into_iter().map(|(_, message)| message).collect(),
             next_cursor,
             last_seq: head,
         })
@@ -937,10 +949,42 @@ fn role_name(role: &MessageRole) -> &'static str {
     }
 }
 
-fn parse_cursor(cursor: &str) -> Result<u64, ConvError> {
-    cursor
-        .strip_prefix("seq:")
-        .and_then(|value| value.parse().ok())
+#[derive(Clone, Copy)]
+enum MessageCursor {
+    Id(MessageId),
+    LegacySeq(Seq),
+}
+
+fn parse_cursor(
+    cursor: &str,
+    cnv: &ConversationId,
+    order: PageOrder,
+    messages: &[(Seq, Message)],
+) -> Result<MessageCursor, ConvError> {
+    let direction = match order {
+        PageOrder::Asc => "asc",
+        PageOrder::Desc => "desc",
+    };
+    let prefix = format!("messages:{cnv}:{direction}:");
+    let id = cursor.strip_prefix(&prefix).and_then(|value| {
+        value
+            .parse::<MessageId>()
+            .ok()
+            .filter(|id| id.to_string() == value)
+    });
+    let legacy = (order == PageOrder::Desc)
+        .then(|| cursor.strip_prefix("seq:"))
+        .flatten()
+        .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|seq| {
+            messages
+                .iter()
+                .find(|(event_seq, _)| event_seq.as_u64() == seq)
+        })
+        .map(|(seq, _)| MessageCursor::LegacySeq(*seq));
+    id.map(MessageCursor::Id)
+        .or(legacy)
         .ok_or_else(|| ConvError::InvalidRequest {
             pointer: "/cursor".into(),
             message: "unknown cursor".into(),

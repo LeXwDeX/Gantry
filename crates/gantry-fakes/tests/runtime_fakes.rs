@@ -445,8 +445,8 @@ async fn fake_conversation_ensure_is_idempotent_and_scripts_messages() {
         .await
         .expect("list conversations");
     assert_eq!(conversations.items[0].id, first);
-    assert_eq!(conversations.last_seq, gantry_core::entities::Seq::ZERO);
-    let error = fake
+    assert_eq!(conversations.last_seq.as_u64(), 2);
+    let asc = fake
         .list_messages(
             &first,
             gantry_core::ports::PageQuery {
@@ -455,11 +455,347 @@ async fn fake_conversation_ensure_is_idempotent_and_scripts_messages() {
             },
         )
         .await
-        .expect_err("ascending order is unsupported");
-    assert!(matches!(
-        error,
-        gantry_core::ports::ConvError::InvalidRequest { .. }
-    ));
+        .expect("ascending order");
+    assert_eq!(asc.items[0].text, "hello");
+    assert_eq!(asc.items[1].text, "scripted reply");
+}
+
+#[tokio::test]
+async fn fake_conversation_deduplicates_posts_by_global_dedup_key() {
+    use gantry_core::ports::context::PageQuery;
+
+    let fake = FakeConversation::new();
+    let project = id::<gantry_core::ids::Prj>(600);
+    let cnv = fake.ensure_conversation(&project, &ctx()).await.unwrap();
+    let other = fake
+        .ensure_conversation(&id::<gantry_core::ids::Prj>(601), &ctx())
+        .await
+        .unwrap();
+    let post = NewUserMessage {
+        text: "first".into(),
+        level_cap: None,
+        refs: vec![],
+    };
+    let mut first_ctx = ctx();
+    first_ctx.dedup_key = Some(format!("api:{}:same-key", first_ctx.device.unwrap()));
+    let first = fake
+        .post_user_message(first_ctx.clone(), cnv, post.clone())
+        .await
+        .unwrap();
+    let mut scripted = first.clone();
+    scripted.text = "second request".into();
+    fake.push_scripted_message(cnv, scripted.clone());
+    let before = fake
+        .list_messages(&cnv, PageQuery::default())
+        .await
+        .unwrap();
+
+    let replay = fake
+        .post_user_message(first_ctx.clone(), cnv, post.clone())
+        .await
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(
+        fake.list_messages(&cnv, PageQuery::default())
+            .await
+            .unwrap(),
+        before
+    );
+
+    // store 的事件去重键是全局的；调用方须将设备作用域写入键本身。
+    let mut other_ctx = first_ctx.clone();
+    other_ctx.device = Some(id::<gantry_core::ids::Dev>(602));
+    let replay = fake
+        .post_user_message(other_ctx.clone(), other, post.clone())
+        .await
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(
+        fake.list_messages(&other, PageQuery::default())
+            .await
+            .unwrap()
+            .last_seq,
+        before.last_seq
+    );
+
+    other_ctx.dedup_key = Some(format!("api:{}:same-key", other_ctx.device.unwrap()));
+    let second = fake
+        .post_user_message(other_ctx.clone(), cnv, post.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        second.text, "second request",
+        "retry must not consume a script"
+    );
+    assert_ne!(second.id, first.id);
+    assert_eq!(
+        fake.post_user_message(other_ctx, cnv, post.clone())
+            .await
+            .unwrap(),
+        second
+    );
+
+    let mut empty_key = ctx();
+    empty_key.dedup_key = Some(String::new());
+    let empty_first = fake
+        .post_user_message(empty_key.clone(), cnv, post.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.post_user_message(empty_key, cnv, post.clone())
+            .await
+            .unwrap(),
+        empty_first
+    );
+    let no_key_a = fake
+        .post_user_message(ctx(), cnv, post.clone())
+        .await
+        .unwrap();
+    let no_key_b = fake.post_user_message(ctx(), cnv, post).await.unwrap();
+    assert_ne!(no_key_a.id, no_key_b.id);
+    let page = fake
+        .list_messages(&cnv, PageQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 5);
+    assert_eq!(page.last_seq.as_u64(), 5);
+    assert!(page.items.contains(&first));
+    assert!(page.items.contains(&second));
+    assert_eq!(
+        fake.calls()
+            .iter()
+            .filter(|call| matches!(
+                call,
+                gantry_fakes::conversation::ConversationCall::PostUserMessage { .. }
+            ))
+            .count(),
+        9
+    );
+}
+
+#[tokio::test]
+async fn fake_conversation_keysets_replace_duplicate_ids_and_survive_inserts() {
+    use gantry_core::ports::context::{PageOrder, PageQuery};
+    use gantry_core::ports::conversation::ConvError;
+
+    let fake = FakeConversation::new();
+    let project = id::<gantry_core::ids::Prj>(500);
+    let cnv = fake.ensure_conversation(&project, &ctx()).await.unwrap();
+    let empty = fake
+        .list_messages(&cnv, PageQuery::default())
+        .await
+        .unwrap();
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.last_seq.as_u64(), 0);
+    let missing = id::<gantry_core::ids::Cnv>(501);
+    assert_eq!(
+        fake.list_messages(&missing, PageQuery::default())
+            .await
+            .unwrap_err(),
+        ConvError::NotFound
+    );
+    let post = |text: &str| NewUserMessage {
+        text: text.into(),
+        level_cap: None,
+        refs: vec![],
+    };
+    let message = fake.post_user_message(ctx(), cnv, post("0")).await.unwrap();
+    let other_project = id::<gantry_core::ids::Prj>(503);
+    let other = fake
+        .ensure_conversation(&other_project, &ctx())
+        .await
+        .unwrap();
+    let mut ids = vec![message.id];
+    for n in 1..5 {
+        let mut scripted = message.clone();
+        scripted.text = n.to_string();
+        fake.push_scripted_message(cnv, scripted);
+        let written = fake
+            .post_user_message(ctx(), cnv, post("ignored"))
+            .await
+            .unwrap();
+        assert!(!ids.contains(&written.id));
+        ids.push(written.id);
+    }
+    let all = fake
+        .list_messages(&cnv, PageQuery::default())
+        .await
+        .unwrap();
+    assert!(all
+        .items
+        .iter()
+        .any(|m| m.id == message.id && m.text == "0"));
+    for order in [PageOrder::Asc, PageOrder::Desc] {
+        let query = |cursor| PageQuery {
+            cursor,
+            limit: 2,
+            order: Some(order),
+        };
+        let first = fake.list_messages(&cnv, query(None)).await.unwrap();
+        let cursor = first.next_cursor.clone().unwrap();
+        let opposite = if order == PageOrder::Asc {
+            PageOrder::Desc
+        } else {
+            PageOrder::Asc
+        };
+        let error = fake
+            .list_messages(
+                &cnv,
+                PageQuery {
+                    cursor: Some(cursor.clone()),
+                    limit: 2,
+                    order: Some(opposite),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+        let error = fake
+            .list_messages(&other, query(Some(cursor.clone())))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+        fake.post_user_message(ctx(), cnv, post("new"))
+            .await
+            .unwrap();
+        let second = fake.list_messages(&cnv, query(Some(cursor))).await.unwrap();
+        let third = fake
+            .list_messages(&cnv, query(second.next_cursor.clone()))
+            .await
+            .unwrap();
+        let texts: Vec<_> = first
+            .items
+            .iter()
+            .chain(&second.items)
+            .chain(&third.items)
+            .map(|m| m.text.as_str())
+            .collect();
+        if order == PageOrder::Asc {
+            assert_eq!(texts, ["0", "1", "2", "3", "4", "new"]);
+        } else {
+            assert_eq!(texts, ["new", "4", "3", "2", "1", "0"]);
+        }
+        assert!(third.next_cursor.is_none());
+        assert_eq!(
+            third.last_seq.as_u64(),
+            if order == PageOrder::Asc { 6 } else { 7 }
+        );
+    }
+    for cursor in [
+        "",
+        "bogus",
+        "seq:",
+        "seq:+1",
+        "seq:asc:",
+        "seq:18446744073709551616",
+        "seq:3",
+        "1",
+        "messages:bad:desc:msg_bad",
+    ] {
+        let error = fake
+            .list_messages(
+                &cnv,
+                PageQuery {
+                    cursor: Some(cursor.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+    }
+    for order in [None, Some(PageOrder::Asc), Some(PageOrder::Desc)] {
+        let page = PageQuery {
+            order,
+            ..Default::default()
+        };
+        assert_eq!(
+            fake.list_conversations(&project, page.clone())
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        let unknown = id::<gantry_core::ids::Prj>(502);
+        assert!(fake
+            .list_conversations(&unknown, page)
+            .await
+            .unwrap()
+            .items
+            .is_empty());
+    }
+    for cursor in ["", "seq:1", "bad"] {
+        let error = fake
+            .list_conversations(
+                &project,
+                PageQuery {
+                    cursor: Some(cursor.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+    }
+}
+
+#[tokio::test]
+async fn fake_conversation_orders_by_id_not_insertion() {
+    use gantry_core::ports::context::{PageOrder, PageQuery};
+    let fake = FakeConversation::new();
+    let cnv = fake
+        .ensure_conversation(&id::<gantry_core::ids::Prj>(504), &ctx())
+        .await
+        .unwrap();
+    let post = || NewUserMessage {
+        text: "first".into(),
+        level_cap: None,
+        refs: vec![],
+    };
+    let first = fake.post_user_message(ctx(), cnv, post()).await.unwrap();
+    let mut scripted = first.clone();
+    scripted.id = gantry_core::ids::Id::from_parts(1, 1).unwrap();
+    scripted.text = "second".into();
+    fake.push_scripted_message(cnv, scripted);
+    fake.post_user_message(ctx(), cnv, post()).await.unwrap();
+    let page = fake
+        .list_messages(
+            &cnv,
+            PageQuery {
+                limit: 1,
+                order: Some(PageOrder::Asc),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let next = fake
+        .list_messages(
+            &cnv,
+            PageQuery {
+                cursor: page.next_cursor.clone(),
+                limit: 1,
+                order: Some(PageOrder::Asc),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items[0].text, "second");
+    assert_eq!(next.items[0].text, "first");
+    assert!(page.items[0].id < next.items[0].id);
+    assert_eq!(next.last_seq.as_u64(), 2);
+    let desc = fake
+        .list_messages(&cnv, PageQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.items
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
 }
 
 #[tokio::test]

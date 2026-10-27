@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use gantry_core::entities::Seq;
 use gantry_core::entities::{Conversation, Message, MessageRole};
-use gantry_core::ids::{ConversationId, Id, IdKind, ProjectId};
+use gantry_core::ids::{ConversationId, Id, IdKind, MessageId, ProjectId};
 use gantry_core::ports::context::{ActorCtx, PageOrder, PageQuery, PageWithSeq};
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
 use gantry_core::time::Timestamp;
@@ -43,6 +43,8 @@ struct State {
     conversations: BTreeMap<ConversationId, Conversation>,
     by_project: BTreeMap<ProjectId, ConversationId>,
     messages: BTreeMap<ConversationId, Vec<Message>>,
+    message_seq: u64,
+    dedup: BTreeMap<String, Message>,
     scripts: BTreeMap<ConversationId, VecDeque<Message>>,
     calls: Vec<ConversationCall>,
 }
@@ -109,20 +111,28 @@ fn now_ms() -> u64 {
         .unwrap_or(1_700_000_000_000)
 }
 
-fn page_bounds(page: &PageQuery, len: usize) -> (usize, usize) {
-    let start = page
-        .cursor
-        .as_deref()
-        .and_then(|cursor| cursor.parse::<usize>().ok())
-        .unwrap_or(0)
-        .min(len);
-    let limit = if page.limit == 0 {
-        50
-    } else {
-        page.limit as usize
+fn parse_cursor(
+    cursor: &str,
+    cnv: &ConversationId,
+    order: PageOrder,
+) -> Result<MessageId, ConvError> {
+    let direction = match order {
+        PageOrder::Asc => "asc",
+        PageOrder::Desc => "desc",
     };
-    let end = start.saturating_add(limit).min(len);
-    (start, end)
+    let prefix = format!("messages:{cnv}:{direction}:");
+    cursor
+        .strip_prefix(&prefix)
+        .and_then(|value| {
+            value
+                .parse::<MessageId>()
+                .ok()
+                .filter(|id| id.to_string() == value)
+        })
+        .ok_or_else(|| ConvError::InvalidRequest {
+            pointer: "/cursor".into(),
+            message: "unknown cursor".into(),
+        })
 }
 
 #[async_trait]
@@ -168,6 +178,7 @@ impl ConversationService for FakeConversation {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dedup_key = ctx.dedup_key.clone();
         state.calls.push(ConversationCall::PostUserMessage {
             ctx,
             conversation_id: cnv,
@@ -176,8 +187,11 @@ impl ConversationService for FakeConversation {
         if !state.conversations.contains_key(&cnv) {
             return Err(ConvError::NotFound);
         }
+        if let Some(message) = dedup_key.as_ref().and_then(|key| state.dedup.get(key)) {
+            return Ok(message.clone());
+        }
         let now = now();
-        let message = match state
+        let mut message = match state
             .scripts
             .get_mut(&cnv)
             .and_then(|queue| queue.pop_front())
@@ -198,7 +212,19 @@ impl ConversationService for FakeConversation {
                 updated_at: now,
             },
         };
+        while state
+            .messages
+            .values()
+            .flatten()
+            .any(|old| old.id == message.id)
+        {
+            message.id = self.next_message_id();
+        }
+        state.message_seq += 1;
         state.messages.entry(cnv).or_default().push(message.clone());
+        if let Some(key) = dedup_key {
+            state.dedup.insert(key, message.clone());
+        }
         if let Some(conversation) = state.conversations.get_mut(&cnv) {
             conversation.updated_at = now;
         }
@@ -210,10 +236,10 @@ impl ConversationService for FakeConversation {
         project: &ProjectId,
         page: PageQuery,
     ) -> Result<PageWithSeq<Conversation>, ConvError> {
-        if page.order.is_some() {
+        if page.cursor.is_some() {
             return Err(ConvError::InvalidRequest {
-                pointer: "/order".into(),
-                message: "conversation ordering is not supported by this fake".into(),
+                pointer: "/cursor".into(),
+                message: "unknown cursor".into(),
             });
         }
         let mut state = self
@@ -230,13 +256,11 @@ impl ConversationService for FakeConversation {
             .filter(|conversation| conversation.project_id == *project)
             .cloned()
             .collect();
-        let (start, end) = page_bounds(&page, all.len());
-        let next_cursor = (end < all.len()).then(|| end.to_string());
         Ok(PageWithSeq {
-            items: all[start..end].to_vec(),
-            next_cursor,
-            // 该替身没有全局事件日志，零仅为测试序号。
-            last_seq: Seq::ZERO,
+            items: all,
+            next_cursor: None,
+            // 此水位只计替身消息写入，不是事件日志序号。
+            last_seq: Seq::from_wire(state.message_seq).expect("fake message sequence fits seq"),
         })
     }
 
@@ -245,12 +269,12 @@ impl ConversationService for FakeConversation {
         cnv: &ConversationId,
         page: PageQuery,
     ) -> Result<PageWithSeq<Message>, ConvError> {
-        if page.order == Some(PageOrder::Asc) {
-            return Err(ConvError::InvalidRequest {
-                pointer: "/order".into(),
-                message: "ascending message ordering is not supported by this fake".into(),
-            });
-        }
+        let order = page.order.unwrap_or(PageOrder::Desc);
+        let boundary = page
+            .cursor
+            .as_deref()
+            .map(|cursor| parse_cursor(cursor, cnv, order))
+            .transpose()?;
         let mut state = self
             .state
             .lock()
@@ -259,19 +283,45 @@ impl ConversationService for FakeConversation {
             conversation_id: *cnv,
             page: page.clone(),
         });
-        let mut messages = state.messages.get(cnv).ok_or(ConvError::NotFound)?.clone();
-        messages.reverse();
-        let (start, end) = page_bounds(&page, messages.len());
-        let next_cursor = (end < messages.len()).then(|| end.to_string());
-        let last_seq = if messages.is_empty() {
-            Seq::ZERO
+        if !state.conversations.contains_key(cnv) {
+            return Err(ConvError::NotFound);
+        }
+        let mut messages: Vec<_> = state
+            .messages
+            .get(cnv)
+            .into_iter()
+            .flatten()
+            .filter(|message| {
+                boundary.is_none_or(|boundary| match order {
+                    PageOrder::Asc => message.id > boundary,
+                    PageOrder::Desc => message.id < boundary,
+                })
+            })
+            .cloned()
+            .collect();
+        messages.sort_by_key(|message| message.id);
+        if order == PageOrder::Desc {
+            messages.reverse();
+        }
+        let limit = if page.limit == 0 {
+            50
         } else {
-            Seq::new(messages.len() as u64).expect("message count fits seq")
+            page.limit.min(200)
+        } as usize;
+        let more = messages.len() > limit;
+        messages.truncate(limit);
+        let next_cursor = if more {
+            messages.last().map(|message| match order {
+                PageOrder::Asc => format!("messages:{cnv}:asc:{}", message.id),
+                PageOrder::Desc => format!("messages:{cnv}:desc:{}", message.id),
+            })
+        } else {
+            None
         };
         Ok(PageWithSeq {
-            items: messages[start..end].to_vec(),
+            items: messages,
             next_cursor,
-            last_seq,
+            last_seq: Seq::from_wire(state.message_seq).expect("fake message sequence fits seq"),
         })
     }
 }

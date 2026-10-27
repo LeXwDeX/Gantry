@@ -599,16 +599,330 @@ async fn list_messages_seq_matches_and_desc_cursor_is_stable() {
         .await
         .unwrap_err();
     assert!(matches!(bad, ConvError::InvalidRequest { .. }));
-    let asc = h
+    assert!(matches!(bad, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+}
+
+#[tokio::test]
+async fn message_keysets_work_in_both_directions_and_reject_wrong_cursors() {
+    let h = harness().await;
+    let cnv = h.conversation().await;
+    let empty = h
+        .conv
+        .list_messages(&cnv, PageQuery::default())
+        .await
+        .unwrap();
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.last_seq, h.store.events().head().await.unwrap());
+    let missing = Id::from_parts(NOW_MS as u64, 999).unwrap();
+    assert_eq!(
+        h.conv
+            .list_messages(&missing, PageQuery::default())
+            .await
+            .unwrap_err(),
+        ConvError::NotFound
+    );
+    for n in 0..5 {
+        h.post(&format!("{n}"), None, vec![]).await;
+    }
+    let other_project: ProjectId = Id::from_parts(NOW_MS as u64, 500).unwrap();
+    h.add_project(other_project).await;
+    let other = h
+        .conv
+        .ensure_conversation(&other_project, &ctx())
+        .await
+        .unwrap();
+    for order in [PageOrder::Asc, PageOrder::Desc] {
+        let query = |cursor| PageQuery {
+            cursor,
+            limit: 2,
+            order: Some(order),
+        };
+        let first = h.conv.list_messages(&cnv, query(None)).await.unwrap();
+        assert_eq!(first.last_seq, h.store.events().head().await.unwrap());
+        let cursor = first.next_cursor.clone().unwrap();
+        let opposite = if order == PageOrder::Asc {
+            PageOrder::Desc
+        } else {
+            PageOrder::Asc
+        };
+        let err = h
+            .conv
+            .list_messages(
+                &cnv,
+                PageQuery {
+                    cursor: Some(cursor.clone()),
+                    limit: 2,
+                    order: Some(opposite),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+        let err = h
+            .conv
+            .list_messages(&other, query(Some(cursor.clone())))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+        h.post("new", None, vec![]).await;
+        let second = h
+            .conv
+            .list_messages(&cnv, query(Some(cursor)))
+            .await
+            .unwrap();
+        assert_eq!(second.last_seq, h.store.events().head().await.unwrap());
+        let third = h
+            .conv
+            .list_messages(&cnv, query(second.next_cursor.clone()))
+            .await
+            .unwrap();
+        let texts: Vec<_> = first
+            .items
+            .iter()
+            .chain(&second.items)
+            .chain(&third.items)
+            .map(|m| m.text.as_str())
+            .collect();
+        if order == PageOrder::Asc {
+            assert_eq!(texts, ["0", "1", "2", "3", "4", "new"]);
+        } else {
+            assert_eq!(texts, ["new", "4", "3", "2", "1", "0"]);
+        }
+        assert!(third.next_cursor.is_none());
+    }
+    for cursor in [
+        "",
+        "bogus",
+        "seq:",
+        "seq:+1",
+        "seq:asc:",
+        "seq:18446744073709551616",
+        "messages:bad:desc:msg_bad",
+    ] {
+        let error = h
+            .conv
+            .list_messages(
+                &cnv,
+                PageQuery {
+                    cursor: Some(cursor.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+    }
+}
+
+#[tokio::test]
+async fn conversation_list_validates_cursor_and_accepts_both_orders() {
+    let h = harness().await;
+    let unknown: ProjectId = Id::from_parts(NOW_MS as u64, 999).unwrap();
+    for order in [None, Some(PageOrder::Asc), Some(PageOrder::Desc)] {
+        let page = PageQuery {
+            order,
+            ..Default::default()
+        };
+        let known = h
+            .conv
+            .list_conversations(&h.project, page.clone())
+            .await
+            .unwrap();
+        assert_eq!(known.items.len(), 1);
+        assert_eq!(known.last_seq, h.store.events().head().await.unwrap());
+        assert!(h
+            .conv
+            .list_conversations(&unknown, page)
+            .await
+            .unwrap()
+            .items
+            .is_empty());
+    }
+    for cursor in ["", "seq:1", "bad"] {
+        let error = h
+            .conv
+            .list_conversations(
+                &h.project,
+                PageQuery {
+                    cursor: Some(cursor.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
+    }
+}
+
+#[tokio::test]
+async fn messages_are_ordered_by_id_and_legacy_seq_is_validated() {
+    use gantry_core::entities::{Actor, ActorKind};
+    use gantry_core::events::{NewEvent, Subject};
+    use gantry_core::ids::Msg;
+
+    let h = harness().await;
+    let cnv = h.conversation().await;
+    let mut message = h.post("first", None, vec![]).await;
+    let first_seq = h.store.events().head().await.unwrap();
+    message.id = Id::<Msg>::from_parts(1, 1).unwrap();
+    message.text = "second".into();
+    let mut tx = h.store.begin_write().await.unwrap();
+    tx.append(NewEvent {
+        ty: EventType::MessagePosted,
+        subject: Subject::parse(&cnv.to_string()).unwrap(),
+        project_id: Some(h.project),
+        actor: Actor::new(ActorKind::System, "test"),
+        causation_id: None,
+        correlation_id: None,
+        data: serde_json::to_value(message).unwrap(),
+        dedup_key: None,
+    })
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let second_seq = h.store.events().head().await.unwrap();
+    let first = h
         .conv
         .list_messages(
             &cnv,
             PageQuery {
+                limit: 1,
                 order: Some(PageOrder::Asc),
-                ..PageQuery::default()
+                ..Default::default()
             },
         )
         .await
-        .unwrap_err();
-    assert!(matches!(asc, ConvError::InvalidRequest { pointer, .. } if pointer == "/order"));
+        .unwrap();
+    let second = h
+        .conv
+        .list_messages(
+            &cnv,
+            PageQuery {
+                cursor: first.next_cursor.clone(),
+                limit: 1,
+                order: Some(PageOrder::Asc),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.items[0].text, "second");
+    assert_eq!(second.items[0].text, "first");
+    assert!(first.items[0].id < second.items[0].id);
+    assert_eq!(second.last_seq, h.store.events().head().await.unwrap());
+    let desc = h
+        .conv
+        .list_messages(&cnv, PageQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        desc.items
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    let legacy = format!("seq:{}", second_seq.as_u64());
+    let page = h
+        .conv
+        .list_messages(
+            &cnv,
+            PageQuery {
+                cursor: Some(legacy.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].text, "first");
+    for query in [
+        PageQuery {
+            cursor: Some(legacy.clone()),
+            order: Some(PageOrder::Asc),
+            ..Default::default()
+        },
+        PageQuery {
+            cursor: Some("seq:0".into()),
+            ..Default::default()
+        },
+        PageQuery {
+            cursor: Some("seq:999999".into()),
+            ..Default::default()
+        },
+        PageQuery {
+            cursor: Some(format!("seq:{}", first_seq.as_u64() - 1)),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            matches!(h.conv.list_messages(&cnv, query).await.unwrap_err(), ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor")
+        );
+    }
+    let other_project: ProjectId = Id::from_parts(NOW_MS as u64, 501).unwrap();
+    h.add_project(other_project).await;
+    let other = h
+        .conv
+        .ensure_conversation(&other_project, &ctx())
+        .await
+        .unwrap();
+    assert!(
+        matches!(h.conv.list_messages(&other, PageQuery { cursor: Some(legacy), ..Default::default() }).await.unwrap_err(), ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor")
+    );
+}
+
+#[tokio::test]
+async fn legacy_cursor_keeps_seq_order_across_upgrade_and_inserts() {
+    use gantry_core::entities::{Actor, ActorKind};
+    use gantry_core::events::{NewEvent, Subject};
+    use gantry_core::ids::Msg;
+
+    let h = harness().await;
+    let cnv = h.conversation().await;
+    let mut message = h.post("E", None, vec![]).await;
+    let mut seqs = vec![h.store.events().head().await.unwrap()];
+    for (text, id) in [("D", 4), ("C", 3), ("B", 2), ("A", 1)] {
+        message.text = text.into();
+        message.id = Id::<Msg>::from_parts(1, id).unwrap();
+        let mut tx = h.store.begin_write().await.unwrap();
+        tx.append(NewEvent {
+            ty: EventType::MessagePosted,
+            subject: Subject::parse(&cnv.to_string()).unwrap(),
+            project_id: Some(h.project),
+            actor: Actor::new(ActorKind::System, "test"),
+            causation_id: None,
+            correlation_id: None,
+            data: serde_json::to_value(&message).unwrap(),
+            dedup_key: None,
+        })
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        seqs.push(h.store.events().head().await.unwrap());
+    }
+    // 旧版本第一页按 seq 返回 [A, B]，其游标指向 B。
+    let mut cursor = Some(format!("seq:{}", seqs[3].as_u64()));
+    let mut texts = vec!["A".to_owned(), "B".to_owned()];
+    h.post("new", None, vec![]).await;
+    for expected_seq in [Some(seqs[2]), Some(seqs[1]), None] {
+        let page = h
+            .conv
+            .list_messages(
+                &cnv,
+                PageQuery {
+                    cursor,
+                    limit: 1,
+                    order: Some(PageOrder::Desc),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.last_seq, h.store.events().head().await.unwrap());
+        texts.push(page.items[0].text.clone());
+        assert_eq!(
+            page.next_cursor,
+            expected_seq.map(|seq| format!("seq:{}", seq.as_u64()))
+        );
+        cursor = page.next_cursor;
+    }
+    assert_eq!(texts, ["A", "B", "C", "D", "E"]);
 }
