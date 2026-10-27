@@ -5226,7 +5226,8 @@ pub enum PolicyTarget {
 }
 
 impl PolicyTarget {
-    fn kind(&self) -> &'static str {
+    /// 线上的 `kind` 判别值（如 `"pr"`、`"issue_creation"`）。
+    pub fn kind(&self) -> &'static str {
         match self {
             Self::Pr { .. } => "pr",
             Self::Branch { .. } => "branch",
