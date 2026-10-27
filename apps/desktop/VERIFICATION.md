@@ -7,7 +7,7 @@
 **两种模式**：
 
 - **场景模式**：`ScenarioIpcAdapter`，数据在浏览器内存中。
-- **Mock 模式**：`MockIpcAdapter` → HTTP / SSE → `tools/mock-api`，见 [README](README.md)「真实 API 模式」。
+- **Mock 模式**：`MockIpcAdapter` → HTTP / SSE → `tools/mock-api`，见 [README](README.md)「真实 API 模式」。Mock 的写请求会产生事件并实时推送；服务端其他部分（引擎、forge、policy）的进展由测试经 `/__mock/events` 注入，data 按 `schemas/events` 校验（#224）。
 
 `tests/unit/shared-modes.test.tsx` 让同一组组件测试在两种模式下各跑一遍；`e2e/mock-api.spec.ts` 在 Mock 模式下跑真实 HTTP 链路，场景模式的 e2e 仍是 `baseline.spec.ts` 和 `full-flow.spec.ts`。
 
@@ -16,72 +16,70 @@
 - **两种模式**：共用组件测试或 Mock e2e 与场景测试都覆盖。
 - **Mock**：只在 Mock 模式验证。
 - **单测 / 场景**：由纯函数单测或场景模式覆盖，Mock 模式未单独验证。
-- **缺测试**：尚无对应测试。
-- **阻塞**：Mock 缺能力（[#224](https://github.com/LeXwDeX/Gantry/issues/224)），或需要真实外壳（B / C 级）。
+- **外壳侧**：取证属于 desktop-shell 或 B 级环境。
 
 | §12 条目 | 证据 | 状态 |
 | --- | --- | --- |
-| E2E-11 不可信内容语料 | `render.test.tsx`（plain / markdown 语料、链接主机、`javascript:` 不可点）；`baseline.spec.ts`「不可信内容不生成元素…」；Mock e2e「水合」断言无任何外部请求 | 单测 / 场景（未经 Mock 注入同样语料） |
+| E2E-11 不可信内容语料 | `render.test.tsx`（plain / markdown 语料、链接主机、`javascript:` 不可点）；`baseline.spec.ts`「不可信内容…」；`mock-api.spec.ts`「E2E-11」（经 Mock 注入同一类语料：无脚本执行、无注入元素、无外部请求、链接旁显示主机） | 两种模式（CSP 报告属外壳侧） |
 | 药丸与卡片只来自结构化字段 | `overlays-inbox-pairing.test.tsx`「不安全文本只作为纯文本显示」；`scenario.test.ts`「unsafe 场景…」 | 单测 / 场景 |
 | lint / 构建检查 | `boundaries.test.ts`；`scripts/check-boundaries.mjs`（只有 `src/ipc/mock/` 可用 `fetch`） | 两种模式 |
-| 未知 kind / 枚举不崩溃 | `conversation-simulation.test.tsx`「未知卡片安全降级」；`events.test.ts`「未知事件…」；`execution-graph.test.tsx` 未知状态 | 单测 / 场景 |
-| 令牌 / 状态文字 | `execution-graph-fixes.test.tsx` | 单测 / 场景（缺 `Tone` 快照测试） |
+| 未知 kind / 枚举不崩溃 | `conversation-simulation.test.tsx`「未知卡片安全降级」；`events.test.ts`「未知事件…」；`execution-graph.test.tsx` 未知状态；`mock-api.spec.ts` 策略拒绝（上报项的未知 `reason_code`） | 两种模式 |
+| 令牌 / 状态文字 | `m1-coverage.test.ts`「Tone 映射」快照；`execution-graph-fixes.test.tsx` | 单测 / 场景 |
 | E2E-12 水位线 | `events.test.ts`「较旧的快照不得覆盖较新的缓存」；`controller-fixes.test.ts` 多项快照竞态 | 单测 / 场景 |
 | 断开重连：重放、无重复、ack 单调 | `mock-adapter.test.ts`「按游标回放 (after, head]…无重复」；`mock-controller.test.ts`「ack 单调推进」 | Mock |
-| 重复 / 乱序帧丢弃；`cursor_ahead` → 重同步 | `events.test.ts`「事件顺序推进游标」「resync 清缓存但保留 UI 与待发送队列」；`mock-adapter.test.ts`「游标超前 → resync_required」 | 两种模式 |
-| `log_epoch` 变化 → 全量重同步 | `events.test.ts`「log_epoch 变化触发全量重同步」；`controller-fixes.test.ts`「不复活旧 log_epoch 的消息」；`mock-adapter.test.ts`「log_epoch 变化以 state 帧送达」 | 两种模式 |
-| E2E-13 关闭后重开与 Mock 一致 | `mock-api.spec.ts`「E2E-13」（消息与“需要你”计数） | Mock（交付阶段推进需 Mock 写事件，#224） |
-| 事件风暴合并刷新 | — | 缺测试 |
+| 重复 / 乱序帧丢弃；`cursor_ahead` → 重同步 | `events.test.ts`；`mock-adapter.test.ts`「游标超前 → resync_required」 | 两种模式 |
+| `log_epoch` 变化 → 全量重同步 | `events.test.ts`；`controller-fixes.test.ts`「不复活旧 log_epoch 的消息」；`mock-adapter.test.ts` | 两种模式 |
+| E2E-13 关闭后重开与 Mock 一致 | `mock-api.spec.ts`「E2E-13」（消息、交付阶段、“需要你”计数） | Mock |
+| 事件风暴合并刷新 | `m1-coverage.test.ts`「500 条同一交付的事件只触发与突发窗口数相当的重新拉取」 | 单测 / 场景 |
 | 恢复后“已补齐 n 件事件” | `mock-api.spec.ts`「恢复连接后从游标续流…」 | Mock |
 | E2E-01 选中不改变发送上下文 | `shared-modes.test.tsx`「E2E-01」；`send.test.ts`；`mock-api.spec.ts`「E2E-01」 | 两种模式 |
-| 档位选择器 | `workspace.test.tsx`「档位选择器用方向键移动…」；`send.test.ts`「未显式改上限时不发送 level_cap」 | 单测 / 场景（缺“上限与交付不同”的提示断言） |
+| 档位选择器 | `workspace.test.tsx`「档位选择器用方向键移动…」「ctx 有交付时显示其上限…已触发的闸门不撤销」；`send.test.ts` | 单测 / 场景 |
 | ⌘↵ 与输入法保护 | `workspace.test.tsx`「macOS 用 ⌘↵ 发送；IME…」 | 单测 / 场景 |
-| E2E-05 只读设备 | `shared-modes.test.tsx`「E2E-05」；`mock-api.spec.ts`「E2E-05」；`send.test.ts` viewer | 两种模式（缺“强行发送得 403”断言） |
-| E2E-17 离线与幂等 | `mock-adapter.test.ts`「响应丢失后重试沿用同一键只产生 1 条消息」；`send.test.ts`；`baseline.spec.ts` 离线队列 | 两种模式（“只产生 1 条 `message.posted`”需 Mock 写事件，#224） |
-| 空项目空态 | — | 缺测试（Mock 的 acme/api 没有对话，会渲染空态卡，但还没有断言它） |
-| 事件行折叠 | `workspace.test.tsx`「连续后台事件折叠」；`workspace-model.test.ts` | 单测 / 场景 |
-| 自动滚动与分页 | 基线 `workspace.test.tsx` | 单测 / 场景（缺“新消息 ↓”断言） |
-| E2E-16 每项目状态保存 | `baseline.spec.ts`「选择只影响检视器，项目切换…保留草稿」 | 场景（未覆盖全部字段） |
-| E2E-18 “需要你”一致性 | `shared-modes.test.tsx` 徽标与顶栏计数；`mock-api.spec.ts`「E2E-18」 | 两种模式（只断言 tab 与顶栏，未断言左栏、气泡、检视器） |
+| E2E-05 只读设备 | `shared-modes.test.tsx`「E2E-05」；`mock-api.spec.ts`「E2E-05」两项（只读禁用；Mock 回 `403 forbidden_role` 时只显示失败） | 两种模式 |
+| E2E-17 离线与幂等 | `mock-adapter.test.ts`「响应丢失后重试沿用同一键只产生 1 条消息」（同时断言事件流上恰好 1 条 `message.posted`）；`send.test.ts`；`baseline.spec.ts` | 两种模式 |
+| 空项目空态 | `mock-api.spec.ts`「空项目」 | Mock |
+| 事件行折叠 | `workspace.test.tsx`「连续后台事件折叠」；`mock-api.spec.ts` E2E-19 / 策略拒绝（新事件行并入折叠组） | 两种模式 |
+| 自动滚动与分页 | `workspace.test.tsx`；`mock-api.spec.ts`「自动滚动：离开底部时…新消息 ↓」 | 两种模式 |
+| E2E-16 每项目状态保存 | `baseline.spec.ts`「选择只影响检视器，项目切换…保留草稿」；`workspace.test.tsx` | 场景（跨重启范围待 OQ-U15） |
+| E2E-18 “需要你”一致性 | `mock-api.spec.ts`「E2E-18」（tab、顶栏、左栏药丸、检视器同时变化）；`shared-modes.test.tsx` | 两种模式 |
 | 徽标来自 `inbox.summary` | `shared-modes.test.tsx` 第 1 项 | 两种模式 |
-| 各 kind 内联操作 | `overlays-inbox-pairing.test.tsx`「选项来自 payload，选择只调 choose」 | 场景 |
-| E2E-19 外部变化 | — | 阻塞（需 Mock 注入 `forge.*` 事件行消息，#224） |
-| E2E-00 端到端 | `full-flow.spec.ts` 多节点任务（场景脚本） | 阻塞（Mock 写请求不推进状态，#224） |
-| 策略拒绝上报 | — | 缺测试 |
-| E2E-08 签名成功流 | `mock-api.spec.ts`「E2E-08 / E2E-09」（grant → “已签名 · 等待合并”） | Mock（“已合并”“Issue 已关闭”需 Mock 推进，#224） |
-| E2E-03 新推送使审批单禁用 | `mock-api.spec.ts`「E2E-03」；`overlays-approval.test.tsx` stale | 两种模式 |
+| 各 kind 内联操作 | `overlays-inbox-pairing.test.tsx`「选项来自 payload，选择只调 choose」；`mock-api.spec.ts` 策略拒绝（`decision_needed` 选项来自 payload） | 两种模式 |
+| E2E-19 外部变化 | `mock-api.spec.ts`「E2E-19」 | Mock |
+| E2E-00 端到端 | `mock-api.spec.ts`「E2E-00」（发消息 → 回复 → 闸门满足 → 签名 → 合并 → Issue 关闭 → 最近完成）；`full-flow.spec.ts` | 两种模式 |
+| 策略拒绝上报 | `mock-api.spec.ts`「策略拒绝上报」 | Mock |
+| E2E-08 签名成功流 | `mock-api.spec.ts`「E2E-08 / E2E-09」「E2E-00」（已签名 · 等待合并 → 已合并 {sha7} → Issue 已关闭 · 交付完成）；`sign.test.ts` | 两种模式 |
+| E2E-03 新推送使审批单禁用 | `mock-api.spec.ts`「E2E-03」（含之后直接 grant 得 409）；`overlays-approval.test.tsx` | 两种模式 |
 | E2E-04 连接中断禁用签名 | `mock-api.spec.ts`「E2E-04」；`approval-gates-mock.test.tsx`；`mock-adapter.test.ts`；`overlays-approval.test.tsx` | 两种模式 |
 | E2E-06 非审批设备 | `mock-adapter.test.ts`「不请求 challenge」；`overlays-approval.test.tsx` | 两种模式 |
 | E2E-07 GitHub 闸门 | `mock-api.spec.ts`「E2E-07」；`approval-gates-mock.test.tsx`；`sign.test.ts` | 两种模式 |
 | 审批非待签 / 拒绝 | `mock-adapter.test.ts`「已非待签…」；`overlays-approval.test.tsx` 拒绝 | 两种模式 |
-| challenge 过期、digest 变化 | `overlays-approval.test.tsx`「challenge 过期后禁用签名并提供重新载入」 | 场景（Mock 时间固定，#224） |
+| challenge 过期、digest 变化 | `mock-api.spec.ts`「challenge 过期」（浏览器时钟快进）；`overlays-approval.test.tsx` | 两种模式 |
 | E2E-09 不回传待签内容 | `mock-api.spec.ts`「E2E-09」；`mock-adapter.test.ts` | Mock |
-| E2E-10 被注入的 WebView 越权 | — | 阻塞（需真实外壳与 CSP，B 级） |
+| E2E-10 被注入的 WebView 越权 | `boundaries.test.ts`（源码无越权 API）；白名单与 `prepared_id` 伪造由 desktop-shell §12 覆盖 | 外壳侧（全栈 B 级，M1.4） |
 | 已签名区与未签名区 | `overlays-approval.test.tsx`；`shared-modes.test.tsx` 审批单 | 两种模式 |
 | 生物识别文案 | `sign.test.ts`「按平台给出系统确认文案」；Mock e2e「用 Touch ID 签名批准」 | 两种模式 |
-| E2E-15 凭据写入需要签名 | `mock-adapter.test.ts`「凭据值不进入 IPC 录制与结果」；`settings-global.test.tsx` | 阻塞（Mock 从不要求签名，#224） |
+| E2E-15 凭据写入需要签名 | `mock-api.spec.ts`「E2E-15」（签名链、未签名 PUT 得 403、rev 一致、值不回显不入 IPC）；`mock-adapter.test.ts` | 两种模式 |
 | 中性 / 收紧改动不弹签名 | `mock-adapter.test.ts` 设置写入 dry_run；`settings-global.test.tsx` | 两种模式 |
-| E2E-21 未保存拦截、412、`errors[].pointer` | `overlays-settings.test.tsx`；`settings-global.test.tsx`；`settings-fixes.test.tsx`；`mock-adapter.test.ts` If-Match 过期 | 单测 / 场景（缺 `applied_rev` 追赶提示） |
+| E2E-21 未保存拦截、412、`errors[].pointer`、applied_rev | `overlays-settings.test.tsx`；`settings-global.test.tsx`；`settings-fixes.test.tsx`；`mock-api.spec.ts`「E2E-21」 | 两种模式 |
 | 不渲染无契约控件；viewer 无设置入口 | `shared-modes.test.tsx`「E2E-05」；`overlays-settings.test.tsx` | 两种模式 |
-| E2E-14 吊销 | `mock-api.spec.ts`「E2E-14」；`mock-adapter.test.ts`；`app.test.tsx` | 两种模式（缺“重新配对后正常水合”） |
-| 配对向导 | `shared-modes.test.tsx`「配对向导」；`mock-api.spec.ts`「配对向导」；`overlays-inbox-pairing.test.tsx` | 两种模式（缺“不一致回到起始”的 UI 断言） |
-| 证书将过期 | — | 缺测试 |
+| E2E-14 吊销 | `mock-api.spec.ts`「E2E-14」（阻塞、无后续请求、重置后重新配对并正常水合）；`mock-adapter.test.ts`；Mock 侧吊销本机即断流（`tools/mock-api/test/control.test.mjs`） | 两种模式 |
+| 配对向导 | `shared-modes.test.tsx`「配对向导」；`mock-api.spec.ts`「配对向导」（含不一致回到起始） | 两种模式 |
+| 证书将过期 | `mock-api.spec.ts`「证书将过期」（顶栏提示；到期后阻塞向导） | Mock |
 | 设备与证书页 | `shared-modes.test.tsx`；`settings-devices.test.tsx`；`mock-adapter.test.ts` 角色变更签名链 | 两种模式 |
 | 阶段条 | `workspace.test.tsx`「Low 交付阶段条显示跳过…」 | 单测 / 场景 |
-| 检视器 ⋯ 暂停 / 继续 / 重试 | `shared-modes.test.tsx`；`mock-api.spec.ts` 暂停；`full-flow.spec.ts` 暂停与继续 | 两种模式 |
-| 关联链按交付计算 | — | 缺测试 |
+| 检视器 ⋯ 暂停 / 继续 / 重试 | `shared-modes.test.tsx`；`mock-api.spec.ts`（暂停后菜单变为继续）；`full-flow.spec.ts` | 两种模式 |
+| 关联链按交付计算 | `m1-coverage.test.ts`「只列本交付的 Issue → PR → 工作树」 | 单测 / 场景 |
 | 放弃交付确认 | `full-flow.spec.ts`「从检视器暂停、继续并确认放弃同一交付」 | 场景 |
-| E2E-20 键盘与无障碍 | `baseline.spec.ts` axe 与键盘；`mock-api.spec.ts` axe | 两种模式（缺完整键盘路径） |
+| E2E-20 键盘与无障碍 | `baseline.spec.ts` axe 与键盘；`mock-api.spec.ts` axe；`workspace.test.tsx` 方向键与 Esc | 两种模式（未用读屏软件实测） |
 | 窄屏 | `baseline.spec.ts` 390×844 | 场景 |
 
-**为本节查明并修复的缺陷**（#227）：
+**为本节查明并修复的缺陷**：
 
-- 闸门满足后签名按钮不会启用：审批单只看打开时的 PR 快照。
-- 事件流重连期间打开的审批单，恢复连接后仍不可签。
+- #227：闸门满足后签名按钮不会启用（审批单只看打开时的 PR 快照，违反 E2E-07）；事件流重连期间打开的审批单，恢复连接后仍不可签（违反 E2E-04）。
+- 本轮：审批已消费且 PR 已合并时，交付关闭后审批卡停在“已合并”，没有推进到“Issue 已关闭 · 交付完成”（E2E-08）。
+- #259：Mock 的设置 rev 与 `settings.updated` 的 seq 脱节（config.md §2.7）；每个 Mock 实例重复编译事件 schema，高负载下测试钩子超时。
 
-两者分别违反 E2E-07 和 E2E-04。
-
-**本节的未完成项**：上表中标为缺测试或阻塞的条目。阻塞项在 Mock 补齐 #224 后转为可测；需真实外壳的归 M1.4（B 级）。
+**仍不在 A 级范围内的**：E2E-10 的全栈越权测试需要真实外壳与 CSP（desktop-shell §12 与 M1.4 B 级）。E2E-16 的跨重启保留范围待 OQ-U15 决定。
 
 ## 本轮验收范围
 

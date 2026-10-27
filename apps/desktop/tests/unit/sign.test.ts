@@ -201,6 +201,13 @@ describe("审批文案与闸门", () => {
         { deliveryStage: "closed" },
       ).label,
     ).toContain("交付完成");
+    // PR 已合并且 Issue 关闭、交付完成后推进到最后一步，不停在“已合并”（E2E-08）。
+    expect(
+      approvalStatusLabel(
+        { ...approval, status: "consumed" },
+        { deliveryStage: "closed", prState: "merged", headSha: approval.subject_digest },
+      ).label,
+    ).toBe("Issue 已关闭 · 交付完成");
     expect(
       approvalStatusLabel({ ...approval, status: "denied" }).label,
     ).toContain("已拒绝");

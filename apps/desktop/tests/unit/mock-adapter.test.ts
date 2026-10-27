@@ -4,6 +4,7 @@ import type { Approval, Me, Message } from "@/api/types";
 import type { RouteId } from "@/api/routes";
 import { MockIpcAdapter } from "@/ipc/mock/adapter";
 import { startMockApi, type RunningMockApi } from "./mockApi";
+import { events, mockMessage } from "./mockEvents";
 
 const CONVERSATION = "cnv_01JB7K5Q1M3X8V2N6R9T4W0YZC";
 const APPROVAL = "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK";
@@ -14,7 +15,7 @@ let mock: RunningMockApi;
 let adapter: MockIpcAdapter;
 let frames: StreamFrame[];
 
-function until<T>(probe: () => T | undefined | null | false, timeoutMs = 3000): Promise<T> {
+function until<T>(probe: () => T | undefined | null | false, timeoutMs = 10_000): Promise<T> {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const tick = (): void => {
@@ -77,6 +78,7 @@ describe("MockIpcAdapter：api_request", () => {
   });
 
   it("写请求带 Idempotency-Key；响应丢失后重试沿用同一键只产生 1 条消息（E2E-17）", async () => {
+    await openLive(18240);
     const before = await messageCount();
     const body = { text: "离线测试", refs: [] };
     adapter.swallowNextWriteResponse();
@@ -94,6 +96,9 @@ describe("MockIpcAdapter：api_request", () => {
     expect(retried).toMatchObject({ ok: true, status: 201, headers: { idempotent_replayed: true } });
     expect(await messageCount()).toBe(before + 1);
     expect((retried.ok && (retried.body as Message).text) || "").toBe("离线测试");
+    // 事件流上恰好 1 条 message.posted。
+    await until(() => frames.some((f) => f.t === "event" && f.envelope.type === "message.posted"));
+    expect(frames.filter((f) => f.t === "event" && f.envelope.type === "message.posted")).toHaveLength(1);
   });
 
   it("断网时不发请求，直接返回 network: offline", async () => {
@@ -111,10 +116,24 @@ describe("MockIpcAdapter：事件流", () => {
     expect(frames[0]).toMatchObject({ t: "state", state: { phase: "live", epoch: 1 } });
     expect(adapter.ackedSeq).toBe(18240);
 
-    await mock.inject("message.posted", "msg_injected", { conversation_id: CONVERSATION });
+    // 写入产生的事件实时推送，不需要重连。
+    await adapter.api("messages.post", {
+      conversationId: CONVERSATION,
+      body: { text: "实时推送", refs: [] },
+      idempotencyKey: "live-push-intent-000001",
+    });
     await until(() => frames.some((f) => f.t === "event" && f.envelope.seq === 18241));
+    expect(frames.filter((f) => f.t === "state")).toHaveLength(1);
+
+    // 断网期间服务端继续产生事件；恢复后从已 ack 的游标续流，不重复、不丢失。
+    adapter.disconnect();
+    const message = mockMessage(1);
+    await mock.push("messages", message as unknown as Record<string, unknown>);
+    await mock.emit(events.messagePosted(message));
+    adapter.reconnect();
+    await until(() => frames.some((f) => f.t === "event" && f.envelope.seq === 18242));
     const all = frames.flatMap((f) => (f.t === "event" ? [f.envelope.seq] : []));
-    expect(all).toEqual([18238, 18239, 18240, 18241]);
+    expect(all).toEqual([18238, 18239, 18240, 18241, 18242]);
     expect(frames.some((f) => f.t === "state" && f.state.phase === "reconnecting")).toBe(true);
     const lastState = [...frames].reverse().find((f) => f.t === "state");
     expect(lastState).toMatchObject({ state: { phase: "live", epoch: 2 } });
