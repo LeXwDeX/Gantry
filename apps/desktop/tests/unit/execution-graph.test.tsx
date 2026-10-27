@@ -75,6 +75,8 @@ function makeNode(
 ): WorkflowNode {
   return {
     id,
+    created_at: "2026-10-24T12:00:00.000Z",
+    updated_at: "2026-10-24T12:00:00.000Z",
     workflow_id: "wfl_fixture",
     role: options.role ?? "build",
     tier: "worker",
@@ -298,6 +300,8 @@ describe("执行图状态、边界与只读", () => {
     );
     const workflow: Workflow = {
       id: "wfl_fixture",
+      created_at: "2026-10-24T12:00:00.000Z",
+      updated_at: "2026-10-24T12:00:00.000Z",
       delivery_id: "dlv_fixture",
       conversation_id: null,
       stage: "implement",
@@ -377,6 +381,8 @@ describe("执行图状态、边界与只读", () => {
   it("工作流没有节点时显示空态", async () => {
     const workflow: Workflow = {
       id: "wfl_empty",
+      created_at: "2026-10-24T12:00:00.000Z",
+      updated_at: "2026-10-24T12:00:00.000Z",
       delivery_id: null,
       conversation_id: null,
       stage: null,
@@ -496,6 +502,8 @@ describe("执行图状态、边界与只读", () => {
   it("尝试为空时不伪造记录", async () => {
     const workflow: Workflow = {
       id: "wfl_empty_attempts",
+      created_at: "2026-10-24T12:00:00.000Z",
+      updated_at: "2026-10-24T12:00:00.000Z",
       delivery_id: "dlv_empty",
       conversation_id: null,
       stage: "implement",

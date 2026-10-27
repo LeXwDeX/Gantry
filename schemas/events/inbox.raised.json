@@ -256,6 +256,18 @@
               ],
               "default": null
             },
+            "action_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Id_act"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "终态失败的 Outbox 动作；`reason_code = outbox_failed:<code>` 时必填，其余不得出现（#67）。",
+              "default": null
+            },
             "evidence": {
               "type": "array",
               "items": {
@@ -414,6 +426,10 @@
         "Ultimate"
       ],
       "description": "线上档位值：`\"None\"`…`\"Ultimate\"`。"
+    },
+    "Id_act": {
+      "type": "string",
+      "pattern": "^act_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "EvidenceRef": {
       "anyOf": [

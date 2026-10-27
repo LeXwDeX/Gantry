@@ -86,6 +86,10 @@ pub fn scan(mirrors_dir: &Path) -> Vec<(ProjectId, MirrorEntry)> {
             continue;
         };
         for repo in repos.flatten() {
+            // 只认 `<repo>.git`；重建时改名保留的 `<repo>.git.broken-*` 不是活的镜像仓。
+            if !repo.file_name().to_string_lossy().ends_with(".git") {
+                continue;
+            }
             let git_dir = repo.path();
             if let Some((project, slug)) = read_project_file(&git_dir) {
                 found.push((

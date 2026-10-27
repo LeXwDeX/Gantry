@@ -28,7 +28,6 @@ use crate::{store_error, GitRepo};
 
 /// 一个 job 的校验结论。
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // project_id / validated / patch_record 由 commit_patch（#91 下一片）使用
 pub struct PatchRecord {
     pub project_id: ProjectId,
     pub outcome: PatchOutcome,
@@ -49,7 +48,6 @@ impl PatchRecord {
     }
 
     /// 可提交的校验结论（`commit_patch` 用）。
-    #[allow(dead_code)]
     pub fn validated(&self) -> Option<&ValidatedPatch> {
         match &self.outcome {
             PatchOutcome::Validated(patch) if self.base_known => Some(patch),
@@ -513,7 +511,6 @@ impl GitRepo {
     }
 
     /// `commit_patch` 用：按 job_id 读回校验结论（不接受调用方传入的判定）。
-    #[allow(dead_code)]
     pub(crate) async fn patch_record(&self, job: &AttemptId) -> Option<PatchRecord> {
         self.inner.patches.lock().await.get(job).cloned()
     }
