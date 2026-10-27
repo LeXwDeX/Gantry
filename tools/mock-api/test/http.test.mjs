@@ -198,13 +198,15 @@ test("write paths validate schema, idempotency keys and content type", async () 
   assert.equal(wrongType.status, 415);
   assertProblemHeaders(wrongType);
 
+  const headBefore = Number((await request("/v1/me")).headers.get("x-event-seq"));
   const created = await request(path, {
     method: "POST",
     headers: { "Idempotency-Key": "message-key-0000000003" },
     body: JSON.stringify({ text: "继续处理登录超时", level_cap: "High" }),
   });
   assert.equal(created.status, 201);
-  assert.equal(created.headers.get("x-event-seq"), "18240");
+  // 写入产生 message.posted：head 前进 1，响应的水位线已包含这条事件。
+  assert.equal(Number(created.headers.get("x-event-seq")), headBefore + 1);
   const createdBody = await json(created);
   assert.equal(createdBody.role, "user");
   assert.equal(createdBody.text, "继续处理登录超时");
@@ -355,26 +357,72 @@ test("settings use ETags, strict bodies and never return secret values", async (
   assert.equal(dryRunBody.requires_signature, false);
 
   const secretValue = "super-secret-value-that-must-not-appear";
-  const written = await request(path, {
-    method: "PUT",
-    headers: { "If-Match": initialEtag },
-    body: JSON.stringify({
-      value: {
-        providers: {
-          anthropic: {
-            kind: "anthropic",
-            base_url: "https://api.anthropic.com",
-            credential: {
-              type: "api_key",
-              secret_ref: "model.anthropic.main",
-              value: secretValue,
-            },
+  const secretBody = JSON.stringify({
+    value: {
+      providers: {
+        anthropic: {
+          kind: "anthropic",
+          base_url: "https://api.anthropic.com",
+          credential: {
+            type: "api_key",
+            secret_ref: "model.anthropic.main",
+            value: secretValue,
           },
         },
       },
+    },
+  });
+
+  // 凭据写入：dry_run 要求签名并给出 signing；未签名的写入 403（config.md §13、E2E-15）。
+  const secretDryRun = await json(
+    await request(`${path}?dry_run=true`, {
+      method: "PUT",
+      headers: { "If-Match": initialEtag },
+      body: secretBody,
     }),
+  );
+  assert.equal(secretDryRun.requires_signature, true);
+  assert.equal(secretDryRun.required_role, "approver");
+  assert.equal(secretDryRun.signing.action, "settings_update");
+  assert.deepEqual(secretDryRun.signing.target, {
+    kind: "settings",
+    scope: "global",
+    resource: "models",
+    base_rev: 18200,
+  });
+  assert.match(secretDryRun.signing.subject_digest, /^sha256:[0-9a-f]{64}$/);
+  const unsigned = await request(path, {
+    method: "PUT",
+    headers: { "If-Match": initialEtag },
+    body: secretBody,
+  });
+  assert.equal(unsigned.status, 403);
+  const unsignedProblem = await json(unsigned);
+  assert.equal(unsignedProblem.code, "signature_required");
+  assert.deepEqual(unsignedProblem.signing, secretDryRun.signing);
+
+  // 发起审批 → challenge → grant → 带 Gantry-Approval 重发。
+  const approval = await json(
+    await request("/v1/approvals", {
+      method: "POST",
+      headers: { "Idempotency-Key": "settings-approval-000001" },
+      body: JSON.stringify(secretDryRun.signing),
+    }),
+  );
+  const challenge = await json(await request(`/v1/approvals/${approval.id}/challenge`));
+  const granted = await request(`/v1/approvals/${approval.id}/grant`, {
+    method: "POST",
+    headers: { "Idempotency-Key": "settings-grant-0000000001" },
+    body: JSON.stringify({ nonce: challenge.payload.nonce, signature: "A".repeat(86) }),
+  });
+  assert.equal(granted.status, 200);
+  const written = await request(path, {
+    method: "PUT",
+    headers: { "If-Match": initialEtag, "Gantry-Approval": approval.id },
+    body: secretBody,
   });
   assert.equal(written.status, 200);
+  assert.equal((await json(await request(`/v1/approvals/${approval.id}`))).status, "consumed");
   const writtenText = JSON.stringify(await json(written));
   assert.equal(writtenText.includes(secretValue), false);
   const writtenBody = JSON.parse(writtenText);
@@ -444,6 +492,9 @@ test("delivery controls are scripted and idempotent", async () => {
 });
 
 test("SSE replays from cursors, honors Last-Event-ID and filters without losing the heartbeat cursor", async () => {
+  // 前面的用例写入会追加事件；回到夹具状态，下面的序号断言只针对录制的事件日志。
+  const reset = await request("/__mock/reset", { method: "POST" });
+  assert.equal(reset.status, 200);
   const all = await openSse("/v1/events?after=18233");
   try {
     assert.equal(all.frames.length, 0);

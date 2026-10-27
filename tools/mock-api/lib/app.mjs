@@ -10,6 +10,7 @@ import {
   sendProblem,
   setCommonHeaders,
 } from "./http.mjs";
+import { assertEventData, loadEventSchemas } from "./events.mjs";
 import { createApplicationState, loadFixtureState } from "./fixtures.mjs";
 import { loadOpenApi } from "./openapi.mjs";
 import { validateQuery } from "./query.mjs";
@@ -38,6 +39,21 @@ const CREATE_APPROVAL_ACTIONS = new Set([
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+/** RFC 8785 的最小子集：对象键排序，其余交给 JSON.stringify；足够覆盖摘要输入。 */
+function jcs(value) {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(jcs).join(",")}]`;
+  }
+  return `{${Object.keys(value)
+    .filter((key) => value[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${jcs(value[key])}`)
+    .join(",")}}`;
 }
 
 function deepClone(value) {
@@ -179,15 +195,36 @@ function effectiveSettingsResponse(state, resource, projectId) {
   };
 }
 
-function dryRunResponse() {
-  return {
+function dryRunResponse(signing = null) {
+  const body = {
     valid: true,
     errors: [],
     warnings: [],
     relaxes: [],
-    required_role: "operator",
-    requires_signature: false,
+    required_role: signing ? "approver" : "operator",
+    requires_signature: signing !== null,
   };
+  if (signing) {
+    body.signing = signing;
+  }
+  return body;
+}
+
+/** 请求体里本次写入的凭据（带 secret_ref 且给了 value 的对象），返回其 secret_ref 列表。 */
+function secretWrites(value, found = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      secretWrites(item, found);
+    }
+  } else if (value && typeof value === "object") {
+    if (typeof value.secret_ref === "string" && typeof value.value === "string") {
+      found.push(value.secret_ref);
+    }
+    for (const nested of Object.values(value)) {
+      secretWrites(nested, found);
+    }
+  }
+  return found;
 }
 
 function decodeCursor(cursor) {
@@ -349,6 +386,48 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
   const pausedStages = new Map();
   const sseConnections = new Set();
   const requestLog = [];
+  const eventSchemas = await loadEventSchemas();
+  // 场景控制：下一次命中某 operationId 的请求返回指定 problem（/__mock/fail-next）。
+  const failNext = new Map();
+
+  function deviceActor() {
+    return { kind: "device", id: state.me.device.id };
+  }
+
+  function projectOfDelivery(deliveryId) {
+    return deliveryId ? findById(state.deliveries, deliveryId)?.project_id ?? null : null;
+  }
+
+  /**
+   * 写入产生的事件：data 先按 schemas/events 校验，信封按 OpenAPI 校验，
+   * 然后追加到日志、推进 head，并实时推给已建立的 SSE 连接（data-model §5）。
+   */
+  function emitEvent(type, subject, data, options = {}) {
+    assertEventData(eventSchemas, type, data);
+    const seq = state.head + 1;
+    const envelope = {
+      id: entityId("evt"),
+      seq,
+      ts: nowTimestamp(state),
+      type,
+      subject,
+      project_id: options.projectId ?? null,
+      actor: options.actor ?? deviceActor(),
+      causation_id: null,
+      correlation_id: options.correlationId === undefined ? subject : options.correlationId,
+      data,
+    };
+    const check = validator.validateNamed("EventEnvelope", envelope);
+    if (!check.ok) {
+      throw new Error(`mock event envelope violates OpenAPI: ${JSON.stringify(check.errors)}`);
+    }
+    state.events.push(envelope);
+    state.head = seq;
+    for (const connection of sseConnections) {
+      connection.push(envelope);
+    }
+    return envelope;
+  }
 
   function fixtureForName(name) {
     switch (name) {
@@ -555,11 +634,21 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       });
     }
     const order = ["None", "Low", "Medium", "High", "Max", "Ultimate"];
+    const previousCap = delivery.level_cap;
     delivery.level_cap = context.body.level_cap;
     if (order.indexOf(delivery.level_effective) > order.indexOf(delivery.level_cap)) {
       delivery.level_effective = delivery.level_cap;
     }
     delivery.updated_at = nowTimestamp(state);
+    // 只发 kind = cap；level_effective 随之派生为 min，不另发事件（desktop-ui 场景契约同此）。
+    if (previousCap !== delivery.level_cap) {
+      emitEvent(
+        "delivery.level_changed",
+        delivery.id,
+        { from: previousCap, to: delivery.level_cap, kind: "cap", reason: "user_cap" },
+        { projectId: delivery.project_id },
+      );
+    }
     return { status: 200, body: delivery };
   }
 
@@ -577,6 +666,12 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       delivery.stage = "abandoned";
       delivery.stage_status = "done";
       delivery.updated_at = nowTimestamp(state);
+      emitEvent(
+        "delivery.abandoned",
+        delivery.id,
+        { reason: context.body?.reason ?? null, by: state.me.device.id },
+        { projectId: delivery.project_id },
+      );
     }
     return { status: 200, body: delivery };
   }
@@ -604,8 +699,15 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
               .map((item) => item.id),
           ),
       });
+      const statusBefore = delivery.stage_status;
       delivery.stage_status = "paused";
       delivery.updated_at = nowTimestamp(state);
+      emitEvent(
+        "delivery.paused",
+        delivery.id,
+        { by: state.me.device.id, status_before: statusBefore },
+        { projectId: delivery.project_id },
+      );
     }
     return { status: 200, body: delivery };
   }
@@ -632,6 +734,12 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
           pausedStages.delete(delivery.id);
         }
         delivery.updated_at = nowTimestamp(state);
+        emitEvent(
+          "delivery.resumed",
+          delivery.id,
+          { by: state.me.device.id, status_after: delivery.stage_status },
+          { projectId: delivery.project_id },
+        );
       }
     }
     return { status: 200, body: delivery };
@@ -688,6 +796,10 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       updated_at: timestamp,
     };
     state.messages.items.push(message);
+    emitEvent("message.posted", message.id, deepClone(message), {
+      projectId: conversation.project_id,
+      correlationId: conversation.id,
+    });
     return { status: 201, body: message };
   }
 
@@ -734,6 +846,17 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       lease_until: addSeconds(timestamp, leaseSeconds),
     };
     worktree.updated_at = timestamp;
+    emitEvent(
+      "worktree.locked",
+      worktree.id,
+      {
+        worktree_id: worktree.id,
+        holder: "human",
+        delivery_id: null,
+        lease_until: worktree.lock.lease_until,
+      },
+      { projectId: worktree.project_id ?? null },
+    );
     return { status: 200, body: worktree };
   }
 
@@ -747,8 +870,17 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
         extensions: { lock: worktree.lock },
       });
     }
+    const wasLocked = worktree.lock !== null && worktree.lock !== undefined;
     worktree.lock = null;
     worktree.updated_at = nowTimestamp(state);
+    if (wasLocked) {
+      emitEvent(
+        "worktree.unlocked",
+        worktree.id,
+        { worktree_id: worktree.id, reason: "released" },
+        { projectId: worktree.project_id ?? null },
+      );
+    }
     return { status: 200, body: worktree };
   }
 
@@ -823,6 +955,12 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       });
     }
     // The engine creates the new attempt asynchronously; the node keeps its current status.
+    emitEvent(
+      "node.retry_requested",
+      found.node.id,
+      { node_id: found.node.id, by: state.me.device.id },
+      { projectId: projectOfDelivery(found.workflow.delivery_id), correlationId: found.workflow.delivery_id },
+    );
     return { status: 202, body: found.node };
   }
 
@@ -860,6 +998,12 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     if (item.status !== "dismissed") {
       item.status = "dismissed";
       item.updated_at = nowTimestamp(state);
+      emitEvent(
+        "inbox.dismissed",
+        item.id,
+        { inbox_id: item.id, note: context.body?.note ?? null },
+        { projectId: item.project_id ?? null, correlationId: item.delivery_id ?? item.id },
+      );
     }
     return { status: 200, body: item };
   }
@@ -895,6 +1039,17 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     }
     item.status = "resolved";
     item.updated_at = nowTimestamp(state);
+    emitEvent(
+      "inbox.resolved",
+      item.id,
+      {
+        inbox_id: item.id,
+        resolution: "chosen",
+        option_id: context.body.option_id,
+        note: context.body.note ?? null,
+      },
+      { projectId: item.project_id ?? null, correlationId: item.delivery_id ?? item.id },
+    );
     return { status: 200, body: item };
   }
 
@@ -1004,6 +1159,20 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       updated_at: timestamp,
     };
     state.approvals.items.push(approval);
+    const target = approval.target;
+    emitEvent(
+      "approval.requested",
+      approval.id,
+      {
+        action: approval.action,
+        target,
+        subject_digest: approval.subject_digest,
+        expires_at: approval.expires_at,
+        config_rev: target.kind === "settings" ? target.base_rev : 0,
+        requested_by: deviceActor(),
+      },
+      { projectId: target.kind === "settings" ? target.project_id ?? null : null, correlationId: approval.id },
+    );
     return { status: 201, body: approval };
   }
 
@@ -1019,6 +1188,12 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     }
     approval.status = "denied";
     approval.updated_at = nowTimestamp(state);
+    emitEvent(
+      "approval.denied",
+      approval.id,
+      { reason: context.body?.reason ?? null },
+      { projectId: projectOfDelivery(approval.delivery_id), correlationId: approval.delivery_id ?? approval.id },
+    );
     return { status: 200, body: approval };
   }
 
@@ -1053,6 +1228,18 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     approval.device_id = state.me.device.id;
     approval.signature = context.body.signature;
     approval.updated_at = nowTimestamp(state);
+    // Mock 不验签；payload_sha256 只是对待签载荷的确定性摘要，供客户端核对事件形状。
+    emitEvent(
+      "approval.granted",
+      approval.id,
+      {
+        approval_id: approval.id,
+        device_id: state.me.device.id,
+        approval_pubkey_fpr: deviceById(state, state.me.device.id)?.approval_pubkey_fpr ?? state.me.device.approval_pubkey_fpr,
+        payload_sha256: `sha256:${sha256(jcs(challenge.body.payload))}`,
+      },
+      { projectId: projectOfDelivery(approval.delivery_id), correlationId: approval.delivery_id ?? approval.id },
+    );
     return { status: 200, body: approval };
   }
 
@@ -1114,24 +1301,100 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     };
   }
 
+  /** 设置写入的签名对象（config.md §13）：目标绑定 scope / project / resource / base_rev，摘要覆盖整个请求体。 */
+  function settingsSigning(scope, projectId, resource, baseRev, body) {
+    const target = { kind: "settings", scope, resource, base_rev: baseRev };
+    if (scope === "project") {
+      target.project_id = projectId;
+    }
+    return {
+      action: "settings_update",
+      target,
+      subject_digest: `sha256:${sha256(jcs(body))}`,
+    };
+  }
+
+  /**
+   * 写入凭据值必须先由审批设备签名：请求头 Gantry-Approval 指向一个已 granted、
+   * 动作 / 目标 / 摘要都与本次请求一致的审批；否则 403 signature_required（附 signing）。
+   * 通过后消费该审批，同一审批不能重复使用。
+   */
+  function requireSettingsApproval(context, signing) {
+    const approvalId = context.req.headers["gantry-approval"];
+    const approval = typeof approvalId === "string" ? findById(state.approvals, approvalId) : null;
+    const matches =
+      approval !== null &&
+      approval.status === "granted" &&
+      approval.action === signing.action &&
+      approval.subject_digest === signing.subject_digest &&
+      jcs(approval.target) === jcs(signing.target);
+    if (!matches) {
+      throw new HttpProblem(403, "signature_required", "this settings change requires an approver signature", {
+        extensions: { signing },
+      });
+    }
+    approval.status = "consumed";
+    approval.consumed_by = `settings:${signing.target.resource}`;
+    approval.updated_at = nowTimestamp(state);
+    emitEvent(
+      "approval.consumed",
+      approval.id,
+      { approval_id: approval.id, consumed_by: approval.consumed_by, subject_digest: approval.subject_digest },
+      { projectId: signing.target.project_id ?? null, correlationId: approval.id },
+    );
+  }
+
+  /** dry_run 与正式写入共用：凭据写入需要签名，其余按中性改动处理（Mock 不计算 relaxes）。 */
+  function writeSettings(context, scope, projectId) {
+    const resource = context.params.resource;
+    const previousRev = currentRev(state, scope, projectId, resource);
+    const secrets = secretWrites(context.body.value);
+    const signing =
+      secrets.length > 0 ? settingsSigning(scope, projectId, resource, previousRev, context.body) : null;
+    const etag = etagFor(previousRev);
+    if (context.query.dry_run === true) {
+      return { status: 200, body: dryRunResponse(signing), headers: { ETag: etag } };
+    }
+    if (signing) {
+      requireSettingsApproval(context, signing);
+    }
+    const entry = { rev: previousRev + 1, value: stripSecretValues(context.body.value), warnings: [] };
+    if (scope === "global") {
+      state.globalSettings[resource] = entry;
+    } else {
+      state.projectSettings[projectId] ??= {};
+      state.projectSettings[projectId][resource] = entry;
+    }
+    emitSettingsUpdated(scope, projectId, resource, previousRev, entry.value, secrets, previousRev + 1);
+    return {
+      status: 200,
+      body: settingsResponse(state, resource, scope, projectId ?? undefined),
+      headers: { ETag: etagFor(previousRev + 1) },
+    };
+  }
+
+  function emitSettingsUpdated(scope, projectId, resource, baseRev, value, secrets, version) {
+    emitEvent(
+      "settings.updated",
+      "settings",
+      {
+        scope,
+        resource,
+        schema_version: 1,
+        base_rev: baseRev,
+        value: deepClone(value),
+        relaxes: [],
+        secret_changes: secrets.map((ref) => ({ ref, op: "set", version })),
+      },
+      { projectId: scope === "project" ? projectId : null, correlationId: null },
+    );
+  }
+
   function handlePutSettings(context) {
     settingsEntryOrThrow(state, context.params.resource);
     const etag = etagFor(currentRev(state, "global", null, context.params.resource));
     requireIfMatch(context.req.headers, etag);
-    if (context.query.dry_run === true) {
-      return { status: 200, body: dryRunResponse(), headers: { ETag: etag } };
-    }
-    const previousRev = currentRev(state, "global", null, context.params.resource);
-    state.globalSettings[context.params.resource] = {
-      rev: previousRev + 1,
-      value: stripSecretValues(context.body.value),
-      warnings: [],
-    };
-    return {
-      status: 200,
-      body: settingsResponse(state, context.params.resource, "global"),
-      headers: { ETag: etagFor(previousRev + 1) },
-    };
+    return writeSettings(context, "global", null);
   }
 
   function requireProject(projectId) {
@@ -1177,31 +1440,7 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       currentRev(state, "project", context.params.project_id, context.params.resource),
     );
     requireIfMatch(context.req.headers, etag);
-    if (context.query.dry_run === true) {
-      return { status: 200, body: dryRunResponse(), headers: { ETag: etag } };
-    }
-    const previousRev = currentRev(
-      state,
-      "project",
-      context.params.project_id,
-      context.params.resource,
-    );
-    state.projectSettings[context.params.project_id] ??= {};
-    state.projectSettings[context.params.project_id][context.params.resource] = {
-      rev: previousRev + 1,
-      value: stripSecretValues(context.body.value),
-      warnings: [],
-    };
-    return {
-      status: 200,
-      body: settingsResponse(
-        state,
-        context.params.resource,
-        "project",
-        context.params.project_id,
-      ),
-      headers: { ETag: etagFor(previousRev + 1) },
-    };
+    return writeSettings(context, "project", context.params.project_id);
   }
 
   function handleDeleteProjectSettings(context) {
@@ -1224,6 +1463,15 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       value: null,
       warnings: [],
     };
+    emitSettingsUpdated(
+      "project",
+      context.params.project_id,
+      context.params.resource,
+      previousRev,
+      null,
+      [],
+      previousRev + 1,
+    );
     return {
       status: 200,
       body: settingsResponse(
@@ -1256,8 +1504,12 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     if (!device) {
       throw new HttpProblem(404, "not_found", "device not found");
     }
+    const previousName = device.name;
     device.name = context.body.name;
     device.updated_at = nowTimestamp(state);
+    if (previousName !== device.name) {
+      emitEvent("device.updated", device.id, { device_id: device.id, changed: { name: device.name } });
+    }
     return { status: 200, body: publicDevice(device) };
   }
 
@@ -1276,8 +1528,15 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
         extensions: { reason: "mobile_cannot_approve" },
       });
     }
+    const previousRole = device.role;
     device.role = context.body.role;
     device.updated_at = nowTimestamp(state);
+    if (previousRole !== device.role) {
+      emitEvent("device.updated", device.id, {
+        device_id: device.id,
+        changed: { role: { from: previousRole, to: device.role } },
+      });
+    }
     return { status: 200, body: publicDevice(device) };
   }
 
@@ -1289,6 +1548,17 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     if (device.status !== "revoked") {
       device.status = "revoked";
       device.updated_at = nowTimestamp(state);
+      emitEvent("device.revoked", device.id, {
+        device_id: device.id,
+        cert_serials: [device.cert_serial],
+        remaining_approvers: state.devices.items.filter(
+          (entry) => entry.role === "approver" && entry.status === "active",
+        ).length,
+      });
+      // 吊销本机：已建立的事件流立即断开（desktop-shell §12 要求在心跳间隔内断开）。
+      if (device.id === state.me.device.id) {
+        setImmediate(() => endStreams());
+      }
     }
     state.pushTokens.delete(device.id);
     return { status: 200, body: publicDevice(device) };
@@ -1389,7 +1659,20 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       sseConnections.delete(entry);
     };
 
-    const entry = { res, cleanup };
+    const entry = {
+      res,
+      cleanup,
+      // 实时推送新事件；过滤条件与回放相同。
+      push(event) {
+        if (closed || res.writableEnded) {
+          return;
+        }
+        if (!matchesProject(event, projectIds) || !matchesEventType(event.type, types)) {
+          return;
+        }
+        res.write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      },
+    };
     sseConnections.add(entry);
     req.on("close", cleanup);
     res.on("close", cleanup);
@@ -1470,6 +1753,11 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     if (requestLog.length > 500) {
       requestLog.shift();
     }
+    const injected = failNext.get(route.operation.operationId);
+    if (injected) {
+      failNext.delete(route.operation.operationId);
+      throw new HttpProblem(injected.status, injected.code, injected.detail);
+    }
 
     // Header precedence: an existing Last-Event-ID wins over the after query parameter.
     if (route.operation.operationId === "streamEvents" && req.headers["last-event-id"] !== undefined) {
@@ -1538,6 +1826,10 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
       rateClass: "read",
     };
     try {
+      if (url.pathname.startsWith("/__mock/")) {
+        await handleControl(req, res, url);
+        return;
+      }
       if (url.pathname === "/v1/pair" && req.method !== "POST") {
         throw new HttpProblem(404, "not_found", "pair is only available on the pairing listener");
       }
@@ -1574,12 +1866,122 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     }
   }
 
-  async function close() {
+  function endStreams() {
     for (const connection of [...sseConnections]) {
       connection.cleanup();
       connection.res.end();
     }
     sseConnections.clear();
+  }
+
+  async function resetState() {
+    const fresh = createApplicationState(await loadFixtureState());
+    for (const key of Object.keys(state)) {
+      delete state[key];
+    }
+    Object.assign(state, fresh);
+    idempotency.clear();
+    challenges.clear();
+    pausedStages.clear();
+    failNext.clear();
+    requestLog.length = 0;
+    endStreams();
+  }
+
+  /**
+   * 场景控制面（desktop-ui §12；#224）：只在 Mock 上存在，不属于 api.md 契约，也不进 OpenAPI。
+   *   POST /__mock/reset          以夹具重建全部状态并断开事件流
+   *   POST /__mock/events         { type, subject, data, project_id?, correlation_id?, actor? } 追加并实时推送
+   *   POST /__mock/drop-streams   断开已建立的事件流（客户端按游标重连）
+   *   POST /__mock/mutate         { collection, id, patch } | { collection, push } | { set, value }
+   *   POST /__mock/clock          { advance_s } | { time }：推进或设置服务端时间
+   *   POST /__mock/fail-next      { operation_id, status, code, detail? }：下一次该操作返回指定 problem
+   *   GET  /__mock/requests       请求日志；DELETE 清空
+   */
+  async function handleControl(req, res, url) {
+    const send = (status, body) => {
+      const payload = body === undefined ? "" : JSON.stringify(body);
+      res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(payload);
+    };
+    const action = url.pathname.slice("/__mock/".length);
+    const raw = await readBody(req, 1 << 20);
+    let body = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      send(400, { error: "invalid_json" });
+      return;
+    }
+    try {
+      if (action === "requests" && req.method === "GET") {
+        send(200, requestLog);
+      } else if (action === "requests" && req.method === "DELETE") {
+        requestLog.length = 0;
+        send(204);
+      } else if (req.method !== "POST") {
+        send(405, { error: "method_not_allowed" });
+      } else if (action === "reset") {
+        await resetState();
+        send(200, { head: state.head, log_epoch: state.logEpoch });
+      } else if (action === "events") {
+        const envelope = emitEvent(body.type, body.subject, body.data ?? {}, {
+          projectId: body.project_id ?? null,
+          correlationId: body.correlation_id,
+          actor: body.actor,
+        });
+        send(201, envelope);
+      } else if (action === "drop-streams") {
+        endStreams();
+        send(204);
+      } else if (action === "mutate") {
+        if (typeof body.set === "string") {
+          state[body.set] = body.value;
+          send(200, { [body.set]: state[body.set] });
+          return;
+        }
+        const items = Array.isArray(state[body.collection]?.items) ? state[body.collection].items : null;
+        if (!items) {
+          send(400, { error: "unknown_collection" });
+          return;
+        }
+        if (body.push) {
+          items.push(body.push);
+          send(201, body.push);
+          return;
+        }
+        const item = items.find((entry) => entry.id === body.id);
+        if (!item) {
+          send(404, { error: "unknown_item" });
+          return;
+        }
+        Object.assign(item, body.patch ?? {});
+        send(200, item);
+      } else if (action === "clock") {
+        const base = typeof body.time === "string" ? body.time : addSeconds(state.me.server.time, Number(body.advance_s ?? 0));
+        if (Number.isNaN(Date.parse(base))) {
+          send(400, { error: "invalid_time" });
+          return;
+        }
+        state.me.server.time = new Date(Date.parse(base)).toISOString();
+        send(200, { time: state.me.server.time });
+      } else if (action === "fail-next") {
+        failNext.set(body.operation_id, {
+          status: Number(body.status),
+          code: String(body.code),
+          detail: body.detail ?? String(body.code),
+        });
+        send(204);
+      } else {
+        send(404, { error: "unknown_control" });
+      }
+    } catch (error) {
+      send(400, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function close() {
+    endStreams();
   }
 
   return { api, state, validator, handle, close, requestLog, idempotency };
