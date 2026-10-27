@@ -1,0 +1,18 @@
+[package]
+name = "gantry-egress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Gantry 出网代理（独立进程 gantry-egress）：控制面、模型反向代理与计量、CONNECT 白名单、出网审计"
+
+[dependencies]
+gantry-core = { path = "../gantry-core" }
+getrandom = "0.3"
+idna = "1"
+# 固定 unicode-rs 后端：ICU 后端（idna_adapter 1.2+）要求 rustc 1.86，超出 MSRV 1.85。
+idna_adapter = "~1.1"
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
