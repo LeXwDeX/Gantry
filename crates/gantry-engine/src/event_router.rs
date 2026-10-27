@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use crate::decide::{Input, InputIdentity, Observed, ObservedData};
 use crate::route::{Route, RouteError, Router};
+use crate::state::OpenInbox;
 
 /// `engine` 消费者在 store 游标表里的名字。
 pub const CURSOR: &str = "engine";
@@ -105,7 +106,8 @@ impl EventRouter {
             }
             match self.router.route(event)? {
                 Route::Delivery { id, input: true } => {
-                    if let Some(dispatch) = dispatch(id, event) {
+                    if let Some(mut dispatch) = dispatch(id, event) {
+                        self.attach_inbox_item(&mut dispatch).await?;
                         self.backlog.entry(id).or_default().push_back(event.seq);
                         out.push(dispatch);
                     }
@@ -131,6 +133,25 @@ impl EventRouter {
     /// 取走自上次调用以来读到的新建交付单元。
     pub fn take_created(&mut self) -> Vec<DeliveryId> {
         std::mem::take(&mut self.created)
+    }
+
+    /// `inbox.resolved` 的原上报项（§7.14.2）：按 `inbox_id` 从 store 的收件箱投影取回，
+    /// 创建方与 `raised_seq` 取自路由索引。投影里没有该项时保持 `None`（执行选项时失败闭合）。
+    async fn attach_inbox_item(&self, dispatch: &mut Dispatch) -> Result<(), RouterError> {
+        let Input::Event(Observed {
+            data: ObservedData::InboxResolved { inbox_id, item, .. },
+            ..
+        }) = &mut dispatch.input
+        else {
+            return Ok(());
+        };
+        let Some(origin) = self.router.inbox_origin(inbox_id) else {
+            return Ok(());
+        };
+        let found = self.store.snapshot().await?.inbox_item(inbox_id).await?;
+        *item =
+            found.map(|found| OpenInbox::from_item(&found, origin.raised_by, origin.raised_seq));
+        Ok(())
     }
 
     /// 执行体处理完 `seq`（含）之前投给它的事件后回报。
@@ -239,7 +260,7 @@ fn observed_data(event: &Event<Value>) -> Option<ObservedData> {
                 inbox_id: data.inbox_id,
                 resolution: data.resolution,
                 option_id: data.option_id.map(OptionId::new),
-                // 原上报项快照由执行选项的切片（#73）联查补上；本切片的 decide 不读它。
+                // 原上报项由 `EventRouter::attach_inbox_item` 从收件箱投影补上。
                 item: None,
             }
         }

@@ -8,9 +8,11 @@
 //! - `Report`：只处理该回报本身，之后由执行体的 `Tick(Settle)` 继续求值（§7.14.1 第 4 步）；
 //! - `Tick(Recover)` 另外为未终结尝试重发 `RunAttempt { resume: true }`（§7.13 第 2 步）。
 //!
-//! 本切片不覆盖、留给后续切片的（每项在 #70 记录）：
-//! - 命令（`SetLevelCap` 等）与异常路径（放弃收尾、T11、T14）：切片 5（#73）；
-//! - 预算不足时的 `budget.exhausted` 与上报、`models_not_configured` 上报：本切片只"不产出"，上报归切片 5；
+//! 命令、事件驱动的迁移（T11）、放弃收尾、T14 / T15、上报项选项的执行与 `models_not_configured`
+//! 见 [`crate::control`]（#73）。
+//!
+//! 仍未覆盖、留给后续切片的：
+//! - 预算不足时的 `budget.exhausted` 与上报（本切片只"不产出"）；
 
 use std::collections::BTreeMap;
 
@@ -27,12 +29,12 @@ use gantry_core::events::{
     WorkflowCreatedData, WorkflowFinishedData,
 };
 use gantry_core::forge::{
-    derive_target_intent, ActionPayload, CreatePrPayload, MergeMode, MergePrPayload,
-    PushBranchPayload, PushTransport,
+    derive_target_intent, ActionPayload, CreatePrPayload, MergeMode, MergePrPayload, PrState,
+    PushBranchPayload, PushTransport, UpdatePrPayload,
 };
 use gantry_core::ids::{ActionId, Nod, NodeId, Wfl};
 use gantry_core::level::Level;
-use gantry_core::machines::delivery::StageTrigger;
+use gantry_core::machines::delivery::{AbandonCause, StageTrigger};
 use gantry_core::ports::forge::{EnqueueRequest, EnqueuedBy, EnqueuedByModule};
 use gantry_core::ports::inbox::{DedupKey, RaiseRequest, SafeSummary};
 use gantry_core::ports::policy::{ActionDecision, ActionFacts, ActionRequest, ReportHint};
@@ -40,10 +42,11 @@ use gantry_core::worker::ProposalParams;
 use serde::Serialize;
 
 use crate::classify::{retry_rule, RetryRule};
+use crate::control;
 use crate::decide::{
-    AttemptPlan, Command, CommandRejection, DecideEnv, Decision, Effect, EffectKey, EffectReport,
-    Finalized, IdMint, Input, ModelKey, PatchResult, ProposalRef, ProposalText, ResolvedModel,
-    TickReason, TrustedInstructions,
+    AttemptPlan, DecideEnv, Decision, Effect, EffectKey, EffectReport, Finalized, IdMint, Input,
+    ModelKey, PatchResult, ProposalRef, ProposalText, ResolvedModel, TickReason,
+    TrustedInstructions,
 };
 use crate::stage::advance;
 use crate::state::{ActionKey, AttemptState, DeliveryState, NodeState, WorkflowState};
@@ -66,19 +69,18 @@ pub fn decide(state: &DeliveryState, input: &Input, env: &DecideEnv) -> Vec<Deci
             release_finished(state, env, &mut out);
             out
         }
-        Input::Tick(_) | Input::Event(_) => derive(state, env, &mut mint),
-        Input::Report(report) => on_report(state, report, env),
-        Input::Command(command) => vec![Decision::Reply(Err(on_command(command)))],
-    }
-}
-
-fn on_command(command: &Command) -> CommandRejection {
-    match command {
-        Command::SupplySpec { .. } | Command::RequestHeal(_) | Command::Classify(_) => {
-            CommandRejection::NotSupportedYet("M2")
+        Input::Tick(_) => derive(state, env, &mut mint),
+        // 事件驱动的决策（T11、选项执行）先求值；没有产出时按状态求值。
+        Input::Event(observed) => {
+            let out = control::on_event(state, observed, env, &mut mint);
+            if out.is_empty() {
+                derive(state, env, &mut mint)
+            } else {
+                out
+            }
         }
-        // 控制面命令归切片 5（#73）。
-        _ => CommandRejection::NotSupportedYet("decide slice 5 (#73)"),
+        Input::Report(report) => on_report(state, report, env),
+        Input::Command(command) => control::on_command(state, command),
     }
 }
 
@@ -94,6 +96,10 @@ pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<
         out.push(decision);
         return out;
     }
+    control::abandon_cleanup(state, env, &mut out);
+    control::reconcile_after_base_advance(state, env, &mut out);
+    control::resolve_models_configured(state, env, &mut out);
+    control::raise_models_not_configured(state, env, &mut out);
     build_workflow(state, mint, &mut out);
     queue_nodes(state, &mut out);
     ensure_worktree(state, env, &mut out);
@@ -107,21 +113,48 @@ pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<
     out
 }
 
-fn delivery_event<T: Serialize>(
+pub(crate) fn delivery_event<T: Serialize>(
     state: &DeliveryState,
     ty: EventType,
     subject: &str,
     data: &T,
 ) -> Decision {
+    event_as(state, ty, subject, data, EventMeta::engine())
+}
+
+/// 事件信封中由调用方决定的部分：`actor`、`causation_id` 与 `dedup_key`。
+pub(crate) struct EventMeta {
+    pub actor: Actor,
+    pub causation_id: Option<gantry_core::ids::EventId>,
+    pub dedup_key: Option<String>,
+}
+
+impl EventMeta {
+    pub(crate) fn engine() -> Self {
+        Self {
+            actor: engine_actor(),
+            causation_id: None,
+            dedup_key: None,
+        }
+    }
+}
+
+pub(crate) fn event_as<T: Serialize>(
+    state: &DeliveryState,
+    ty: EventType,
+    subject: &str,
+    data: &T,
+    meta: EventMeta,
+) -> Decision {
     Decision::Append(NewEvent {
         ty,
         subject: Subject::parse(subject).expect("engine ids are valid subjects"),
         project_id: Some(state.delivery.project_id),
-        actor: engine_actor(),
-        causation_id: None,
+        actor: meta.actor,
+        causation_id: meta.causation_id,
         correlation_id: Some(state.delivery.id.to_string()),
         data: without_nulls(serde_json::to_value(data).expect("event data serializes")),
-        dedup_key: None,
+        dedup_key: meta.dedup_key,
     })
 }
 
@@ -141,17 +174,24 @@ fn without_nulls(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn engine_actor() -> Actor {
+pub(crate) fn engine_actor() -> Actor {
     Actor::new(ActorKind::Engine, "engine")
 }
 
-fn stage_changed(
+/// 按 core 转移表写 `delivery.stage_changed`；没有边时不产出。
+/// 暂停中被外部事件推进（T11）到非终态阶段时保持 `paused`，恢复后再回到暂停前的值（P-56）。
+pub(crate) fn stage_changed(
     state: &DeliveryState,
     trigger: StageTrigger,
     reason: Option<&str>,
 ) -> Option<Decision> {
     let row = &state.delivery;
     let transition = advance(row.stage, row.level_effective, trigger, row.abandon_cause).ok()?;
+    let stage_status = if !transition.to.is_terminal() && row.stage_status == StageStatus::Paused {
+        StageStatus::Paused
+    } else {
+        transition.status
+    };
     Some(delivery_event(
         state,
         EventType::DeliveryStageChanged,
@@ -160,15 +200,27 @@ fn stage_changed(
             from: transition.from,
             to: transition.to,
             reason: reason.map(str::to_owned),
-            stage_status: transition.status,
+            stage_status,
         },
     ))
 }
 
-/// §7.6 中本切片覆盖的迁移：T2、T6、T8、T10、T12（Low）。
+/// §7.6 中按状态求值的迁移：T2、T6、T8、T10、T12（Low），以及 T14、T15（见 `control`）。
+/// T11 由事件驱动，见 [`control::on_event`]。
 fn stage_transition(state: &DeliveryState) -> Option<Decision> {
     let row = &state.delivery;
-    if row.stage.is_terminal() || row.stage_status != StageStatus::Running {
+    // T15：只认 PR 被关闭造成的 abandoned（core 的边要求 `PrClosedUnmerged`）。
+    if let Some(decision) = control::pr_reopened(state) {
+        return Some(decision);
+    }
+    if row.stage.is_terminal() {
+        return None;
+    }
+    // T14：任一非终态，含暂停中（守卫为空，§7.6）。
+    if let Some(decision) = control::pr_closed(state) {
+        return Some(decision);
+    }
+    if row.stage_status != StageStatus::Running {
         return None;
     }
     match row.stage {
@@ -184,8 +236,8 @@ fn stage_transition(state: &DeliveryState) -> Option<Decision> {
         }
         // T8（首次）：create_pr 已成功、PR 已绑定，且快照 head = 已推送的本地提交。
         Stage::Propose if pr_created(state) => stage_changed(state, StageTrigger::PrCreated, None),
-        // T10（Low 无评审图，只等 CI）。
-        Stage::Review if ci_green(state) => {
+        // T10（Low 无评审图，只等 CI）；因 base 前移进入时另需对账已回（§7.14.5）。
+        Stage::Review if ci_green(state) && control::base_synced(state) => {
             stage_changed(state, StageTrigger::ReviewAcceptCiGreen, None)
         }
         // T12。
@@ -269,7 +321,7 @@ fn merged(state: &DeliveryState) -> bool {
 }
 
 /// 本阶段的 Workflow（自 `stage_entered` 起建的那张图）。
-fn current_workflow(state: &DeliveryState) -> Option<&WorkflowState> {
+pub(crate) fn current_workflow(state: &DeliveryState) -> Option<&WorkflowState> {
     let entered = state.delivery.stage_entered.seq;
     state
         .workflows
@@ -293,14 +345,23 @@ fn build_workflow(state: &DeliveryState, mint: &mut IdMint, out: &mut Vec<Decisi
     if row.stage.is_terminal() || state.workflow_built_in_stage() || !state.may_dispatch() {
         return;
     }
-    let Some(graph) = stage_graph(row.level_effective, row.stage) else {
-        return;
-    };
+    if let Some(decisions) = new_workflow(state, mint) {
+        out.extend(decisions);
+    }
+}
+
+/// 为当前阶段新建一张图：`workflow.created` + 每个节点一条 `budget.charged(nodes)`。
+/// 只检查节点预算（追加后 `used.nodes ≤ limits.nodes`），其余前置条件由调用方保证；
+/// 当前阶段没有图或预算不足时返回 `None`。Low 的 `replan` 也走这里（§7.14.5）。
+pub(crate) fn new_workflow(state: &DeliveryState, mint: &mut IdMint) -> Option<Vec<Decision>> {
+    let row = &state.delivery;
+    let graph = stage_graph(row.level_effective, row.stage)?;
     let k = graph.nodes.len() as u64;
     let used = state.ledger.used.nodes;
     if used + k > row.budget.limits.nodes {
-        return;
+        return None;
     }
+    let mut out = Vec::new();
     let workflow_id = mint.next_id::<Wfl>();
     let ids: Vec<NodeId> = graph.nodes.iter().map(|_| mint.next_id::<Nod>()).collect();
     let nodes = graph
@@ -347,6 +408,7 @@ fn build_workflow(state: &DeliveryState, mint: &mut IdMint, out: &mut Vec<Decisi
             },
         ));
     }
+    Some(out)
 }
 
 /// 依赖满足（§7.4 通则）：每个 required 依赖已 succeeded，每个非 required 依赖已终态。
@@ -391,7 +453,7 @@ fn queue_nodes(state: &DeliveryState, out: &mut Vec<Decision>) {
     }
 }
 
-fn node_event(
+pub(crate) fn node_event(
     state: &DeliveryState,
     ty: EventType,
     node: &NodeState,
@@ -506,6 +568,35 @@ pub fn expected_actions(
                 expected_head_sha: snapshot.head_sha,
             };
             if let Some(intent) = intent(state, payload, facts, Priority::High, None) {
+                out.insert(intent.key.clone(), intent);
+            }
+        }
+        // 放弃收尾：PR 仍 open 且不是因 PR 被关闭而放弃 → 期望 `update_pr(state = closed)`（§7.12）。
+        Stage::Abandoned => {
+            if row.abandon_cause == Some(AbandonCause::PrClosedUnmerged) {
+                return out;
+            }
+            let (Some(pr), Some(snapshot)) = (&state.pr, &state.pr_snapshot) else {
+                return out;
+            };
+            if snapshot.state != PullRequestState::Open || snapshot.number != pr.number {
+                return out;
+            }
+            let payload = ActionPayload::UpdatePr(UpdatePrPayload {
+                repo: project.repo.clone(),
+                pull_number: pr.number,
+                title: None,
+                body: None,
+                base: None,
+                state: Some(PrState::Closed),
+            });
+            let facts = ActionFacts::Other {
+                target: gantry_core::events::PolicyTarget::Pr {
+                    repo: project.repo.clone(),
+                    number: pr.number,
+                },
+            };
+            if let Some(intent) = intent(state, payload, facts, Priority::Normal, None) {
                 out.insert(intent.key.clone(), intent);
             }
         }
@@ -702,9 +793,9 @@ fn raise_approval_needed(state: &DeliveryState, out: &mut Vec<Decision>) {
     }
 }
 
-/// T12 的"释放工作树"：阶段 `closed`、尝试全部终结、工作树仍在 → `RemoveWorktree`。
+/// T12 / T13 的"释放工作树"：阶段 `closed` 或 `abandoned`、尝试全部终结、工作树仍在 → `RemoveWorktree`。
 fn release_worktree(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>) {
-    if state.delivery.stage != Stage::Closed || state.unfinished_attempts().next().is_some() {
+    if !state.delivery.stage.is_terminal() || state.unfinished_attempts().next().is_some() {
         return;
     }
     let Some(worktree) = &state.worktree else {
@@ -970,7 +1061,10 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -
             if will_retry(&detail, since.len() as u32, &since, env) {
                 None
             } else {
-                out.extend(failure_reports(state, node, attempt, finalized, &detail));
+                // 已终结的交付单元不再上报（放弃收尾中被取消的尝试可能以失败告终）。
+                if !state.delivery.stage.is_terminal() {
+                    out.extend(failure_reports(state, node, attempt, finalized, &detail));
+                }
                 Some(NodeStatus::Failed)
             }
         }
@@ -1141,8 +1235,13 @@ fn failure_reports(
             evidence: Vec::new(),
             options: None,
         },
-        format!("esc:{delivery}:attempt_failed:{}", node.id),
+        attempt_failed_dedup(delivery, node.id),
     )]
+}
+
+/// 节点 `escalation(attempt_failed)` 的 `dedup_key`；`RetryNode` 按它关闭该项（§7.14.5）。
+pub fn attempt_failed_dedup(delivery: gantry_core::ids::DeliveryId, node: NodeId) -> String {
+    format!("esc:{delivery}:attempt_failed:{node}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,7 +1305,11 @@ fn ensure_worktree(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decisio
     }));
 }
 
-fn model_for(env: &DecideEnv, state: &DeliveryState, node: &NodeState) -> Option<ResolvedModel> {
+pub(crate) fn model_for(
+    env: &DecideEnv,
+    state: &DeliveryState,
+    node: &NodeState,
+) -> Option<ResolvedModel> {
     env.models
         .get(&ModelKey {
             sandbox: node.exec != gantry_core::entities::Exec::Direct,
@@ -1237,7 +1340,7 @@ fn lease_seconds(env: &DecideEnv, wall_time_s: u64) -> u64 {
 }
 
 /// 节点处于可派发状态：`queued`（本切片不含自动重试，失败重试归切片 4）。
-fn dispatchable(node: &NodeState, env: &DecideEnv) -> bool {
+pub(crate) fn dispatchable(node: &NodeState, env: &DecideEnv) -> bool {
     if node.attempts.iter().any(|a| a.finished_at.is_none()) {
         return false;
     }

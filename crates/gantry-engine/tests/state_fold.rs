@@ -125,6 +125,7 @@ fn expected_low_path() -> DeliveryState {
         ledger: LedgerState {
             used,
             exhausted: vec![],
+            raised: vec![],
         },
         workflows: BTreeMap::from([(
             id(WORKFLOW),

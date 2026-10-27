@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use gantry_core::entities::Seq;
 use gantry_core::events::{
     AttemptStartedData, Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData,
     NodeEventData, NodeRetryRequestedData, OutboxEnqueuedData, PatchRejectedData,
@@ -19,6 +20,8 @@ use gantry_core::ids::{
     ActionId, ApprovalId, AttemptId, DeliveryId, InboxId, NodeId, WorkflowId, WorktreeId,
 };
 use serde_json::Value;
+
+use crate::state::RaisedBy;
 
 /// 一条事件的去向。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,10 +57,19 @@ pub struct Router {
     workflows: BTreeMap<WorkflowId, DeliveryId>,
     nodes: BTreeMap<NodeId, DeliveryId>,
     attempts: BTreeMap<AttemptId, DeliveryId>,
-    inbox: BTreeMap<InboxId, DeliveryId>,
+    inbox: BTreeMap<InboxId, InboxOrigin>,
     actions: BTreeMap<ActionId, DeliveryId>,
     approvals: BTreeMap<ApprovalId, DeliveryId>,
     worktrees: BTreeMap<WorktreeId, DeliveryId>,
+}
+
+/// `inbox.raised` 信封里、上报项本身不带的两项，以及归属；供路由器把收件箱投影中的项
+/// 还原为 [`crate::state::OpenInbox`]（§7.14.2 `InboxResolved.item`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InboxOrigin {
+    pub delivery: DeliveryId,
+    pub raised_by: RaisedBy,
+    pub raised_seq: Seq,
 }
 
 fn decode<T: gantry_core::events::EventData>(event: &Event<Value>) -> Result<T, RouteError> {
@@ -143,17 +155,24 @@ impl Router {
             T::InboxRaised => {
                 let data: InboxRaisedData = decode(event)?;
                 if let Some(owner) = data.item.delivery_id {
-                    self.inbox.insert(data.item.id, owner);
+                    self.inbox.insert(
+                        data.item.id,
+                        InboxOrigin {
+                            delivery: owner,
+                            raised_by: RaisedBy::of(event.actor.kind),
+                            raised_seq: event.seq,
+                        },
+                    );
                 }
                 fold_only(data.item.delivery_id)
             }
             T::InboxResolved => {
                 let data: InboxResolvedData = decode(event)?;
-                deliver(self.inbox.get(&data.inbox_id).copied())
+                deliver(self.inbox.get(&data.inbox_id).map(|o| o.delivery))
             }
             T::InboxDismissed => {
                 let data: InboxDismissedData = decode(event)?;
-                deliver(self.inbox.get(&data.inbox_id).copied())
+                deliver(self.inbox.get(&data.inbox_id).map(|o| o.delivery))
             }
             T::OutboxEnqueued => {
                 let data: OutboxEnqueuedData = decode(event)?;
@@ -218,6 +237,11 @@ impl Router {
 
     fn action_owner(&self, event: &Event<Value>) -> Option<DeliveryId> {
         subject::<ActionId>(event).and_then(|id| self.actions.get(&id).copied())
+    }
+
+    /// 上报项的归属与创建信息（由已路由的 `inbox.raised` 建立）。
+    pub fn inbox_origin(&self, id: &InboxId) -> Option<InboxOrigin> {
+        self.inbox.get(id).copied()
     }
 
     /// 节点所属交付单元（`retry_node` 只拿到 `node_id`）。
