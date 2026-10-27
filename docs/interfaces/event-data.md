@@ -28,7 +28,7 @@
 | 2 | `guardian.triaged` | `guardian §7.10` 给出 `{event_ref, class, action, delivery_id, rule, reason_code?, fingerprint?, also_matched[], config_rev, round_id?, inbox_id?, action_ids[]}`；`§7.3` 给出处置词汇；`§7.6` 给出指纹 | 审定 §2.2.2 推荐的触发引用判别、封闭 action、`round_closed` 字段、轮 ID 与分支必填规则 | 判别联合：普通分流一支、`round_closed` 一支。见 §2.2.2 | `G+C` |
 | 3 | `guardian.heal_requested` | `guardian §7.10` 给出字段列表；`§6` 给出 `HealTask` 与 `ProblemSpec` | `task` 的序列化；`problems[].kind` 词表；`batch_included[]` 元素；`request_digest` 覆盖什么、是什么类型 | 推荐字段表、`request_digest` 投影与分支负例。见 §2.2.2 | `G+E+C` |
 | 4 | `guardian.escalated` | `guardian §7.10` 给出 `{delivery_id, class, reason_code, inbox_id?, fingerprint?, round_id?}`；`§7.9` 给出 `reason_code` 表；`m0-contract-gaps.md` 称它是 14 个中唯一可安全补全的候选 | `reason_code` 的封闭集；`suppressed_duplicate` 如何表达；`round_id` 类型；`Deduped` 时是否省略 `inbox_id` | 最小 JSON 候选。见 §2.2.2；仍不是冻结 | `G+U+C` |
-| 5 | `approval.invalidated` | `policy §7.6` 第 5 步说 `data` 含新旧 head；`§7.7` 还列出 `pr_closed`、`pr_merged`、`delivery.abandoned`、head 变化等失效原因；`data-model §4.4` 定义审批状态机 | 6 个事件 reason 与 `InvalidateReason` 的端口映射；`pr_closed` / `pr_merged` 缺端口变体；`SubjectReplaced` / `Other` 待审 | 推荐 `reason` 判别联合（6 值，含 `owner_cancelled`）与映射；见 §2.2.3 | `P+F+E+C` |
+| 5 | `approval.invalidated` | `policy §7.6` 第 5 步说 `data` 含新旧 head；`§7.7` 还列出 `pr_closed`、`pr_merged`、`delivery.abandoned`、head 变化等失效原因；`data-model §4.4` 定义审批状态机 | 端口映射已由 #89 Q2 补齐（`InvalidateReason` 与 6 个 reason 一一对应） | 推荐 `reason` 判别联合（6 值，含 `owner_cancelled`）与映射；见 §2.2.3 | `P+F+E+C` |
 | 6 | `approval.expired` | `data-model §5.2` 只有事件名；`policy §7.5` / `§7.7` 定义懒过期与清扫；审批实体已有 `expires_at`、`status` | 确认已推荐的 `data={}` 是否冻结；不新增 `previous_status` / `expired_at`；不重复 `approval_id` | 推荐 `data={}`；见 §2.2.3 | `P+C` |
 | 7 | `approval.denied` | `api §6.1` 的 `deny` 请求体是 `{reason?}`；`policy §6.4` 的 `deny(id, device, reason)`；`§7.5` 定义 `pending → denied` | 确认已推荐的 `{reason?: string}` 与空对象是否冻结；纯文本处理与体积门禁 | 推荐 `{reason?: string}`，受 64 KiB 请求体门禁；见 §2.2.3 | `P+API+C` |
 | 8 | `outbox.enqueued` | `m0-contract-gaps.md` 说只定义 `revision` 一项；`core §7.5` 的 `upsert_status_comment` 带 `revision`；`forge §7.8` 用 `revision` 保持幂等；`data-model` 的 `OutboxAction` 有完整动作字段 | 字段来源与恢复责任；哪些动作写及如何取值；是否内嵌 payload/依赖/优先级/`enqueued_by` 及包装；不能单靠入队事件恢复后续租约、重试或预写效果，G-06 信封不能替代 | 已确认方向：记录完整入队意图，而非仅 `revision` 审计；保留状态评论 `revision`。候选 A/B 仅作字段对照；B 的完整快照不是已批准包装。见 §2.2.4 | `F+G+E+S+C` |
@@ -296,7 +296,7 @@
 | `owner_cancelled` | — | 推荐新增分支；`{}` 除 `reason`；审批发起方主动取消。 |
 
 - `head_changed` 覆盖 `forge.pr_synchronized` / `forge.synced` 的 head 变化；`pr_closed` / `pr_merged` 分别由 `forge.pr_closed` / `forge.pr_merged` 触发；`pr_merged` 只使 `pending` 失效，`granted` 由消费路径处理；`pr_closed` / `delivery_abandoned` / `owner_cancelled` 覆盖对应目标的活跃审批；`attempt_superseded` 由 engine 在补丁被新 Attempt 取代时触发。这 6 个分支之外不发 `approval.invalidated`。
-- 与现有 `core::ports::policy::InvalidateReason` 的关系：`HeadMoved` → `head_changed`，`AttemptSuperseded` → `attempt_superseded`，`DeliveryAbandoned` → `delivery_abandoned`，`OwnerCancelled` → `owner_cancelled`。`SubjectReplaced` 与 `Other(String)` 在 M0 不产生本事件：前者由 policy 记录内部失效并待契约审查是否新增分支，后者不把任意字符串写入封闭 `reason`；`pr_closed` / `pr_merged` 若当前端口没有对应变体，契约 PR 需补齐端口枚举或映射，本轮不改代码。`docs/modules/policy.md §7.7` 尚未列 `owner_cancelled`，`PR-C1` 需同步；当前不是已生效路径。
+- 与 `core::ports::policy::InvalidateReason` 一一对应（#89 Q2，契约 PR 已落地）：`HeadMoved { from, to }` → `head_changed`（`from` / `to` 即 `previous_head_sha` / `current_head_sha`），`PrClosed` → `pr_closed`，`PrMerged` → `pr_merged`，`DeliveryAbandoned` → `delivery_abandoned`，`AttemptSuperseded { from, to }` → `attempt_superseded`（`previous_attempt_id` / `current_attempt_id`），`OwnerCancelled` → `owner_cancelled`；`core` 提供 `From<&InvalidateReason> for ApprovalInvalidatedData`。原 `SubjectReplaced`、`Other(String)` 没有调用方，已删除：主体替换按具体原因（head 变化、尝试替代）表达，封闭 `reason` 不接受任意字符串。
 - 内部动作主体不匹配仍按 `policy §7.6` 拒绝消费，不新增内部失效原因；`base_advanced` 仍按 OQ-P9 不使审批失效。
 - 不重复 `approval_id`，不要求 `repo` / `number`（由审批 `target` 推出）。示例：
 
@@ -975,7 +975,7 @@
 | `guardian.triaged` | 普通分流与 `round_closed` 使用同一事件的判别分支；`event_ref` 区分 Forge 事件、尝试结束和结算检查，不能都强塞成外部事件 | 按 `guardian §7.3 / §7.10` 列封闭字段集；冻结触发引用、分支必填项和轮 ID。不得为草案新增 `rnd_` 前缀 |
 | `guardian.heal_requested` | 先冻结 `HealTask` / `ProblemSpec` 序列化，再冻结事件中的摘要和引用；不带材料正文 | 明确 `request_digest` 覆盖范围、`batch_included` 元素及 round_id；保留调用 HealPort 前落盘的顺序（`guardian §7.10`） |
 | `guardian.escalated` | `class` / `reason_code` 复用守护封闭表；推荐显式 `suppressed_duplicate`，避免把缺 inbox_id 当作抑制成功 | `Deduped` 的 inbox 引用、可选性和全局归属须明确；不能忽略守护字段表与抑制说明之间的缺口 |
-| `approval.invalidated` | 推荐 6 个原因：head 变化、PR 关闭/合并、交付放弃、尝试替代、发起方取消；head 变化带新旧 head，空分支只带 `reason` | 补齐 `pr_closed` / `pr_merged` 的端口映射；`SubjectReplaced` / `Other` 不产生事件，待契约审查是否新增分支 |
+| `approval.invalidated` | 推荐 6 个原因：head 变化、PR 关闭/合并、交付放弃、尝试替代、发起方取消；head 变化带新旧 head，空分支只带 `reason` | 已落地（#89 Q2）：`InvalidateReason` 与 6 个 reason 一一对应，`SubjectReplaced` / `Other` 已删除 |
 | `approval.expired` | 推荐 `{}`，用信封定位审批，依赖审批日志恢复前态 | 不新增 `previous_status` / `expired_at`；区分实体 expires_at 与实际记录过期的时刻 |
 | `approval.denied` | 推荐 `{reason?: string}`，由信封记录主体、操作者与时间，不重复 device_id | 备注按不可信文本处理；受 64 KiB 请求体门禁，不借 settings 的 256 KiB 上限 |
 | `forge.synced` | §2.2.5.1 已给出 `target` 仅 PR/Issue、`changes` 按字段强类型与完整正负例；不允许任意 JSON 兜底或复制正文 | 契约审查核对字段白名单、可空性和首次快照；项目级变化仍不在 M0 范围，不从 PR 示例推导扩围 |

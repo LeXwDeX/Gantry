@@ -10,7 +10,7 @@ use gantry_core::entities::{
     ApprovalAction, ApprovalStatus, ApprovalTarget, ForgeActionKind, InboxKind, PolicyActionId, Seq,
 };
 use gantry_core::events::EventType;
-use gantry_core::ids::{Act, Dlv};
+use gantry_core::ids::{Act, Att, Dlv};
 use gantry_core::ports::{
     ActionDecision, ActionFacts, ActionRequest, DenyReason, ExecutionCheck, ExecutionPermit,
     GateError, InvalidateReason, MismatchReason, PolicyError, PolicyPort,
@@ -614,6 +614,53 @@ async fn invalidate_live_and_reject_terminal() {
             .await,
         Err(PolicyError::Conflict { .. })
     ));
+}
+
+/// #89 Q2：`InvalidateReason` 带上前后值，事件 data 与之一一对应，不再降级为
+/// `owner_cancelled`。
+#[tokio::test]
+async fn invalidate_carries_reason_fields_into_event() {
+    let h = Harness::new();
+    let cases = [
+        InvalidateReason::HeadMoved {
+            from: oid("old"),
+            to: oid("new"),
+        },
+        InvalidateReason::PrClosed,
+        InvalidateReason::PrMerged,
+        InvalidateReason::AttemptSuperseded {
+            from: id::<Att>(1),
+            to: id::<Att>(2),
+        },
+    ];
+    for reason in cases {
+        let approval = needs_approval(&h, merge("head")).await;
+        h.engine
+            .invalidate(&approval.id, reason, &ctx())
+            .await
+            .expect("invalidate");
+    }
+    let events = h.events(EventType::ApprovalInvalidated).await;
+    let reasons: Vec<_> = events.iter().map(|e| e.data["reason"].clone()).collect();
+    assert_eq!(
+        reasons,
+        [
+            "head_changed",
+            "pr_closed",
+            "pr_merged",
+            "attempt_superseded"
+        ]
+    );
+    assert_eq!(events[0].data["previous_head_sha"], oid("old").to_string());
+    assert_eq!(events[0].data["current_head_sha"], oid("new").to_string());
+    assert_eq!(
+        events[3].data["previous_attempt_id"],
+        id::<Att>(1).to_string()
+    );
+    assert_eq!(
+        events[3].data["current_attempt_id"],
+        id::<Att>(2).to_string()
+    );
 }
 
 #[tokio::test]
