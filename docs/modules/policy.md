@@ -664,7 +664,7 @@ stateDiagram-v2
 - [ ] `merge_pr`：无审批 → `NeedsApproval`；`pending` → 带 `pending`；`granted` 且 head 未变 → `Allow{approval}`；`expected_head_sha` 与快照不符 → `Deny(HeadMismatch)`；`denied` → `Deny(ApprovalDenied)`；`consumed` → `Deny(ApprovalConsumed)`。
 - [ ] `push_branch` 条件伪动作：`force = true` → `force_push`；非 `gantry/` 前缀 → `push_outside_prefix`；两者同时 → `force_push`；`gantry/` 前缀、非 force、补丁 `allow` → `Allow`。
 - [ ] `push_branch` 没有匹配的 `patch.validated`（或 `validation_ref` 对不上）→ `Deny(NoValidatedPatch)`。
-- [ ] 处置为 `approve` 而审批形状未定义的动作（如把 `create_pr` 配成 `approve`、`push_outside_prefix`）→ `Deny(ApprovalShapeUndefined)` + `ReportHint`，不会 `Allow` 也不会创建审批。
+- [ ] 处置为 `approve` 而审批形状未定义的动作（如把 `create_pr` 配成 `approve`）→ `Deny(ApprovalShapeUndefined)` + `ReportHint`，不会 `Allow` 也不会创建审批。`push_outside_prefix` 的形状 `{branch, git_oid}` 已在 data-model 审批形状表（`core::APPROVAL_SHAPES`）定义，给出 `NeedsApproval`（#89 Q5）。
 - [ ] 同一 `Deny` 被连续判定 100 次，`policy.denied` 只有一条（`dedup_key`）。
 - [ ] `resolve_review_thread` 含人类评论 → `resolve_review_thread_human` → 默认 `Deny(ActionDenied)`（M3）。
 
