@@ -4,10 +4,10 @@
 //! `event:<type>` 走 `events::validate_event_data`（含 SecretRef 与 kind 一致性检查）。
 
 use gantry_core::egress::{
-    ActivateSecretResponse, ConfigApplyResponse, ConfigView, EndpointsResponse, FinalUsage,
-    IssueJobTokenRequest, IssueJobTokenResponse, IssueSvcTokenRequest, IssueSvcTokenResponse,
-    PresentRequest, PresentResponse, ProblemDetails, RevokeSvcTokenResponse, StageSecretResponse,
-    StagedSecretList, StatusResponse, UsagePage,
+    ActivateSecretResponse, CloseCallResponse, ConfigApplyResponse, ConfigView, EndpointsResponse,
+    FinalUsage, IssueJobTokenRequest, IssueJobTokenResponse, IssueSvcTokenRequest,
+    IssueSvcTokenResponse, PresentRequest, PresentResponse, ProblemDetails, RevokeSvcTokenRequest,
+    RevokeSvcTokenResponse, StageSecretResponse, StagedSecretList, StatusResponse, UsagePage,
 };
 use gantry_core::entities::{
     Approval, Attempt, BudgetLedger, Conversation, Delivery, Device, InboxItem, Message, Node,
@@ -74,7 +74,9 @@ pub fn check_annotation(kind: &str, data: &Value) -> Result<(), String> {
         "egress::FinalUsage" => roundtrip::<FinalUsage>(data),
         "egress::IssueSvcTokenRequest" => roundtrip::<IssueSvcTokenRequest>(data),
         "egress::IssueSvcTokenResponse" => roundtrip::<IssueSvcTokenResponse>(data),
+        "egress::RevokeSvcTokenRequest" => roundtrip::<RevokeSvcTokenRequest>(data),
         "egress::RevokeSvcTokenResponse" => roundtrip::<RevokeSvcTokenResponse>(data),
+        "egress::CloseCallResponse" => roundtrip::<CloseCallResponse>(data),
         "egress::StageSecretResponse" => roundtrip::<StageSecretResponse>(data),
         "egress::ActivateSecretResponse" => roundtrip::<ActivateSecretResponse>(data),
         "egress::StagedSecretList" => roundtrip::<StagedSecretList>(data),

@@ -9,12 +9,23 @@
     },
     "next_cursor": {
       "type": "string"
+    },
+    "terminal": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CallTerminal"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
     "items",
     "next_cursor"
   ],
+  "description": "`GET /control/v1/usage` 的一页；`terminal` 只在 `?call_id=` 查询且该调用已关闭时出现\n（`egress-call-terminal.md` §3）。",
   "title": "UsagePage",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
@@ -71,6 +82,12 @@
           "format": "uint64",
           "minimum": 0
         },
+        "weight_rev": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "计量时生效的权重表所属配置视图的 `config_rev`（§4.5）。"
+        },
         "incomplete": {
           "type": "boolean"
         }
@@ -84,6 +101,7 @@
         "model",
         "usage",
         "weighted_tokens",
+        "weight_rev",
         "incomplete"
       ]
     },
@@ -244,6 +262,70 @@
         "cache_write_tokens",
         "requests"
       ]
+    },
+    "CallTerminal": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/CallTerminalState"
+        },
+        "closed_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "last_seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "record_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "svc_token_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SvcTokenId"
+          },
+          "description": "有已接受请求的 token，升序去重；零接收为空。"
+        },
+        "usage": {
+          "$ref": "#/$defs/TokenUsage"
+        },
+        "weighted_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "records_digest": {
+          "$ref": "#/$defs/Sha256Digest"
+        },
+        "incomplete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "state",
+        "closed_at",
+        "last_seq",
+        "record_count",
+        "svc_token_ids",
+        "usage",
+        "weighted_tokens",
+        "records_digest",
+        "incomplete"
+      ],
+      "description": "只读终结证明（`egress-call-terminal.md` §3）。"
+    },
+    "CallTerminalState": {
+      "type": "string",
+      "enum": [
+        "closed"
+      ]
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
     }
   },
   "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",

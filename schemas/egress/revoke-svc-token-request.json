@@ -1,0 +1,49 @@
+{
+  "anyOf": [
+    {
+      "$ref": "#/$defs/RevokeCallScope"
+    },
+    {
+      "$ref": "#/$defs/RevokeWholeToken"
+    }
+  ],
+  "description": "`POST /control/v1/svc-tokens/{svc_token_id}/revoke` 的请求体。缺 `scope` 时禁止带\n`call_id`，`scope: \"call\"` 时 `call_id` 必填；两种形状以 `deny_unknown_fields` 互斥。",
+  "title": "RevokeSvcTokenRequest",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "RevokeCallScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/RevokeScope"
+        },
+        "call_id": {
+          "$ref": "#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "scope",
+        "call_id"
+      ],
+      "description": "`{\"scope\": \"call\", \"call_id\": …}`：按全局 `call_id` 关闭一次调用。"
+    },
+    "RevokeScope": {
+      "type": "string",
+      "enum": [
+        "call"
+      ]
+    },
+    "Ulid": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "RevokeWholeToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "`{}`：整令牌吊销。"
+    }
+  },
+  "x-gantry-dialect": "https://json-schema.org/draft/2020-12/schema",
+  "x-gantry-source": "egress::RevokeSvcTokenRequest"
+}

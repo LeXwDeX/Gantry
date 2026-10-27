@@ -645,6 +645,100 @@ fn egress_usage_page_decodes() {
 }
 
 #[test]
+fn egress_usage_record_requires_weight_rev() {
+    let page: UsagePage = serde_json::from_str(USAGE).unwrap();
+    assert_eq!(page.items[0].weight_rev, 7);
+    assert_eq!(page.items[1].weight_rev, 6);
+    assert!(page.terminal.is_none());
+    let mut value = parse(USAGE);
+    value["items"][0].as_object_mut().unwrap().remove("weight_rev");
+    assert!(serde_json::from_value::<UsagePage>(value).is_err());
+}
+
+#[test]
+fn egress_revoke_request_scopes_are_exclusive() {
+    use gantry_core::egress::RevokeSvcTokenRequest;
+    let call: Ulid = "01JBX5D2F4H6K8M0P2R4T6V8XZ".parse().unwrap();
+    assert_eq!(
+        serde_json::from_value::<RevokeSvcTokenRequest>(json!({})).unwrap(),
+        RevokeSvcTokenRequest::Token(Default::default())
+    );
+    assert_eq!(
+        serde_json::from_value::<RevokeSvcTokenRequest>(
+            json!({"scope": "call", "call_id": call.to_string()})
+        )
+        .unwrap(),
+        RevokeSvcTokenRequest::call(call)
+    );
+    for bad in [
+        json!({"scope": "call"}),
+        json!({"call_id": call.to_string()}),
+        json!({"scope": "token"}),
+    ] {
+        assert!(serde_json::from_value::<RevokeSvcTokenRequest>(bad).is_err());
+    }
+}
+
+#[test]
+fn egress_call_terminal_digest_and_verify() {
+    use gantry_core::egress::{records_digest, CallTerminal, TerminalMismatch};
+    use gantry_core::time::Timestamp;
+
+    // 零条记录：对 `[]` 取 JCS 摘要。
+    assert_eq!(
+        records_digest(&[]).unwrap().to_string(),
+        "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    );
+
+    let page: UsagePage = serde_json::from_str(USAGE).unwrap();
+    let svc = vec![page.items[0].clone()];
+    let call = match &svc[0].caller {
+        UsageCaller::Svc { call_id, .. } => *call_id,
+        other => panic!("expected svc caller, got {other:?}"),
+    };
+    let terminal = CallTerminal::from_records(&svc, Timestamp::from_millis(0)).unwrap();
+    // 与 egress-call-terminal.md §2 / §3 示例中的摘要一致。
+    assert_eq!(
+        terminal.records_digest.to_string(),
+        "sha256:c22348d8fde83362ae748e3b7ad96fa64dc2ee6073faa41681ddb4addb00e3a2"
+    );
+    assert_eq!(terminal.last_seq, 90211);
+    assert_eq!(terminal.weighted_tokens, 5531);
+    terminal.verify(call, &svc).unwrap();
+    assert!(terminal.settleable());
+
+    assert_eq!(
+        terminal.verify(call, &[]),
+        Err(TerminalMismatch::RecordCount {
+            expected: 1,
+            actual: 0
+        })
+    );
+    let duplicated = vec![svc[0].clone(), svc[0].clone()];
+    assert_eq!(
+        terminal.verify(call, &duplicated),
+        Err(TerminalMismatch::DuplicateSeq(90211))
+    );
+    assert!(matches!(
+        terminal.verify(call, &page.items),
+        Err(TerminalMismatch::ForeignRecord { .. })
+    ));
+    let mut reweighted = svc.clone();
+    reweighted[0].weight_rev = 8;
+    assert_eq!(
+        terminal.verify(call, &reweighted),
+        Err(TerminalMismatch::Digest)
+    );
+
+    let mut interrupted = svc.clone();
+    interrupted[0].incomplete = true;
+    let partial = CallTerminal::from_records(&interrupted, Timestamp::from_millis(0)).unwrap();
+    assert!(partial.incomplete);
+    assert_eq!(partial.weighted_tokens, 5531);
+    assert_eq!(partial.records_digest, terminal.records_digest);
+}
+
+#[test]
 fn egress_config_status_and_endpoints_decode() {
     let config: ConfigView = serde_json::from_str(CONFIG).unwrap();
     assert_eq!(config.rev, 18240);

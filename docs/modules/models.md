@@ -40,10 +40,10 @@
 
 | 依赖 | 用到什么 | 契约 |
 | --- | --- | --- |
-| `core` | 端口 `core::ports::ModelProvider`（本模块实现）与 `EgressControl`（取 `svc_token`、`call_usage`），P-51；`EffectiveSettings` 与项目合并、`TokenUsage` / `TokenWeights` / `Tier` / `Level` / `Effort` / `Role` 类型、JSON Schema 校验器、`UntrustedText` | [config.md §2–§3](../interfaces/config.md)、[data-model §1.1](../data-model.md)、[core.md §6.10](core.md) |
+| `core` | 端口 `core::ports::ModelProvider`（本模块实现）与 `EgressControl`（取 `svc_token`；调用结束后 `close_call` 关闭、`call_terminal` 取终结证明，[interfaces/egress-call-terminal.md](../interfaces/egress-call-terminal.md)），P-51；`EffectiveSettings` 与项目合并、`TokenUsage` / `TokenWeights` / `Tier` / `Level` / `Effort` / `Role` 类型、JSON Schema 校验器、`UntrustedText` | [config.md §2–§3](../interfaces/config.md)、[data-model §1.1](../data-model.md)、[core.md §6.10](core.md) |
 | `store` | 订阅 `settings.updated`；追加直接调用的 `budget.charged`（交付台账或会话台账，P-58）；读会话台账以判断 `levels.none.daily_tokens`；保存订阅游标 | architecture §4；[store.md §6.2](store.md) |
 
-间接关系（不是代码依赖）：经 Egress 的回环 HTTP 反向代理（`svc_model` 监听，`svc_token`，egress.md §6.3、[interfaces/egress-control.md](../interfaces/egress-control.md)，P-50）调用模型，并经控制面 `EgressControl::call_usage(call_id)` 取权威用量；被 `engine`、`conversation` 与 `notify`（可选，通知文案，P-59）调用；适配器能力来自 `worker` 的 `WorkerAdapter::capabilities()`（worker.md §6.3）。**硬约束：`gantry-models` 不得依赖 `gantry-secrets`，也不得持有任何 provider key**（测试强制，§12）。
+间接关系（不是代码依赖）：经 Egress 的回环 HTTP 反向代理（`svc_model` 监听，`svc_token`，egress.md §6.3、[interfaces/egress-control.md](../interfaces/egress-control.md)，P-50）调用模型，并经控制面 `EgressControl::close_call` / `call_terminal(call_id)` 取权威用量与终结证明；被 `engine`、`conversation` 与 `notify`（可选，通知文案，P-59）调用；适配器能力来自 `worker` 的 `WorkerAdapter::capabilities()`（worker.md §6.3）。**硬约束：`gantry-models` 不得依赖 `gantry-secrets`，也不得持有任何 provider key**（测试强制，§12）。
 
 ## 4. 输入
 
@@ -52,7 +52,7 @@
 | `ResolveQuery` | `engine`、`conversation` | §6 | 可信 |
 | `DirectCall`：角色、可信指令、不可信材料、期望 schema、归属、期限 | `engine`（`admission`、`summarize`、`classify`）、`conversation`（`intent`、`classify`）、`notify`（`classify`，通知文案） | §6 | `instructions` 可信；`materials` 不可信（I5） |
 | 生效的 `models.*` 设置 | `core` / `store`（`settings.updated`） | config §3 | 可信 |
-| 提供方响应与 Egress 计量 | 经 Egress 的 HTTP 响应；`call_usage(call_id)` | 提供方响应 + `CallUsage` | 响应内容不可信（模型输出）；计量可信（Egress 是用量事实源，P-22） |
+| 提供方响应与 Egress 计量 | 经 Egress 的 HTTP 响应；`close_call` + `call_terminal(call_id)` | 提供方响应 + `CallStatement`（记录 + `terminal`） | 响应内容不可信（模型输出）；计量可信（Egress 是用量事实源，P-22） |
 | 模型能力数据 | 来源待定（config OQ-3） | `CapabilityTable` | 可信 |
 | Egress 的 `svc_token` 与回环 base URL | `EgressControl::service_token()`（控制面 `/run/gantry/egress.sock`；每个 `gantryd` 进程一枚，启动时签发，P-74） | egress.md §6.2–§6.3；P-50、P-74 | 可信；`svc_token` 只在进程内存 |
 
@@ -153,7 +153,7 @@ pub enum StopReason { EndTurn, MaxTokens, Refusal { category: Option<String> }, 
 /// （取自 service_token() 的 model_base_urls，含进程级 svc_token），只在内存，Debug 脱敏。
 pub struct EgressRoute { pub base_url: Url, pub tier: Tier, pub call_id: CallId,
                          pub ledger: LedgerId /* X-Gantry-Ledger：dlv_… | cnv_…:YYYY-MM-DD | unattributed */ }
-// 计量：调用结束后经 core::ports::EgressControl::call_usage(call_id) 取权威用量（原草案的 UsageMeter 并入 EgressControl）。
+// 计量：调用结束后经 core::ports::EgressControl::close_call 关闭该 call_id，再经 call_terminal(call_id) 取终结证明（原草案的 UsageMeter 并入 EgressControl）。
 
 pub trait CapabilityTable: Send + Sync {
     fn model(&self, provider_id: &str, model: &str) -> Option<ModelCaps>;   // tools、reasoning_efforts、context_window?
@@ -174,7 +174,7 @@ pub trait CapabilityTable: Send + Sync {
                        → CallRunner（重试 / 降级 / 期限 / 并发闸）
                           → ModelProvider::complete ──HTTP（回环，svc_token）──► Egress 反向代理 ──► 提供方
                        → OutputValidator（角色 schema）
-                       → UsageAccountant（EgressControl::call_usage + levels.token_weights 加权 + 交付 / 会话台账）
+                       → UsageAccountant（EgressControl::close_call + call_terminal + levels.token_weights 加权 + 交付 / 会话台账）
 ```
 
 ### 7.2 `resolve` 规则
@@ -197,8 +197,8 @@ pub trait CapabilityTable: Send + Sync {
 4. 构造 prompt（§7.4）；发 `ProviderRequest`（目标 = Egress 路由，§7.5）。
 5. 按 §7.6 重试 / 降级；每次尝试用 `request_timeout_s`，整体不超过 `min(total_timeout_s, deadline)`。
 6. 响应 → `StopReason` 处理（`Refusal` → `ContentRefused`，不重试不降级；`MaxTokens` → `OutputTruncated`，不重试）→ 解析 JSON → `OutputValidator`（角色 schema + 一致性规则，如 `ACCEPT` ⇒ 无 blocker）。校验失败视为可重试错误，计入 `max_attempts`，重试时只回喂校验错误码，不回喂模型原输出。
-7. `UsageAccountant`：`EgressControl::call_usage(call_id)` 取计量；取不到 → 退回 `usage_reported` 并标 `ProviderReported`、记警告（OQ-3）；折算 `weighted_tokens`。降级调用的用量记入同一 tier，`served_by` 写实际使用的提供方 / 模型。
-8. **每次直接调用由本模块追加一条 `budget.charged`**（台账即请求头 `X-Gantry-Ledger` 声明的那个）（egress.md §11："`models` 经 `call_usage` 记自己的 `budget.charged`"）：`Attempt` / `Aux` 归属的带 `delivery_id`、`tier`、`source = {kind: "direct_call", call_id}`；`Conversation` 归属的带 `conversation_id`，记入该项目的会话台账（`BudgetLedger.subject = conversation`，每日上限 `levels.none.daily_tokens`，P-58）；`Unattributed`（无项目的全局调用）两者都为空（OQ-3）。`Attempt` 归属的调用另把 `usage` 返回给 `engine` 写进 `attempt.finished.usage`（仅展示），`engine` 不重复写 `budget.charged`。
+7. `UsageAccountant`：首次发送前持久化 `call_id`、台账、tier、已使用 token 集合；调用结束后先持久化"禁止继续发送"，再 `EgressControl::close_call` 关闭、`call_terminal(call_id)` 取终结证明，`CallStatement::settleable_terminal()` 返回证明（`terminal.verify(call_id, &items)` 通过且 `incomplete = false`）才按证明记账（interfaces/egress-call-terminal.md §2.2）；`incomplete = true` 不结算、不零判定；取不到 → 退回 `usage_reported` 并标 `ProviderReported`、记警告（OQ-3）；折算 `weighted_tokens`。降级调用的用量记入同一 tier，`served_by` 写实际使用的提供方 / 模型。
+8. **每次直接调用由本模块追加一条 `budget.charged`**（台账即请求头 `X-Gantry-Ledger` 声明的那个）（egress.md §11："`models` 经 `close_call` + `call_terminal` 记自己的 `budget.charged`"）：`Attempt` / `Aux` 归属的带 `delivery_id`、`tier`、`source = {kind: "direct_call", call_id}`；`Conversation` 归属的带 `conversation_id`，记入该项目的会话台账（`BudgetLedger.subject = conversation`，每日上限 `levels.none.daily_tokens`，P-58）；`Unattributed`（无项目的全局调用）两者都为空（OQ-3）。`Attempt` 归属的调用另把 `usage` 返回给 `engine` 写进 `attempt.finished.usage`（仅展示），`engine` 不重复写 `budget.charged`。
 9. **对账**（P-74）：`svc_token` 被吊销（`service_token()` / `rotate_service_token()` 返回的 `revoked_previous`，含上一个进程留下的令牌）后，按 `EgressControl::svc_token_usage` 取该令牌的全部用量记录，与已写 `budget.charged` 的 `source.call_id` 比对，补记遗漏（补记的事件与正常记账同形，以 `source.call_id` 去重）；平时按 `usage_since` 游标定期对账。
 
 ### 7.4 Prompt 组装与隔离包装
@@ -323,7 +323,7 @@ pub trait CapabilityTable: Send + Sync {
 | 替身 | 用法 |
 | --- | --- |
 | `FakeModelProvider` | 替代外部提供方：按规则（角色 + 模式）返回固定输出，需要支持注入 5xx / 429 / 超时 / 404 / 拒绝 / 截断 / 非法 JSON / 慢响应、并回传脚本化的 `usage_reported`（milestones 只写"按规则返回固定输出"，失败注入是本模块测试的需求，需 `contract` 泳道一并交付） |
-| `EgressStub`（M0，P-51） | 实现 `EgressControl`（`service_token`、`call_usage`），并起一个回环 HTTP 服务模拟 `svc_model`：记录收到的请求（头、路径、体）、返回脚本化响应 |
+| `EgressStub`（M0，P-51） | 实现 `EgressControl`（`service_token`、`call_usage`、`close_call`、`call_terminal`），并起一个回环 HTTP 服务模拟 `svc_model`：记录收到的请求（头、路径、体）、返回脚本化响应 |
 | 假时钟 | 驱动退避与期限，避免真实等待 |
 | `store` | 内存事件日志，验证未归属用量事件与 `settings.updated` 订阅 |
 

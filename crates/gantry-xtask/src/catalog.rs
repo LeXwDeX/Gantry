@@ -4,10 +4,11 @@
 //! `resource_schema` 产生。未定义形状的事件与字段显式拒绝，不生成宽松对象。
 
 use gantry_core::egress::{
-    ActivateSecretResponse, ConfigApplyResponse, ConfigView, EndpointsResponse, FinalUsage,
-    IssueJobTokenRequest, IssueJobTokenResponse, IssueSvcTokenRequest, IssueSvcTokenResponse,
-    PresentRequest, PresentResponse, ProblemDetails, RevokeSvcTokenResponse, StageSecretRequest,
-    StageSecretResponse, StagedSecretList, StatusResponse, UsagePage,
+    ActivateSecretResponse, CloseCallResponse, ConfigApplyResponse, ConfigView, EndpointsResponse,
+    FinalUsage, IssueJobTokenRequest, IssueJobTokenResponse, IssueSvcTokenRequest,
+    IssueSvcTokenResponse, PresentRequest, PresentResponse, ProblemDetails, RevokeSvcTokenRequest,
+    RevokeSvcTokenResponse, StageSecretRequest, StageSecretResponse, StagedSecretList,
+    StatusResponse, UsagePage,
 };
 use gantry_core::entities::{
     Approval, Attempt, BudgetLedger, Conversation, Delivery, Device, ForgeEventKind, InboxItem,
@@ -467,9 +468,17 @@ fn egress() -> Vec<Artifact> {
             "schemas/egress/issue-svc-token-response.json",
             "egress::IssueSvcTokenResponse",
         ),
+        Artifact::typed::<RevokeSvcTokenRequest>(
+            "schemas/egress/revoke-svc-token-request.json",
+            "egress::RevokeSvcTokenRequest",
+        ),
         Artifact::typed::<RevokeSvcTokenResponse>(
             "schemas/egress/revoke-svc-token-response.json",
             "egress::RevokeSvcTokenResponse",
+        ),
+        Artifact::typed::<CloseCallResponse>(
+            "schemas/egress/close-call-response.json",
+            "egress::CloseCallResponse",
         ),
         Artifact::typed::<StageSecretRequest>(
             "schemas/egress/stage-secret-request.json",

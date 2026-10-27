@@ -656,7 +656,7 @@
 | `weight_revs` | 数组 | `svc_records` | `{config_rev, weighted_tokens}`；同修订合并，和等于 `delta`。 |
 | `records_digest` | `sha256:…` | `svc_records` | 覆盖 `{seq, weight_rev, weighted_tokens}` 的 JCS 摘要。 |
 
-`job_token` 的单一 `config_rev` 是合法的，因为权重在令牌签发时只有一个快照；仍须保存权重值或摘要。`FinalUsage` 当前缺权重快照；推荐随 `FinalUsage` 持久化权重摘要，或从 job token 签发记录取回，不能只存 `config_rev`。`svc_records` 必须逐请求保留 `weight_rev`；不能用一个 `config_rev` 冒充多请求版本。`UsageRecord` 当前缺 `weight_rev`，这是契约增补点；晚到记录不按当前配置重算。
+`job_token` 的单一 `config_rev` 是合法的，因为权重在令牌签发时只有一个快照；仍须保存权重值或摘要。`FinalUsage` 当前缺权重快照；推荐随 `FinalUsage` 持久化权重摘要，或从 job token 签发记录取回，不能只存 `config_rev`。`svc_records` 必须逐请求保留 `weight_rev`；不能用一个 `config_rev` 冒充多请求版本。`UsageRecord.weight_rev`（u64，必填，计量时生效的权重修订）已由 #82 补入（egress-control §4.5）；晚到记录不按当前配置重算。
 
 **去重**
 
@@ -901,11 +901,11 @@
 
 ##### 2.2.6.5 仍需授权或阻塞
 
-- B-01 方向已确认、字段待审：契约批准前 direct call 最终结算、释放和零判定仍阻塞。
+- ~~B-01 方向已确认、字段待审~~：2026-10-27 已批准并补端口（#82，[egress-call-terminal.md](egress-call-terminal.md)）；direct call 的最终结算、释放和零判定以其 `terminal` 证明为据。
 - `decide_proposals` 缺 P78 `ActorCtx`：proposal 分支不能发事件；需加参数。
 - `ActionRequest` 缺统一 `target`，`ActionFacts::Other`/`ResolveReviewThread` 缺对象身份；未补前不能发对应 `policy.denied`，不能退化为 `repo`。
 - `DenyReason` 缺 `PatchNotApproved`；`file_mode_change` 仍是 OQ-P5 候选。
-- `UsageRecord` 缺 `weight_rev`，`FinalUsage` 缺权重快照；权重审计需补契约。
+- ~~`UsageRecord` 缺 `weight_rev`~~（#82 已补）；`FinalUsage` 缺权重快照；权重审计仍需补契约。
 - `BudgetDimension` 缺 `Attempts`；需枚举同步，不新增配置键。
 - 现有 schema 仍拒绝新 data，持久表未实现；`Attempt.usage` 保持非空，公开终态延迟到结算。`incomplete` 的长期等待需人工处置，不自动重跑或抹账。
 

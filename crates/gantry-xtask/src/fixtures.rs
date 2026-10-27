@@ -15,6 +15,7 @@ use crate::docs;
 pub const DOCUMENTS: &[&str] = &[
     "docs/interfaces/api.md",
     "docs/interfaces/config.md",
+    "docs/interfaces/egress-call-terminal.md",
     "docs/interfaces/egress-control.md",
     "docs/interfaces/forge-actions.md",
     "docs/interfaces/worker-protocol.md",

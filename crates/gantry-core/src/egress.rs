@@ -18,6 +18,7 @@ use schemars::Schema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::canon::Sha256Digest;
 use crate::entities::{Seq, Tier, TokenWeights};
 use crate::ids::{AttemptId, ConversationId, DeliveryId, ProjectId, SandboxId, Ulid};
 use crate::secret::{SecretName, SecretString};
@@ -568,13 +569,248 @@ pub struct UsageRecord {
     pub model: String,
     pub usage: crate::entities::TokenUsage,
     pub weighted_tokens: u64,
+    /// 计量时生效的权重表所属配置视图的 `config_rev`（§4.5）。
+    pub weight_rev: u64,
     pub incomplete: bool,
 }
 
+/// `GET /control/v1/usage` 的一页；`terminal` 只在 `?call_id=` 查询且该调用已关闭时出现
+/// （`egress-call-terminal.md` §3）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UsagePage {
     pub items: Vec<UsageRecord>,
     pub next_cursor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<CallTerminal>,
+}
+
+// ---------------------------------------------------------------------------
+// 调用级终结（egress-call-terminal.md）
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum RevokeScope {
+    Call,
+}
+
+/// `{"scope": "call", "call_id": …}`：按全局 `call_id` 关闭一次调用。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeCallScope {
+    pub scope: RevokeScope,
+    pub call_id: Ulid,
+}
+
+/// `{}`：整令牌吊销。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeWholeToken {}
+
+/// `POST /control/v1/svc-tokens/{svc_token_id}/revoke` 的请求体。缺 `scope` 时禁止带
+/// `call_id`，`scope: "call"` 时 `call_id` 必填；两种形状以 `deny_unknown_fields` 互斥。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RevokeSvcTokenRequest {
+    Call(RevokeCallScope),
+    Token(RevokeWholeToken),
+}
+
+impl RevokeSvcTokenRequest {
+    pub fn call(call_id: Ulid) -> Self {
+        Self::Call(RevokeCallScope {
+            scope: RevokeScope::Call,
+            call_id,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CallTerminalState {
+    Closed,
+}
+
+/// 只读终结证明（`egress-call-terminal.md` §3）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CallTerminal {
+    pub state: CallTerminalState,
+    pub closed_at: Timestamp,
+    pub last_seq: u64,
+    pub record_count: u64,
+    /// 有已接受请求的 token，升序去重；零接收为空。
+    pub svc_token_ids: Vec<SvcTokenId>,
+    pub usage: crate::entities::TokenUsage,
+    pub weighted_tokens: u64,
+    pub records_digest: Sha256Digest,
+    pub incomplete: bool,
+}
+
+/// 调用级关闭的 200 响应。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CloseCallResponse {
+    pub call_id: Ulid,
+    pub terminal: CallTerminal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TerminalMismatch {
+    #[error("record {seq} does not belong to call {call_id}")]
+    ForeignRecord { seq: u64, call_id: Ulid },
+    #[error("duplicate record seq {0}")]
+    DuplicateSeq(u64),
+    #[error("record_count {expected} != {actual} records")]
+    RecordCount { expected: u64, actual: u64 },
+    #[error("last_seq {expected} != {actual}")]
+    LastSeq { expected: u64, actual: u64 },
+    #[error("svc_token_ids do not match the records")]
+    SvcTokenIds,
+    #[error("usage does not equal the sum of the records")]
+    Usage,
+    #[error("weighted_tokens {expected} != {actual}")]
+    WeightedTokens { expected: u64, actual: u64 },
+    #[error("records_digest does not match the records")]
+    Digest,
+    #[error("records cannot be canonicalized: {0}")]
+    Canon(String),
+}
+
+/// `records_digest`：按 `seq` 升序的 `[{seq, weight_rev, weighted_tokens}, …]` 取 JCS 后
+/// 求 SHA-256；零条记录即 `[]` 的摘要（§3.1）。
+pub fn records_digest(records: &[UsageRecord]) -> Result<Sha256Digest, crate::canon::CanonError> {
+    let mut keyed: Vec<(u64, u64, u64)> = records
+        .iter()
+        .map(|record| (record.seq, record.weight_rev, record.weighted_tokens))
+        .collect();
+    keyed.sort_unstable();
+    let value = Value::Array(
+        keyed
+            .into_iter()
+            .map(|(seq, weight_rev, weighted_tokens)| {
+                serde_json::json!({
+                    "seq": seq,
+                    "weight_rev": weight_rev,
+                    "weighted_tokens": weighted_tokens,
+                })
+            })
+            .collect(),
+    );
+    crate::canon::jcs_digest(&value)
+}
+
+fn sum_usage(records: &[UsageRecord]) -> Option<(crate::entities::TokenUsage, u64)> {
+    let mut usage = crate::entities::TokenUsage::default();
+    let mut weighted = 0u64;
+    for record in records {
+        usage.input_tokens = usage.input_tokens.checked_add(record.usage.input_tokens)?;
+        usage.output_tokens = usage
+            .output_tokens
+            .checked_add(record.usage.output_tokens)?;
+        usage.cache_read_tokens = usage
+            .cache_read_tokens
+            .checked_add(record.usage.cache_read_tokens)?;
+        usage.cache_write_tokens = usage
+            .cache_write_tokens
+            .checked_add(record.usage.cache_write_tokens)?;
+        usage.requests = usage.requests.checked_add(record.usage.requests)?;
+        weighted = weighted.checked_add(record.weighted_tokens)?;
+    }
+    Some((usage, weighted))
+}
+
+fn svc_token_ids_of(records: &[UsageRecord]) -> Vec<SvcTokenId> {
+    records
+        .iter()
+        .filter_map(|record| match &record.caller {
+            UsageCaller::Svc { svc_token_id, .. } => Some(svc_token_id.clone()),
+            UsageCaller::Job { .. } => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+impl CallTerminal {
+    /// 由一次调用的全部记录计算证明；存在中断记录时 `incomplete = true`（§3.2）。
+    pub fn from_records(
+        records: &[UsageRecord],
+        closed_at: Timestamp,
+    ) -> Result<Self, TerminalMismatch> {
+        let (usage, weighted_tokens) = sum_usage(records).ok_or(TerminalMismatch::Usage)?;
+        let records_digest =
+            records_digest(records).map_err(|error| TerminalMismatch::Canon(error.to_string()))?;
+        Ok(Self {
+            state: CallTerminalState::Closed,
+            closed_at,
+            last_seq: records.iter().map(|record| record.seq).max().unwrap_or(0),
+            record_count: records.len() as u64,
+            svc_token_ids: svc_token_ids_of(records),
+            usage,
+            weighted_tokens,
+            records_digest,
+            incomplete: records.iter().any(|record| record.incomplete),
+        })
+    }
+
+    /// 可以据此结算：证明完整（`incomplete = false`）。仍须先通过 [`Self::verify`]。
+    pub fn settleable(&self) -> bool {
+        !self.incomplete
+    }
+
+    /// 完整性校验（§3）：记录都属于 `call_id`、`seq` 唯一且个数等于 `record_count`、
+    /// `last_seq` 等于最大 `seq`、token 集合与汇总等于逐条之和、摘要等于重算值。
+    pub fn verify(&self, call_id: Ulid, items: &[UsageRecord]) -> Result<(), TerminalMismatch> {
+        let mut seqs = BTreeSet::new();
+        for record in items {
+            match &record.caller {
+                UsageCaller::Svc {
+                    call_id: recorded, ..
+                } if *recorded == call_id => {}
+                _ => {
+                    return Err(TerminalMismatch::ForeignRecord {
+                        seq: record.seq,
+                        call_id,
+                    })
+                }
+            }
+            if !seqs.insert(record.seq) {
+                return Err(TerminalMismatch::DuplicateSeq(record.seq));
+            }
+        }
+        let actual = seqs.len() as u64;
+        if actual != self.record_count {
+            return Err(TerminalMismatch::RecordCount {
+                expected: self.record_count,
+                actual,
+            });
+        }
+        let last = seqs.last().copied().unwrap_or(0);
+        if last != self.last_seq {
+            return Err(TerminalMismatch::LastSeq {
+                expected: self.last_seq,
+                actual: last,
+            });
+        }
+        if svc_token_ids_of(items) != self.svc_token_ids {
+            return Err(TerminalMismatch::SvcTokenIds);
+        }
+        let (usage, weighted) = sum_usage(items).ok_or(TerminalMismatch::Usage)?;
+        if usage != self.usage {
+            return Err(TerminalMismatch::Usage);
+        }
+        if weighted != self.weighted_tokens {
+            return Err(TerminalMismatch::WeightedTokens {
+                expected: self.weighted_tokens,
+                actual: weighted,
+            });
+        }
+        let digest =
+            records_digest(items).map_err(|error| TerminalMismatch::Canon(error.to_string()))?;
+        if digest != self.records_digest {
+            return Err(TerminalMismatch::Digest);
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
