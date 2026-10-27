@@ -577,7 +577,7 @@ fn random_spec(rng: &mut Rng, layout: &StagingLayout) -> ContainerSpec {
             }
             7 => {
                 let images = [format!("ghcr.io/x@{DIGEST}"), DIGEST.to_owned()];
-                spec.image = ImageDigest::parse(rng.pick(&images)).unwrap();
+                spec.image = ImageDigest::parse(rng.pick(&images).as_str()).unwrap();
             }
             8 => {
                 spec.runtime = if rng.chance(50) {

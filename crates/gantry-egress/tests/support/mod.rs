@@ -20,7 +20,7 @@ use gantry_core::egress::{ConfigView, IssueJobTokenRequest, IssueSvcTokenRequest
 use gantry_core::entities::{Actor, ActorKind};
 use gantry_core::ids::Ulid;
 use gantry_core::ports::context::ActorCtx;
-use gantry_core::ports::secrets::{SecretSink, SecretValue};
+use gantry_core::ports::secrets::{SecretSink, SecretSource, SecretValue};
 use gantry_core::secret::{Consumer, SecretName};
 use gantry_core::testing::{FakeClock, SeqEntropy};
 use gantry_egress::audit::MemoryAudit;
@@ -474,7 +474,9 @@ impl Egress {
         let clock = Arc::new(FakeClock::new(T0));
         let store = MemorySecretStore::new(clock.now_timestamp());
         store.allow(Consumer::Egress);
-        let secrets: Arc<dyn SecretSink> = Arc::new(store.scoped(Consumer::Egress).unwrap());
+        let scoped = Arc::new(store.scoped(Consumer::Egress).unwrap());
+        let secrets: Arc<dyn SecretSink> = scoped.clone();
+        let source: Arc<dyn SecretSource> = scoped.clone();
         let registry = Registry::open(
             Db::open_in_memory().unwrap(),
             clock.clone(),
@@ -517,7 +519,7 @@ impl Egress {
         let audit = Arc::new(MemoryAudit::new());
         let proxy = ModelProxy::new(
             registry.clone(),
-            secrets.clone(),
+            source,
             audit.clone(),
             connector,
             tls_config(roots),

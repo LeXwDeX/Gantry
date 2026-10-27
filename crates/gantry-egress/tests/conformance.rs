@@ -21,6 +21,7 @@ use gantry_core::ports::egress::{
     UsageCursor,
 };
 use gantry_core::ports::sandbox::{GroupName, ProfileName};
+use gantry_core::ports::secrets::{SecretSink, SecretSource};
 use gantry_core::secret::{SecretName, SecretString};
 use gantry_egress::audit::MemoryAudit;
 use gantry_egress::client::EgressClient;
@@ -98,8 +99,9 @@ async fn real(name: &str) -> Real {
     ));
     let store = MemorySecretStore::new(clock.now_timestamp());
     store.allow(gantry_core::secret::Consumer::Egress);
-    let secrets: Arc<dyn gantry_core::ports::secrets::SecretSink> =
-        Arc::new(store.scoped(gantry_core::secret::Consumer::Egress).unwrap());
+    let scoped = Arc::new(store.scoped(gantry_core::secret::Consumer::Egress).unwrap());
+    let secrets: Arc<dyn SecretSink> = scoped.clone();
+    let source: Arc<dyn SecretSource> = scoped.clone();
     let sandbox = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let loopback = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let registry = Registry::open(
@@ -125,7 +127,7 @@ async fn real(name: &str) -> Real {
     let audit = Arc::new(MemoryAudit::new());
     let proxy = ModelProxy::new(
         registry.clone(),
-        secrets,
+        source,
         audit.clone(),
         connector,
         tls_config(roots_from_pem(ca.root_cert_pem()).unwrap()),

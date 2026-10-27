@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
-      - run: cargo check --locked --workspace --all-features
+      - run: cargo check --locked --workspace --all-targets --all-features
 
   contracts:
     name: 契约与 Mock API
