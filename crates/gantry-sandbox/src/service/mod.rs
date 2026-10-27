@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
@@ -120,9 +121,28 @@ pub(crate) struct Inner<D> {
     dispatch: OnceLock<mpsc::UnboundedSender<PermitWaiter>>,
     /// 本服务启动的全部任务（测试用的 `crash` 一次性中止它们）。
     tasks: Mutex<Vec<tokio::task::AbortHandle>>,
+    /// 恢复时超出并发上限的容器数（重启后上限变小）。分派任务先拿许可还账，
+    /// 新作业要等实际容器数降到上限以下。
+    debt: Arc<AtomicUsize>,
 }
 
 impl<D> Inner<D> {
+    /// 欠账减一；没有欠账时返回 `false`。
+    fn take_debt(&self) -> bool {
+        self.debt
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |debt| {
+                debt.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    /// 没拿到许可的恢复容器结束：欠账还没还就销账，已经由分派任务拿许可还过就把那个许可还回去。
+    pub(crate) fn settle_overdraft(&self) {
+        if !self.take_debt() {
+            self.permits.add_permits(1);
+        }
+    }
+
     pub(crate) fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
@@ -139,16 +159,28 @@ impl<D> Inner<D> {
         self.dispatch.get_or_init(|| {
             let (tx, mut rx) = mpsc::unbounded_channel::<PermitWaiter>();
             let permits = Arc::clone(&self.permits);
+            let inner_debt = Arc::clone(&self.debt);
             self.spawn(async move {
-                while let Some(mut waiter) = rx.recv().await {
-                    // 排队中被取消的 job 已丢弃接收端：跳过，不占许可。
-                    let permit = tokio::select! {
-                        biased;
-                        () = waiter.closed() => continue,
-                        permit = Arc::clone(&permits).acquire_owned() => match permit {
-                            Ok(permit) => permit,
-                            Err(_) => break,
-                        },
+                'waiters: while let Some(mut waiter) = rx.recv().await {
+                    let permit = loop {
+                        // 排队中被取消的 job 已丢弃接收端：跳过，不占许可。
+                        let permit = tokio::select! {
+                            biased;
+                            () = waiter.closed() => continue 'waiters,
+                            permit = Arc::clone(&permits).acquire_owned() => match permit {
+                                Ok(permit) => permit,
+                                Err(_) => break 'waiters,
+                            },
+                        };
+                        // 先还恢复时的欠账：这个许可代表一个早已在跑的容器。
+                        if inner_debt
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |d| d.checked_sub(1))
+                            .is_ok()
+                        {
+                            permit.forget();
+                            continue;
+                        }
+                        break permit;
                     };
                     let _ = waiter.send(permit);
                 }
@@ -175,6 +207,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 submit_lock: tokio::sync::Mutex::new(()),
                 dispatch: OnceLock::new(),
                 tasks: Mutex::new(Vec::new()),
+                debt: Arc::default(),
             }),
         }
     }
@@ -338,7 +371,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         let running_or_exited = container
             .as_ref()
             .filter(|summary| summary.status != ContainerStatus::Created);
-        let started = meta.started() || running_or_exited.is_some();
+        let started = meta.past_start() || running_or_exited.is_some();
         if meta.phase == Phase::Failed {
             let container = container.map(|summary| summary.id);
             self.spawn_recovered(
@@ -387,6 +420,11 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         }
         if let Some(summary) = container {
             let running = summary.status == ContainerStatus::Running;
+            // 同步占许可（在任何新提交之前）；超出上限就记欠账。
+            let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
+            if permit.is_none() {
+                self.inner.debt.fetch_add(1, Ordering::SeqCst);
+            }
             let handle = self.spawn_recovered(
                 ctx,
                 unfinished.project_id,
@@ -394,7 +432,11 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 meta,
                 Some(summary.id.clone()),
                 created,
-                job::RecoverMode::Supervise(summary.id),
+                job::RecoverMode::Supervise {
+                    id: summary.id,
+                    exited: !running,
+                    permit,
+                },
             );
             return Ok(if running {
                 RecoveredJob::Running(handle)
@@ -461,6 +503,18 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
             created,
             job::RecoverMode::Lost,
         );
+    }
+}
+
+/// 吊销 job 令牌；Egress 不认识它（从未签发或已遗忘）也算已吊销。
+async fn revoke(
+    egress: &dyn EgressControl,
+    job_id: &AttemptId,
+    ctx: &ActorCtx,
+) -> Result<(), gantry_core::ports::egress::EgressError> {
+    match egress.revoke_job_token(job_id, ctx).await {
+        Ok(_) | Err(gantry_core::ports::egress::EgressError::NotFound) => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -681,7 +735,16 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         let driver = &self.inner.deps.driver;
         let egress = &self.inner.deps.egress;
         let grace = self.inner.config.orphan_grace;
-        let active: BTreeSet<AttemptId> = self.jobs().keys().copied().collect();
+        // 只保护仍在推进、或结果尚未 release 的 job；已 release 的残留照样清理。
+        let active: BTreeSet<AttemptId> = self
+            .jobs()
+            .iter()
+            .filter(|(_, slot)| {
+                slot.result.borrow().is_none()
+                    || slot.released.try_lock().map_or(true, |released| !*released)
+            })
+            .map(|(job_id, _)| *job_id)
+            .collect();
         let keep = |job_id: &AttemptId| live.contains(job_id) || active.contains(job_id);
         let mut report = SweepReport::default();
         let mut revoked = BTreeSet::new();
@@ -712,8 +775,11 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                 continue;
             }
             if let Some(job_id) = job_id {
-                // 先吊销：容器删除前它的令牌已作废（吊销幂等，未签发的报错忽略）。
-                let _ = egress.revoke_job_token(&job_id, ctx).await;
+                // 先吊销：容器删除前它的令牌已作废。吊销失败就不删，留到下一轮重试。
+                if let Err(err) = revoke(egress.as_ref(), &job_id, ctx).await {
+                    report.errors.push(format!("revoke {job_id}: {err}"));
+                    continue;
+                }
                 revoked.insert(job_id);
             }
             let _ = driver.kill(&summary.id).await;
@@ -746,8 +812,14 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                 continue;
             }
             if let Some(job_id) = job_id {
-                if meta.as_ref().is_some_and(|meta| meta.token_issued) && revoked.insert(job_id) {
-                    let _ = egress.revoke_job_token(&job_id, ctx).await;
+                let issued = meta.as_ref().is_some_and(|meta| meta.token_issued);
+                if issued && !revoked.contains(&job_id) {
+                    if let Err(err) = revoke(egress.as_ref(), &job_id, ctx).await {
+                        // meta.json 还在，下一轮还能找到它。
+                        report.errors.push(format!("revoke {job_id}: {err}"));
+                        continue;
+                    }
+                    revoked.insert(job_id);
                 }
             }
             match driver.purge_staging(&layout).await {

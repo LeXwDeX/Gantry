@@ -159,6 +159,7 @@ struct RecordingEgress {
     inner: EgressStub,
     log: std::sync::Mutex<Vec<String>>,
     fail_issue: std::sync::atomic::AtomicBool,
+    fail_revoke: std::sync::atomic::AtomicBool,
 }
 
 impl RecordingEgress {
@@ -197,6 +198,11 @@ impl EgressControl for RecordingEgress {
         ctx: &ActorCtx,
     ) -> Result<FinalUsage, EgressError> {
         self.log.lock().unwrap().push(format!("revoke {job_id}"));
+        if self.fail_revoke.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(EgressError::Unavailable {
+                message: "egress restarting".into(),
+            });
+        }
         self.inner.revoke_job_token(job_id, ctx).await
     }
     async fn forget_job(&self, job_id: &AttemptId, ctx: &ActorCtx) -> Result<(), EgressError> {
@@ -318,6 +324,7 @@ fn harness(max_concurrent: usize) -> Harness {
         inner: EgressStub::with_default_config(),
         log: Default::default(),
         fail_issue: Default::default(),
+        fail_revoke: Default::default(),
     });
     let orphan_grace = Duration::ZERO;
     let service = manager(
@@ -1074,6 +1081,17 @@ async fn recover_running_keeps_deadline_and_dedups_log_reread() {
     h.service.submit(&ctx(), spec(40)).await.unwrap();
     tokio::time::sleep(Duration::from_secs(150)).await;
     h.restart();
+    // 崩溃留下半条 spool 记录：恢复先截掉它，重读到的事件接在完整记录后面。
+    {
+        use std::io::Write as _;
+        let path = h
+            .root
+            .path()
+            .join(sbx(40).to_string())
+            .join("progress.spool.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(br#"{"received_at":"2023-"#).unwrap();
+    }
     let recovered = h.service.recover(&ctx(), &[unfinished(40)]).await.unwrap();
     assert_eq!(recovered, vec![RecoveredJob::Running(handle(40))]);
     let outcome = h.service.wait(&att(40)).await.unwrap();
@@ -1308,6 +1326,120 @@ async fn finished_but_unrecorded_job_replays_the_same_outcome() {
     let after = h.service.wait(&att(50)).await.unwrap();
     assert_eq!(after.terminal, before.terminal);
     assert_eq!(after.files, before.files);
+    assert_eq!(after.stdout_tail, before.stdout_tail);
+    assert_eq!(after.stderr_tail, before.stderr_tail);
     assert!(!after.partial);
     assert_eq!(creates(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn exited_past_deadline_is_not_a_timer_kill() {
+    let mut h = harness(1);
+    h.driver.script(sbx(51), golden_script());
+    h.service.submit(&ctx(), spec(51)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    h.restart();
+    // 停机期间容器正常退出，恢复时已过持久化的 deadline（第 600 秒）。
+    tokio::time::sleep(Duration::from_secs(700)).await;
+    let recovered = h.service.recover(&ctx(), &[unfinished(51)]).await.unwrap();
+    assert_eq!(recovered, vec![RecoveredJob::Exited(handle(51))]);
+    let outcome = h.service.wait(&att(51)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert!(!outcome.partial);
+    assert!(h.driver.signals(&container_id(&h)).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovered_overdraft_counts_against_capacity() {
+    let mut h = harness(2);
+    for n in [52, 53] {
+        h.driver.script(sbx(n), long_running());
+        h.service.submit(&ctx(), spec(n)).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // 重启后上限降为 1：两个容器都还在跑。
+    h.max_concurrent = 1;
+    h.restart();
+    let recovered = h
+        .service
+        .recover(&ctx(), &[unfinished(52), unfinished(53)])
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered,
+        vec![
+            RecoveredJob::Running(handle(52)),
+            RecoveredJob::Running(handle(53))
+        ]
+    );
+    h.driver.script(sbx(54), golden_script());
+    h.service.submit(&ctx(), spec(54)).await.unwrap();
+    h.service.cancel(&ctx(), &att(52)).await.unwrap();
+    h.service.wait(&att(52)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    // 53 仍在运行，实际容器数没有降到上限以下：54 不能启动。
+    assert_eq!(creates(&h), 2);
+    h.service.cancel(&ctx(), &att(53)).await.unwrap();
+    h.service.wait(&att(53)).await.unwrap();
+    let outcome = h.service.wait(&att(54)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert_eq!(creates(&h), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sweep_keeps_orphans_whose_revoke_failed() {
+    let mut h = harness(1);
+    h.driver.script(sbx(55), long_running());
+    h.service.submit(&ctx(), spec(55)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    h.restart();
+    h.egress
+        .fail_revoke
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (0, 0));
+    assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
+    assert_eq!(h.driver.container_count(), 1);
+    assert!(h.root.path().join(sbx(55).to_string()).exists());
+    // 下一轮 Egress 恢复：照常吊销并清理。
+    h.egress
+        .fail_revoke
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (1, 1));
+    assert_eq!(h.driver.container_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sweep_cleans_leftovers_of_released_jobs() {
+    let h = harness(1);
+    h.driver.script(sbx(56), golden_script());
+    // 销毁失败：留给孤儿巡检（§9）。
+    h.driver.fail_next(FailPoint::Remove);
+    h.service.submit(&ctx(), spec(56)).await.unwrap();
+    h.service.wait(&att(56)).await.unwrap();
+    assert_eq!(h.driver.container_count(), 1);
+    // 未 release：结果还要保留，不清理。
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!(report.destroyed, 0);
+    h.service.release(&ctx(), &att(56)).await.unwrap();
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!(report.destroyed, 1);
+    assert_eq!(h.driver.container_count(), 0);
 }

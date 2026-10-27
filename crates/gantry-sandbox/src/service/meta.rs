@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use gantry_core::canon::Sha256Digest;
 use gantry_core::ids::{AttemptId, ProjectId, SandboxId};
 use gantry_core::ports::sandbox::Timings;
 use gantry_core::settings::resource::SandboxIo;
@@ -73,6 +74,21 @@ pub struct Meta {
     pub lost: bool,
     #[serde(default)]
     pub timings: TimingsRecord,
+    /// `Collected` 时记录的日志尾部 CAS 引用：容器删除后恢复，尾部仍与原结果相同。
+    #[serde(default)]
+    pub tails: Option<TailsRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CasRef {
+    pub sha256: Sha256Digest,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailsRecord {
+    pub stdout: CasRef,
+    pub stderr: CasRef,
 }
 
 /// 崩溃恢复要用、但 `UnfinishedAttempt` 不带的运行参数。
@@ -140,12 +156,23 @@ impl Meta {
             exit: None,
             lost: false,
             timings: TimingsRecord::default(),
+            tails: None,
         }
     }
 
-    /// 容器是否已经启动过（`start` 成功后才有 deadline）。
-    pub fn started(&self) -> bool {
-        self.deadline_ms.is_some()
+    /// 相位已过 `Starting`（`start` 确定成功过）。`Starting` 本身不算：deadline 在
+    /// `start` 之前就落盘，那一刻容器可能还没启动。
+    pub fn past_start(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Running
+                | Phase::Stopping
+                | Phase::Stopped
+                | Phase::Collecting
+                | Phase::Collected
+                | Phase::Destroying
+                | Phase::Destroyed
+        )
     }
 
     /// 写入原因；已有原因时不覆盖（先写入者胜），返回最终生效的原因。

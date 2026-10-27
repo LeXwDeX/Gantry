@@ -23,8 +23,8 @@ use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::egress::{IssueJobToken, JobTokenGrant, ProviderId};
 use gantry_core::ports::repo::PrepareWorkspace;
 use gantry_core::ports::sandbox::{
-    EgressFlags, InfraDetail, JobOutcome, ProgressSample, SandboxError, SandboxSpec, TerminalCause,
-    TerminalFacts, TimerKind, Timings, WorkspaceMode,
+    CasObject, EgressFlags, InfraDetail, JobOutcome, ProgressSample, SandboxError, SandboxSpec,
+    TerminalCause, TerminalFacts, TimerKind, Timings, WorkspaceMode,
 };
 use gantry_core::time::Timestamp;
 use gantry_store::Appended;
@@ -32,7 +32,7 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit};
 use tokio::time::Instant;
 
-use super::meta::{Meta, Phase, Resume, TerminalReason};
+use super::meta::{CasRef, Meta, Phase, Resume, TailsRecord, TerminalReason};
 use super::seams::CasKind;
 use super::{infra, Command, Inner, Occupancy, Outcome};
 use crate::driver::{DriverError, ExitFacts, LogCursor, SandboxDriver};
@@ -137,8 +137,14 @@ enum LogSignal {
 
 /// 恢复出的 job 从哪一步接着走（§7.10）。
 pub(super) enum RecoverMode {
-    /// 容器还在（运行中或已退出）：继续监督，从头重读日志按 seq 去重，然后 collect。
-    Supervise(ContainerId),
+    /// 容器还在：继续监督，从头重读日志按 seq 去重，然后 collect。`exited` 时不再起
+    /// 计时器（沿用已写盘的原因，没有就是 `RuntimeExit`），只等退出事实。
+    /// `permit` 为空表示恢复时已超出并发上限：这份占用记在 `Inner::debt` 上。
+    Supervise {
+        id: ContainerId,
+        exited: bool,
+        permit: Option<OwnedSemaphorePermit>,
+    },
     /// 容器已不在、`out/` 已读出：直接 collect。`lost` 为假表示容器是本服务在
     /// `Destroying` 相位自己删的（终止事实取 `meta.json`），否则 `cause = Lost`。
     Collect {
@@ -300,9 +306,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
 
     async fn recover_inner(&mut self, mode: RecoverMode) -> Outcome {
         match mode {
-            RecoverMode::Supervise(id) => {
-                // 重启后的新服务：占一个许可（不排队，容器早已存在）。
-                let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
+            RecoverMode::Supervise { id, exited, permit } => {
                 self.set_occupancy(Occupancy::Holding);
                 let wall_time = Duration::from_secs(self.resume().wall_time_s);
                 let now = self.now().as_millis();
@@ -316,10 +320,19 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 self.phase(Phase::Running)?;
                 // deadline 按持久化的 UTC 时刻重建，不因重启而延长。
                 let wall = Duration::from_millis(deadline_ms.saturating_sub(now).max(0) as u64);
-                let preset = self.meta.terminal_reason;
-                let run = self.supervise(&id, wall, preset).await?;
-                let outcome = self.collect_and_destroy(&id, run, None).await;
-                drop(permit);
+                let preset = if exited {
+                    Some(self.meta.record_reason(TerminalReason::RuntimeExit))
+                } else {
+                    self.meta.terminal_reason
+                };
+                let outcome = match self.supervise(&id, wall, preset).await {
+                    Ok(run) => self.collect_and_destroy(&id, run, None).await,
+                    Err(err) => Err(err),
+                };
+                match permit {
+                    Some(permit) => drop(permit),
+                    None => self.inner.settle_overdraft(),
+                }
                 outcome
             }
             RecoverMode::Collect { id, intake, lost } => {
@@ -351,8 +364,20 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
     }
 
     /// 从 `progress.spool.jsonl` 重建 seq 与计数；新 job 的 spool 为空，等同新建。
+    /// 崩溃留下的半条末行先截掉，之后的追加才能接在完整记录后面。
     fn resumed_collector(&self) -> ProgressCollector {
-        let spool = std::fs::read(self.layout.progress_spool()).unwrap_or_default();
+        let path = self.layout.progress_spool();
+        let mut spool = std::fs::read(&path).unwrap_or_default();
+        if !spool.is_empty() && spool.last() != Some(&b'\n') {
+            let keep = spool
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map_or(0, |at| at + 1);
+            spool.truncate(keep);
+            if let Ok(file) = OpenOptions::new().write(true).open(&path) {
+                let _ = file.set_len(keep as u64).and_then(|()| file.sync_all());
+            }
+        }
         ProgressCollector::resume_from_spool(self.meta.job_id, self.progress_limits(), &spool)
     }
 
@@ -385,14 +410,15 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             return self.finish_without_start().await;
         }
         let id = self.container.clone().expect("prepared container");
+        // deadline 在 start 之前落盘：start 之后、Running 写盘之前崩溃，恢复也不会重发整段墙钟。
+        let wall = Duration::from_secs(self.resume().wall_time_s);
+        self.meta.deadline_ms = Some(self.now().as_millis() + wall.as_millis() as i64);
         self.phase(Phase::Starting)?;
         self.driver()
             .start(&id)
             .await
             .map_err(driver_infra(InfraDetail::SandboxCreate))?;
         self.timings.started = Some(self.now());
-        let wall = Duration::from_secs(self.resume().wall_time_s);
-        self.meta.deadline_ms = Some(self.now().as_millis() + wall.as_millis() as i64);
         self.phase(Phase::Running)?;
         let run = self.supervise(&id, wall, None).await?;
         self.collect_and_destroy(&id, run, None).await
@@ -875,6 +901,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         intake: Option<IntakeResult>,
     ) -> Outcome {
         self.phase(Phase::Collecting)?;
+        let intake_was_preread = intake.is_some();
         let intake = match intake {
             Some(intake) => intake,
             None => {
@@ -902,8 +929,33 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         } else {
             Some(put(&spool, CasKind::Progress)?)
         };
-        let stdout_tail = put(&run.collector.stdout_tail().contents(), CasKind::Artifact)?;
-        let stderr_tail = put(&run.collector.stderr_tail().contents(), CasKind::Artifact)?;
+        // 容器已删、日志无从重读时，沿用崩溃前记下的尾部。
+        let (stdout_tail, stderr_tail) = match self.meta.tails {
+            Some(tails) if intake_was_preread => (
+                CasObject {
+                    sha256: tails.stdout.sha256,
+                    bytes: tails.stdout.bytes,
+                },
+                CasObject {
+                    sha256: tails.stderr.sha256,
+                    bytes: tails.stderr.bytes,
+                },
+            ),
+            _ => (
+                put(&run.collector.stdout_tail().contents(), CasKind::Artifact)?,
+                put(&run.collector.stderr_tail().contents(), CasKind::Artifact)?,
+            ),
+        };
+        self.meta.tails = Some(TailsRecord {
+            stdout: CasRef {
+                sha256: stdout_tail.sha256,
+                bytes: stdout_tail.bytes,
+            },
+            stderr: CasRef {
+                sha256: stderr_tail.sha256,
+                bytes: stderr_tail.bytes,
+            },
+        });
         self.timings.collected = Some(self.now());
         self.phase(Phase::Collected)?;
 
