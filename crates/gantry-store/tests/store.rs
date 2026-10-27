@@ -477,15 +477,18 @@ async fn outbox_claim_and_complete_update_the_row_and_log() {
     let snapshot = store.snapshot().await.unwrap();
     let action = snapshot.outbox_action(&enqueued.action.id).unwrap();
     assert_eq!(action.status, OutboxStatus::Succeeded);
-    // 入队与完成各一条事件，同一事务。
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 2);
+    // 入队、认领、完成各一条事件，同一事务。
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 3);
     let page = store
         .events()
         .scan(Seq::ZERO, &EventFilter::default(), 10)
         .await
         .unwrap();
     assert_eq!(page.events[0].ty, EventType::OutboxEnqueued);
-    assert_eq!(page.events[1].ty, EventType::OutboxSucceeded);
+    assert_eq!(page.events[1].ty, EventType::OutboxExecuting);
+    assert_eq!(page.events[1].data, json!({"attempts": 1, "replay": false}));
+    assert_eq!(page.events[1].actor, Actor::new(ActorKind::Forge, "forge"));
+    assert_eq!(page.events[2].ty, EventType::OutboxSucceeded);
 }
 
 #[tokio::test]
@@ -546,8 +549,8 @@ async fn outbox_retry_stays_queued_and_terminal_fails() {
     let action = snapshot.outbox_action(&enqueued.action.id).unwrap();
     assert_eq!(action.status, OutboxStatus::Queued);
     assert!(action.not_before.is_some());
-    // 只有入队事件：Retry 不追加 outbox.failed（P-53）。
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 1);
+    // 入队与认领各一条：Retry 不追加 outbox.failed（P-53）。
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 2);
 
     let mut tx = store.begin_write().await.unwrap();
     // Retry 回到 queued；再次认领是普通认领（replay = false），再走终态失败。
@@ -582,9 +585,18 @@ async fn outbox_retry_stays_queued_and_terminal_fails() {
         .scan(Seq::ZERO, &EventFilter::default(), 10)
         .await
         .unwrap();
-    assert_eq!(page.events.len(), 2);
-    assert_eq!(page.events[0].ty, EventType::OutboxEnqueued);
-    assert_eq!(page.events[1].ty, EventType::OutboxFailed);
+    let types: Vec<EventType> = page.events.iter().map(|event| event.ty).collect();
+    assert_eq!(
+        types,
+        vec![
+            EventType::OutboxEnqueued,
+            EventType::OutboxExecuting,
+            EventType::OutboxExecuting,
+            EventType::OutboxFailed
+        ]
+    );
+    // 第二次认领是普通认领，attempts 前进到 2。
+    assert_eq!(page.events[2].data, json!({"attempts": 2, "replay": false}));
 }
 
 #[tokio::test]
@@ -1429,8 +1441,35 @@ async fn outbox_cancel_blocked_returns_all_cascaded_ids() {
     }
     tx.commit().await.unwrap();
 
-    // 只有四条入队事件；级联取消暂不写 outbox.cancelled（不在本次范围）。
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 4);
+    // 四条入队 + 根的手动取消 + 三条级联取消，各一条 `outbox.cancelled`。
+    let page = store
+        .events()
+        .scan(Seq::ZERO, &EventFilter::default(), 20)
+        .await
+        .unwrap();
+    let reasons: Vec<(String, Value)> = page
+        .events
+        .iter()
+        .filter(|event| event.ty == EventType::OutboxCancelled)
+        .map(|event| {
+            (
+                event.subject.as_str().to_owned(),
+                event.data["reason"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(page.events.len(), 8);
+    assert_eq!(reasons[0], (a.action.id.to_string(), json!("manual")));
+    assert_eq!(
+        reasons[1..]
+            .iter()
+            .map(|(subject, reason)| (subject.clone(), reason.clone()))
+            .collect::<BTreeSet<_>>(),
+        [b.action.id, c.action.id, d.action.id]
+            .iter()
+            .map(|id| (id.to_string(), json!("dependency_failed")))
+            .collect::<BTreeSet<_>>()
+    );
 }
 
 #[tokio::test]

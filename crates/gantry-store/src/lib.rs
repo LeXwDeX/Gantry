@@ -944,8 +944,9 @@ impl Inner {
     fn project(&mut self, event: &Event<Value>, mode: Fold) -> Result<(), StoreError> {
         match event.ty {
             EventType::OutboxSucceeded | EventType::OutboxFailed if mode == Fold::Replay => {}
-            // 行由 `OutboxTx::enqueue` 在同一事务写入；事件本身不再改表。
-            EventType::OutboxEnqueued => {}
+            // 行由 `OutboxTx` 在同一事务写入；这些事件本身不再改表。
+            EventType::OutboxEnqueued | EventType::OutboxExecuting | EventType::OutboxCancelled => {
+            }
             EventType::SettingsUpdated => {
                 let data: SettingsUpdatedData =
                     decode_data(event).map_err(StoreError::InvalidEvent)?;
@@ -2164,7 +2165,7 @@ impl OutboxTx<'_> {
 
     pub async fn claim(&mut self, opts: ClaimOpts) -> Result<Option<Claimed>, StoreError> {
         let now = self.tx.now();
-        cancel_failed_dependents(&mut self.tx.snapshot, now);
+        self.cancel_blocked().await?;
         let mut candidates: Vec<(u8, Seq, ActionId)> = Vec::new();
         for (id, row) in &self.tx.snapshot.outbox {
             if opts.exclude_deliveries.contains(&row.action.delivery_id) {
@@ -2219,10 +2220,40 @@ impl OutboxTx<'_> {
             row.action.attempts += 1;
         }
         row.action.updated_at = now;
-        Ok(Some(Claimed {
-            action: row.action.clone(),
-            replay,
-        }))
+        let action = row.action.clone();
+        // 状态 / 租约更新与 `outbox.executing` 同事务（event-data §2.2.4）。
+        self.append_outbox_event(
+            EventType::OutboxExecuting,
+            &action,
+            serde_json::json!({"attempts": action.attempts, "replay": replay}),
+        )
+        .await?;
+        Ok(Some(Claimed { action, replay }))
+    }
+
+    /// Outbox 状态事件的共用信封：`subject = act_…`、`correlation_id = delivery_id`、
+    /// `actor = forge`（认领、依赖级联与执行前复核都由 forge 发起，event-data §2.2.4）。
+    async fn append_outbox_event(
+        &mut self,
+        ty: EventType,
+        action: &OutboxAction,
+        data: Value,
+    ) -> Result<(), StoreError> {
+        self.tx
+            .append(NewEvent {
+                ty,
+                subject: Subject::parse(&action.id.to_string()).map_err(|error| {
+                    StoreError::PreconditionFailed(format!("action id subject: {error}"))
+                })?,
+                project_id: Some(action.project_id),
+                actor: Actor::new(ActorKind::Forge, "forge"),
+                causation_id: None,
+                correlation_id: Some(action.delivery_id.to_string()),
+                data,
+                dedup_key: None,
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn record_effects(
@@ -2300,7 +2331,17 @@ impl OutboxTx<'_> {
 
     pub async fn cancel_blocked(&mut self) -> Result<Vec<ActionId>, StoreError> {
         let now = self.tx.now();
-        Ok(cancel_failed_dependents(&mut self.tx.snapshot, now))
+        let cancelled = cancel_failed_dependents(&mut self.tx.snapshot, now);
+        for id in &cancelled {
+            let action = self.tx.snapshot.outbox[id].action.clone();
+            self.append_outbox_event(
+                EventType::OutboxCancelled,
+                &action,
+                serde_json::json!({"reason": "dependency_failed"}),
+            )
+            .await?;
+        }
+        Ok(cancelled)
     }
 
     pub async fn count_succeeded_since(
@@ -2444,7 +2485,13 @@ impl OutboxTx<'_> {
         });
         row.action.lease_until = None;
         row.action.updated_at = now;
-        Ok(())
+        let action = row.action.clone();
+        self.append_outbox_event(
+            EventType::OutboxCancelled,
+            &action,
+            serde_json::json!({"reason": cancel_reason_code(reason)}),
+        )
+        .await
     }
 }
 
@@ -2461,7 +2508,7 @@ fn cancel_reason_code(reason: CancelReason) -> &'static str {
 /// 认领前把依赖已失败/已取消的 queued 动作级联取消（直到不动点）。
 ///
 /// 迭代到不动点处理多层链与排序倒置；缺失的依赖继续阻塞（fail-closed）。
-/// 不追加 `outbox.cancelled` 事件：该事件未定义。
+/// 只改表；`outbox.cancelled` 由调用方（`cancel_blocked`）逐条追加。
 fn cancel_failed_dependents(inner: &mut Inner, now: Timestamp) -> Vec<ActionId> {
     let mut cancelled = Vec::new();
     loop {

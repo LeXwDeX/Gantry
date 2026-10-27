@@ -189,7 +189,7 @@ async fn committed_state_survives_reopen() {
     let store = open(&dir, 1_700_000_100_000).await.unwrap();
     assert_eq!(store.log_identity().log_id, identity.log_id);
     assert_eq!(store.log_identity().log_epoch, 1);
-    assert_eq!(store.events().head().await.unwrap().as_u64(), 4);
+    assert_eq!(store.events().head().await.unwrap().as_u64(), 5);
     let page = store
         .events()
         .scan(Seq::ZERO, &EventFilter::default(), 10)
@@ -202,6 +202,7 @@ async fn committed_state_survives_reopen() {
             EventType::DeliveryCreated,
             EventType::MessagePosted,
             EventType::OutboxEnqueued,
+            EventType::OutboxExecuting,
             EventType::OutboxSucceeded
         ]
     );
@@ -237,7 +238,7 @@ async fn committed_state_survives_reopen() {
     let Appended::New(next) = tx.append(message_posted("msg-2")).await.unwrap() else {
         panic!("expected a new event");
     };
-    assert_eq!(next.seq.as_u64(), 5);
+    assert_eq!(next.seq.as_u64(), 6);
     tx.commit().await.unwrap();
 }
 
