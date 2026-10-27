@@ -379,7 +379,7 @@ CREATE TABLE forge_project_state (
 3. **内容字段**：评论正文、check 输出等取载荷；对账合成的事件没有载荷，必须按 ID 另行拉取。所有来自 GitHub 的文本包成 `UntrustedText`（`source` 形如 `github:review_comment.body`），写入事件日志前按 `forge.events.max_text_bytes`（默认 65536 [自选]）截断并置 `truncated`。
 4. **陈旧标记**：针对非当前 head 的 check / review 事件 `stale = true`（G4）。
 5. **绑定**：`delivery_id` 的解析顺序：① `forge_effect_index`（自己创建的 PR / Issue 评论等，早于 `engine` 的投影）；② `Delivery.pr` / `Delivery.issues` 投影；③ 停放至多 `self_event_grace`，仍未绑定则丢弃并计数（`forge.events.pass_unbound=false`，FA §5.4）。
-6. **`forge.synced` 的 `data`（本文提议，F-OQ-7）**：`{target, source: "webhook"|"reconcile", changes: [{field, from, to}], synced_at}`，`field` 取 `IssueRef` / `PullRequestRef` 的字段名（`head_sha`、`state`、`mergeable_state`、`review_state`、`checks`、`draft`、`in_merge_queue` 等）。快照每次变化都发一条，使 `guardian` 能响应"合并状态变脏""review 状态变化"这类没有对应 webhook 事件的事实。
+6. **`forge.synced` 的 `data`（本文提议，F-OQ-7）**：`{target, source: "webhook"|"reconcile", changes: [{field, from, to}], synced_at}`，`field` 取 `IssueRef` / `PullRequestRef` 的字段名（`head_sha`、`state`、`mergeable_state`、`review_state`、`checks`、`draft`、`in_merge_queue` 等）。快照每次变化都发一条，使 `guardian` 能响应"合并状态变脏""review 状态变化"这类没有对应 webhook 事件的事实。本地第一次看到某个 PR / Issue 时发一条带 `initial`（全部白名单字段）、`changes` 为空的 `forge.synced`（event-data §2.2.5.1「首次快照」）。
 7. **`review_state` 口径**：优先取 GraphQL `reviewDecision`；为空（仓库没有"必需 review"规则时它为空）则由各 reviewer 最新一条非 `COMMENTED`、未被撤销的 review 推出：存在 `CHANGES_REQUESTED` → `changes_requested`；否则存在 `APPROVED` → `approved`；否则 `none`（保守：任何人的 approve 都算，供 `guardian` 的"已审批不得静默推送"使用，F-OQ-16）。
 
 本节 `forge.synced` data 的字段见 [event-data.md](../interfaces/event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本节其余语义不变。

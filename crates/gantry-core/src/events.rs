@@ -4481,19 +4481,81 @@ impl ForgeSyncedChange {
     }
 }
 
+/// 首次快照的完整字段（event-data §2.2.5.1「首次快照」）：本地第一次看到该 PR / Issue 时
+/// 没有 `from` 可比，改为一次给出该 target 适用的全部白名单字段。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ForgeSyncedInitial {
+    Pr {
+        state: ForgeSyncedState,
+        title: UntrustedText,
+        head_sha: GitOid,
+        base_ref: String,
+        base_sha: GitOid,
+        draft: bool,
+        mergeable_state: String,
+        in_merge_queue: bool,
+        checks: CheckSummary,
+        review_state: ReviewState,
+    },
+    Issue {
+        state: ForgeSyncedState,
+        state_reason: Option<IssueStateReason>,
+        title: UntrustedText,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForgeSyncedData {
     pub target: ForgeSyncedTarget,
     pub source: ForgeEventSource,
+    /// 首次快照时为空，字段全部在 `initial` 里。
     pub changes: Vec<ForgeSyncedChange>,
     pub synced_at: Timestamp,
+    /// 只在首次快照出现；之后的同步一律只发 `changes`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial: Option<ForgeSyncedInitial>,
 }
 
 impl EventData for ForgeSyncedData {
     const TYPES: &'static [EventType] = &[EventType::ForgeSynced];
 
     fn validate(&self) -> Result<(), SchemaError> {
+        if let Some(initial) = &self.initial {
+            if !self.changes.is_empty() {
+                return Err(SchemaError::consistency(
+                    "/changes",
+                    "an initial snapshot carries its fields in `initial`, not `changes`",
+                ));
+            }
+            return match (initial, self.target.kind) {
+                (
+                    ForgeSyncedInitial::Pr {
+                        base_ref,
+                        mergeable_state,
+                        ..
+                    },
+                    ForgeSyncedTargetKind::Pr,
+                ) => {
+                    require_non_empty(base_ref, "/initial/base_ref")?;
+                    require_non_empty(mergeable_state, "/initial/mergeable_state")
+                }
+                (ForgeSyncedInitial::Issue { state, .. }, ForgeSyncedTargetKind::Issue) => {
+                    if *state == ForgeSyncedState::Merged {
+                        return Err(SchemaError::consistency(
+                            "/initial/state",
+                            "issues cannot use the merged state",
+                        ));
+                    }
+                    Ok(())
+                }
+                _ => Err(SchemaError::consistency(
+                    "/initial/type",
+                    "initial snapshot type must match target type",
+                )),
+            };
+        }
         if self.changes.is_empty() {
             return Err(SchemaError::shape(
                 "/changes",
@@ -4575,9 +4637,52 @@ impl EventData for ForgeSyncedData {
 }
 
 fn check_forge_synced_shape(data: &Value) -> Result<(), SchemaError> {
-    deny_keys_at(data, "", &["target", "source", "changes", "synced_at"])?;
+    deny_keys_at(
+        data,
+        "",
+        &["target", "source", "changes", "synced_at", "initial"],
+    )?;
     require_keys_at(data, "", &["target", "source", "changes", "synced_at"])?;
-    reject_null_keys_at(data, "", &["target", "source", "changes", "synced_at"])?;
+    // `initial` 可选：出现就不能是 null（可选字段一律省略）。
+    reject_null_keys_at(
+        data,
+        "",
+        &["target", "source", "changes", "synced_at", "initial"],
+    )?;
+    if let Some(initial) = data.get("initial") {
+        let pr = [
+            "type",
+            "state",
+            "title",
+            "head_sha",
+            "base_ref",
+            "base_sha",
+            "draft",
+            "mergeable_state",
+            "in_merge_queue",
+            "checks",
+            "review_state",
+        ];
+        let issue = ["type", "state", "state_reason", "title"];
+        let keys: &[&str] = match initial.get("type").and_then(Value::as_str) {
+            Some("pr") => &pr,
+            Some("issue") => &issue,
+            _ => {
+                return Err(SchemaError::shape(
+                    "/initial/type",
+                    "initial type must be pr or issue",
+                ))
+            }
+        };
+        deny_keys_at(initial, "/initial", keys)?;
+        require_keys_at(initial, "/initial", keys)?;
+        let non_null: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|key| *key != "state_reason")
+            .collect();
+        reject_null_keys_at(initial, "/initial", &non_null)?;
+    }
     if let Some(changes) = data.get("changes") {
         if !changes.is_array() {
             return Err(SchemaError::shape("/changes", "changes must be an array"));

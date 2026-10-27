@@ -147,6 +147,7 @@ pub struct SandboxSpec {
     pub io: IoLimits,                      // sandbox.io.*：进度、产物、材料、日志尾部上限
     pub egress: EgressRequest,             // {profile: ProfileName, groups: Vec<GroupName>（解析后的集合）, tokens_total: u64, weights: TokenWeights（levels.token_weights，P-70）}
     pub workspace: WorkspaceRequest,       // {repo, base_sha, pr_base_sha?, mode: Rw | Ro}；Ro 对应 exec = sandbox_ro
+    pub config_rev: Seq,                   // 引擎组装本 spec 时 ConfigView 的 rev（egress.weights 所属快照）；原样填入 IssueJobToken.config_rev，不取签发时刻的生效修订（#220）
 }
 
 pub struct JobOutcome {
