@@ -538,7 +538,7 @@ flowchart LR
 | V4 | `structured_output`：role schema；一致性规则（`ACCEPT` ⇒ 无 blocker；`REVISE` / `REJECT` ⇒ 至少一条 finding；`BLOCKED` ⇒ `blocking_reasons` 非空）；引用完整性（`arbiter` 的 `finding_ref` 必须指向本轮 `upstream` 的 reviewer） | `exec.output_invalid` |
 | V5 | 补丁：`RepoService::validate_patch`（仅当 V1–V4 通过且 `status = succeeded`；幂等于 `job_id`）。`Validated(allow)` → 生成提交说明（utility 辅助调用或模板）后 `commit_patch`（需 `LockToken`；提交身份取 `github.commit_identity`，P-69；`repo` 按 `refs/gantry/attempt/<job_id>` 幂等）；`Validated(needs_approval)` → 补丁挂起，请求 `patch_apply_protected` 审批；授予后 `commit_patch(approval = 该审批)`，`repo` 在提交前消费它（P-54）；`Validated(deny)`（`policy` 规则判定）→ 丢弃；`Rejected{reason}`（`repo` 机械拒绝：`not_applicable` → `exec.output_invalid`；`binary` / `symlink` / `submodule` / `path_invalid` / `dotgit` → `policy_denied` 类，按 worker-protocol §9 映射）；`BaseConflict` → 不自动 rebase，用新的 `base_sha` 重新派发（计一次重试）；`NoChange` → 视为无补丁（OQ-15） | `policy.*` / `exec.output_invalid` |
 | V6 | proposals：`PolicyPort::decide_proposals`；`Accepted` 的由引擎入队（`open_pr` → `create_pr`），`escalate` 写上报项，`NeedsApproval` / `Held` 随补丁挂起，`Denied` 记 `policy.denied`；单条失败不使尝试失败 | 逐条 `rejected` |
-| 终结 | 按 worker-protocol §9 的优先级分类；用 Egress 计量（不是自报）填 `usage`；写 `attempt.finished`（`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`）、`budget.charged`、`node.finished`；然后把结果交 `decide` | — |
+| 终结 | 按 worker-protocol §9 的优先级分类；用 Egress 计量（不是自报）填 `usage`；写 `attempt.finished`（`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`result_commit`）、`budget.charged`、`node.finished`；然后把结果交 `decide` | — |
 
 V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol §1 的责任表没有逐项写明这几项归属，见 OQ-12。
 
@@ -1000,14 +1000,14 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 
 | # | 缺口 | 需要 | 影响里程碑 |
 | --- | --- | --- | --- |
-| E1 | 本地提交的 `commit_oid` 不在任何事件里（repo.md OQ-R2）。T6 的 `push_branch.local_head_oid` = `Evidence.candidate_head` 无法从日志重建 | `attempt.finished` 增加可选 `result_commit`（有补丁且 `status = succeeded` 时必填，与 `result_tree` 同时出现） | **M1（阻塞端到端与"重启一致"）** |
+| E1 | **已落地（#64）**：`attempt.finished` 增加可选 `result_commit`，`core` 校验 `status = succeeded` 且有 `result_tree` 时必填、有 `result_commit` 时必须有 `result_tree`。原缺口：本地提交的 `commit_oid` 不在任何事件里（repo.md OQ-R2），T6 的 `push_branch.local_head_oid` = `Evidence.candidate_head` 无法从日志重建 | 引擎投影把它读入 `AttemptState.result_commit`（阶段 2 切片 1） | **M1（阻塞端到端与"重启一致"）** |
 | E2 | 无进展检测的 finding 指纹没有落盘处 | 判定节点的 `node.finished` 增加可选 `fingerprints[]`（`FindingFingerprint` 十六进制，≤ 64 条，只在 `REVISE` / `REJECT` 时出现） | M2 / M3（M1 无轮次，`round_history` 恒空） |
 | E3 | `PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报（policy.md 未规定何时省略 `report`） | 二选一：policy.md 规定对 `engine` 发起的动作 `Deny` 必带 `ReportHint`；或 data-model 词表增加通用码 | M1（`merge_pr` 以外的动作） |
 | E5 | `open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态；§7.12 要求 `create_pr` 的 `title` / `body` 取自它 | `attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），执行器据 `result_ref` 从 CAS 取原文填入意图（内容寻址，恢复后一致） | M1（体验；未落地时用模板标题与正文，不阻塞） |
 | E6 | Outbox 终态失败后用户重做（`epoch + 1`）没有入口：`escalation(outbox_failed:*)` 无选项（P-79），§9 却写"由用户决定是否重试" | data-model 词表给 `outbox_failed:*` 增加选项（如 `retry` / `abandon`），或在 api 增加动作级重试路由 | M1（失败路径；成功路径不受影响） |
 | E4 | **已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`），区分"job 从未被受理"与"受理后丢失"；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`，不把未起沙盒的尝试判成 `infra.lost` | 见 sandbox.md §6.1、§7.10；`FakeSandboxService` 按受理集合分类 | M1（"重启一致"） |
 
-E1 批准前，M1 实现可在测试里用 `FakeRepo` 的确定性 `commit_oid`（= f(`job_id`, `tree`)）推进，但 §12.2"重启一致"在 E1 落地前不能宣布通过。E4 已落地，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果。
+E1、E4 都已落地：本地提交 OID 落盘到 `attempt.finished.result_commit`，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果。§12.2"重启一致"在引擎投影读入 `result_commit` 前不能宣布通过。
 
 #### 7.14.7 `GraphTemplate` 的 `TemplateCx` 与 `ExitRule`
 
@@ -1142,7 +1142,7 @@ M1（Low）需要：`Command` 的前五个变体；`ObservedData` 全部；`Effe
 | `node.queued` / `started` / `finished` / `superseded` | `node_id`、`status`、`verdict`、`superseded_by` |
 | `node.retry_requested` | `node_id`、`by`（P-56） |
 | `attempt.started` | `attempt_id`、`node_id`、`n`、`provider`、`model`、`reasoning_effort`、`config_rev`、`base_sha`、`tokens_total`、`wall_time_s` |
-| `attempt.finished` | `status`、`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`served_by` |
+| `attempt.finished` | `status`、`result_ref`、`failure_class`、`failure_detail`、`usage`、`result_tree`、`result_commit`（本地提交 OID，与 `result_tree` 同时出现；`succeeded` 且有补丁时必填，§7.14.6 E1）、`served_by` |
 | `attempt.progress` | 采样节流后的展示字段 |
 | `budget.charged`（引擎写的部分） | `dimension`、`tier?`、`delta`（含加权值）、`used_after`、`source = {kind, id}`、`delivery_id` 或 `conversation_id`；`direct` 调用的 token 由 `models` 写 |
 | `budget.exhausted` | `dimension`、`limit`、`used` |
