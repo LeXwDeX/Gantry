@@ -10,7 +10,7 @@ use gantry_core::machines::delivery::StageTrigger;
 use gantry_core::settings::resource::{LevelBudget, LevelEntry, TierBudget};
 use gantry_engine::create::{budget_from_level, NewDelivery};
 use gantry_engine::engine::{Engine, StageRequest};
-use gantry_engine::Projection;
+use gantry_engine::DeliveryState;
 use gantry_store::testing::{FakeClock, SeqEntropy};
 use gantry_store::{EventFilter, Store, StoreDeps};
 
@@ -116,11 +116,8 @@ async fn advance_appends_stage_changed_and_projects() {
     assert_eq!(all[1].data["to"], "implement");
     assert_eq!(all[1].data["reason"], "admission_skipped");
 
-    let mut projection = Projection::default();
-    for event in &all {
-        projection.apply(event).unwrap();
-    }
-    let delivery = projection.delivery.as_ref().unwrap();
+    let state = DeliveryState::fold(&all).unwrap().unwrap();
+    let delivery = &state.delivery;
     assert_eq!(delivery.stage, Stage::Implement);
     assert_eq!(
         delivery.stage_status,
@@ -154,9 +151,7 @@ async fn terminal_transition_sets_done() {
         request.from = from;
         engine.advance_stage(request).await.unwrap();
     }
-    let mut projection = Projection::default();
-    for event in events(&engine).await {
-        projection.apply(&event).unwrap();
-    }
-    assert_eq!(projection.delivery.unwrap().stage, Stage::Closed);
+    let all = events(&engine).await;
+    let state = DeliveryState::fold(&all).unwrap().unwrap();
+    assert_eq!(state.delivery.stage, Stage::Closed);
 }

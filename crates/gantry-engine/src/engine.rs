@@ -1,8 +1,11 @@
 //! 引擎写入口的最小实现：创建、阶段推进与交付控制写入事件日志（engine.md §7.1）。
 //!
-//! 决策器、调度与副作用执行仍未实现。
+//! 决策器、调度与副作用执行仍未实现。读取一律经 [`DeliveryState`]：按 §7.14.2 路由表
+//! 在本项目范围内归属事件后折叠（M1 收尾评审 A4）。
 
 use std::sync::Arc;
+
+use std::collections::BTreeSet;
 
 use gantry_core::entities::{Actor, InboxItem, NodeStatus, Seq, Stage, StageStatus};
 use gantry_core::events::{
@@ -17,11 +20,12 @@ use gantry_core::machines::TransitionError;
 use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::engine::TemplateCatalog;
 use gantry_core::ports::inbox::{InboxPort, RaiseError, RaiseRequest};
-use gantry_store::{Appended, EventFilter, Store, StoreError};
+use gantry_store::{Appended, DeliveryRow, EventFilter, Store, StoreError, TypePattern};
 
 use crate::create::{created_event, NewDelivery};
-use crate::projection::{DeliveryProjection, NodeProjection, Projection, ProjectionError};
+use crate::route::{RouteError, Router};
 use crate::stage::{advance, StageTransition};
+use crate::state::{DeliveryState, NodeState, StateError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -33,8 +37,10 @@ pub enum EngineError {
     Id(#[from] IdError),
     #[error("stage: {0}")]
     Stage(#[from] TransitionError),
-    #[error("projection: {0}")]
-    Projection(#[from] ProjectionError),
+    #[error("state: {0}")]
+    State(#[from] StateError),
+    #[error("route: {0}")]
+    Route(#[from] RouteError),
     #[error("delivery not found")]
     NotFound,
     #[error("invalid state: {0}")]
@@ -146,11 +152,8 @@ impl Engine {
     }
 
     /// 读取一条交付的投影；不存在时返回 `None`。
-    pub async fn load_delivery(
-        &self,
-        id: &DeliveryId,
-    ) -> Result<Option<DeliveryProjection>, EngineError> {
-        Ok(self.load_projection(id).await?.delivery)
+    pub async fn load_delivery(&self, id: &DeliveryId) -> Result<Option<DeliveryRow>, EngineError> {
+        Ok(self.load_state(id).await?.map(|state| state.delivery))
     }
 
     /// 人工重试：只接受 `failed` 节点；`failed → queued`。
@@ -158,15 +161,15 @@ impl Engine {
         &self,
         node_id: NodeId,
         actor: Actor,
-    ) -> Result<NodeProjection, EngineError> {
+    ) -> Result<NodeState, EngineError> {
         let delivery_id = self.delivery_of_node(&node_id).await?;
-        let projection = self.load_projection(&delivery_id).await?;
-        let delivery = projection.delivery.as_ref().ok_or(EngineError::NotFound)?;
-        ensure_active(delivery)?;
-        let node = projection
-            .nodes
-            .get(&node_id)
+        let state = self
+            .load_state(&delivery_id)
+            .await?
             .ok_or(EngineError::NotFound)?;
+        let delivery = &state.delivery;
+        ensure_active(delivery)?;
+        let node = state.node(&node_id).ok_or(EngineError::NotFound)?;
         if node.status != NodeStatus::Failed {
             return Err(EngineError::InvalidState("node is not failed"));
         }
@@ -190,60 +193,88 @@ impl Engine {
         let mut tx = self.store.begin_write().await?;
         tx.append(event).await?;
         tx.commit().await?;
-        self.load_projection(&delivery_id)
+        self.load_state(&delivery_id)
             .await?
-            .nodes
-            .remove(&node_id)
+            .and_then(|state| state.node(&node_id).cloned())
             .ok_or(EngineError::NotFound)
     }
 
-    async fn load_projection(&self, id: &DeliveryId) -> Result<Projection, EngineError> {
-        let target = id.to_string();
-        let mut projection = Projection::default();
-        let mut cursor = Seq::ZERO;
-        loop {
-            let page = self.store.events().scan(cursor, &all_events(), 200).await?;
-            for event in &page.events {
-                if event.correlation_id.as_deref() == Some(target.as_str()) {
-                    projection.apply(event)?;
-                }
+    /// 重建一个交付单元的 `DeliveryState`：先按 subject 取 `delivery.created` 得到所属项目，
+    /// 再只扫本项目的事件（含 `project_id` 为空的全局事件），按路由表归属后折叠。
+    pub async fn load_state(&self, id: &DeliveryId) -> Result<Option<DeliveryState>, EngineError> {
+        let subject = Subject::parse(&id.to_string())
+            .map_err(|error| SchemaError::shape("/subject", error.to_string()))?;
+        let Some(project_id) = self
+            .store
+            .events()
+            .by_subject(&subject)
+            .await?
+            .into_iter()
+            .find_map(|event| event.project_id)
+        else {
+            return Ok(None);
+        };
+        let filter = EventFilter {
+            project_ids: Some(BTreeSet::from([project_id])),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        let mut router = Router::default();
+        let mut state: Option<DeliveryState> = None;
+        self.scan(&filter, |event| {
+            if router.route(event)?.delivery() != Some(*id) {
+                return Ok(());
             }
-            if page.scanned_to >= page.head {
-                break;
+            match &mut state {
+                Some(state) => state.apply(event)?,
+                None => state = Some(DeliveryState::created(event)?),
             }
-            cursor = page.scanned_to;
-        }
-        Ok(projection)
+            Ok(())
+        })
+        .await?;
+        Ok(state)
     }
 
+    /// 节点所属交付单元：只扫建图事件（`workflow.created` / `revised` 里登记了节点）。
+    /// `retry_node` 只拿到 `node_id`、不知道项目，所以不能按项目收窄；按 ID 的索引属于 store（#88）。
     async fn delivery_of_node(&self, node_id: &NodeId) -> Result<DeliveryId, EngineError> {
-        let target = node_id.to_string();
+        let filter = EventFilter {
+            project_ids: None,
+            include: vec![
+                TypePattern::Exact(EventType::WorkflowCreated),
+                TypePattern::Exact(EventType::WorkflowRevised),
+            ],
+            exclude: Vec::new(),
+        };
+        let mut router = Router::default();
+        self.scan(&filter, |event| {
+            router.route(event)?;
+            Ok(())
+        })
+        .await?;
+        router.node_owner(node_id).ok_or(EngineError::NotFound)
+    }
+
+    async fn scan(
+        &self,
+        filter: &EventFilter,
+        mut visit: impl FnMut(&gantry_core::events::Event<serde_json::Value>) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
         let mut cursor = Seq::ZERO;
         loop {
-            let page = self.store.events().scan(cursor, &all_events(), 200).await?;
+            let page = self.store.events().scan(cursor, filter, 200).await?;
             for event in &page.events {
-                if event.subject.as_str() == target {
-                    return event
-                        .correlation_id
-                        .as_deref()
-                        .and_then(|value| value.parse().ok())
-                        .ok_or(EngineError::NotFound);
-                }
+                visit(event)?;
             }
             if page.scanned_to >= page.head {
-                break;
+                return Ok(());
             }
             cursor = page.scanned_to;
         }
-        Err(EngineError::NotFound)
     }
 
     /// 暂停：停止派发新节点，记录暂停前的 `stage_status`。已暂停 → 幂等返回。
-    pub async fn pause(
-        &self,
-        id: DeliveryId,
-        actor: Actor,
-    ) -> Result<DeliveryProjection, EngineError> {
+    pub async fn pause(&self, id: DeliveryId, actor: Actor) -> Result<DeliveryRow, EngineError> {
         let current = self.current(&id).await?;
         ensure_active(&current)?;
         if current.stage_status == StageStatus::Paused {
@@ -258,11 +289,7 @@ impl Engine {
     }
 
     /// 继续：恢复到暂停前的 `stage_status`。未暂停 → 非法状态。
-    pub async fn resume(
-        &self,
-        id: DeliveryId,
-        actor: Actor,
-    ) -> Result<DeliveryProjection, EngineError> {
+    pub async fn resume(&self, id: DeliveryId, actor: Actor) -> Result<DeliveryRow, EngineError> {
         let current = self.current(&id).await?;
         ensure_active(&current)?;
         let status_after = current
@@ -283,7 +310,7 @@ impl Engine {
         id: DeliveryId,
         cap: Level,
         actor: Actor,
-    ) -> Result<DeliveryProjection, EngineError> {
+    ) -> Result<DeliveryRow, EngineError> {
         if cap == Level::None {
             return Err(EngineError::Validation(
                 "delivery level_cap must not be None",
@@ -313,7 +340,7 @@ impl Engine {
         id: DeliveryId,
         reason: Option<String>,
         actor: Actor,
-    ) -> Result<DeliveryProjection, EngineError> {
+    ) -> Result<DeliveryRow, EngineError> {
         let current = self.current(&id).await?;
         ensure_active(&current)?;
         let data = DeliveryAbandonedData {
@@ -324,17 +351,17 @@ impl Engine {
             .await
     }
 
-    async fn current(&self, id: &DeliveryId) -> Result<DeliveryProjection, EngineError> {
+    async fn current(&self, id: &DeliveryId) -> Result<DeliveryRow, EngineError> {
         self.load_delivery(id).await?.ok_or(EngineError::NotFound)
     }
 
     async fn append<T: serde::Serialize>(
         &self,
         ty: EventType,
-        delivery: &DeliveryProjection,
+        delivery: &DeliveryRow,
         actor: Actor,
         data: &T,
-    ) -> Result<DeliveryProjection, EngineError> {
+    ) -> Result<DeliveryRow, EngineError> {
         let event = delivery_event(ty, delivery, actor, data)?;
         let mut tx = self.store.begin_write().await?;
         tx.append(event).await?;
@@ -344,7 +371,7 @@ impl Engine {
 }
 
 fn level_changed_event(
-    delivery: &DeliveryProjection,
+    delivery: &DeliveryRow,
     actor: &Actor,
     from: Level,
     to: Level,
@@ -365,7 +392,7 @@ fn level_changed_event(
 
 fn delivery_event<T: serde::Serialize>(
     ty: EventType,
-    delivery: &DeliveryProjection,
+    delivery: &DeliveryRow,
     actor: Actor,
     data: &T,
 ) -> Result<NewEvent, EngineError> {
@@ -386,15 +413,7 @@ fn delivery_event<T: serde::Serialize>(
     Ok(event)
 }
 
-fn all_events() -> EventFilter {
-    EventFilter {
-        project_ids: None,
-        include: Vec::new(),
-        exclude: Vec::new(),
-    }
-}
-
-fn ensure_active(delivery: &DeliveryProjection) -> Result<(), EngineError> {
+fn ensure_active(delivery: &DeliveryRow) -> Result<(), EngineError> {
     if matches!(delivery.stage, Stage::Closed | Stage::Abandoned) {
         return Err(EngineError::InvalidState("delivery is terminal"));
     }
