@@ -3,13 +3,17 @@
 mod common;
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
 use common::TempDir;
 use gantry_worker::claude_cli::PINNED_CLAUDE_VERSION;
-use gantry_worker::selftest::{run_checks, scan_setid, Check, Probe, SetidScan};
+#[cfg(unix)]
+use gantry_worker::selftest::scan_setid;
+use gantry_worker::selftest::{run_checks, Check, Probe, SetidScan};
 use serde_json::Value;
 
 const SUCCESS: &str = include_str!("../fixtures/claude-stream-json/success.jsonl");
