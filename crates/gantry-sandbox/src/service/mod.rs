@@ -109,6 +109,15 @@ struct Slot {
 
 type PermitWaiter = oneshot::Sender<OwnedSemaphorePermit>;
 
+// 最低支持的 Rust 1.85 尚无 `try_update`；提高最低版本后改用 `try_update`。
+#[allow(deprecated)]
+fn take_debt(debt: &AtomicUsize) -> bool {
+    debt.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+        value.checked_sub(1)
+    })
+    .is_ok()
+}
+
 pub(crate) struct Inner<D> {
     deps: SandboxDeps<D>,
     config: SandboxConfig,
@@ -127,18 +136,9 @@ pub(crate) struct Inner<D> {
 }
 
 impl<D> Inner<D> {
-    /// 欠账减一；没有欠账时返回 `false`。
-    fn take_debt(&self) -> bool {
-        self.debt
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |debt| {
-                debt.checked_sub(1)
-            })
-            .is_ok()
-    }
-
     /// 没拿到许可的恢复容器结束：欠账还没还就销账，已经由分派任务拿许可还过就把那个许可还回去。
     pub(crate) fn settle_overdraft(&self) {
-        if !self.take_debt() {
+        if !take_debt(&self.debt) {
             self.permits.add_permits(1);
         }
     }
@@ -173,10 +173,7 @@ impl<D> Inner<D> {
                             },
                         };
                         // 先还恢复时的欠账：这个许可代表一个早已在跑的容器。
-                        if inner_debt
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |d| d.checked_sub(1))
-                            .is_ok()
-                        {
+                        if take_debt(&inner_debt) {
                             permit.forget();
                             continue;
                         }
