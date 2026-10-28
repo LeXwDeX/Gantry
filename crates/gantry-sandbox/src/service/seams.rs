@@ -1,7 +1,7 @@
-//! 尚无契约端口的依赖：CAS 与结构化输出 schema 注册表（契约缺口 1、6，见 #95 评论）。
+//! sandbox 内部的 CAS 与结构化输出 schema 接缝。
 //!
 //! 这两个接口只在 sandbox 内部使用，不进 `core::ports`。CAS 可使用 `Store::cas()`；
-//! schema 注册表仍待 core 交付。内存实现只供测试。
+//! 生产 schema 适配器使用 core 内置查询；内存实现供测试注入。
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -58,6 +58,16 @@ pub trait OutputSchemas: Send + Sync {
     fn get(&self, id: &str) -> Option<Vec<u8>>;
 }
 
+/// 委托 core 内置查询的生产 schema 适配器。
+#[derive(Default)]
+pub struct BuiltinSchemas;
+
+impl OutputSchemas for BuiltinSchemas {
+    fn get(&self, id: &str) -> Option<Vec<u8>> {
+        gantry_core::worker::output_schema(id).map(<[u8]>::to_vec)
+    }
+}
+
 /// 内存 CAS。
 #[derive(Default)]
 pub struct MemoryArtifacts {
@@ -108,7 +118,7 @@ impl ArtifactStore for MemoryArtifacts {
     }
 }
 
-/// 固定的 schema 表。
+/// 测试注入用的固定 schema 表。
 #[derive(Default)]
 pub struct StaticSchemas(pub BTreeMap<String, Vec<u8>>);
 

@@ -141,6 +141,20 @@ fn defaults_map_same_revision_and_real_schema() {
     assert_eq!(runtime.poll_interval, DEFAULT_POLL_INTERVAL);
     assert_eq!(runtime.cleanup_lease, DEFAULT_CLEANUP_LEASE);
     let role = &runtime.runner.roles[&Role::Single];
+    let builtin = gantry_core::worker::output_schema("gantry.worker.output.build/1").unwrap();
+    assert_eq!(builtin, BUILD_SCHEMA);
+    let queried = s
+        .build_with(7, project(), ModelTable::new(), builtin)
+        .unwrap();
+    assert_eq!(
+        queried.runner.roles[&Role::Single].structured_schema,
+        role.structured_schema
+    );
+    assert_eq!(role.structured_schema.id, "gantry.worker.output.build/1");
+    assert_eq!(
+        role.structured_schema.path,
+        "/gantry/inputs/output.schema.json"
+    );
     assert_eq!(role.structured_schema.sha256, sha256(BUILD_SCHEMA));
     assert_ne!(role.structured_schema.sha256, sha256(b"build-schema"));
     assert_eq!(role.patch, PatchMode::Optional);
