@@ -967,6 +967,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         let outcome = JobOutcome {
             job_id: self.meta.job_id,
             sandbox_id: self.meta.sandbox_id,
+            job_sha256: None, // 可信摘要链路尚未接线。
             partial: terminal.cause != TerminalCause::Exited,
             terminal,
             files,
@@ -1050,6 +1051,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         Ok(JobOutcome {
             job_id: self.meta.job_id,
             sandbox_id: self.meta.sandbox_id,
+            job_sha256: None, // 可信摘要链路尚未接线。
             terminal: TerminalFacts {
                 cause: TerminalCause::KilledCancel,
                 exit_code: None,

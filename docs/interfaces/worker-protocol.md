@@ -127,7 +127,7 @@ sequenceDiagram
   E->>E: 分类，写 attempt.finished
 ```
 
-要点：`destroy` 在 `collect` 之后立刻执行，**校验发生在沙盒之外**；校验失败不需要保留沙盒。
+要点：一般情况下 `destroy` 在 `collect` 之后执行，**校验发生在沙盒之外**；任务身份拒绝依据的保留例外见 [§14](#job-identity)。
 
 ### 3.2 阶段
 
@@ -187,7 +187,7 @@ worker 不需要区分 SIGTERM 的原因：原因只由管理器记录。取消�
 
 | 场景 | 处理 |
 | --- | --- |
-| `gantryd` 重启 | 沙盒带标签 `gantry.job_id`、`gantry.sandbox_id`。对每个没有 `attempt.finished` 的 Attempt 查运行时：仍在运行 → 重新接管日志（用 `seq` 去重）；已退出 → 直接 `collect`；受理后已不存在 → 终结为 `infra_error`（`infra.lost`），Sandbox `lost`；从未被受理（`submit` 返回前崩溃）→ 重新 `submit`，不计为失败（sandbox.md §6.1 `RecoveredJob`） |
+| `gantryd` 重启 | 沙盒带标签 `gantry.job_id`、`gantry.sandbox_id`。对每个没有 `attempt.finished` 的 Attempt 查运行时；普通运行、退出、丢失和从未受理按 sandbox.md §6.1 处理。身份不可验证时不得按普通丢失或从未受理重试，见 [§14](#job-identity) |
 | 提取幂等 | `collect` 的结果只取决于已停止沙盒的 `out/`，重复执行得到相同的内容寻址对象 |
 | 补丁提交幂等 | 校验得到的 `result_tree`（git tree OID）写入 `attempt.finished`；重放时先查该事件，已存在则不重复提交 |
 | 孤儿沙盒 | 巡检按标签找出没有对应未终结 Attempt 的沙盒并销毁 |
@@ -494,7 +494,7 @@ worker 只能写 `/gantry/out/` 下这四个文件名（精确匹配、区分大
 | `agent` | object | 是 | 实际用的 CLI 与版本、模型名 |
 | `started_at`、`ended_at` | time | 是 | 自报，仅展示 |
 
-服务端把 `result.json`、各产物、采集的 stdout / stderr 尾部、运行时事实、`egress` 计量、校验结论组成 `ResultBundle`，存为内容寻址对象；`Attempt.result_ref` 指向其清单哈希。该对象库的位置、备份、保留期见 OQ-12。清单**由服务端生成**（不是 worker 写的）：`sandbox` 交原料（`JobOutcome`），`engine` 组装清单，经 `core::jcs` 规范化后入 CAS。形状已在 #84 拍板，Rust 类型是 `gantry_core::worker::ResultBundle`，schema 是 `schemas/worker/result-bundle.schema.json`：
+服务端在有可信任务摘要时把 `result.json`、各产物、采集的 stdout / stderr 尾部、运行时事实、`egress` 计量、校验结论组成 `ResultBundle`；缺摘要不构造清单，见 [§14](#job-identity)。`Attempt.result_ref` 指向清单哈希。对象库的位置、备份、保留期见 OQ-12。清单**由服务端生成**（不是 worker 写的）：`sandbox` 交原料（`JobOutcome`），`engine` 组装清单，经 `core::jcs` 规范化后入 CAS。形状已在 #84 拍板，Rust 类型是 `gantry_core::worker::ResultBundle`，schema 是 `schemas/worker/result-bundle.schema.json`：
 
 ```json
 {
@@ -1228,3 +1228,52 @@ claude -p \
 ## 13. 事件 data 契约
 
 13 个事件 data 的字段见 [event-data.md](event-data.md)（已批准（2026-10-27，用户统一批准））。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地的仍按 fail-closed 拒绝；本文其余语义不变。
+
+<a id="job-identity"></a>
+## 14. 任务身份与恢复（D-21，#362）
+
+**状态**：本节冻结公共端口与目标行为。摘要传递、恢复、终结和放行的完整行为尚待独立实现；当前编译适配不证明这些规则已生效。本节对身份不可验证的例外优先于 §3、§5、§8、§9 的普通流程。
+
+### 14.1 可信摘要
+
+`stage` 对最终写入的 `job.json` 原始字节计算摘要。管理器把返回的摘要与 `Staged` 相位一起持久保存到可信服务端 `meta.json`，成功后才调用 `driver.start`；保存失败不得启动。恢复已有执行时只能读取先前保存的可信摘要；证明从未启动而重新准备时，新 stage 返回的新摘要按同一规则保存。不得从 worker 声明、`MANIFEST.json`、派发前 `JobSpec`、ID 哈希或恢复时重算旧 `job.json` 补证。
+
+`JobOutcome.job_sha256: Option<Sha256Digest>` 的 `Some` 只能来自上述链路；`None` 表示没有可信摘要，也包括正常启动前取消。`ResultBundle.job_sha256` 仍必填；有摘要时 V3 比对 worker 声明，新 bundle 使用服务端摘要；没有摘要时不构造 bundle，`result_ref = None`。历史日志和已完成 bundle 不改、不补证；旧 bundle 或 `result_ref` 的存在不是追溯可信证明，处理未完成旧任务不撤销历史结果。
+
+### 14.2 元数据与恢复
+
+| 可信元数据 | 相位 / 运行事实 | 处理 |
+| --- | --- | --- |
+| 新记录，摘要显式 `null` | `Accepted` 或确定未启动的准备阶段 | `Accepted` 不要求已有恢复参数；可按正常准备路径继续，或按下文准备重入例外重新准备。启动前取消仍为取消，恢复 `Destroyed` 不得变成 `Lost` 后自动重试 |
+| 有效摘要 | `Staged` 或之后，且身份、相位与运行事实一致 | 已有进程只接管或收尾，沿用已保存摘要；能确认从未启动时可重新准备并保存新的 staging 摘要后启动一次，不得重复执行 worker |
+| 旧记录，摘要字段缺失 | 任意准备阶段，包括 `Staged` | 不自动启动或重新提交；不能把旧记录保存成显式 `null` 并当新任务 |
+| 旧记录，摘要字段缺失 | 身份和参数可信，已有运行中或已退出进程 | 只监督既有进程并保留真实终止事实与可信最终计量；计量未就绪时继续拒绝收尾。返回 outcome 时摘要为 `None`，不执行 V5 / V6，不生成 bundle |
+| 摘要非法、元数据损坏、身份 / 归属错配或相位与事实组合不可能 | 有受理迹象 | 拒绝，不当作从未受理；不能自动启动或重提 |
+| 没有任何受理痕迹 | 从未受理 | `Unknown`，可按既有规则重新提交 |
+
+三态必须区分旧字段缺失、新记录显式 `null`、有效摘要；旧记录经过相位保存后仍须保留缺字段的语义。**准备重入例外**：新格式记录的摘要为显式 `null` 或有效值，且相位与运行时事实共同证明从未启动时，sandbox 可安全清理准备残留并持久记录新 `Accepted`，返回 `Unknown`；engine 以相同 `job_id` / `sandbox_id` 重新 `submit` 完整 `SandboxSpec`。这是已受理但未执行的准备重入，不是旧任务恢复计算；重新 stage 后须先保存新的摘要再启动一次。新 `Accepted` 没有完整恢复参数时也走此例外，不持久化整个 `SandboxSpec` 或秘密。不能仅凭当前容器不存在证明从未启动；旧字段缺失、损坏、归属错配或 `Starting` 的执行情况不明均不能走此例外，启动前取消优先按取消收尾。
+
+`recover` 按输入顺序逐 job 返回，单个不可验证任务不得中断整批；不可验证 job 不得返回可导致重提 / 自动重试的 `Unknown` 或 `Lost`。现有 `Running` 包括拒绝收尾正在推进，`Exited` 包括 `wait` 稳定返回 outcome 或 `JobIdentityUnavailable`，不新增恢复变体。
+
+### 14.3 分类、终结和清理
+
+有可靠 outcome 但无摘要时，先按 V1 和 §9 保留取消、超时、OOM、预算等真实分类；禁止自动重试是独立于 `failure_detail` 的决定，不得改其他子码掩盖。正常启动前取消按既有取消语义处理。新记录有可信摘要而 worker 声明不符是 `exec.protocol`，可按正常规则重试。
+
+没有可靠 outcome 且计量可交付时，`wait` 返回稳定终态 `SandboxError::JobIdentityUnavailable { message, usage }`。`usage` 复用 Egress `FinalUsage`，不是 worker 自报；`Some` 必须 job_id 匹配当前尝试、吊销已确认且 `incomplete = false`。`None` **仅**允许服务端可信事实证明 worker 从未启动且没有签发 job token，此时没有需结算的用量；这收紧并取代此前 `None` 表示无法获取的提案。Egress 暂不可达或 `NotFound` 不证明零用量。
+
+若曾运行或可能运行，或者已签发令牌，尚未取得可信完整计量或确认吊销，仍处于拒绝收尾：`recover` 返回 `Running`，`wait` 尚不产生公开终态；保留拒绝记录并输出可定位诊断。`incomplete = true` 同样阻断结算、公开终态和遗忘，不把用量下界当作完整用量；已停止的容器可销毁并释放计算槽位，不必占用槽位等待计量。停止、吊销、取计量只做有界单次调用并退避重试，绝不重新 `start`；服务崩溃后继续收尾。始终无法取得完整计量时保持可诊断阻断，需运维修复来源，不补零结束，不承诺自动恢复。缺摘要旧任务的 outcome 路径遵守同样条件。普通非身份错误的计量语义不在本规则重构范围。
+
+未来 runner 必须专门拦截稳定错误并形成 failed、`infra_error` / `infra.job_identity_unavailable`、明确 `Never` 重试的 `Finalized`；必须终结 attempt 和 node，并用现有 `escalation(attempt_failed)` 诊断携带 node / attempt，不扩展上报原因词表。当前 `Defect` 编译映射只走可能不终结的 `EffectFailed`，不满足此要求。
+
+缺摘要的已受理旧任务可在引擎内部 `Finalized` 携带独立 `retry_blocked` 原因。`on_finalized` 同事务结算已交付的最终计量并落 `attempt.finished`、`node.finished` 与诊断，提交后释放沙盒和写锁；无需迟到结算系统或可空的 `Finalized` 用量字段。崩溃重放、重试定时器均不得重跑 worker；预算失败没有可信 bundle / `result_ref` 时，`raise_cap` 不自动重排，显式 `RetryNode` 才按原权限处理。不得把已有 `result_ref` 当作历史可信证明。
+
+拒绝依据在引擎终结落库前不得由 `cleanup_failed` 删除；停止、吊销、删除允许重试，失败时保留可重放记录，但不得重跑 worker。`forget_job` 必须在吊销确认、最终计量随终态交给 engine、engine 提交结算与终结且提交后请求 `release` 之后；从未签发令牌的例外无 job 可遗忘。本契约只要求进程崩溃恢复，不承诺父目录 `fsync` 或掉电保障。
+
+### 14.4 后续实现验收
+
+- 最终 `job.json` 字节、已持久化摘要、outcome 与新 bundle 的摘要一致；改变 nonce 或材料后仍一致。保存失败时启动次数为零；启动前后进程崩溃恢复不重复执行。
+- 正确摘要通过；worker 声明错误时 V3 失败且 bundle 仍使用服务端摘要。覆盖 V1 优先级与禁止重试独立判断；替身分别注入可信摘要和 worker 声明，包括两者不一致。
+- 覆盖旧字段缺失的各准备 / 已运行 / 已停止 / 失败相位、相位保存后仍缺字段、非法摘要、损坏元数据、归属错配及不可能组合；断言不重新提交或启动、不执行 V5 / V6、不生成虚假 bundle，诊断能定位 node / attempt，其他 job 恢复不受影响。
+- 新 `Accepted` 无恢复参数、显式 `null` 或有效摘要且确定未启动的准备阶段，验证清理残留、持久 `Accepted`、返回 `Unknown`，引擎用相同 ID 重提交完整 spec，重 stage 并保存新摘要后仅启动一次；单凭容器不存在、旧记录缺字段、损坏、错配及 `Starting` 状态不明均不得重提。启动前取消及 `Destroyed` 取消恢复各有正例。
+- Egress 不可达、`NotFound`、吊销失败、job_id 错配或 `incomplete = true` 均不能产生公开终态、结算、遗忘或补零，重启后继续有界调用与退避；确认吊销且取得匹配、完整计量后才交付。仅可信证明从未启动且未签发令牌时错误可带 `None`。覆盖缺摘要旧 outcome 的同样边界，并验证等待计量不占已销毁容器的计算槽位。
+- 在终结提交和清理前后崩溃重放，验证不会重跑 worker；最终计量交付、引擎同事务结算并终结、提交后请求 `release` 之前不得 `forget_job`；`raise_cap` 不绕过阻断，显式重试仍按原权限。历史 bundle 字节和引用不变。以上是实现验收条件，不是本契约切片已通过的测试。

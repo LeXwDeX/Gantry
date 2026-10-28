@@ -211,6 +211,7 @@ impl FakeSandboxService {
         JobOutcome {
             job_id,
             sandbox_id,
+            job_sha256: None, // 可信摘要链路尚未接线。
             terminal: TerminalFacts {
                 cause: TerminalCause::Exited,
                 exit_code: Some(0),
