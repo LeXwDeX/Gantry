@@ -1140,6 +1140,7 @@ dependencies = [
  "gantry-notify",
  "gantry-policy",
  "gantry-repo",
+ "gantry-sandbox",
  "gantry-store",
  "getrandom 0.3.4",
  "p256",
