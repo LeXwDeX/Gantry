@@ -1,7 +1,8 @@
-//! 本地 GitRepo + SQLite 联测；没有生产装配、网络或沙盒。
+//! 本地 GitRepo + SQLite 联测；无生产装配或外网，Egress 替身监听本地回环。
 #![cfg(unix)]
 
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::collections::BTreeMap;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -13,13 +14,22 @@ mod engine_cfg;
 
 use gantry_core::canon::{sha256, GitOid, RepoSlug};
 use gantry_core::entities::{Actor, ActorKind, LockHolder, Seq};
+use gantry_core::entities::{SandboxLimits, SandboxTrust, TokenWeights};
 use gantry_core::events::{EventType, NewEvent, PatchRejectedData, PatchValidatedData, Subject};
 use gantry_core::ids::IdGen;
+use gantry_core::ports::sandbox::{
+    ArtifactName, EgressRequest, ExecSpec, GroupName, ProfileName, SandboxService, SandboxSpec,
+    TerminalCause, Timers, TokenEnvSpec, WorkspaceMode, WorkspaceRequest,
+};
 use gantry_core::ports::{
     ActorCtx, BranchName, CommitMessage, CommitPatch, CreateWorktree, DeclaredPatch, PatchOutcome,
     RepoError, RepoService, RevSpec, ValidatePatch,
 };
+use gantry_core::settings::resource::{
+    ArtifactIo, MaterialIo, ProgressIo, SandboxDriver, SandboxIo,
+};
 use gantry_core::time::Timestamp;
+use gantry_core::worker::JobSpec;
 use gantry_core::worker::{PatchRejectReason, PatchVerdict, PathConstraints};
 use gantry_core::{
     entities::DeliveryOrigin,
@@ -34,11 +44,16 @@ use gantry_engine::{
     engine::{load_delivery_state, Engine},
     PortEffects,
 };
+use gantry_fakes::egress::EgressStub;
 use gantry_fakes::policy::FakePolicy;
 use gantry_fakes::{
     forge::FakeForge, inbox::FakeInbox, sandbox::FakeSandboxService, worker::StubWorkerAdapter,
 };
 use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
+use gantry_sandbox::fake::{FakeDriver, FakeOutEntry, FakeScript};
+use gantry_sandbox::service::seams::StaticSchemas;
+use gantry_sandbox::service::{SandboxConfig, SandboxDeps, SandboxManager};
+use gantry_sandbox::spec::{NetworkAttach, Runtime};
 use gantry_store::testing::{FakeClock, SeqEntropy};
 use gantry_store::{EventFilter, Store, StoreConfig, StoreDeps, TypePattern};
 use serde_json::json;
@@ -83,10 +98,36 @@ impl Drop for TempDir {
                 && !metadata.file_type().is_symlink()
                 && (metadata.dev(), metadata.ino()) == (self.dev, self.ino)
             {
-                std::fs::remove_dir_all(&self.path).expect("remove owned test directory");
+                gantry_sandbox::stage::unseal(&self.path.join("sandboxes"));
+                if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                    if std::thread::panicking() {
+                        eprintln!(
+                            "failed to remove owned test directory {:?}: {error}",
+                            self.path
+                        );
+                    } else {
+                        panic!("remove owned test directory {:?}: {error}", self.path);
+                    }
+                }
             }
         }
     }
+}
+
+#[test]
+fn temp_dir_cleans_sealed_sandbox_during_unwind() {
+    let tmp = TempDir::new();
+    let path = tmp.path.clone();
+    let inputs = path.join("sandboxes/job/inputs");
+    std::fs::create_dir_all(&inputs).unwrap();
+    std::fs::write(inputs.join("job.json"), b"fixture").unwrap();
+    std::fs::set_permissions(&inputs, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let result = std::panic::catch_unwind(move || {
+        let _tmp = tmp;
+        panic!("exercise cleanup during unwind");
+    });
+    assert!(result.is_err());
+    assert!(!path.exists());
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -176,6 +217,308 @@ async fn open_repo(store: &Store, dir: &Path, clock: Arc<FakeClock>, ids: Arc<Id
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn sandbox_artifact_reaches_real_repo_through_sqlite_cas() {
+    let tmp = TempDir::new();
+    let clock = Arc::new(FakeClock::new(1_800_000_000_000));
+    let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
+    let store = Store::open(
+        StoreConfig::new(tmp.path.join("sqlite")),
+        StoreDeps {
+            clock: clock.clone(),
+            ids: ids.clone(),
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    let repo = Arc::new(open_repo(&store, &tmp.path, clock.clone(), ids.clone()).await);
+    let ctx = context(&ids);
+    let project = ids.next().unwrap();
+    let delivery = ids.next().unwrap();
+    let job_id = ids.next().unwrap();
+    let sandbox_id = ids.next().unwrap();
+    let slug = RepoSlug::parse("fixture/local").unwrap();
+    repo.ensure_mirror(&ctx, &project, &slug).await.unwrap();
+    let mirror = tmp.path.join("repo/mirrors/fixture/local.git");
+    let upstream = tmp.path.join("upstream");
+    std::fs::create_dir(&upstream).unwrap();
+    git(
+        &upstream,
+        &["init", "-q", "-b", "main", "--template=/dev/null"],
+    );
+    std::fs::write(upstream.join("README.md"), "hello\n").unwrap();
+    git(&upstream, &["add", "README.md"]);
+    git(&upstream, &["commit", "-q", "-m", "fixture base"]);
+    let base = GitOid::parse(git(&upstream, &["rev-parse", "HEAD"]).trim()).unwrap();
+    git(
+        &upstream,
+        &[
+            "push",
+            "-q",
+            mirror.to_str().unwrap(),
+            "HEAD:refs/mirror/heads/main",
+        ],
+    );
+    let wt = repo
+        .create_worktree(
+            &ctx,
+            CreateWorktree {
+                project_id: project,
+                delivery_id: delivery,
+                branch: BranchName::new("gantry/fixture"),
+                base_ref: "main".into(),
+                base_sha: base,
+            },
+        )
+        .await
+        .unwrap();
+    let lock = repo
+        .acquire_lock(
+            &ctx,
+            &wt.id,
+            LockHolder::Engine,
+            &delivery,
+            Duration::from_secs(900),
+        )
+        .await
+        .unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    let rev = tx.read().config_rev(None);
+    tx.append(NewEvent {
+        ty: EventType::SettingsUpdated, subject: Subject::parse("settings").unwrap(), project_id: None,
+        actor: Actor::new(ActorKind::User, "test"), causation_id: None, correlation_id: None,
+        data: json!({"scope":"global", "resource":"github", "schema_version":1,
+            "base_rev":rev.as_u64(), "value":{"commit_identity":{"name":"Fixture Bot","email":"bot@example.invalid"}},
+            "relaxes":[], "secret_changes":[]}), dedup_key: None,
+    }).await.unwrap();
+    tx.commit().await.unwrap();
+
+    std::fs::write(upstream.join("README.md"), "hello\nworld\n").unwrap();
+    git(&upstream, &["add", "README.md"]);
+    let patch = git(
+        &upstream,
+        &["diff", "--cached", "--full-index", "--no-renames", "HEAD"],
+    );
+    let tree = GitOid::parse(git(&upstream, &["write-tree"]).trim()).unwrap();
+
+    const SCHEMA: &[u8] = br#"{"type":"object"}"#;
+    let mut job: JobSpec = serde_json::from_str(include_str!(
+        "../../gantry-core/fixtures/protocol/worker/job_spec.json"
+    ))
+    .unwrap();
+    job.job_id = job_id;
+    job.project_id = project;
+    job.delivery_id = delivery;
+    job.workspace.repo = slug.clone();
+    job.workspace.base_sha = base;
+    job.output.structured_schema.sha256 = sha256(SCHEMA);
+    job.materials.clear();
+    job.upstream.clear();
+    job.constraints.paths = PathConstraints {
+        allow: vec!["**".into()],
+        deny: vec![],
+        approval_required: vec![],
+    };
+    let schemas = BTreeMap::from([(job.output.structured_schema.id.clone(), SCHEMA.to_vec())]);
+    let paths = job.constraints.paths.clone();
+    let workspace_dir = tmp.path.join("sandboxes");
+    std::fs::create_dir(&workspace_dir).unwrap();
+    let driver = Arc::new(FakeDriver::new(&workspace_dir));
+    driver.script(
+        sandbox_id,
+        FakeScript {
+            out: vec![(
+                "changes.patch".into(),
+                FakeOutEntry::File(patch.as_bytes().to_vec()),
+            )],
+            ..FakeScript::default()
+        },
+    );
+    // 固定测试 schema 不是生产注册表（#319）；本切片也不执行引擎结果校验。
+    let sandbox = SandboxManager::new(
+        SandboxDeps {
+            driver: driver.clone(),
+            repo: repo.clone(),
+            egress: Arc::new(EgressStub::with_default_config()),
+            store: store.clone(),
+            clock: clock.clone(),
+            artifacts: Arc::new(store.cas()),
+            schemas: Arc::new(StaticSchemas(schemas)),
+        },
+        SandboxConfig {
+            workspaces_dir: workspace_dir.clone(),
+            runtime: Runtime::Runc,
+            max_concurrent_sandboxes: 1,
+            network: NetworkAttach {
+                network: "gantry-sbx".into(),
+                add_hosts: Vec::new(),
+            },
+            log_max_bytes: 16 << 20,
+            out_quota_bytes: 12 << 20,
+            tmpfs_home_mb: 256,
+            tmpfs_tmp_mb: 512,
+            progress_sample: Duration::from_secs(1),
+            log_drain_timeout: Duration::from_secs(5),
+            orphan_grace: Duration::ZERO,
+        },
+    );
+    let spec = SandboxSpec {
+        job_id,
+        sandbox_id,
+        project_id: project,
+        delivery_id: Some(delivery),
+        conversation_id: None,
+        workspace: WorkspaceRequest {
+            repo: slug,
+            base_sha: base,
+            pr_base_sha: None,
+            mode: WorkspaceMode::Rw,
+        },
+        job,
+        raw_materials: Vec::new(),
+        upstream: Vec::new(),
+        exec: ExecSpec {
+            image_digest: sha256(b"worker-image"),
+            argv: vec!["gantry-worker".into(), "run".into()],
+            env: BTreeMap::from([
+                ("HOME".into(), "/gantry/home".into()),
+                ("ANTHROPIC_API_KEY".into(), "gantry-egress-managed".into()),
+            ]),
+            token_env: TokenEnvSpec {
+                model_base_url: BTreeMap::from([("anthropic".into(), "ANTHROPIC_BASE_URL".into())]),
+                proxy: vec!["HTTPS_PROXY".into()],
+            },
+        },
+        driver: SandboxDriver::Podman,
+        trust: SandboxTrust::Untrusted,
+        limits: SandboxLimits {
+            cpu_cores: 1.0,
+            mem_mb: 512,
+            disk_mb: 512,
+            pids: 64,
+            wall_time_s: 600,
+        },
+        timers: Timers {
+            idle_timeout_s: 120,
+            kill_grace_s: 10,
+        },
+        io: SandboxIo {
+            progress: ProgressIo {
+                max_line_bytes: 8192,
+                max_lines: 20_000,
+                max_rate_per_s: 20,
+            },
+            artifacts: ArtifactIo {
+                result_max_bytes: 1 << 20,
+                report_max_bytes: 1 << 18,
+                proposals_max_bytes: 1 << 18,
+                proposals_max_count: 20,
+            },
+            materials: MaterialIo {
+                max_item_bytes: 64 * 1024,
+                max_total_bytes: 512 * 1024,
+            },
+            logs_tail_bytes: 1 << 20,
+        },
+        egress: EgressRequest {
+            profile: ProfileName::new("default"),
+            groups: vec![GroupName::new("model_api")],
+            tokens_total: 100_000,
+            weights: TokenWeights::default(),
+        },
+        config_rev: Seq::from_wire(7).unwrap(),
+    };
+    sandbox.submit(&ctx, spec).await.unwrap();
+    let outcome = sandbox.wait(&job_id).await.unwrap();
+    assert_eq!((outcome.job_id, outcome.sandbox_id), (job_id, sandbox_id));
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert_eq!(outcome.terminal.exit_code, Some(0));
+    assert!(!outcome.partial && outcome.unexpected.is_empty());
+    assert_eq!(outcome.files.len(), 1);
+    let artifact = &outcome.files[&ArtifactName::new("changes.patch")];
+    assert_eq!(
+        (artifact.sha256, artifact.bytes),
+        (sha256(patch.as_bytes()), patch.len() as u64)
+    );
+    let stat = store.cas().stat(&artifact.sha256).await.unwrap().unwrap();
+    assert_eq!(
+        (stat.kind, stat.bytes, stat.quarantined),
+        (gantry_store::CasKind::Artifact, artifact.bytes, false)
+    );
+    assert_eq!(
+        store
+            .cas()
+            .get_bytes(&artifact.sha256, patch.len())
+            .await
+            .unwrap()
+            .unwrap(),
+        patch.as_bytes()
+    );
+    let digest = artifact.sha256;
+    let validated = repo
+        .validate_patch(
+            &ctx,
+            ValidatePatch {
+                project_id: project,
+                delivery_id: delivery,
+                job_id,
+                worktree_id: Some(wt.id),
+                base_sha: base,
+                patch: digest,
+                declared: DeclaredPatch {
+                    sha256: digest,
+                    bytes: artifact.bytes,
+                    base_sha: base,
+                    files_changed: 1,
+                },
+                job_paths: paths,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(validated, PatchOutcome::Validated(p) if p.verdict == PatchVerdict::Allow && p.result_tree == Some(tree) && p.sha256 == digest)
+    );
+    let record = repo
+        .commit_patch(
+            &ctx,
+            CommitPatch {
+                project_id: project,
+                job_id,
+                worktree_id: wt.id,
+                lock: lock.clone(),
+                approval: None,
+                message: CommitMessage {
+                    subject: "fixture patch".into(),
+                    body: String::new(),
+                },
+                timestamp: Timestamp::from_millis(1_800_000_000_000),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            record.parent,
+            record.tree_oid,
+            record.patch_sha256,
+            record.job_id,
+            record.worktree_id
+        ),
+        (base, tree, digest, job_id, wt.id)
+    );
+    assert_eq!(repo.branch_head(&wt.id).await.unwrap(), record.commit_oid);
+    sandbox.release(&ctx, &job_id).await.unwrap();
+    repo.release_lock(&ctx, &lock).await.unwrap();
+    assert_eq!(driver.container_count(), 0);
+    assert_eq!(
+        driver.reads(),
+        vec![workspace_dir.join(sandbox_id.to_string()).join("out")]
+    );
+    assert!(!workspace_dir.join(sandbox_id.to_string()).exists());
 }
 
 #[tokio::test]
