@@ -52,19 +52,27 @@ impl UnixControlClient {
             timeout: Duration::from_secs(30),
         }
     }
-}
 
-#[cfg(unix)]
-impl ControlClient for UnixControlClient {
-    fn call(&self, cmd: &str, args: Value) -> Result<Value, ControlError> {
+    fn exchange(
+        &self,
+        mut stream: UnixStream,
+        cmd: &str,
+        args: Value,
+    ) -> Result<Value, ControlError> {
         let unavailable = |error: std::io::Error| ControlError::Unavailable {
             path: self.path.display().to_string(),
             message: error.to_string(),
         };
-        let mut stream = UnixStream::connect(&self.path).map_err(unavailable)?;
-        stream
-            .set_read_timeout(Some(self.timeout))
-            .map_err(unavailable)?;
+        if let Err(error) = stream.set_read_timeout(Some(self.timeout)) {
+            let recover =
+                !self.timeout.is_zero() && error.kind() == std::io::ErrorKind::InvalidInput;
+            let original = unavailable(error);
+            return if recover {
+                Self::early_denial(&stream, original)
+            } else {
+                Err(original)
+            };
+        }
         let mut line = json!({ "cmd": cmd, "args": args }).to_string();
         line.push('\n');
         // 对端 uid 不符时，服务端在连接建立后先写一行 `forbidden` 再断开；此时写请求可能
@@ -79,6 +87,36 @@ impl ControlClient for UnixControlClient {
             (Ok(()), Ok(_)) => Err(ControlError::Protocol("连接在应答前关闭".into())),
             (Ok(()), Err(error)) => Err(ControlError::Protocol(error.to_string())),
         }
+    }
+
+    fn early_denial(stream: &UnixStream, original: ControlError) -> Result<Value, ControlError> {
+        if stream.set_nonblocking(true).is_ok() {
+            let mut reply = String::new();
+            let read = BufReader::new(std::io::Read::take(stream, MAX_RESPONSE_BYTES))
+                .read_line(&mut reply);
+            // take 的上限或非阻塞读取都可能在换行前结束，不能把前缀当作完整应答。
+            if read.is_ok() && reply.ends_with('\n') {
+                if let Err(error) = parse_response(&reply) {
+                    if matches!(&error, ControlError::Rejected { code, .. } if code == "forbidden")
+                    {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Err(original)
+    }
+}
+
+#[cfg(unix)]
+impl ControlClient for UnixControlClient {
+    fn call(&self, cmd: &str, args: Value) -> Result<Value, ControlError> {
+        let stream =
+            UnixStream::connect(&self.path).map_err(|error| ControlError::Unavailable {
+                path: self.path.display().to_string(),
+                message: error.to_string(),
+            })?;
+        self.exchange(stream, cmd, args)
     }
 }
 
@@ -102,5 +140,120 @@ pub fn parse_response(line: &str) -> Result<Value, ControlError> {
             })
         }
         None => Err(ControlError::Protocol("缺少 ok 字段".into())),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    const FORBIDDEN: &[u8] =
+        b"{\"ok\":false,\"error\":{\"code\":\"forbidden\",\"message\":\"root only\"}}\n";
+
+    fn original() -> ControlError {
+        ControlError::Unavailable {
+            path: "fixture.sock".into(),
+            message: "original timeout error".into(),
+        }
+    }
+
+    #[test]
+    fn closed_peer_with_forbidden_reply_is_reported() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(FORBIDDEN).unwrap();
+        drop(peer);
+        let result = UnixControlClient::new("fixture.sock").exchange(stream, "status", Value::Null);
+        assert_eq!(
+            result,
+            Err(ControlError::Rejected {
+                code: "forbidden".into(),
+                message: "root only".into()
+            })
+        );
+    }
+
+    #[test]
+    fn zero_timeout_keeps_error_even_with_forbidden_reply() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(FORBIDDEN).unwrap();
+        let mut client = UnixControlClient::new("fixture.sock");
+        client.timeout = Duration::ZERO;
+        assert!(matches!(
+            client.exchange(stream, "status", Value::Null),
+            Err(ControlError::Unavailable { .. })
+        ));
+        peer.set_nonblocking(true).unwrap();
+        let mut request = [0; 1];
+        assert_eq!(std::io::Read::read(&mut peer, &mut request).unwrap(), 0);
+    }
+
+    #[test]
+    fn early_denial_only_accepts_a_complete_forbidden_line() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b"{\"ok\":false",
+            &FORBIDDEN[..FORBIDDEN.len() - 1],
+            b"not json\n",
+            b"\xff\n",
+            b"{\"ok\":true}\n",
+            b"{\"ok\":false,\"error\":{\"code\":\"other\"}}\n",
+        ];
+        for input in cases {
+            let (stream, mut peer) = UnixStream::pair().unwrap();
+            peer.write_all(input).unwrap();
+            drop(peer);
+            assert_eq!(
+                UnixControlClient::early_denial(&stream, original()),
+                Err(original()),
+                "fixture: {input:?}"
+            );
+        }
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(FORBIDDEN).unwrap();
+        assert_eq!(
+            UnixControlClient::early_denial(&stream, original()),
+            Err(ControlError::Rejected {
+                code: "forbidden".into(),
+                message: "root only".into()
+            })
+        );
+        peer.set_nonblocking(true).unwrap();
+        let mut request = [0; 1];
+        assert_eq!(
+            std::io::Read::read(&mut peer, &mut request)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn early_denial_does_not_wait_for_an_open_peer() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        assert_eq!(
+            UnixControlClient::early_denial(&stream, original()),
+            Err(original())
+        );
+    }
+
+    #[test]
+    fn early_denial_rejects_an_over_limit_line() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let (ready, received) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            let mut input = FORBIDDEN[..FORBIDDEN.len() - 1].to_vec();
+            input.resize(MAX_RESPONSE_BYTES as usize, b' ');
+            input.push(b'\n');
+            peer.write_all(&input[..FORBIDDEN.len() - 1]).unwrap();
+            ready.send(()).unwrap();
+            let _ = peer.write_all(&input[FORBIDDEN.len() - 1..]);
+        });
+        received.recv().unwrap();
+        assert_eq!(
+            UnixControlClient::early_denial(&stream, original()),
+            Err(original())
+        );
+        drop(stream);
+        writer.join().unwrap();
     }
 }
