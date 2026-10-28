@@ -1,15 +1,21 @@
 //! sandbox.md §12.F：intake 的白名单、判型、大小与文本规则（方式 A 与方式 B）。
 
+#[cfg(unix)]
 use std::fs;
 use std::io::Cursor;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gantry_core::ports::sandbox::ArtifactName;
 use gantry_core::worker::PatchMode;
+#[cfg(unix)]
 use gantry_sandbox::intake::host::read_out_dir;
 use gantry_sandbox::intake::tar::read_out_tar;
-use gantry_sandbox::intake::{IntakePlan, IntakeResult, MAX_UNEXPECTED};
+#[cfg(unix)]
+use gantry_sandbox::intake::MAX_UNEXPECTED;
+use gantry_sandbox::intake::{IntakePlan, IntakeResult};
 
 const RESULT: &[u8] = br#"{"job_id":"att_x","status":"succeeded"}"#;
 
@@ -25,8 +31,10 @@ fn plan() -> IntakePlan {
 }
 
 /// 每个用例一个独立的临时目录（不依赖 tempfile crate）。
+#[cfg(unix)]
 struct TempDir(PathBuf);
 
+#[cfg(unix)]
 impl TempDir {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -49,6 +57,7 @@ impl TempDir {
     }
 }
 
+#[cfg(unix)]
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -67,6 +76,7 @@ fn has(result: &IntakeResult, name: &str) -> bool {
     result.files.contains_key(&ArtifactName::new(name))
 }
 
+#[cfg(unix)]
 fn mkfifo(path: &Path) {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -79,6 +89,7 @@ fn mkfifo(path: &Path) {
 // 方式 A：主机直读
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[test]
 fn host_accepts_the_four_whitelisted_files() {
     let dir = TempDir::new();
@@ -92,6 +103,7 @@ fn host_accepts_the_four_whitelisted_files() {
     assert_eq!(result.files[&ArtifactName::new("result.json")], RESULT);
 }
 
+#[cfg(unix)]
 #[test]
 fn host_discards_links_fifos_dirs_and_extra_files_without_blocking() {
     let dir = TempDir::new();
@@ -130,6 +142,7 @@ fn host_discards_links_fifos_dirs_and_extra_files_without_blocking() {
     assert_eq!(got, want);
 }
 
+#[cfg(unix)]
 #[test]
 fn host_out_dir_symlink_is_a_collect_failure() {
     let dir = TempDir::new();
@@ -142,6 +155,7 @@ fn host_out_dir_symlink_is_a_collect_failure() {
     assert!(read_out_dir(&dir.0.join("missing"), &plan()).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn host_size_boundary_uses_bytes_actually_read() {
     let dir = TempDir::new();
@@ -159,6 +173,7 @@ fn host_size_boundary_uses_bytes_actually_read() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn host_rejects_bad_text_and_json() {
     for (name, bytes, reason) in [
@@ -186,6 +201,7 @@ fn host_rejects_bad_text_and_json() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn forbidden_patch_is_discarded_but_others_kept() {
     let dir = TempDir::new();
@@ -203,6 +219,7 @@ fn forbidden_patch_is_discarded_but_others_kept() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn unexpected_names_are_sanitized_and_bounded() {
     let dir = TempDir::new();
@@ -219,6 +236,7 @@ fn unexpected_names_are_sanitized_and_bounded() {
     assert_eq!(result.unexpected.last().unwrap().reason, "too_many_entries");
 }
 
+#[cfg(unix)]
 #[test]
 fn repeated_collect_is_stable() {
     let dir = TempDir::new();
@@ -432,6 +450,7 @@ fn tar_truncated_or_corrupt_archives_are_malformed() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn both_modes_agree_on_the_same_content() {
     let dir = TempDir::new();
