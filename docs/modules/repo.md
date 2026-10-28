@@ -64,6 +64,8 @@
 
 `repo` **不**依赖 `forge`、`sandbox`、`engine`（architecture §4 依赖图：`repo → sandbox / forge / engine`）。反向地，`forge`、`engine`、`sandbox` 都经 `core::ports::RepoService` 使用本模块（`forge` 用 `ensure_mirror` / `mirror_access` / `commit_info` / `provenance`），见 §6.1。提交身份（机器人名 / 邮箱）取配置 `github.commit_identity`（P-69）。
 
+**当前实现**：`gantry_store::Cas` 实现了 `repo` 本地的 `PatchCas`，可由装配方注入同一 `Store` 的 CAS。读取上限、损坏和存储错误向调用方返回；隔离标记沿用 `store` 的粘性语义，隔离本身不禁止读取。`gantryd` 生产装配尚未接线（#105）；本地 Git 与 SQLite 联测使用该实现，不代表生产装配已完成。
+
 ## 4. 输入
 
 | 输入 | 来源 | 格式 / 契约 | 信任级别 |

@@ -1,9 +1,7 @@
 //! 本模块用到的内容寻址存储（CAS）接缝。
 //!
-//! CAS 归 `store`（store.md §6、OQ-R9），但 `store` 的 CAS 尚未落地（#88）。这里只
-//! 声明 `repo` 用到的两个方法，名字照搬 store.md §6 的 `Cas::get_bytes` / `put`；
-//! `store::Cas` 落地后为它实现本 trait 即可替换，不在这里实现 store 的其他逻辑。
-//! [`MemoryCas`] 是接线前与测试用的内存实现。
+//! CAS 归 `store`（store.md §6、OQ-R9）。本模块仅使用 `get_bytes` / `put`；
+//! `store::Cas` 实现此接缝，[`MemoryCas`] 供测试使用。
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -27,6 +25,25 @@ pub trait PatchCas: Send + Sync {
     async fn get_bytes(&self, digest: &CasRef, max: usize) -> Result<Option<Vec<u8>>, RepoError>;
     /// 写入并返回摘要；同一内容重复写入幂等，`Quarantine` 会把已有对象标为隔离。
     async fn put(&self, bytes: &[u8], kind: CasKind) -> Result<CasRef, RepoError>;
+}
+
+#[async_trait]
+impl PatchCas for gantry_store::Cas {
+    async fn get_bytes(&self, digest: &CasRef, max: usize) -> Result<Option<Vec<u8>>, RepoError> {
+        gantry_store::Cas::get_bytes(self, digest, max)
+            .await
+            .map_err(crate::store_error)
+    }
+
+    async fn put(&self, bytes: &[u8], kind: CasKind) -> Result<CasRef, RepoError> {
+        let kind = match kind {
+            CasKind::Artifact => gantry_store::CasKind::Artifact,
+            CasKind::Quarantine => gantry_store::CasKind::Quarantine,
+        };
+        gantry_store::Cas::put(self, bytes, kind)
+            .await
+            .map_err(crate::store_error)
+    }
 }
 
 #[derive(Debug, Default)]
