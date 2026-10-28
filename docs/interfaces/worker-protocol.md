@@ -1253,7 +1253,9 @@ claude -p \
 
 三态必须区分旧字段缺失、新记录显式 `null`、有效摘要；旧记录经过相位保存后仍须保留缺字段的语义。**准备重入例外**：新格式记录的摘要为显式 `null` 或有效值，且相位与运行时事实共同证明从未启动时，sandbox 可安全清理准备残留并持久记录新 `Accepted`，返回 `Unknown`；engine 以相同 `job_id` / `sandbox_id` 重新 `submit` 完整 `SandboxSpec`。这是已受理但未执行的准备重入，不是旧任务恢复计算；重新 stage 后须先保存新的摘要再启动一次。新 `Accepted` 没有完整恢复参数时也走此例外，不持久化整个 `SandboxSpec` 或秘密。不能仅凭当前容器不存在证明从未启动；旧字段缺失、损坏、归属错配或 `Starting` 的执行情况不明均不能走此例外，启动前取消优先按取消收尾。
 
-`recover` 按输入顺序逐 job 返回，单个不可验证任务不得中断整批；不可验证 job 不得返回可导致重提 / 自动重试的 `Unknown` 或 `Lost`。现有 `Running` 包括拒绝收尾正在推进，`Exited` 包括 `wait` 稳定返回 outcome 或 `JobIdentityUnavailable`，不新增恢复变体。
+**请求预验证（D-22）**：`recover` 在既有 `submit_lock` 内先纯验证整个输入批次及既有内存槽位：同一 `job_id` 必须绑定同一 `sandbox_id` 和 `project_id`，同一 `sandbox_id` 不得属于不同 `job_id`；这两项同时检查输入内部和已知槽位。三个身份字段完全相同的重复项幂等。任一绑定冲突返回请求级 `InvalidSpec`，在任何驱动、Egress、磁盘、槽位或许可副作用之前拒绝整批；合法项本次也不推进，调用方修正后重试。不得返回原槽位的 outcome 或计量，不得污染或取消原合法槽位。
+
+通过预验证后，`recover` 按输入顺序逐项返回；坏 `meta.json`、旧记录缺字段或持久身份错配等证据问题仍按本节逐 job 拒绝收尾，不得中断其他任务。不可验证 job 不得返回可导致重提 / 自动重试的 `Unknown` 或 `Lost`。现有 `Running` 包括拒绝收尾正在推进，`Exited` 包括 `wait` 稳定返回 outcome 或 `JobIdentityUnavailable`，不新增恢复变体。`wait`、`progress`、`cancel`、`release` 按 `job_id` 是可信引擎内部端口，仅在成功绑定后使用；请求被拒后不得直接 `wait` 绕过绑定。当前引擎单元素 `recover` 遇请求级 `InvalidSpec` 不得 `submit`、`wait`、产生 `Finalized` 或结算。
 
 ### 14.3 分类、终结和清理
 
@@ -1277,3 +1279,4 @@ claude -p \
 - 新 `Accepted` 无恢复参数、显式 `null` 或有效摘要且确定未启动的准备阶段，验证清理残留、持久 `Accepted`、返回 `Unknown`，引擎用相同 ID 重提交完整 spec，重 stage 并保存新摘要后仅启动一次；单凭容器不存在、旧记录缺字段、损坏、错配及 `Starting` 状态不明均不得重提。启动前取消及 `Destroyed` 取消恢复各有正例。
 - Egress 不可达、`NotFound`、吊销失败、job_id 错配或 `incomplete = true` 均不能产生公开终态、结算、遗忘或补零，重启后继续有界调用与退避；确认吊销且取得匹配、完整计量后才交付。仅可信证明从未启动且未签发令牌时错误可带 `None`。覆盖缺摘要旧 outcome 的同样边界，并验证等待计量不占已销毁容器的计算槽位。
 - 在终结提交和清理前后崩溃重放，验证不会重跑 worker；最终计量交付、引擎同事务结算并终结、提交后请求 `release` 之前不得 `forget_job`；`raise_cap` 不绕过阻断，显式重试仍按原权限。历史 bundle 字节和引用不变。以上是实现验收条件，不是本契约切片已通过的测试。
+- 覆盖输入内部和既有槽位的同 job 不同 sandbox、同 job 不同 project、同 sandbox 不同 job，以及完全相同重复项；将合法项分别置于冲突项之前和之后，断言整批拒绝且驱动、Egress、磁盘、槽位和许可均无副作用。原槽位的合法 outcome 与非零计量不变；修正后可重试。有效批次中坏元数据仍只拒绝对应 job。引擎单元素请求被拒时断言不提交、不等待、不终结、不结算。

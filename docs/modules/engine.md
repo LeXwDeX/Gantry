@@ -674,6 +674,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - **启动恢复**：
   1. 读所有非终结交付单元，以及仍有未清理资源的 `abandoned` / `closed` 交付单元（排队中的 Outbox、未终结尝试、活跃审批、未移除的工作树）的投影，折叠游标之后的事件，重建 `DeliveryState`；
   2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`：`Running` 包括拒绝收尾，继续等待；`Exited` 的 `wait` 稳定返回 outcome 或身份不可恢复错误；普通 `Lost` 按 §7.8。`Unknown` 包含从未受理或新格式已受理但证明从未启动并持久重置 `Accepted` 的准备重入，引擎以相同 job / sandbox ID 重新提交完整 `SandboxSpec`；这不是旧任务重新执行。身份不可验证时不得通过 `Lost` / `Unknown` 触发重试，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)；`direct` 尝试没有沙盒，按 `infra.lost` 重试；计量和终结同事务提交后 `release`，再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
+     当前单元素恢复请求若返回请求级 `InvalidSpec`，不得 `submit`、直接 `wait`、产生 `Finalized` 或结算；修正绑定后才可重试。此规则与有效请求中的身份证据拒绝收尾不同，见同一契约。
   3. 终结管线内的补丁提交幂等：先查 `attempt.finished` 是否已存在 `result_tree`，再由 `repo` 按 `refs/gantry/attempt/<job_id>` 查已有提交，已存在则不重复提交；
   4. 对每个交付单元补一次 `decide(Tick)`：应有未建的 Workflow / 悬空的上报项（`dedup_key` 相同则 `Deduped`）都会被补齐（阶段事件与入队之间的崩溃窗口由 §7.14.1 的期望动作集合补齐；同一幂等键不会重复）；
   5. 锁租约过期的工作树由 `repo` 回收；引擎重新 `acquire_lock` 取得新的 `LockToken`。
@@ -1367,6 +1368,7 @@ M1 的执行体在主循环里串行处理（交付单元之间也串行），�
 - [ ] **上报幂等**：重放同一决策，`InboxPort::raise` 因 `dedup_key` 相同返回 `Deduped`，收件箱只有一项；`dismiss` 一个阻塞项后 `stage_status` 不变、引擎不推进；`choose` 产生的 `inbox.resolved(option_id)` 驱动 `abandon` / `replan` / `upgrade` / `narrow` / `done` / `fix`；`raise_cap` 的用例在 #129（追加事件契约）合入后补。
 - [ ] **release**：每个 `attempt.finished` 落库后调用 `SandboxService::release`：进程不重启时恰一次，跨重启至少一次且幂等（sandbox.md §12 的 `release` 幂等），未终结的尝试从不被 `release`；重启后对存活 `job_id` 调 `sweep_orphans`。
 - [ ] **重启一致**：在每个崩溃点（`delivery.created` 后、`attempt.started` 后、`collect` 后提交前、提交后 `attempt.finished` 前、入队后、`outbox.succeeded` 后）杀掉引擎并重建，最终状态与不崩溃一致；`outbox` 表中同一幂等键只有一行；同一 `job_id` 只有一个本地提交；没有重复的 `attempt.started`。
+- [ ] **恢复请求冲突**：单元素 `recover` 返回请求级 `InvalidSpec` 时不 `submit`、不 `wait`、不产生 `Finalized` 或结算；见 [任务身份契约 §14.4](../interfaces/worker-protocol.md#job-identity)。
 - [ ] **不重复创建 PR**：重放 T6 的决策得到相同的 `create_pr` 幂等键（与 `FakeForge` 联测：崩溃发生在"GitHub 已创建、本地未记录"时不新增 PR）。黄金结果带 `open_pr` 提议时，重启（`env.proposals` 清空后重新预取）前后的幂等键相同。
 - [ ] **提议原文**（#125）：`env.proposals` 中为 `Found` → `create_pr` 的 `title` / `body` / `draft` 等于提议原文；为 `Missing`（结果对象无该 `proposal_id`）→ 用交付单元标题与模板正文，并记错误日志、不上报；键不在表中 → 不产出 `create_pr` 的 `JudgeAction`，预取完成后的 `Tick(Settle)` 才产出；预取遇 CAS 瞬时错误 → 不记成 `Missing`，重试成功后意图取原文。`decide` 在测试中不访问 CAS（测试替身的 CAS 只被执行体调用）。
 - [ ] **受保护路径**：`FakeRepo` 对 `.github/workflows/x.yml` 补丁返回 `deny(policy.path_protected:workflows)` → 尝试 `failed(policy_denied, policy.path_protected:workflows)`；写 `decision_needed`（`payload.kind = manual_action`）且附补丁引用；对 `Cargo.lock` 补丁写 `escalation`（`policy.path_protected:lockfiles`）且 `payload.evidence` 含 `patch.rejected` 引用；两者都无任何 Outbox 行、不自动重试、`stage_status = waiting_human`（P-48）。

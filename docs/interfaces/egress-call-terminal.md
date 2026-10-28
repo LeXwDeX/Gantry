@@ -148,7 +148,7 @@ async fn call_terminal(&self, call_id: &CallId) -> Result<CallStatement, EgressE
 
 - 关闭后保留最小 `closed` 墓碑（`call_id`、`closed_at`、证明汇总字段，不含用量明细正文），永久保留、不自动遗忘；否则同一 `call_id` 可能被重新接收。
 - 完整证明只在 usage 记录保留期（egress-control §4.5，7 天 **[提议]**）内可查。过了保留期，`GET usage?call_id=` 的 `terminal` 仍为 `state: "closed"`，同时 `incomplete: true`，`items` 可以为空；空 `items` 不等于零，不据此结算。
-- 24 h 自动遗忘只适用于 **job token**（egress-control §4.2）；svc usage 的保留期是另一条（§4.5），不得混用。
+- job 登记与最终计量按 [egress-control §4.2 / §8](egress-control.md#8-测试与验收) 保留至结算与终结提交后显式删除，不按 24 h 自动遗忘（D-22）；svc usage 的保留期仍按该文 §4.5，不得混用。
 
 ## 6. 非目标
 

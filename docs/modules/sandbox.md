@@ -111,10 +111,10 @@ pub trait SandboxService: Send + Sync {
     fn progress(&self, job_id: &AttemptId) -> BoxStream<'static, ProgressSample>;
     /// 取消。信号 + 计时器是唯一控制手段。create / stage 阶段直接 destroy。幂等。
     async fn cancel(&self, ctx: &Ctx, job_id: &AttemptId) -> Result<(), SandboxError>;
-    /// engine 在 attempt.finished 落库后调用：删除 meta.json，并让 egress 忘记该 job 的最终用量（forget_job）。
+    /// engine 结算与 attempt.finished 提交后调用：删除 meta.json，并让 egress 忘记该 job 的最终用量（forget_job）。
     async fn release(&self, ctx: &Ctx, job_id: &AttemptId) -> Result<(), SandboxError>;
     /// gantryd 重启：对每个没有 attempt.finished 的 Attempt 查运行时并接管（§7.10）。
-    /// 按输入顺序为每个 UnfinishedAttempt 恰好返回一项 RecoveredJob（E4）。
+    /// 请求先按任务身份契约整批预验证；有效请求按输入顺序每项返回一项 RecoveredJob（E4）。
     async fn recover(&self, ctx: &Ctx, unfinished: &[UnfinishedAttempt]) -> Result<Vec<RecoveredJob>, SandboxError>;
     /// 销毁没有对应未终结 Attempt 的沙盒与残留 staging。
     async fn sweep_orphans(&self, live: &BTreeSet<AttemptId>) -> Result<SweepReport, SandboxError>;
@@ -412,6 +412,8 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 
 `recover(unfinished)`（worker-protocol §3.5）：对每个没有 `attempt.finished` 的 Attempt，按标签 `gantry.job_id` 查运行时：
 
+查运行时前在 `submit_lock` 内完成请求绑定预验证；请求冲突整批 `InvalidSpec`，与通过预验证后的逐 job 证据拒绝不同，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。按 `job_id` 的内部操作只在绑定成功后使用。
+
 | 运行时状态 | 处理 |
 | --- | --- |
 | 仍在运行 | 读 `meta.json` 重建 deadline 与终止原因；从头重读日志，按 `seq` 去重并并入 `progress.spool.jsonl`；继续监督 |
@@ -608,6 +610,7 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 - [ ] 终止原因已写入 `meta.json` 但信号尚未发出时崩溃，重启后补发信号，不丢原因。
 - [ ] 孤儿：带标签但无对应未终结 Attempt 的容器、无容器的 staging 目录被 `sweep_orphans` 清除（先 `revoke_job_token`）；有对应未终结 Attempt 的不被误杀。
 - [ ] 日志重读不重复计数（`seq` 去重）。
+- [ ] 请求绑定冲突的批次原子拒绝、相同项幂等、原合法槽位及非零计量不受影响；逐项边界与副作用断言见 [任务身份契约 §14.4](../interfaces/worker-protocol.md#job-identity)。
 
 ### I. 预热池（M2）
 
