@@ -471,6 +471,14 @@ pub fn default_config(rev: u64) -> ConfigView {
 pub struct EgressStub {
     state: Arc<Mutex<State>>,
     data_plane: Option<DataPlane>,
+    revoke_fault: Mutex<Option<RevokeFault>>,
+}
+
+/// 临时覆盖吊销响应，供跨模块恢复测试使用。
+#[derive(Clone, Copy, Debug)]
+pub enum RevokeFault {
+    NotFound,
+    Incomplete,
 }
 
 impl EgressStub {
@@ -509,6 +517,7 @@ impl EgressStub {
         Self {
             state,
             data_plane: Some(data_plane),
+            revoke_fault: Mutex::new(None),
         }
     }
 
@@ -544,6 +553,10 @@ impl EgressStub {
 
     pub fn calls(&self) -> Vec<EgressCall> {
         self.lock().calls.clone()
+    }
+
+    pub fn set_revoke_fault(&self, fault: Option<RevokeFault>) {
+        *self.revoke_fault.lock().unwrap() = fault;
     }
 
     pub fn usage_records(&self) -> Vec<UsageRecord> {
@@ -681,11 +694,17 @@ impl EgressControl for EgressStub {
             job_id: *job_id,
             ctx: ctx.clone(),
         });
+        let fault = *self.revoke_fault.lock().unwrap();
+        if matches!(fault, Some(RevokeFault::NotFound)) {
+            return Err(EgressError::NotFound);
+        }
         let Some(entry) = state.jobs.get_mut(job_id) else {
             return Err(EgressError::NotFound);
         };
         if let Some(final_usage) = &entry.final_usage {
-            return Ok(final_usage.clone());
+            let mut usage = final_usage.clone();
+            usage.incomplete |= matches!(fault, Some(RevokeFault::Incomplete));
+            return Ok(usage);
         }
         entry.revoked_at = Some(now());
         let token = entry.active_token.take();
@@ -694,6 +713,8 @@ impl EgressControl for EgressStub {
         if let Some(token) = token {
             state.job_by_token.remove(&token);
         }
+        let mut usage = usage;
+        usage.incomplete |= matches!(fault, Some(RevokeFault::Incomplete));
         Ok(usage)
     }
 

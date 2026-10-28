@@ -9,10 +9,8 @@
 //! `tier` 取 `job.execution.tier`、`provider` 取 `exec.token_env.model_base_url` 的唯一键；
 //! 运行时取服务配置；`upstream/` 暂不支持（非空 → `InvalidSpec`）。
 //!
-//! 崩溃恢复（§7.10）：`recover` 按 `meta.json`、带 `gantry.job_id` 标签的容器、作业目录与
-//! `store` 里的 `sandbox.created` 逐项分类。尚未启动的相位拿不到 `SandboxSpec`（缺口 10）：
-//! 删除残留容器与 staging、把 `meta.json` 重写为 `Accepted` 后返回 `Unknown`，由 engine 以
-//! 同一 spec 重新 `submit`（容器从未启动，不会重复执行；令牌不吊销，以便重新签发）。
+//! 崩溃恢复（worker-protocol §14）：只允许新记录在证明从未启动后清理并重入；旧记录和
+//! 无法验证的记录走身份拒绝收尾。恢复依据放在 staging 之外，直到终结提交后的 release。
 
 mod job;
 pub mod meta;
@@ -46,7 +44,7 @@ use crate::spec::{
     ContainerId, NetworkAttach, Runtime, StagingLayout, LABEL_JOB_ID, LABEL_MANAGED,
     LABEL_SANDBOX_ID,
 };
-use meta::{Meta, Phase, TerminalReason};
+use meta::{Meta, Phase, RecoveryKind, RecoveryRecord, TerminalReason};
 use seams::{ArtifactStore, OutputSchemas};
 
 /// 服务配置（`sandbox.*` 设置与引导配置中建沙盒时固化的部分）。
@@ -99,6 +97,7 @@ struct Slot {
     /// 恢复出的 job 没有 spec：同一 job 的再次 `submit` 以槽位为准（返回同一句柄）。
     spec: Option<SandboxSpec>,
     handle: JobHandle,
+    project_id: ProjectId,
     result: watch::Receiver<Option<Outcome>>,
     commands: mpsc::UnboundedSender<Command>,
     progress: broadcast::Sender<ProgressSample>,
@@ -247,9 +246,16 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
     }
 
     /// 本进程里已有该 job（同一服务上重复 `recover`）：按它的状态作答。
-    fn known(&self, job_id: &AttemptId) -> Option<RecoveredJob> {
+    fn known(&self, attempt: &UnfinishedAttempt) -> Result<Option<RecoveredJob>, SandboxError> {
         let jobs = self.jobs();
-        let slot = jobs.get(job_id)?;
+        let Some(slot) = jobs.get(&attempt.job_id) else {
+            return Ok(None);
+        };
+        if slot.handle.sandbox_id != attempt.sandbox_id || slot.project_id != attempt.project_id {
+            return Err(SandboxError::InvalidSpec(
+                "conflicting identity for an in-process job".into(),
+            ));
+        }
         let handle = slot.handle;
         let result = slot.result.borrow();
         let recovered = match &*result {
@@ -260,7 +266,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
             })) => RecoveredJob::Lost(handle),
             Some(_) => RecoveredJob::Exited(handle),
         };
-        Some(recovered)
+        Ok(Some(recovered))
     }
 
     /// 为恢复出的 job 建槽位并起 actor。
@@ -288,6 +294,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
             Slot {
                 spec: None,
                 handle,
+                project_id,
                 result: result_rx,
                 commands: command_tx,
                 progress: progress_tx.clone(),
@@ -319,7 +326,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         ctx: &ActorCtx,
         unfinished: &UnfinishedAttempt,
     ) -> Result<RecoveredJob, SandboxError> {
-        if let Some(known) = self.known(&unfinished.job_id) {
+        if let Some(known) = self.known(unfinished)? {
             return Ok(known);
         }
         let driver = &self.inner.deps.driver;
@@ -328,93 +335,314 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
             sandbox_id: unfinished.sandbox_id,
         };
         let layout = self.layout(unfinished.sandbox_id)?;
-        // 损坏的 meta.json 按「不存在」处理：只靠容器、目录与事件判断。
-        let meta = Meta::load(&layout.meta_json()).ok().flatten();
+        let meta = Meta::load(&layout.meta_json());
+        let guard = RecoveryRecord::load(&recovery_path(&layout));
         let mut selector = BTreeMap::new();
         selector.insert(LABEL_JOB_ID.to_owned(), unfinished.job_id.to_string());
-        let containers = driver
-            .list(&LabelSelector(selector))
-            .await
-            .map_err(|err| infra(InfraDetail::Lost, err.to_string()))?;
-        let container = pick_container(&containers, meta.as_ref());
+        let mut containers = tokio::time::timeout(
+            Duration::from_secs(5),
+            driver.list(&LabelSelector(selector)),
+        )
+        .await
+        .map_err(|_| infra(InfraDetail::Lost, "runtime list timed out"))?
+        .map_err(|err| infra(InfraDetail::Lost, err.to_string()))?;
+        let mut selector = BTreeMap::new();
+        selector.insert(
+            LABEL_SANDBOX_ID.to_owned(),
+            unfinished.sandbox_id.to_string(),
+        );
+        for summary in tokio::time::timeout(
+            Duration::from_secs(5),
+            driver.list(&LabelSelector(selector)),
+        )
+        .await
+        .map_err(|_| infra(InfraDetail::Lost, "runtime list timed out"))?
+        .map_err(|err| infra(InfraDetail::Lost, err.to_string()))?
+        {
+            if !containers.iter().any(|other| other.id == summary.id) {
+                containers.push(summary);
+            }
+        }
         let dir_exists = layout.dir().exists();
         let created = self.created_event(unfinished.sandbox_id).await?;
-
-        let Some(mut meta) = meta.filter(|meta| meta.resume.is_some()) else {
-            // 没有可用的受理记录：残留的只可能是受理途中崩溃的半成品（容器从未启动）。
-            if let Some(summary) = &container {
-                let _ = driver.kill(&summary.id).await;
-                let _ = driver.remove(&summary.id).await;
-            }
-            if dir_exists {
-                let _ = driver.purge_staging(&layout).await;
-            }
-            return Ok(if created {
-                self.spawn_lost(ctx, layout, unfinished, created);
-                RecoveredJob::Lost(handle)
-            } else {
-                RecoveredJob::Unknown {
-                    job_id: unfinished.job_id,
-                }
+        let ownership_ok = containers.len() <= 1
+            && containers.iter().all(|summary| {
+                summary.labels.get(LABEL_MANAGED).is_some_and(|v| v == "1")
+                    && summary.labels.get(LABEL_JOB_ID) == Some(&unfinished.job_id.to_string())
+                    && summary.labels.get(LABEL_SANDBOX_ID)
+                        == Some(&unfinished.sandbox_id.to_string())
             });
+        let container = containers.first().cloned();
+        let reject = |message: &str, no_usage: bool| RecoveryRecord {
+            job_id: unfinished.job_id,
+            sandbox_id: unfinished.sandbox_id,
+            project_id: unfinished.project_id,
+            kind: RecoveryKind::Reject {
+                message: message.to_owned(),
+                no_usage,
+                delivered: false,
+            },
         };
-        if meta.job_id != unfinished.job_id {
-            return Err(infra(
-                InfraDetail::Lost,
-                "meta.json belongs to a different job",
-            ));
-        }
-
-        let running_or_exited = container
-            .as_ref()
-            .filter(|summary| summary.status != ContainerStatus::Created);
-        let started = meta.past_start() || running_or_exited.is_some();
-        if meta.phase == Phase::Failed {
-            let container = container.map(|summary| summary.id);
+        let reject_job = |record: RecoveryRecord, meta: Option<Meta>| {
+            let _ = record.save(&recovery_path(&layout));
+            let mut actor_meta =
+                meta.unwrap_or_else(|| Meta::new(unfinished.job_id, unfinished.sandbox_id));
+            actor_meta.job_id = unfinished.job_id;
+            actor_meta.sandbox_id = unfinished.sandbox_id;
+            let occupied = containers.iter().any(|c| {
+                c.labels.get(LABEL_MANAGED).is_some_and(|v| v == "1")
+                    && c.labels.get(LABEL_JOB_ID) == Some(&unfinished.job_id.to_string())
+                    && c.labels.get(LABEL_SANDBOX_ID) == Some(&unfinished.sandbox_id.to_string())
+            });
+            let permit = if occupied {
+                let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
+                if permit.is_none() {
+                    self.inner.debt.fetch_add(1, Ordering::SeqCst);
+                }
+                Some(permit)
+            } else {
+                None
+            };
             self.spawn_recovered(
                 ctx,
                 unfinished.project_id,
-                layout,
-                meta,
-                container,
+                layout.clone(),
+                actor_meta,
+                None,
                 created,
-                job::RecoverMode::Lost,
+                job::RecoverMode::Reject { record, permit },
             );
-            return Ok(RecoveredJob::Lost(handle));
+            RecoveredJob::Running(handle)
+        };
+
+        if !ownership_ok {
+            return Ok(reject_job(
+                reject("container ownership mismatch or duplicate", false),
+                None,
+            ));
         }
-        if !started {
+        let guard = match guard {
+            Ok(guard) => guard,
+            Err(_) => return Ok(reject_job(reject("damaged recovery record", false), None)),
+        };
+        if let Some(record) = guard {
+            if record.job_id != unfinished.job_id
+                || record.sandbox_id != unfinished.sandbox_id
+                || record.project_id != unfinished.project_id
+            {
+                return Ok(reject_job(
+                    reject("recovery record ownership mismatch", false),
+                    None,
+                ));
+            }
+            if matches!(record.kind, RecoveryKind::Reject { .. }) {
+                return Ok(reject_job(record, None));
+            }
+            if container
+                .as_ref()
+                .is_some_and(|c| c.status != ContainerStatus::Created)
+            {
+                return Ok(reject_job(
+                    reject("reentry container unexpectedly executed", false),
+                    None,
+                ));
+            }
+            return self
+                .finish_reentry(ctx, unfinished, layout, container, created, record)
+                .await;
+        }
+        let mut meta = match meta {
+            Ok(Some(meta)) => meta,
+            Ok(None) if !dir_exists && containers.is_empty() && !created => {
+                return Ok(RecoveredJob::Unknown {
+                    job_id: unfinished.job_id,
+                });
+            }
+            Ok(None) => {
+                return Ok(reject_job(
+                    reject("accepted job has no metadata", false),
+                    None,
+                ))
+            }
+            Err(_) => {
+                return Ok(reject_job(
+                    reject("damaged metadata or digest", false),
+                    None,
+                ))
+            }
+        };
+        if meta.job_id != unfinished.job_id
+            || meta.sandbox_id != unfinished.sandbox_id
+            || meta
+                .project_id
+                .or_else(|| meta.resume.as_ref().map(|r| r.project_id))
+                != Some(unfinished.project_id)
+            || meta
+                .resume
+                .as_ref()
+                .is_some_and(|r| r.project_id != unfinished.project_id)
+            || container.as_ref().is_some_and(|c| {
+                meta.container_id
+                    .as_deref()
+                    .is_some_and(|id| id != c.id.as_str())
+            })
+        {
+            return Ok(reject_job(
+                reject("metadata ownership mismatch", false),
+                None,
+            ));
+        }
+        let before_start = matches!(
+            meta.phase,
+            Phase::Accepted
+                | Phase::Queued
+                | Phase::Creating
+                | Phase::Created
+                | Phase::Staging
+                | Phase::Staged
+        ) && container
+            .as_ref()
+            .is_none_or(|c| c.status == ContainerStatus::Created)
+            && meta.timings.started.is_none()
+            && meta.exit.is_none()
+            && meta.deadline_ms.is_none();
+        let starting_created = meta.phase == Phase::Starting
+            && container
+                .as_ref()
+                .is_some_and(|c| c.status == ContainerStatus::Created)
+            && meta.timings.started.is_none()
+            && meta.exit.is_none();
+        let cancelled_destroyed = matches!(meta.phase, Phase::Destroying | Phase::Destroyed)
+            && meta.terminal_reason == Some(TerminalReason::Cancel)
+            && meta.timings.started.is_none()
+            && meta.exit.is_none()
+            && container
+                .as_ref()
+                .is_none_or(|c| c.status == ContainerStatus::Created);
+        let never_started = before_start || starting_created || cancelled_destroyed;
+        let past_creation = matches!(
+            meta.phase,
+            Phase::Created
+                | Phase::Staging
+                | Phase::Staged
+                | Phase::Starting
+                | Phase::Running
+                | Phase::Stopping
+                | Phase::Stopped
+                | Phase::Collecting
+                | Phase::Collected
+        ) || (matches!(meta.phase, Phase::Destroying | Phase::Destroyed)
+            && !never_started);
+        let stopped_phase = matches!(
+            meta.phase,
+            Phase::Stopped
+                | Phase::Collecting
+                | Phase::Collected
+                | Phase::Destroying
+                | Phase::Destroyed
+        );
+        let impossible = (matches!(
+            meta.phase,
+            Phase::Accepted
+                | Phase::Queued
+                | Phase::Creating
+                | Phase::Created
+                | Phase::Staging
+                | Phase::Staged
+        ) && !before_start)
+            || (meta.phase == Phase::Starting && container.is_none())
+            || (matches!(
+                meta.phase,
+                Phase::Staged
+                    | Phase::Starting
+                    | Phase::Running
+                    | Phase::Stopping
+                    | Phase::Stopped
+                    | Phase::Collecting
+                    | Phase::Collected
+            ) && meta.job_sha256 == Some(None))
+            || (!never_started && meta.job_sha256 == Some(None))
+            || (meta.phase == Phase::Failed)
+            || (past_creation
+                && (!meta.token_issued
+                    || meta.resume.is_none()
+                    || meta.container_id.is_none()
+                    || meta.timings.created.is_none()))
+            || (matches!(
+                meta.phase,
+                Phase::Staged
+                    | Phase::Starting
+                    | Phase::Running
+                    | Phase::Stopping
+                    | Phase::Stopped
+                    | Phase::Collecting
+                    | Phase::Collected
+            ) && meta.timings.staged.is_none())
+            || (meta.phase == Phase::Starting && meta.deadline_ms.is_none())
+            || (matches!(
+                meta.phase,
+                Phase::Running
+                    | Phase::Stopping
+                    | Phase::Stopped
+                    | Phase::Collecting
+                    | Phase::Collected
+            ) && (meta.timings.started.is_none() || meta.deadline_ms.is_none()))
+            || (stopped_phase
+                && container
+                    .as_ref()
+                    .is_some_and(|c| c.status == ContainerStatus::Running))
+            || (matches!(meta.phase, Phase::Running | Phase::Starting) && meta.exit.is_some())
+            || (!never_started && meta.resume.is_none())
+            || (!never_started
+                && container
+                    .as_ref()
+                    .is_some_and(|c| c.status == ContainerStatus::Created));
+        if impossible {
+            return Ok(reject_job(
+                reject("inconsistent metadata phase and runtime state", false),
+                Some(meta),
+            ));
+        }
+        if never_started {
             if meta.terminal_reason == Some(TerminalReason::Cancel) {
-                let container = container.map(|summary| summary.id);
+                let id = container.map(|summary| summary.id);
                 let handle = self.spawn_recovered(
                     ctx,
                     unfinished.project_id,
                     layout,
                     meta,
-                    container,
+                    id,
                     created,
                     job::RecoverMode::CancelledBeforeStart,
                 );
-                return Ok(RecoveredJob::Exited(handle));
+                return Ok(RecoveredJob::Running(handle));
             }
-            // 缺口 10：拿不到 SandboxSpec，无法重走该阶段——清掉残留，让 engine 重新 submit。
-            if let Some(summary) = &container {
-                let _ = driver.kill(&summary.id).await;
-                driver
-                    .remove(&summary.id)
-                    .await
-                    .map_err(|err| infra(InfraDetail::Lost, err.to_string()))?;
+            if meta.job_sha256.is_none() {
+                let no_usage = !meta.token_issued;
+                return Ok(reject_job(
+                    reject("legacy preparation has no trusted digest", no_usage),
+                    Some(meta),
+                ));
             }
-            driver
-                .purge_staging(&layout)
-                .await
-                .map_err(|err| infra(InfraDetail::Lost, err.to_string()))?;
-            std::fs::create_dir_all(layout.dir())
-                .and_then(|()| Meta::new(meta.job_id, meta.sandbox_id).save(&layout.meta_json()))
-                .map_err(|err| infra(InfraDetail::Lost, err.to_string()))?;
-            return Ok(RecoveredJob::Unknown {
+            let record = RecoveryRecord {
                 job_id: unfinished.job_id,
-            });
+                sandbox_id: unfinished.sandbox_id,
+                project_id: unfinished.project_id,
+                kind: RecoveryKind::Reenter {
+                    token_issued: meta.token_issued,
+                },
+            };
+            if record.save(&recovery_path(&layout)).is_err() {
+                return Ok(reject_job(
+                    reject("could not persist preparation recovery", !meta.token_issued),
+                    Some(meta),
+                ));
+            }
+            return self
+                .finish_reentry(ctx, unfinished, layout, container, created, record)
+                .await;
         }
+        let legacy = meta.job_sha256.is_none();
         if let Some(summary) = container {
             let running = summary.status == ContainerStatus::Running;
             // 同步占许可（在任何新提交之前）；超出上限就记欠账。
@@ -435,11 +663,18 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     permit,
                 },
             );
-            return Ok(if running {
+            return Ok(if running || legacy {
                 RecoveredJob::Running(handle)
             } else {
                 RecoveredJob::Exited(handle)
             });
+        }
+        // 旧任务必须有真实退出事实，不能把丢失伪装成可交付 outcome。
+        if legacy && (meta.exit.is_none() || meta.lost) {
+            return Ok(reject_job(
+                reject("legacy job has no reliable exit facts", false),
+                Some(meta),
+            ));
         }
         // 容器已不在：没有进程能再写 out/，主机直读还能取就 collect（cause = Lost）。
         if dir_exists {
@@ -449,9 +684,21 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 .map(ContainerId::new)
                 .unwrap_or_else(|| ContainerId::new(layout.container_name()));
             let plan = meta.resume.as_ref().expect("filtered above").intake;
-            if let Ok(intake) = driver.read_out(&id, &layout, &plan).await {
+            let intake = if legacy {
+                tokio::time::timeout(Duration::from_secs(5), driver.read_out(&id, &layout, &plan))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            } else {
+                driver.read_out(&id, &layout, &plan).await.ok()
+            };
+            if let Some(intake) = intake {
                 // 已过 Destroying：容器是本服务删的，终止事实以 meta.json 为准。
-                let lost = meta.lost || !matches!(meta.phase, Phase::Destroying | Phase::Destroyed);
+                let lost = if legacy {
+                    false
+                } else {
+                    meta.lost || !matches!(meta.phase, Phase::Destroying | Phase::Destroyed)
+                };
                 meta.lost = lost;
                 let handle = self.spawn_recovered(
                     ctx,
@@ -462,8 +709,18 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     created,
                     job::RecoverMode::Collect { id, intake, lost },
                 );
-                return Ok(RecoveredJob::Exited(handle));
+                return Ok(if legacy {
+                    RecoveredJob::Running(handle)
+                } else {
+                    RecoveredJob::Exited(handle)
+                });
             }
+        }
+        if meta.job_sha256.is_none() {
+            return Ok(reject_job(
+                reject("legacy job artifacts are unavailable", false),
+                Some(meta),
+            ));
         }
         let container = meta.container_id.clone().map(ContainerId::new);
         self.spawn_recovered(
@@ -478,28 +735,200 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         Ok(RecoveredJob::Lost(handle))
     }
 
-    /// 没有可用 `meta.json` 但有 `sandbox.created`：受理后丢失。
-    fn spawn_lost(
+    async fn finish_reentry(
         &self,
         ctx: &ActorCtx,
-        layout: StagingLayout,
         unfinished: &UnfinishedAttempt,
+        layout: StagingLayout,
+        container: Option<ContainerSummary>,
         created: bool,
-    ) {
-        let mut meta = Meta::new(unfinished.job_id, unfinished.sandbox_id);
-        meta.phase = Phase::Failed;
-        // 是否签发过令牌已不可知：按已签发处理（吊销幂等）。
-        meta.token_issued = true;
-        meta.resume = None;
-        self.spawn_recovered(
+        record: RecoveryRecord,
+    ) -> Result<RecoveredJob, SandboxError> {
+        let RecoveryKind::Reenter { token_issued } = record.kind else {
+            unreachable!()
+        };
+        let driver = &self.inner.deps.driver;
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
+            if let Some(summary) = &container {
+                driver.remove(&summary.id).await?;
+            }
+            driver.purge_staging(&layout).await
+        })
+        .await;
+        if matches!(cleanup, Ok(Ok(()))) {
+            let mut accepted = Meta::new(unfinished.job_id, unfinished.sandbox_id);
+            accepted.project_id = Some(unfinished.project_id);
+            accepted.token_issued = token_issued;
+            if std::fs::create_dir_all(layout.dir())
+                .and_then(|()| accepted.save(&layout.meta_json()))
+                .is_ok()
+                && std::fs::remove_file(recovery_path(&layout)).is_ok()
+            {
+                return Ok(RecoveredJob::Unknown {
+                    job_id: unfinished.job_id,
+                });
+            }
+        }
+        let record = RecoveryRecord {
+            job_id: unfinished.job_id,
+            sandbox_id: unfinished.sandbox_id,
+            project_id: unfinished.project_id,
+            kind: RecoveryKind::Reject {
+                message: "preparation cleanup failed".into(),
+                no_usage: !token_issued,
+                delivered: false,
+            },
+        };
+        let _ = record.save(&recovery_path(&layout));
+        let meta = Meta::new(unfinished.job_id, unfinished.sandbox_id);
+        let permit = if container.is_some() {
+            let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
+            if permit.is_none() {
+                self.inner.debt.fetch_add(1, Ordering::SeqCst);
+            }
+            Some(permit)
+        } else {
+            None
+        };
+        let handle = self.spawn_recovered(
             ctx,
             unfinished.project_id,
             layout,
             meta,
             None,
             created,
-            job::RecoverMode::Lost,
+            job::RecoverMode::Reject { record, permit },
         );
+        Ok(RecoveredJob::Running(handle))
+    }
+
+    /// 已提交终结后的重启可能没有内存槽位；只认持久化的可释放依据。
+    fn release_evidence(
+        &self,
+        job_id: &AttemptId,
+    ) -> Result<(gantry_core::ids::SandboxId, bool), SandboxError> {
+        let entries = std::fs::read_dir(&self.inner.config.workspaces_dir)
+            .map_err(|err| infra(InfraDetail::Collect, err.to_string()))?;
+        let mut found = BTreeMap::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if let Some(sandbox) = name
+                .strip_suffix(".recovery.json")
+                .and_then(|s| s.parse().ok())
+            {
+                if let Ok(Some(record)) = RecoveryRecord::load(&entry.path()) {
+                    if record.job_id == *job_id && record.sandbox_id == sandbox {
+                        if let RecoveryKind::Reject {
+                            no_usage,
+                            delivered: true,
+                            ..
+                        } = record.kind
+                        {
+                            found.insert(sandbox, !no_usage);
+                        }
+                    }
+                }
+                continue;
+            }
+            let Ok(sandbox) = name.parse() else { continue };
+            let layout = self.layout(sandbox)?;
+            if recovery_path(&layout).exists() {
+                continue;
+            }
+            let Ok(Some(meta)) = Meta::load(&layout.meta_json()) else {
+                continue;
+            };
+            let cancelled_without_token = meta.terminal_reason == Some(TerminalReason::Cancel)
+                && !meta.token_issued
+                && meta.timings.started.is_none()
+                && meta.exit.is_none();
+            let prestart_cancel = meta.terminal_reason == Some(TerminalReason::Cancel)
+                && meta.timings.started.is_none()
+                && meta.exit.is_none();
+            let outcome_recorded = match meta.job_sha256 {
+                Some(Some(_)) => {
+                    (meta.timings.started.is_some() || prestart_cancel)
+                        && (meta.identity_diagnostic.is_none() || meta.identity_finalized)
+                }
+                Some(None) => {
+                    prestart_cancel
+                        && (meta.identity_diagnostic.is_none() || meta.identity_finalized)
+                }
+                None => meta.identity_finalized || cancelled_without_token,
+            };
+            if meta.job_id == *job_id
+                && meta.sandbox_id == sandbox
+                && meta.phase == Phase::Destroyed
+                && outcome_recorded
+            {
+                found.insert(sandbox, meta.token_issued);
+            }
+        }
+        if found.len() != 1 {
+            return Err(SandboxError::NotFound);
+        }
+        Ok(found.into_iter().next().expect("one entry"))
+    }
+
+    async fn release_files(
+        &self,
+        ctx: &ActorCtx,
+        job_id: &AttemptId,
+        sandbox_id: gantry_core::ids::SandboxId,
+        forget: bool,
+    ) -> Result<(), SandboxError> {
+        let layout = StagingLayout::new(&self.inner.config.workspaces_dir, sandbox_id)
+            .map_err(|err| infra(InfraDetail::Collect, err.to_string()))?;
+        let mut labels = BTreeMap::new();
+        labels.insert(LABEL_SANDBOX_ID.to_owned(), sandbox_id.to_string());
+        let containers = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.inner.deps.driver.list(&LabelSelector(labels)),
+        )
+        .await
+        .map_err(|_| {
+            infra(
+                InfraDetail::Collect,
+                "runtime list timed out during release",
+            )
+        })?
+        .map_err(|err| infra(InfraDetail::Collect, err.to_string()))?;
+        if containers.iter().any(|c| {
+            c.labels.get(LABEL_JOB_ID) != Some(&job_id.to_string())
+                || c.labels.get(LABEL_MANAGED).is_none_or(|v| v != "1")
+                || c.status == ContainerStatus::Running
+        }) {
+            return Err(infra(
+                InfraDetail::Collect,
+                "container ownership or state prevents release",
+            ));
+        }
+        if forget {
+            self.inner
+                .deps
+                .egress
+                .forget_job(job_id, ctx)
+                .await
+                .map_err(|err| infra(InfraDetail::Egress, format!("forget: {err}")))?;
+        }
+        self.inner
+            .deps
+            .driver
+            .purge_staging(&layout)
+            .await
+            .map_err(|err| infra(InfraDetail::Collect, err.to_string()))?;
+        match std::fs::remove_file(recovery_path(&layout)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(infra(
+                    InfraDetail::Collect,
+                    format!("recovery record: {err}"),
+                ))
+            }
+        }
+        Ok(())
     }
 }
 
@@ -515,17 +944,8 @@ async fn revoke(
     }
 }
 
-/// 同一 job 至多一个容器；有多个时优先 `meta.json` 记的那个。
-fn pick_container(
-    containers: &[ContainerSummary],
-    meta: Option<&Meta>,
-) -> Option<ContainerSummary> {
-    let recorded = meta.and_then(|meta| meta.container_id.as_deref());
-    containers
-        .iter()
-        .find(|summary| Some(summary.id.as_str()) == recorded)
-        .or_else(|| containers.first())
-        .cloned()
+fn recovery_path(layout: &StagingLayout) -> PathBuf {
+    layout.dir().with_extension("recovery.json")
 }
 
 /// 作业目录是否已过孤儿宽限（以 `meta.json`，没有时以目录本身的修改时间为准）。
@@ -568,7 +988,10 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         };
         let _submitting = self.inner.submit_lock.lock().await;
         if let Some(slot) = self.jobs().get(&spec.job_id) {
-            if slot.spec.as_ref().is_some_and(|known| *known != spec) {
+            if slot.handle.sandbox_id != spec.sandbox_id
+                || slot.project_id != spec.project_id
+                || slot.spec.as_ref().is_some_and(|known| *known != spec)
+            {
                 return Err(SandboxError::InvalidSpec(
                     "a different sandbox spec was already submitted for this job".into(),
                 ));
@@ -578,9 +1001,37 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         job::check_spec(&spec)?;
         let layout = StagingLayout::new(&self.inner.config.workspaces_dir, spec.sandbox_id)
             .map_err(|err| infra(InfraDetail::SandboxCreate, err.to_string()))?;
+        if recovery_path(&layout).exists() {
+            return Err(SandboxError::InvalidSpec(
+                "job has unresolved recovery evidence".into(),
+            ));
+        }
+        let mut accepted = match Meta::load(&layout.meta_json()) {
+            Ok(Some(meta))
+                if meta.job_id == spec.job_id
+                    && meta.sandbox_id == spec.sandbox_id
+                    && meta.phase == Phase::Accepted
+                    && meta.job_sha256 == Some(None)
+                    && meta.project_id == Some(spec.project_id)
+                    && meta
+                        .resume
+                        .as_ref()
+                        .is_none_or(|r| r.project_id == spec.project_id) =>
+            {
+                meta
+            }
+            Ok(None) if !layout.dir().exists() => Meta::new(spec.job_id, spec.sandbox_id),
+            _ => {
+                return Err(SandboxError::InvalidSpec(
+                    "job has existing unverified metadata".into(),
+                ))
+            }
+        };
+        accepted.resume = None;
+        accepted.project_id = Some(spec.project_id);
         // 返回 Ok 之前受理记录已原子写盘（E4）：重启后 recover 不会判成 Unknown。
         std::fs::create_dir_all(layout.dir())
-            .and_then(|()| Meta::new(spec.job_id, spec.sandbox_id).save(&layout.meta_json()))
+            .and_then(|()| accepted.save(&layout.meta_json()))
             .map_err(|err| infra(InfraDetail::WorkspacePrep, format!("accept: {err}")))?;
 
         let (result_tx, result_rx) = watch::channel(None);
@@ -593,6 +1044,7 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             Slot {
                 spec: Some(spec.clone()),
                 handle,
+                project_id: spec.project_id,
                 result: result_rx,
                 commands: command_tx,
                 progress: progress_tx.clone(),
@@ -607,6 +1059,7 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             ctx.clone(),
             spec,
             layout,
+            accepted,
             command_rx,
             progress_tx,
             occupancy,
@@ -680,31 +1133,38 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
     }
 
     async fn release(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError> {
-        let (sandbox_id, released) = {
+        let slot = {
             let jobs = self.jobs();
-            let slot = jobs.get(job_id).ok_or(SandboxError::NotFound)?;
-            if slot.result.borrow().is_none() {
-                return Err(SandboxError::InvalidSpec(
-                    "release before the job reached a terminal state".into(),
-                ));
-            }
-            (slot.handle.sandbox_id, Arc::clone(&slot.released))
+            jobs.get(job_id).map(|slot| {
+                (
+                    slot.handle.sandbox_id,
+                    Arc::clone(&slot.released),
+                    slot.result.borrow().clone(),
+                )
+            })
         };
+        let Some((sandbox_id, released, outcome)) = slot else {
+            let _guard = self.inner.submit_lock.lock().await;
+            let (sandbox_id, forget) = self.release_evidence(job_id)?;
+            return self.release_files(ctx, job_id, sandbox_id, forget).await;
+        };
+        let outcome = outcome.ok_or_else(|| {
+            SandboxError::InvalidSpec("release before the job reached a terminal state".into())
+        })?;
         // 并发的 release 排队；失败不置位，调用方可以重试。
         let mut released = released.lock().await;
         if *released {
             return Ok(());
         }
-        let layout = StagingLayout::new(&self.inner.config.workspaces_dir, sandbox_id)
-            .map_err(|err| infra(InfraDetail::Collect, err.to_string()))?;
-        self.inner
-            .deps
-            .driver
-            .purge_staging(&layout)
-            .await
-            .map_err(|err| infra(InfraDetail::Collect, err.to_string()))?;
-        // 让 egress 忘记最终用量；它不在了也不影响本地释放。
-        let _ = self.inner.deps.egress.forget_job(job_id, ctx).await;
+        let layout = self.layout(sandbox_id)?;
+        let forget = match &outcome {
+            Err(SandboxError::JobIdentityUnavailable { usage, .. }) => usage.is_some(),
+            _ => Meta::load(&layout.meta_json())
+                .ok()
+                .flatten()
+                .is_some_and(|meta| meta.token_issued),
+        };
+        self.release_files(ctx, job_id, sandbox_id, forget).await?;
         *released = true;
         Ok(())
     }
@@ -715,9 +1175,46 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         ctx: &ActorCtx,
         unfinished: &[UnfinishedAttempt],
     ) -> Result<Vec<RecoveredJob>, SandboxError> {
+        let _recovering = self.inner.submit_lock.lock().await;
         let mut recovered = Vec::with_capacity(unfinished.len());
         for attempt in unfinished {
-            recovered.push(self.recover_one(ctx, attempt).await?);
+            match self.recover_one(ctx, attempt).await {
+                Ok(item) => recovered.push(item),
+                Err(err @ SandboxError::InvalidSpec(_)) => return Err(err),
+                Err(err) => {
+                    let layout = self.layout(attempt.sandbox_id)?;
+                    let record = RecoveryRecord {
+                        job_id: attempt.job_id,
+                        sandbox_id: attempt.sandbox_id,
+                        project_id: attempt.project_id,
+                        kind: RecoveryKind::Reject {
+                            message: format!("recovery could not verify identity: {err}"),
+                            no_usage: false,
+                            delivered: false,
+                        },
+                    };
+                    let _ = record.save(&recovery_path(&layout));
+                    // 运行时不可查询时，先保守占一个槽位，直到确认容器已停止。
+                    let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
+                    if permit.is_none() {
+                        self.inner.debt.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let meta = Meta::new(attempt.job_id, attempt.sandbox_id);
+                    let handle = self.spawn_recovered(
+                        ctx,
+                        attempt.project_id,
+                        layout,
+                        meta,
+                        None,
+                        false,
+                        job::RecoverMode::Reject {
+                            record,
+                            permit: Some(permit),
+                        },
+                    );
+                    recovered.push(RecoveredJob::Running(handle));
+                }
+            }
         }
         Ok(recovered)
     }
@@ -767,6 +1264,12 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                 .and_then(|sandbox_id| self.layout(sandbox_id).ok());
             if layout
                 .as_ref()
+                .is_some_and(|layout| recovery_path(layout).exists())
+            {
+                continue;
+            }
+            if layout
+                .as_ref()
                 .is_some_and(|layout| !older_than(layout, grace))
             {
                 continue;
@@ -803,6 +1306,9 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             let Ok(layout) = self.layout(sandbox_id) else {
                 continue;
             };
+            if recovery_path(&layout).exists() {
+                continue;
+            }
             let meta = Meta::load(&layout.meta_json()).ok().flatten();
             let job_id = meta.as_ref().map(|meta| meta.job_id);
             if job_id.as_ref().is_some_and(keep) || !older_than(&layout, grace) {

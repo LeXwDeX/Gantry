@@ -229,6 +229,8 @@ pub struct Finalized {
     pub status: AttemptStatus,
     pub failure_class: Option<FailureClass>,
     pub failure_detail: Option<FailureDetail>,
+    /// 独立于运行时分类的自动重试阻断原因。
+    pub retry_blocked: Option<RetryBlocked>,
     pub result_ref: Option<Sha256Digest>,
     pub usage_metered: TokenUsage,
     pub weighted_tokens: u64,
@@ -239,6 +241,11 @@ pub struct Finalized {
     pub patch: PatchResult,
     pub proposals: Vec<ProposalOutcome>,
     pub signals: OutputSignals,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryBlocked {
+    JobIdentityUnavailable,
 }
 
 #[derive(Clone, Debug)]

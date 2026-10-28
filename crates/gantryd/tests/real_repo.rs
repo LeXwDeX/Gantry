@@ -18,7 +18,7 @@ use gantry_core::entities::{
 };
 use gantry_core::entities::{SandboxLimits, SandboxTrust, TokenWeights};
 use gantry_core::events::{EventType, NewEvent, PatchRejectedData, PatchValidatedData, Subject};
-use gantry_core::ids::IdGen;
+use gantry_core::ids::{Clock, IdGen};
 use gantry_core::ports::sandbox::{
     ArtifactName, EgressRequest, ExecSpec, GroupName, ProfileName, SandboxService, SandboxSpec,
     TerminalCause, Timers, TokenEnvSpec, WorkspaceMode, WorkspaceRequest,
@@ -51,14 +51,15 @@ use gantry_engine::{
     engine::{load_delivery_state, Engine},
     PortEffects,
 };
-use gantry_fakes::egress::EgressStub;
+use gantry_fakes::egress::{EgressCall, EgressStub, RevokeFault};
 use gantry_fakes::policy::FakePolicy;
+use gantry_fakes::repo::FakeRepo;
 use gantry_fakes::{
     forge::FakeForge, inbox::FakeInbox, sandbox::FakeSandboxService, worker::StubWorkerAdapter,
 };
 use gantry_policy::{PolicyDeps, PolicyEngine, POLICY_MODULE};
 use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
-use gantry_sandbox::fake::{FakeDriver, FakeOutEntry, FakeScript};
+use gantry_sandbox::fake::{DriverCall, FakeBehavior, FakeDriver, FakeOutEntry, FakeScript};
 use gantry_sandbox::service::seams::StaticSchemas;
 use gantry_sandbox::service::{SandboxConfig, SandboxDeps, SandboxManager};
 use gantry_sandbox::spec::{NetworkAttach, Runtime};
@@ -421,10 +422,9 @@ async fn attempt_real_repo_and_policy_commit_or_deny() {
             required: true,
             upstream: vec![],
         };
-        // 替身无 staging；摘要取派发 JobSpec 的规范化字节，不覆盖真实 staging 的 nonce。
+        // 无 staging 的替身独立声明一个固定的服务端摘要。
         let job = preview.assemble(&plan, &cx, &ctx).await.unwrap().job;
-        let job_sha256 =
-            sha256(&gantry_core::canon::jcs(&serde_json::to_value(&job).unwrap()).unwrap());
+        let job_sha256 = sha256(b"job.json");
         let result = serde_json::to_vec(&json!({
             "protocol": "gantry-worker/1", "job_id": attempt, "job_sha256": job_sha256,
             "status": "succeeded", "summary": "fixture", "error": null,
@@ -892,6 +892,406 @@ async fn sandbox_artifact_reaches_real_repo_through_sqlite_cas() {
         vec![workspace_dir.join(sandbox_id.to_string()).join("out")]
     );
     assert!(!workspace_dir.join(sandbox_id.to_string()).exists());
+}
+
+#[tokio::test]
+async fn staged_job_digest_flows_through_sandbox_and_runner() {
+    let tmp = TempDir::new();
+    let clock = Arc::new(FakeClock::new(1_800_000_000_000));
+    let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
+    let store = Store::open_in_memory(
+        StoreDeps {
+            clock: clock.clone(),
+            ids: ids.clone(),
+        },
+        &[],
+    )
+    .await
+    .unwrap();
+    let project = ids.next().unwrap();
+    let delivery = ids.next().unwrap();
+    let base = GitOid::parse(engine_cfg::BASE).unwrap();
+    let ctx = context(&ids);
+    let repo = Arc::new(FakeRepo::new(clock.now()));
+    repo.insert_commit(
+        project,
+        base,
+        gantry_core::ports::repo::CommitInfo {
+            parents: vec![],
+            tree: GitOid::parse("1111111111111111111111111111111111111111").unwrap(),
+            trailers: vec![],
+        },
+    );
+    let policy = Arc::new(FakePolicy::new(clock.now()));
+    let forge = Arc::new(FakeForge::new(clock.now()));
+    let egress = Arc::new(EgressStub::with_default_config());
+    let workspaces = tmp.path.join("sandboxes");
+    std::fs::create_dir(&workspaces).unwrap();
+    let driver = Arc::new(FakeDriver::new(&workspaces));
+    const SCHEMA: &[u8] = br#"{"type":"object"}"#;
+    let mut config = engine_cfg::runner_config();
+    config
+        .roles
+        .get_mut(&Role::Single)
+        .unwrap()
+        .structured_schema
+        .sha256 = sha256(SCHEMA);
+    let sandbox = Arc::new(SandboxManager::new(
+        SandboxDeps {
+            driver: driver.clone(),
+            repo: repo.clone(),
+            egress: egress.clone(),
+            store: store.clone(),
+            clock: clock.clone(),
+            artifacts: Arc::new(store.cas()),
+            schemas: Arc::new(StaticSchemas(BTreeMap::from([(
+                "gantry.worker.output.build/1".into(),
+                SCHEMA.to_vec(),
+            )]))),
+        },
+        SandboxConfig {
+            workspaces_dir: workspaces.clone(),
+            runtime: Runtime::Runc,
+            max_concurrent_sandboxes: 1,
+            network: NetworkAttach {
+                network: "gantry-sbx".into(),
+                add_hosts: vec![],
+            },
+            log_max_bytes: 16 << 20,
+            out_quota_bytes: 12 << 20,
+            tmpfs_home_mb: 256,
+            tmpfs_tmp_mb: 512,
+            progress_sample: Duration::from_secs(1),
+            log_drain_timeout: Duration::from_secs(5),
+            orphan_grace: Duration::ZERO,
+        },
+    ));
+    let runner = AttemptRunner::new(
+        AttemptPorts {
+            sandbox: sandbox.clone(),
+            repo: repo.clone(),
+            policy: policy.clone(),
+            forge,
+            cas: Arc::new(store.cas()),
+            adapter: Arc::new(StubWorkerAdapter::new()),
+            clock: clock.clone(),
+            entropy: Arc::new(SeqEntropy::new(99)),
+        },
+        Arc::new(config),
+    );
+    let mut nonces = Vec::new();
+    for wrong_declaration in [false, true] {
+        let attempt = ids.next().unwrap();
+        let sandbox_id = sandbox_id_for(&attempt);
+        driver.script(
+            sandbox_id,
+            FakeScript {
+                behavior: FakeBehavior::Forever { honor_term: true },
+                ..FakeScript::default()
+            },
+        );
+        let plan = AttemptPlan {
+            attempt_id: attempt,
+            node_id: ids.next().unwrap(),
+            workflow_id: ids.next().unwrap(),
+            role: Role::Single,
+            exec: Exec::Sandbox,
+            critical: false,
+            n: 1,
+            base_sha: base,
+            pr_base_sha: None,
+            tokens_total: 100_000,
+            wall_time_s: 900,
+            model: ResolvedModel {
+                provider_id: "anthropic".into(),
+                model: "claude-test".into(),
+                reasoning_effort: gantry_core::level::Effort::Medium,
+                attempt_wall_s: 900,
+            },
+            upstream: vec![],
+            previous: vec![],
+            instructions: TrustedInstructions::compose("single", "fixture"),
+            refs: vec![],
+            lock: None,
+            resume: false,
+        };
+        let cx = AttemptContext {
+            project_id: project,
+            delivery_id: delivery,
+            level_effective: Level::Low,
+            graph_rev: 1,
+            revision_round: 0,
+            required: true,
+            upstream: vec![],
+        };
+        let dir = workspaces.join(sandbox_id.to_string());
+        let prior_starts = driver
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, DriverCall::Start(_)))
+            .count();
+        let worker = async {
+            let id = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(id) = driver
+                        .calls()
+                        .into_iter()
+                        .filter_map(|call| match call {
+                            DriverCall::Start(id) => Some(id),
+                            _ => None,
+                        })
+                        .nth(prior_starts)
+                    {
+                        if dir.join("job.json").exists() {
+                            break id;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let bytes = std::fs::read(dir.join("job.json")).unwrap();
+            let digest = sha256(&bytes);
+            let job: JobSpec = serde_json::from_slice(&bytes).unwrap();
+            let meta = gantry_sandbox::service::meta::Meta::load(&dir.join("meta.json"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(meta.job_sha256, Some(Some(digest)));
+            let declared = if wrong_declaration {
+                sha256(b"forged")
+            } else {
+                digest
+            };
+            let proposal = serde_json::to_vec(&json!({
+                "protocol":"gantry-worker/1", "job_id":attempt, "proposals":[{
+                    "id":"p1", "kind":"open_pr", "target":null,
+                    "params":{"title":"bad", "body":"bad", "draft":false}, "rationale":"done"
+                }]
+            }))
+            .unwrap();
+            let patch = b"diff --git a/src/lib.rs b/src/lib.rs\n".to_vec();
+            let result = serde_json::to_vec(&json!({
+                "protocol":"gantry-worker/1", "job_id":attempt, "job_sha256":declared,
+                "status":"succeeded", "summary":"fixture", "error":null,
+                "structured_output":{"kind":"build", "changes_summary":"done"},
+                "artifacts":{
+                    "patch": if wrong_declaration { Some(json!({"path":"changes.patch", "sha256":sha256(&patch), "bytes":patch.len(), "base_sha":base, "files_changed":1})) } else { None },
+                    "report":null,
+                    "proposals": if wrong_declaration { Some(json!({"path":"proposals.json", "sha256":sha256(&proposal), "bytes":proposal.len()})) } else { None }
+                },
+                "flags":{"suspected_injection":[]},
+                "usage_reported":{"input_tokens":0, "output_tokens":0, "cache_read_tokens":0,
+                    "cache_write_tokens":0, "turns":1, "tool_calls":1},
+                "agent":{"kind":"claude-code", "version":"1.0.0", "model":"claude-test"},
+                "started_at":clock.now(), "ended_at":clock.now()
+            })).unwrap();
+            let mut out = vec![("result.json".into(), FakeOutEntry::File(result))];
+            if wrong_declaration {
+                out.push(("changes.patch".into(), FakeOutEntry::File(patch)));
+                out.push(("proposals.json".into(), FakeOutEntry::File(proposal)));
+            }
+            driver.complete(&id, out).unwrap();
+            (digest, job.isolation.nonce)
+        };
+        let (finalized, (digest, nonce)) = tokio::join!(runner.run(&plan, &cx, &ctx), worker);
+        let finalized = finalized.unwrap();
+        let outcome = sandbox.wait(&attempt).await.unwrap();
+        assert_eq!(outcome.job_sha256, Some(digest));
+        let bundle: ResultBundle = serde_json::from_slice(
+            &store
+                .cas()
+                .get_bytes(&finalized.result_ref.unwrap(), 1 << 20)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bundle.job_sha256, digest);
+        if wrong_declaration {
+            assert_eq!(finalized.status, AttemptStatus::Failed);
+            assert_eq!(finalized.failure_detail.unwrap().as_str(), "exec.protocol");
+            assert!(bundle.validation.is_none());
+            assert!(matches!(finalized.patch, PatchResult::None));
+            assert!(finalized.proposals.is_empty());
+            assert!(repo.patch_outcome(&attempt).is_none());
+            assert_eq!(policy.proposal_calls(), 0);
+        } else {
+            assert_eq!(finalized.status, AttemptStatus::Succeeded);
+        }
+        assert!(!egress.calls().iter().any(
+            |call| matches!(call, EgressCall::ForgetJob { job_id, .. } if *job_id == attempt)
+        ));
+        nonces.push(nonce);
+    }
+    assert_ne!(nonces[0], nonces[1]);
+
+    // 模拟旧记录：原执行仍在驱动中，只能接管，不能重新启动。
+    let attempt = ids.next().unwrap();
+    let sandbox_id = sandbox_id_for(&attempt);
+    driver.script(
+        sandbox_id,
+        FakeScript {
+            behavior: FakeBehavior::Forever { honor_term: true },
+            ..FakeScript::default()
+        },
+    );
+    let mut plan = AttemptPlan {
+        attempt_id: attempt,
+        node_id: ids.next().unwrap(),
+        workflow_id: ids.next().unwrap(),
+        role: Role::Single,
+        exec: Exec::Sandbox,
+        critical: false,
+        n: 1,
+        base_sha: base,
+        pr_base_sha: None,
+        tokens_total: 100_000,
+        wall_time_s: 900,
+        model: ResolvedModel {
+            provider_id: "anthropic".into(),
+            model: "claude-test".into(),
+            reasoning_effort: gantry_core::level::Effort::Medium,
+            attempt_wall_s: 900,
+        },
+        upstream: vec![],
+        previous: vec![],
+        instructions: TrustedInstructions::compose("single", "legacy"),
+        refs: vec![],
+        lock: None,
+        resume: false,
+    };
+    let cx = AttemptContext {
+        project_id: project,
+        delivery_id: delivery,
+        level_effective: Level::Low,
+        graph_rev: 1,
+        revision_round: 0,
+        required: true,
+        upstream: vec![],
+    };
+    sandbox
+        .submit(&ctx, runner.assemble(&plan, &cx, &ctx).await.unwrap())
+        .await
+        .unwrap();
+    let id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(id) = driver
+                .calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    DriverCall::Start(id) => Some(id),
+                    _ => None,
+                })
+                .nth(2)
+            {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sandbox.crash();
+    let meta_path = workspaces.join(sandbox_id.to_string()).join("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    meta.as_object_mut().unwrap().remove("job_sha256");
+    std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    driver.complete(&id, vec![]).unwrap();
+    egress.set_revoke_fault(Some(RevokeFault::NotFound));
+    let recovered = Arc::new(SandboxManager::new(
+        SandboxDeps {
+            driver: driver.clone(),
+            repo: repo.clone(),
+            egress: egress.clone(),
+            store: store.clone(),
+            clock: clock.clone(),
+            artifacts: Arc::new(store.cas()),
+            schemas: Arc::new(StaticSchemas(BTreeMap::from([(
+                "gantry.worker.output.build/1".into(),
+                SCHEMA.to_vec(),
+            )]))),
+        },
+        SandboxConfig {
+            workspaces_dir: workspaces.clone(),
+            runtime: Runtime::Runc,
+            max_concurrent_sandboxes: 1,
+            network: NetworkAttach {
+                network: "gantry-sbx".into(),
+                add_hosts: vec![],
+            },
+            log_max_bytes: 16 << 20,
+            out_quota_bytes: 12 << 20,
+            tmpfs_home_mb: 256,
+            tmpfs_tmp_mb: 512,
+            progress_sample: Duration::from_secs(1),
+            log_drain_timeout: Duration::from_secs(5),
+            orphan_grace: Duration::ZERO,
+        },
+    ));
+    let recovered_runner = AttemptRunner::new(
+        AttemptPorts {
+            sandbox: recovered.clone(),
+            repo: repo.clone(),
+            policy: policy.clone(),
+            forge: Arc::new(FakeForge::new(clock.now())),
+            cas: Arc::new(store.cas()),
+            adapter: Arc::new(StubWorkerAdapter::new()),
+            clock: clock.clone(),
+            entropy: Arc::new(SeqEntropy::new(99)),
+        },
+        runner.config().clone(),
+    );
+    plan.resume = true;
+    let mut running = Box::pin(recovered_runner.run(&plan, &cx, &ctx));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), &mut running)
+            .await
+            .is_err()
+    );
+    assert_eq!(recovered.capacity().await.running, 0);
+    assert!(recovered.release(&ctx, &attempt).await.is_err());
+    egress.set_revoke_fault(Some(RevokeFault::Incomplete));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(800), &mut running)
+            .await
+            .is_err()
+    );
+    assert!(recovered.release(&ctx, &attempt).await.is_err());
+    assert!(!egress
+        .calls()
+        .iter()
+        .any(|call| matches!(call, EgressCall::ForgetJob { job_id, .. } if *job_id == attempt)));
+    egress.set_revoke_fault(None);
+    let finalized = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finalized.failure_detail.unwrap().as_str(), "exec.protocol");
+    assert_eq!(
+        finalized.retry_blocked,
+        Some(gantry_engine::decide::RetryBlocked::JobIdentityUnavailable)
+    );
+    assert!(finalized.result_ref.is_none());
+    assert_eq!(recovered.wait(&attempt).await.unwrap().job_sha256, None);
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(meta_path).unwrap()).unwrap();
+    assert!(meta.get("job_sha256").is_none());
+    assert_eq!(
+        driver
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, DriverCall::Start(_)))
+            .count(),
+        3
+    );
+    assert_eq!(policy.proposal_calls(), 0);
+    assert!(repo.patch_outcome(&attempt).is_none());
+    assert!(!egress
+        .calls()
+        .iter()
+        .any(|call| matches!(call, EgressCall::ForgetJob { job_id, .. } if *job_id == attempt)));
 }
 
 #[tokio::test]

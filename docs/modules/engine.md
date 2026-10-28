@@ -521,7 +521,7 @@ flowchart LR
 
 ### 7.8 尝试生命周期、终结管线与失败处理
 
-**任务身份例外（#362）**：缺少可信摘要时，不执行 V5 / V6，不生成 bundle；真实运行时分类、禁止自动重试、错误终结和清理顺序按 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。本契约切片只添加端口及编译适配，上述行为尚未实现；`JobIdentityUnavailable` 当前映射为 `Defect` 的 `EffectFailed` 路径不会保证 attempt / node 终结，后续 runner 必须专门拦截并生成 `Finalized`。
+**任务身份例外（#362）**：当前 runner 已按 [任务身份契约](../interfaces/worker-protocol.md#job-identity) 比对服务端摘要，缺摘要时不执行 V5 / V6 或生成 bundle，并单独拦截 `JobIdentityUnavailable`。缺摘要的重试阻断与真实运行时分类分开；终结事务和提交后释放已有模块测试。跨模块仍有恢复隔离和 Egress 保留期缺口，不能据此宣布 §14 全部通过；生产 `assemble_real` 仍返回 `NotReady`。
 
 **派发（对应 worker-protocol §3.2 阶段 0）**：
 

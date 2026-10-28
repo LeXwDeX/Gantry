@@ -2,6 +2,8 @@
 
 > 状态：设计 v0.1 · 里程碑：M1 起（M2 / M3 增量） · 泳道：`exec`（见 [milestones.md](../milestones.md)） · crate / 目录：`crates/gantry-sandbox/`
 
+> **#362 实现现状**：`SandboxManager` 已保存最终 `job.json` 字节摘要，并在旧记录或身份不可验证时按 [任务身份契约](../interfaces/worker-protocol.md#job-identity) 收尾；替身驱动与 runner 的联测覆盖摘要和计量等待。同进程同一 job 的归属冲突仍会中断批量恢复，真实 Egress 的最终用量可能被保留期巡检提前遗忘；§14 尚未全部验收。`assemble_real` 仍返回 `NotReady`。
+
 > **协作扩展边界（提议）** —— 多工作树协作的完整语义见 [collaboration.md](../collaboration.md)；**设计提案，待单独契约批准，不替换本文现行规格**。
 >
 > - 跨树材料只作为服务端中介提供的固定快照进入 `SandboxSpec`；本模块不挂载其他工作树，也不接受指向其他树的活动路径。

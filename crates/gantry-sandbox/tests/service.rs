@@ -41,7 +41,9 @@ use gantry_sandbox::driver::LogStream;
 use gantry_sandbox::fake::{
     DriverCall, FailPoint, FakeBehavior, FakeDriver, FakeOutEntry, FakeScript, SIGKILL, SIGTERM,
 };
-use gantry_sandbox::service::seams::{ArtifactStore, BuiltinSchemas, CasKind, MemoryArtifacts};
+use gantry_sandbox::service::seams::{
+    ArtifactStore, BuiltinSchemas, CasKind, MemoryArtifacts, OutputSchemas,
+};
 use gantry_sandbox::service::{SandboxConfig, SandboxDeps, SandboxManager};
 use gantry_sandbox::spec::{NetworkAttach, Runtime};
 use gantry_store::{Store, StoreDeps};
@@ -164,6 +166,8 @@ struct RecordingEgress {
     log: std::sync::Mutex<Vec<String>>,
     fail_issue: std::sync::atomic::AtomicBool,
     fail_revoke: std::sync::atomic::AtomicBool,
+    revoke_behavior: std::sync::atomic::AtomicU8,
+    nonzero_usage: std::sync::atomic::AtomicBool,
     issued_revs: std::sync::Mutex<Vec<u64>>,
 }
 
@@ -212,7 +216,25 @@ impl EgressControl for RecordingEgress {
                 message: "egress restarting".into(),
             });
         }
-        self.inner.revoke_job_token(job_id, ctx).await
+        let behavior = self
+            .revoke_behavior
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if behavior == 1 {
+            return Err(EgressError::NotFound);
+        }
+        let mut usage = self.inner.revoke_job_token(job_id, ctx).await?;
+        if self.nonzero_usage.load(std::sync::atomic::Ordering::SeqCst) {
+            usage.usage = gantry_core::entities::TokenUsage::new(11, 7, 3, 2, 1);
+            usage.weighted_tokens = 19;
+        }
+        match behavior {
+            2 => usage.incomplete = true,
+            3 => usage.job_id = att(999),
+            4 => usage.state = gantry_core::egress::JobTokenState::Active,
+            5 => usage.revoked_at = None,
+            _ => {}
+        }
+        Ok(usage)
     }
     async fn forget_job(&self, job_id: &AttemptId, ctx: &ActorCtx) -> Result<(), EgressError> {
         self.log.lock().unwrap().push(format!("forget {job_id}"));
@@ -334,6 +356,8 @@ fn harness(max_concurrent: usize) -> Harness {
         log: Default::default(),
         fail_issue: Default::default(),
         fail_revoke: Default::default(),
+        revoke_behavior: Default::default(),
+        nonzero_usage: Default::default(),
         issued_revs: Default::default(),
     });
     let orphan_grace = Duration::ZERO;
@@ -376,6 +400,7 @@ fn manager(
         max_concurrent,
         orphan_grace,
         Arc::new(MemoryArtifacts::default()),
+        Arc::new(BuiltinSchemas),
     )
 }
 
@@ -389,6 +414,7 @@ fn manager_with_artifacts(
     max_concurrent: usize,
     orphan_grace: Duration,
     artifacts: Arc<dyn ArtifactStore>,
+    schemas: Arc<dyn OutputSchemas>,
 ) -> SandboxManager<FakeDriver> {
     let repo = FakeRepo::new(gantry_core::time::Timestamp::from_millis(MS));
     let job = base_job();
@@ -409,7 +435,7 @@ fn manager_with_artifacts(
             store: store.clone(),
             clock: clock.clone(),
             artifacts,
-            schemas: Arc::new(BuiltinSchemas),
+            schemas,
         },
         SandboxConfig {
             workspaces_dir: root.path().to_path_buf(),
@@ -515,6 +541,14 @@ async fn golden_path() {
     let handle = h.service.submit(&ctx(), spec(1)).await.unwrap();
     assert_eq!((handle.job_id, handle.sandbox_id), (att(1), sbx(1)));
     let outcome = h.service.wait(&att(1)).await.unwrap();
+    let job_bytes = std::fs::read(h.root.path().join(sbx(1).to_string()).join("job.json")).unwrap();
+    let meta = gantry_sandbox::service::meta::Meta::load(
+        &h.root.path().join(sbx(1).to_string()).join("meta.json"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(outcome.job_sha256, Some(sha256(&job_bytes)));
+    assert_eq!(meta.job_sha256, Some(outcome.job_sha256));
     let staged = std::fs::read(
         h.root
             .path()
@@ -1278,7 +1312,7 @@ async fn vanished_container_with_readable_out_collects_as_lost() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn container_and_staging_gone_is_lost() {
+async fn container_and_metadata_gone_is_identity_rejection() {
     let mut h = harness(1);
     h.driver.script(sbx(44), long_running());
     h.service.submit(&ctx(), spec(44)).await.unwrap();
@@ -1291,21 +1325,29 @@ async fn container_and_staging_gone_is_lost() {
         h.driver.purge_staging(&layout).await.unwrap();
     }
     let recovered = h.service.recover(&ctx(), &[unfinished(44)]).await.unwrap();
-    assert_eq!(recovered, vec![RecoveredJob::Lost(handle(44))]);
+    assert_eq!(recovered, vec![RecoveredJob::Running(handle(44))]);
     let err = h.service.wait(&att(44)).await.unwrap_err();
     assert!(
         matches!(
             err,
-            SandboxError::Infra {
-                detail: InfraDetail::Lost,
-                ..
-            }
+            SandboxError::JobIdentityUnavailable { usage: Some(_), .. }
         ),
         "{err:?}"
     );
     assert!(h.egress.log().contains(&format!("revoke {}", att(44))));
-    let types = event_types(&h.store).await;
-    assert_eq!(types.last().map(String::as_str), Some("sandbox.destroyed"));
+    assert_eq!(h.service.wait(&att(44)).await.unwrap_err(), err);
+    assert!(h
+        .root
+        .path()
+        .join(format!("{}.recovery.json", sbx(44)))
+        .exists());
+    assert!(!h.egress.log().contains(&format!("forget {}", att(44))));
+    h.service.release(&ctx(), &att(44)).await.unwrap();
+    assert!(!h
+        .root
+        .path()
+        .join(format!("{}.recovery.json", sbx(44)))
+        .exists());
 }
 
 #[tokio::test(start_paused = true)]
@@ -1545,6 +1587,7 @@ fn use_artifacts(h: &mut Harness, artifacts: Arc<dyn ArtifactStore>) {
         h.max_concurrent,
         h.orphan_grace,
         artifacts,
+        Arc::new(BuiltinSchemas),
     );
 }
 
@@ -1709,4 +1752,1082 @@ async fn failed_collect_preserves_prior_cas_object_and_cleans_up() {
         h.egress.log(),
         vec![format!("issue {}", att(73)), format!("revoke {}", att(73))]
     );
+}
+
+fn meta_path(h: &Harness, n: u128) -> std::path::PathBuf {
+    h.root.path().join(sbx(n).to_string()).join("meta.json")
+}
+
+fn write_meta_json(h: &Harness, n: u128, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = meta_path(h, n);
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    edit(&mut value);
+    std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+fn starts(h: &Harness) -> usize {
+    h.driver
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, DriverCall::Start(_)))
+        .count()
+}
+
+fn preparation_meta(
+    n: u128,
+    phase: gantry_sandbox::service::meta::Phase,
+) -> gantry_sandbox::service::meta::Meta {
+    use gantry_sandbox::service::meta::{Meta, Phase, Resume};
+    let s = spec(n);
+    let mut meta = Meta::new(s.job_id, s.sandbox_id);
+    meta.project_id = Some(s.project_id);
+    meta.phase = phase;
+    if phase != Phase::Accepted {
+        meta.resume = Some(Resume {
+            project_id: s.project_id,
+            io: s.io.clone(),
+            intake: gantry_sandbox::intake::IntakePlan::new(
+                &s.io.artifacts,
+                s.job.output.patch,
+                s.job.constraints.patch.as_ref(),
+                12 << 20,
+            ),
+            wall_time_s: s.limits.wall_time_s,
+            idle_timeout_s: s.timers.idle_timeout_s,
+            kill_grace_s: s.timers.kill_grace_s,
+        });
+    }
+    if matches!(phase, Phase::Created | Phase::Staging | Phase::Staged) {
+        meta.token_issued = true;
+        meta.container_id = Some("removed-created-container".into());
+        meta.timings.created = Some(Timestamp::from_millis(MS));
+    }
+    if phase == Phase::Staged {
+        meta.timings.staged = Some(Timestamp::from_millis(MS));
+        meta.job_sha256 = Some(Some(sha256(b"old staged bytes")));
+    }
+    meta
+}
+
+async fn issue_test_token(h: &Harness, s: &SandboxSpec) {
+    use gantry_core::egress::SandboxTier;
+    use gantry_core::entities::Tier;
+    use gantry_core::ports::egress::ProviderId;
+    let tier = match s.job.execution.tier {
+        Tier::Planner => SandboxTier::Planner,
+        Tier::Worker => SandboxTier::Worker,
+        Tier::Utility => panic!("invalid test tier"),
+    };
+    let request = IssueJobToken {
+        job_id: s.job_id,
+        sandbox_id: s.sandbox_id,
+        project_id: s.project_id,
+        delivery_id: s.delivery_id,
+        conversation_id: s.conversation_id,
+        tier,
+        provider: ProviderId::new("anthropic"),
+        profile: s.egress.profile.clone(),
+        groups: s.egress.groups.clone(),
+        tokens_total: s.egress.tokens_total,
+        weights: s.egress.weights,
+        wall_time_s: s.limits.wall_time_s,
+        config_rev: s.config_rev,
+    };
+    h.egress.issue_job_token(request, &ctx()).await.unwrap();
+}
+
+#[test]
+fn metadata_distinguishes_missing_null_valid_and_invalid_digest() {
+    use gantry_sandbox::service::meta::{Meta, Phase};
+    let root = TempRoot::new();
+    let path = root.path().join("meta.json");
+    let mut meta = Meta::new(att(210), sbx(210));
+    meta.project_id = Some(base_job().project_id);
+    meta.save(&path).unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(value.get("job_sha256").unwrap().is_null());
+    value.as_object_mut().unwrap().remove("job_sha256");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    let mut legacy = Meta::load(&path).unwrap().unwrap();
+    assert_eq!(legacy.job_sha256, None);
+    legacy.phase = Phase::Running;
+    legacy.save(&path).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(saved.get("job_sha256").is_none());
+    meta.job_sha256 = Some(Some(sha256(b"exact job bytes")));
+    meta.save(&path).unwrap();
+    assert_eq!(
+        Meta::load(&path).unwrap().unwrap().job_sha256,
+        meta.job_sha256
+    );
+    value["job_sha256"] = serde_json::json!("not-a-digest");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(Meta::load(&path).is_err());
+    value.as_object_mut().unwrap().remove("job_sha256");
+    value.as_object_mut().unwrap().remove("token_issued");
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(Meta::load(&path).is_err());
+}
+
+struct FailStagedMetaSave(std::path::PathBuf);
+
+impl OutputSchemas for FailStagedMetaSave {
+    fn get(&self, id: &str) -> Option<Vec<u8>> {
+        std::fs::create_dir(&self.0).unwrap();
+        BuiltinSchemas.get(id)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_staged_meta_save_never_starts_worker() {
+    let mut h = harness(1);
+    let path = meta_path(&h, 211).with_extension("json.tmp");
+    h.service = manager_with_artifacts(
+        &h.root,
+        &h.driver,
+        &h.egress,
+        &h.store,
+        &h.clock,
+        h.max_concurrent,
+        h.orphan_grace,
+        Arc::new(MemoryArtifacts::default()),
+        Arc::new(FailStagedMetaSave(path)),
+    );
+    h.service.submit(&ctx(), spec(211)).await.unwrap();
+    assert!(matches!(
+        h.service.wait(&att(211)).await,
+        Err(SandboxError::Infra {
+            detail: InfraDetail::WorkspacePrep,
+            ..
+        })
+    ));
+    assert_eq!(starts(&h), 0);
+    assert_eq!(h.driver.container_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_preparation_reenters_with_same_ids_and_new_digest() {
+    use gantry_sandbox::service::meta::{Meta, Phase};
+    for (i, phase) in [
+        Phase::Accepted,
+        Phase::Queued,
+        Phase::Creating,
+        Phase::Created,
+        Phase::Staging,
+        Phase::Staged,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let n = 220 + i as u128;
+        let h = harness(1);
+        let path = meta_path(&h, n);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let meta = preparation_meta(n, phase);
+        if meta.token_issued {
+            issue_test_token(&h, &spec(n)).await;
+        }
+        meta.save(&path).unwrap();
+        std::fs::write(path.parent().unwrap().join("old-preparation"), b"stale").unwrap();
+        assert_eq!(
+            h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+            vec![RecoveredJob::Unknown { job_id: att(n) }]
+        );
+        assert_eq!(
+            h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+            vec![RecoveredJob::Unknown { job_id: att(n) }]
+        );
+        let accepted = Meta::load(&path).unwrap().unwrap();
+        assert_eq!(accepted.phase, Phase::Accepted);
+        assert_eq!(accepted.job_sha256, Some(None));
+        assert!(!path.parent().unwrap().join("old-preparation").exists());
+        h.driver.script(sbx(n), golden_script());
+        h.service.submit(&ctx(), spec(n)).await.unwrap();
+        let outcome = h.service.wait(&att(n)).await.unwrap();
+        assert_eq!(starts(&h), 1);
+        let bytes = std::fs::read(path.parent().unwrap().join("job.json")).unwrap();
+        assert_eq!(outcome.job_sha256, Some(sha256(&bytes)));
+        assert_ne!(outcome.job_sha256, Some(sha256(b"old staged bytes")));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn reentry_evidence_survives_crash_after_staging_was_removed() {
+    let h = harness(1);
+    let n = 230;
+    let record = serde_json::json!({
+        "job_id": att(n), "sandbox_id": sbx(n), "project_id": base_job().project_id,
+        "kind": {"kind": "reenter", "token_issued": false}
+    });
+    let guard = h.root.path().join(format!("{}.recovery.json", sbx(n)));
+    std::fs::write(&guard, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert!(!meta_path(&h, n).exists());
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Unknown { job_id: att(n) }]
+    );
+    assert!(meta_path(&h, n).exists());
+    assert!(!guard.exists());
+    h.driver.script(sbx(n), golden_script());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_preparation_rejects_without_start_and_without_fabricated_usage() {
+    use gantry_sandbox::service::meta::Phase;
+    for (i, phase) in [
+        Phase::Accepted,
+        Phase::Queued,
+        Phase::Creating,
+        Phase::Created,
+        Phase::Staging,
+        Phase::Staged,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let n = 240 + i as u128;
+        let h = harness(1);
+        let path = meta_path(&h, n);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut meta = preparation_meta(n, phase);
+        meta.job_sha256 = None;
+        if meta.token_issued {
+            issue_test_token(&h, &spec(n)).await;
+        }
+        meta.save(&path).unwrap();
+        assert_eq!(
+            h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+            vec![RecoveredJob::Running(handle(n))]
+        );
+        let error = h.service.wait(&att(n)).await.unwrap_err();
+        if meta.token_issued {
+            assert!(matches!(
+                error,
+                SandboxError::JobIdentityUnavailable { usage: Some(_), .. }
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                SandboxError::JobIdentityUnavailable { usage: None, .. }
+            ));
+        }
+        assert_eq!(h.service.wait(&att(n)).await.unwrap_err(), error);
+        assert_eq!(
+            h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+            vec![RecoveredJob::Exited(handle(n))]
+        );
+        assert_eq!(starts(&h), 0);
+        assert!(path.exists());
+        h.service.release(&ctx(), &att(n)).await.unwrap();
+        assert_eq!(
+            h.egress.log().iter().any(|s| s.starts_with("forget")),
+            meta.token_issued
+        );
+        assert!(!path.exists());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn starting_without_container_and_orphan_staging_block_instead_of_resubmitting() {
+    use gantry_sandbox::service::meta::{Meta, Phase};
+    let h = harness(1);
+    let n = 250;
+    let path = meta_path(&h, n);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut meta = Meta::new(att(n), sbx(n));
+    meta.project_id = Some(base_job().project_id);
+    meta.phase = Phase::Starting;
+    meta.job_sha256 = Some(Some(sha256(b"job")));
+    meta.save(&path).unwrap();
+    std::fs::create_dir_all(meta_path(&h, 251).parent().unwrap()).unwrap();
+    let recovered = h
+        .service
+        .recover(&ctx(), &[unfinished(n), unfinished(251), unfinished(252)])
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered,
+        vec![
+            RecoveredJob::Running(handle(n)),
+            RecoveredJob::Running(handle(251)),
+            RecoveredJob::Unknown { job_id: att(252) }
+        ]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), h.service.wait(&att(251)))
+            .await
+            .is_err()
+    );
+    assert_eq!(starts(&h), 0);
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    assert!(!h.egress.log().iter().any(|s| s.starts_with("forget")));
+    h.service.crash();
+}
+
+#[tokio::test(start_paused = true)]
+async fn destroyed_prestart_cancel_replays_without_lost_or_start() {
+    let mut h = harness(1);
+    h.driver.script(sbx(260), long_running());
+    h.service.submit(&ctx(), spec(260)).await.unwrap();
+    h.service.submit(&ctx(), spec(261)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.service.cancel(&ctx(), &att(261)).await.unwrap();
+    let first = h.service.wait(&att(261)).await.unwrap();
+    assert_eq!(first.terminal.cause, TerminalCause::KilledCancel);
+    assert_eq!(first.job_sha256, None);
+    h.restart();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(261)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(261))]
+    );
+    let second = h.service.wait(&att(261)).await.unwrap();
+    assert_eq!(second.terminal, first.terminal);
+    assert_eq!(second.job_sha256, None);
+    assert_eq!(starts(&h), 1);
+    h.service.release(&ctx(), &att(261)).await.unwrap();
+    assert!(!h.egress.log().contains(&format!("forget {}", att(261))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn new_null_digest_prestart_cancel_waits_for_issued_token_usage() {
+    use gantry_sandbox::service::meta::{Meta, TerminalReason};
+    use std::sync::atomic::Ordering;
+
+    let h = harness(1);
+    let n = 265;
+    issue_test_token(&h, &spec(n)).await;
+    let path = meta_path(&h, n);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut meta = Meta::new(att(n), sbx(n));
+    meta.project_id = Some(base_job().project_id);
+    meta.token_issued = true;
+    meta.terminal_reason = Some(TerminalReason::Cancel);
+    meta.save(&path).unwrap();
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    h.egress.fail_revoke.store(false, Ordering::SeqCst);
+    h.egress.revoke_behavior.store(2, Ordering::SeqCst);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(6), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+    h.egress.revoke_behavior.store(0, Ordering::SeqCst);
+    let outcome = h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(outcome.job_sha256, None);
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+    assert!(!outcome.egress.incomplete);
+    assert_eq!(starts(&h), 0);
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_outcome_waits_for_complete_matching_revoked_usage_across_restart() {
+    use std::sync::atomic::Ordering;
+    let mut h = harness(1);
+    h.egress.nonzero_usage.store(true, Ordering::SeqCst);
+    let n = 270;
+    h.driver.script(sbx(n), long_running());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    h.restart();
+    write_meta_json(&h, n, |v| {
+        v.as_object_mut().unwrap().remove("job_sha256");
+    });
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    h.driver.fail_next(FailPoint::Stop);
+    h.service.cancel(&ctx(), &att(n)).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert_eq!(h.service.capacity().await.running, 0);
+    assert_eq!(h.driver.container_count(), 0);
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    assert!(meta_path(&h, n).exists());
+    let meta = gantry_sandbox::service::meta::Meta::load(&meta_path(&h, n))
+        .unwrap()
+        .unwrap();
+    assert!(meta
+        .identity_diagnostic
+        .as_deref()
+        .unwrap()
+        .contains("egress"));
+    assert!(meta.job_sha256.is_none());
+    assert!(!h.egress.log().iter().any(|s| s.starts_with("forget")));
+    // 等计量不占槽位，另一个作业可以执行。
+    h.driver.script(sbx(271), golden_script());
+    h.service.submit(&ctx(), spec(271)).await.unwrap();
+    let other = h.service.wait(&att(271)).await.unwrap();
+    assert_eq!(other.terminal.cause, TerminalCause::Exited);
+    assert_eq!(starts(&h), 2);
+    h.restart();
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    h.egress.fail_revoke.store(false, Ordering::SeqCst);
+    for behavior in 1..=5 {
+        h.egress.revoke_behavior.store(behavior, Ordering::SeqCst);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(6), h.service.wait(&att(n)))
+                .await
+                .is_err(),
+            "behavior {behavior}"
+        );
+        assert_eq!(
+            h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+            vec![RecoveredJob::Running(handle(n))]
+        );
+        assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    }
+    h.egress.revoke_behavior.store(0, Ordering::SeqCst);
+    let outcome = h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(outcome.job_sha256, None);
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+    assert_eq!(
+        outcome.usage_metered,
+        gantry_core::entities::TokenUsage::new(11, 7, 3, 2, 1)
+    );
+    assert_eq!(outcome.weighted_tokens, 19);
+    assert!(!outcome.egress.incomplete);
+    assert_eq!(h.service.wait(&att(n)).await.unwrap(), outcome);
+    assert_eq!(starts(&h), 2);
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+    h.restart();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert_eq!(h.service.wait(&att(n)).await.unwrap(), outcome);
+    h.restart();
+    h.service.release(&ctx(), &att(n)).await.unwrap();
+    assert!(h.egress.log().contains(&format!("forget {}", att(n))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn damaged_metadata_rejection_survives_cleanup_and_retries_usage() {
+    use std::sync::atomic::Ordering;
+    let mut h = harness(1);
+    h.egress.nonzero_usage.store(true, Ordering::SeqCst);
+    let n = 280;
+    h.driver.script(sbx(n), long_running());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    h.restart();
+    std::fs::write(meta_path(&h, n), b"{broken").unwrap();
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    h.driver.fail_next(FailPoint::Remove);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert_eq!(h.driver.container_count(), 0);
+    assert_eq!(h.service.capacity().await.running, 0);
+    assert_eq!(std::fs::read(meta_path(&h, n)).unwrap(), b"{broken");
+    let guard = h.root.path().join(format!("{}.recovery.json", sbx(n)));
+    assert!(guard.exists());
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    h.restart();
+    let swept = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((swept.destroyed, swept.staging_removed), (0, 0));
+    assert!(guard.exists() && meta_path(&h, n).exists());
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    for behavior in 1..=5 {
+        h.egress.fail_revoke.store(false, Ordering::SeqCst);
+        h.egress.revoke_behavior.store(behavior, Ordering::SeqCst);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(6), h.service.wait(&att(n)))
+                .await
+                .is_err(),
+            "behavior {behavior}"
+        );
+    }
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+    h.egress.revoke_behavior.store(0, Ordering::SeqCst);
+    let error = h.service.wait(&att(n)).await.unwrap_err();
+    let SandboxError::JobIdentityUnavailable {
+        usage: Some(usage), ..
+    } = &error
+    else {
+        panic!("{error:?}")
+    };
+    assert_eq!(usage.job_id, att(n));
+    assert_eq!(usage.state, gantry_core::egress::JobTokenState::Revoked);
+    assert_eq!(
+        usage.usage,
+        gantry_core::entities::TokenUsage::new(11, 7, 3, 2, 1)
+    );
+    assert_eq!(usage.weighted_tokens, 19);
+    assert!(!usage.incomplete);
+    assert_eq!(h.service.wait(&att(n)).await.unwrap_err(), error);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Exited(handle(n))]
+    );
+    assert_eq!(starts(&h), 1);
+    assert!(guard.exists());
+    h.restart();
+    h.service.release(&ctx(), &att(n)).await.unwrap();
+    assert!(!guard.exists());
+    assert!(!meta_path(&h, n).exists());
+    assert!(h.egress.log().contains(&format!("forget {}", att(n))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn identity_mismatch_invalid_digest_and_phase_are_isolated_per_job() {
+    let mut h = harness(5);
+    for n in 290..295 {
+        h.driver.script(sbx(n), long_running());
+        h.service.submit(&ctx(), spec(n)).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    h.restart();
+    write_meta_json(&h, 290, |v| v["job_id"] = serde_json::json!(att(999)));
+    write_meta_json(&h, 291, |v| v["sandbox_id"] = serde_json::json!(sbx(999)));
+    write_meta_json(&h, 292, |v| {
+        v["project_id"] =
+            serde_json::json!(gantry_core::ids::ProjectId::from_parts(MS as u64, 999).unwrap())
+    });
+    write_meta_json(&h, 293, |v| v["job_sha256"] = serde_json::json!("invalid"));
+    write_meta_json(&h, 294, |v| v["phase"] = serde_json::json!("staging"));
+    let attempts: Vec<_> = (290..295)
+        .map(unfinished)
+        .chain([unfinished(295)])
+        .collect();
+    let recovered = h.service.recover(&ctx(), &attempts).await.unwrap();
+    assert_eq!(
+        &recovered[..5],
+        &(290..295)
+            .map(|n| RecoveredJob::Running(handle(n)))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(recovered[5], RecoveredJob::Unknown { job_id: att(295) });
+    for n in 290..295 {
+        assert!(matches!(
+            h.service.wait(&att(n)).await,
+            Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+        ));
+    }
+    assert_eq!(starts(&h), 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn changed_materials_and_nonce_are_in_the_persisted_outcome_digest() {
+    use gantry_core::ports::sandbox::RawMaterial;
+    use gantry_core::text::UntrustedText;
+    use gantry_core::worker::MaterialKind;
+    let mut digests = Vec::new();
+    let mut nonces = Vec::new();
+    for body in ["first issue body", "changed issue body"] {
+        let h = harness(1);
+        let n = 310;
+        let mut s = spec(n);
+        s.raw_materials.push(RawMaterial {
+            id: "mat-001".into(),
+            kind: MaterialKind::IssueBody,
+            source: "acme/widgets#5".into(),
+            text: UntrustedText::new(body.into(), "github:issue.body".into(), false),
+        });
+        h.driver.script(sbx(n), golden_script());
+        h.service.submit(&ctx(), s).await.unwrap();
+        let outcome = h.service.wait(&att(n)).await.unwrap();
+        let bytes = std::fs::read(meta_path(&h, n).parent().unwrap().join("job.json")).unwrap();
+        let job: JobSpec = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(job.materials.len(), 1);
+        assert_eq!(outcome.job_sha256, Some(sha256(&bytes)));
+        let meta = gantry_sandbox::service::meta::Meta::load(&meta_path(&h, n))
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.job_sha256, Some(outcome.job_sha256));
+        digests.push(outcome.job_sha256.unwrap());
+        nonces.push(job.isolation.nonce);
+    }
+    assert_ne!(digests[0], digests[1]);
+    assert_ne!(nonces[0], nonces[1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn starting_created_reenters_but_starting_running_is_only_supervised() {
+    use gantry_sandbox::driver::SandboxDriver as _;
+    use gantry_sandbox::service::meta::{Meta, Phase};
+    let h = harness(1);
+    let n = 320;
+    issue_test_token(&h, &spec(n)).await;
+    let layout = gantry_sandbox::spec::StagingLayout::new(h.root.path(), sbx(n)).unwrap();
+    h.driver.prepare_dirs(&layout).await.unwrap();
+    let id = h
+        .driver
+        .create(&common::valid_spec(&layout, att(n)))
+        .await
+        .unwrap();
+    let mut meta = preparation_meta(n, Phase::Staged);
+    meta.phase = Phase::Starting;
+    meta.container_id = Some(id.to_string());
+    meta.deadline_ms = Some(MS + 600_000);
+    meta.save(&layout.meta_json()).unwrap();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Unknown { job_id: att(n) }]
+    );
+    assert_eq!(h.driver.container_count(), 0);
+    assert_eq!(
+        Meta::load(&layout.meta_json()).unwrap().unwrap().phase,
+        Phase::Accepted
+    );
+    h.driver.script(sbx(n), golden_script());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(starts(&h), 1);
+
+    let mut h = harness(1);
+    let n = 321;
+    h.driver.script(sbx(n), long_running());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    h.restart();
+    write_meta_json(&h, n, |v| {
+        v["phase"] = serde_json::json!("starting");
+        v["timings"]["started"] = serde_json::Value::Null;
+    });
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    h.service.cancel(&ctx(), &att(n)).await.unwrap();
+    let outcome = h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+    assert!(outcome.job_sha256.is_some());
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_exited_oom_keeps_real_runtime_facts_and_complete_usage() {
+    use std::sync::atomic::Ordering;
+    let mut h = harness(1);
+    let n = 330;
+    h.driver.script(
+        sbx(n),
+        FakeScript {
+            behavior: FakeBehavior::OomAfter {
+                after: Duration::from_secs(5),
+            },
+            ..FakeScript::default()
+        },
+    );
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    h.restart();
+    write_meta_json(&h, n, |v| {
+        v.as_object_mut().unwrap().remove("job_sha256");
+    });
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    h.egress.revoke_behavior.store(2, Ordering::SeqCst);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    h.egress.revoke_behavior.store(0, Ordering::SeqCst);
+    let outcome = h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(outcome.job_sha256, None);
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledRuntime);
+    assert!(outcome.terminal.oom);
+    assert!(!outcome.egress.incomplete);
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn foreign_container_label_is_rejected_without_touching_the_container() {
+    use gantry_sandbox::driver::SandboxDriver as _;
+    use gantry_sandbox::service::meta::Phase;
+    let h = harness(1);
+    let n = 340;
+    issue_test_token(&h, &spec(n)).await;
+    let layout = gantry_sandbox::spec::StagingLayout::new(h.root.path(), sbx(n)).unwrap();
+    h.driver.prepare_dirs(&layout).await.unwrap();
+    let id = h
+        .driver
+        .create(&common::valid_spec(&layout, att(999)))
+        .await
+        .unwrap();
+    let mut meta = preparation_meta(n, Phase::Staged);
+    meta.container_id = Some(id.to_string());
+    meta.save(&layout.meta_json()).unwrap();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+    assert_eq!(h.driver.container_count(), 1);
+    assert!(!h
+        .driver
+        .calls()
+        .iter()
+        .any(|c| matches!(c, DriverCall::Kill(i) | DriverCall::Remove(i) if *i == id)));
+    assert_eq!(starts(&h), 0);
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    assert!(layout.meta_json().exists());
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_list_failure_rejects_one_job_without_aborting_the_batch() {
+    let mut h = harness(1);
+    let n = 350;
+    h.driver.script(sbx(n), long_running());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    h.restart();
+    h.driver.fail_next(FailPoint::List);
+    let recovered = h
+        .service
+        .recover(&ctx(), &[unfinished(n), unfinished(n + 1)])
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered,
+        vec![
+            RecoveredJob::Running(handle(n)),
+            RecoveredJob::Unknown { job_id: att(n + 1) }
+        ]
+    );
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn in_process_identity_conflict_does_not_abort_other_recovery() {
+    use std::sync::atomic::Ordering;
+    let h = harness(1);
+    let n = 355;
+    h.driver.script(sbx(n), long_running());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    let mut conflict = unfinished(n);
+    conflict.sandbox_id = sbx(n + 10);
+    let recovered = h
+        .service
+        .recover(&ctx(), &[conflict, unfinished(n + 1)])
+        .await
+        .expect("a conflicting job must not abort the batch");
+    assert!(matches!(
+        recovered[0],
+        RecoveredJob::Running(handle) if handle.job_id == att(n) && handle.sandbox_id == sbx(n + 10)
+    ));
+    assert_eq!(recovered[1], RecoveredJob::Unknown { job_id: att(n + 1) });
+    let id = container_id(&h);
+    let _ = h.driver.complete(&id, vec![]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    assert_eq!(starts(&h), 1);
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+    h.service.crash();
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_recovery_and_submit_reenter_once() {
+    use gantry_sandbox::service::meta::{Meta, Phase};
+    let h = harness(1);
+    let n = 360;
+    let path = meta_path(&h, n);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut meta = Meta::new(att(n), sbx(n));
+    meta.project_id = Some(base_job().project_id);
+    meta.phase = Phase::Accepted;
+    meta.save(&path).unwrap();
+    let attempts = [unfinished(n)];
+    let context = ctx();
+    let (a, b) = tokio::join!(
+        h.service.recover(&context, &attempts),
+        h.service.recover(&context, &attempts)
+    );
+    assert_eq!(a.unwrap(), vec![RecoveredJob::Unknown { job_id: att(n) }]);
+    assert_eq!(b.unwrap(), vec![RecoveredJob::Unknown { job_id: att(n) }]);
+    h.driver.script(sbx(n), golden_script());
+    let (a, b) = tokio::join!(
+        h.service.submit(&context, spec(n)),
+        h.service.submit(&context, spec(n))
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_reentry_cleanup_is_retried_as_rejection_without_starting() {
+    use gantry_sandbox::driver::SandboxDriver as _;
+    use gantry_sandbox::service::meta::Phase;
+    let h = harness(1);
+    let n = 361;
+    issue_test_token(&h, &spec(n)).await;
+    let layout = gantry_sandbox::spec::StagingLayout::new(h.root.path(), sbx(n)).unwrap();
+    h.driver.prepare_dirs(&layout).await.unwrap();
+    let id = h
+        .driver
+        .create(&common::valid_spec(&layout, att(n)))
+        .await
+        .unwrap();
+    let mut meta = preparation_meta(n, Phase::Staged);
+    meta.container_id = Some(id.to_string());
+    meta.save(&layout.meta_json()).unwrap();
+    h.driver.fail_next(FailPoint::Remove);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+    assert_eq!(h.driver.container_count(), 0);
+    assert_eq!(starts(&h), 0);
+    assert!(h
+        .root
+        .path()
+        .join(format!("{}.recovery.json", sbx(n)))
+        .exists());
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_failed_phase_is_rejected_instead_of_lost() {
+    use gantry_sandbox::service::meta::Phase;
+    let h = harness(1);
+    let n = 362;
+    issue_test_token(&h, &spec(n)).await;
+    let path = meta_path(&h, n);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut meta = preparation_meta(n, Phase::Staged);
+    meta.phase = Phase::Failed;
+    meta.job_sha256 = None;
+    meta.save(&path).unwrap();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+    assert_eq!(starts(&h), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn start_error_after_launch_is_identity_rejection_not_retryable_infra() {
+    use std::sync::atomic::Ordering;
+    let mut h = harness(1);
+    let n = 370;
+    h.driver.script(sbx(n), long_running());
+    h.driver.fail_next(FailPoint::StartAfterLaunch);
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert_eq!(starts(&h), 1);
+    assert_eq!(h.driver.container_count(), 0);
+    assert_eq!(h.service.capacity().await.running, 0);
+    assert!(h
+        .root
+        .path()
+        .join(format!("{}.recovery.json", sbx(n)))
+        .exists());
+    assert!(meta_path(&h, n).exists());
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    h.restart();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    h.egress.fail_revoke.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_running_phase_save_after_start_preserves_rejection_evidence() {
+    use std::sync::atomic::Ordering;
+    let mut h = harness(1);
+    let n = 371;
+    h.driver.script(sbx(n), long_running());
+    h.driver.fail_next(FailPoint::BlockRunningMeta);
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert_eq!(starts(&h), 1);
+    assert_eq!(h.driver.container_count(), 0);
+    assert_eq!(h.service.capacity().await.running, 0);
+    let meta = gantry_sandbox::service::meta::Meta::load(&meta_path(&h, n))
+        .unwrap()
+        .unwrap();
+    assert_eq!(meta.phase, gantry_sandbox::service::meta::Phase::Starting);
+    assert!(meta.job_sha256.flatten().is_some());
+    assert!(h
+        .root
+        .path()
+        .join(format!("{}.recovery.json", sbx(n)))
+        .exists());
+    h.restart();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    h.egress.fail_revoke.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_reentry_with_earlier_token_waits_for_final_usage() {
+    use gantry_sandbox::service::meta::Meta;
+    use std::sync::atomic::Ordering;
+    let h = harness(1);
+    let n = 380;
+    issue_test_token(&h, &spec(n)).await;
+    let path = meta_path(&h, n);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut meta = Meta::new(att(n), sbx(n));
+    meta.project_id = Some(base_job().project_id);
+    meta.token_issued = true;
+    meta.save(&path).unwrap();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Unknown { job_id: att(n) }]
+    );
+    h.egress.fail_issue.store(true, Ordering::SeqCst);
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert!(path.exists());
+    assert_eq!(starts(&h), 0);
+    assert!(!h.egress.log().contains(&format!("forget {}", att(n))));
+    h.egress.fail_revoke.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reentered_token_cancel_waits_for_usage_even_after_restart() {
+    use gantry_sandbox::service::meta::Meta;
+    use std::sync::atomic::Ordering;
+    let mut h = harness(1);
+    let n = 390;
+    issue_test_token(&h, &spec(n)).await;
+    let path = meta_path(&h, n);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut meta = Meta::new(att(n), sbx(n));
+    meta.project_id = Some(base_job().project_id);
+    meta.token_issued = true;
+    meta.save(&path).unwrap();
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Unknown { job_id: att(n) }]
+    );
+    h.driver.script(sbx(391), long_running());
+    h.service.submit(&ctx(), spec(391)).await.unwrap();
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    h.service.cancel(&ctx(), &att(n)).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        (
+            h.service.capacity().await.running,
+            h.service.capacity().await.queued
+        ),
+        (1, 0)
+    );
+    h.restart();
+    assert!(h.service.release(&ctx(), &att(n)).await.is_err());
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), h.service.wait(&att(n)))
+            .await
+            .is_err()
+    );
+    h.egress.fail_revoke.store(false, Ordering::SeqCst);
+    let outcome = h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+    assert!(!outcome.egress.incomplete);
+    assert_eq!(outcome.job_sha256, None);
+    assert_eq!(starts(&h), 1);
 }

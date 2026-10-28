@@ -52,7 +52,16 @@ pub enum TerminalReason {
 pub struct Meta {
     pub job_id: AttemptId,
     pub sandbox_id: SandboxId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
     pub phase: Phase,
+    /// 缺失为旧记录，显式 null 为新记录尚未 stage。
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "digest_field"
+    )]
+    pub job_sha256: Option<Option<Sha256Digest>>,
     #[serde(default)]
     pub container_id: Option<String>,
     /// `start` 时刻的 UTC 毫秒 + `wall_time`。
@@ -60,7 +69,6 @@ pub struct Meta {
     pub deadline_ms: Option<i64>,
     #[serde(default)]
     pub terminal_reason: Option<TerminalReason>,
-    #[serde(default)]
     pub token_issued: bool,
     #[serde(default)]
     pub cancel_requested: bool,
@@ -77,6 +85,16 @@ pub struct Meta {
     /// `Collected` 时记录的日志尾部 CAS 引用：容器删除后恢复，尾部仍与原结果相同。
     #[serde(default)]
     pub tails: Option<TailsRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_diagnostic: Option<String>,
+    #[serde(default)]
+    pub identity_finalized: bool,
+}
+
+fn digest_field<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<Sha256Digest>>, D::Error> {
+    Option::<Sha256Digest>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,7 +164,9 @@ impl Meta {
         Self {
             job_id,
             sandbox_id,
+            project_id: None,
             phase: Phase::Accepted,
+            job_sha256: Some(None),
             container_id: None,
             deadline_ms: None,
             terminal_reason: None,
@@ -157,6 +177,8 @@ impl Meta {
             lost: false,
             timings: TimingsRecord::default(),
             tails: None,
+            identity_diagnostic: None,
+            identity_finalized: false,
         }
     }
 
@@ -190,6 +212,50 @@ impl Meta {
             file.sync_all()?;
         }
         fs::rename(&tmp, path)
+    }
+
+    pub fn load(path: &Path) -> std::io::Result<Option<Self>> {
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(std::io::Error::other),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+/// 在清理 staging 时仍保留的恢复依据。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct RecoveryRecord {
+    pub job_id: AttemptId,
+    pub sandbox_id: SandboxId,
+    pub project_id: ProjectId,
+    pub kind: RecoveryKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum RecoveryKind {
+    Reenter {
+        token_issued: bool,
+    },
+    Reject {
+        message: String,
+        no_usage: bool,
+        #[serde(default)]
+        delivered: bool,
+    },
+}
+
+impl RecoveryRecord {
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        let tmp = path.with_extension("tmp");
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(tmp, path)
     }
 
     pub fn load(path: &Path) -> std::io::Result<Option<Self>> {

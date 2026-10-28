@@ -332,7 +332,9 @@ pub(crate) fn requeue_after_raise(state: &DeliveryState, out: &mut Vec<Decision>
     };
     for node in workflow.nodes.values() {
         let budget_failed = node.status == NodeStatus::Failed
-            && last_failure(node).is_some_and(|d| d.starts_with("budget."));
+            && last_failure(node).is_some_and(|d| d.starts_with("budget."))
+            && (node.exec == gantry_core::entities::Exec::Direct
+                || node.attempts.last().is_some_and(|a| a.result_ref.is_some()));
         if budget_failed
             && budget_raised_since_exhausted(state, BudgetDimension::TokensByTier(node.tier))
         {
