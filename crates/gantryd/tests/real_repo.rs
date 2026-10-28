@@ -13,7 +13,9 @@ use std::time::Duration;
 mod engine_cfg;
 
 use gantry_core::canon::{sha256, GitOid, RepoSlug};
-use gantry_core::entities::{Actor, ActorKind, LockHolder, Seq};
+use gantry_core::entities::{
+    Actor, ActorKind, AttemptStatus, Exec, FailureClass, LockHolder, Role, Seq,
+};
 use gantry_core::entities::{SandboxLimits, SandboxTrust, TokenWeights};
 use gantry_core::events::{EventType, NewEvent, PatchRejectedData, PatchValidatedData, Subject};
 use gantry_core::ids::IdGen;
@@ -23,14 +25,16 @@ use gantry_core::ports::sandbox::{
 };
 use gantry_core::ports::{
     ActorCtx, BranchName, CommitMessage, CommitPatch, CreateWorktree, DeclaredPatch, PatchOutcome,
-    RepoError, RepoService, RevSpec, ValidatePatch,
+    PolicyPort, RepoError, RepoService, RevSpec, ValidatePatch,
 };
 use gantry_core::settings::resource::{
     ArtifactIo, MaterialIo, ProgressIo, SandboxDriver, SandboxIo,
 };
 use gantry_core::time::Timestamp;
 use gantry_core::worker::JobSpec;
-use gantry_core::worker::{PatchRejectReason, PatchVerdict, PathConstraints};
+use gantry_core::worker::{
+    BundleFileName, FileArtifact, PatchRejectReason, PatchVerdict, PathConstraints, ResultBundle,
+};
 use gantry_core::{
     entities::DeliveryOrigin,
     level::Level,
@@ -38,9 +42,12 @@ use gantry_core::{
 };
 use gantry_engine::{
     actor::EffectRunner,
-    attempt::AttemptPorts,
+    attempt::{sandbox_id_for, AttemptContext, AttemptPorts, AttemptRunner},
     create::{budget_from_level, NewDelivery},
-    decide::{Effect, EffectErrorClass, EffectReport},
+    decide::{
+        AttemptPlan, Effect, EffectErrorClass, EffectReport, PatchResult, ResolvedModel,
+        TrustedInstructions,
+    },
     engine::{load_delivery_state, Engine},
     PortEffects,
 };
@@ -49,6 +56,7 @@ use gantry_fakes::policy::FakePolicy;
 use gantry_fakes::{
     forge::FakeForge, inbox::FakeInbox, sandbox::FakeSandboxService, worker::StubWorkerAdapter,
 };
+use gantry_policy::{PolicyDeps, PolicyEngine, POLICY_MODULE};
 use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
 use gantry_sandbox::fake::{FakeDriver, FakeOutEntry, FakeScript};
 use gantry_sandbox::service::seams::StaticSchemas;
@@ -203,6 +211,23 @@ async fn events(
 }
 
 async fn open_repo(store: &Store, dir: &Path, clock: Arc<FakeClock>, ids: Arc<IdGen>) -> GitRepo {
+    open_repo_with_policy(
+        store,
+        dir,
+        clock,
+        ids,
+        Arc::new(FakePolicy::new_in(store.clone())),
+    )
+    .await
+}
+
+async fn open_repo_with_policy(
+    store: &Store,
+    dir: &Path,
+    clock: Arc<FakeClock>,
+    ids: Arc<IdGen>,
+    policy: Arc<dyn PolicyPort>,
+) -> GitRepo {
     let mut cfg = RepoConfig::new(dir.join("repo"));
     cfg.git_bin = Some(PathBuf::from("/usr/bin/git"));
     GitRepo::open(
@@ -211,12 +236,360 @@ async fn open_repo(store: &Store, dir: &Path, clock: Arc<FakeClock>, ids: Arc<Id
             store: store.clone(),
             clock,
             ids,
-            policy: Arc::new(FakePolicy::new_in(store.clone())),
+            policy,
             cas: Arc::new(store.cas()),
         },
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn attempt_real_repo_and_policy_commit_or_deny() {
+    for path in ["README.md", ".github/workflows/ci.yml"] {
+        let tmp = TempDir::new();
+        let clock = Arc::new(FakeClock::new(1_800_000_000_000));
+        let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
+        let store = Store::open(
+            StoreConfig::new(tmp.path.join("sqlite")),
+            StoreDeps {
+                clock: clock.clone(),
+                ids: ids.clone(),
+            },
+            &[POLICY_MODULE],
+        )
+        .await
+        .unwrap();
+        let project = ids.next().unwrap();
+        let delivery = ids.next().unwrap();
+        let ctx = context(&ids);
+        let slug = RepoSlug::parse("fixture/local").unwrap();
+        let forge = Arc::new(FakeForge::new_in(store.clone()));
+        let now = Timestamp::from_millis(1_800_000_000_000);
+        forge.insert_project(gantry_core::entities::Project {
+            id: project,
+            repo: slug.clone(),
+            installation_id: 42,
+            bot_user_id: 9,
+            default_branch: "main".into(),
+            allowed_merge_methods: vec![gantry_core::entities::MergeMethod::Merge],
+            merge_queue_enabled: false,
+            created_at: now,
+            updated_at: now,
+        });
+        let policy = Arc::new(PolicyEngine::new(PolicyDeps {
+            store: store.clone(),
+            forge: forge.clone(),
+            clock: clock.clone(),
+            ids: ids.clone(),
+        }));
+        let repo = Arc::new(
+            open_repo_with_policy(
+                &store,
+                &tmp.path,
+                clock.clone(),
+                ids.clone(),
+                policy.clone(),
+            )
+            .await,
+        );
+        repo.ensure_mirror(&ctx, &project, &slug).await.unwrap();
+        let mirror = tmp.path.join("repo/mirrors/fixture/local.git");
+        let upstream = tmp.path.join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        git(
+            &upstream,
+            &["init", "-q", "-b", "main", "--template=/dev/null"],
+        );
+        std::fs::write(upstream.join("README.md"), "hello\n").unwrap();
+        git(&upstream, &["add", "README.md"]);
+        git(&upstream, &["commit", "-q", "-m", "fixture base"]);
+        let base = GitOid::parse(git(&upstream, &["rev-parse", "HEAD"]).trim()).unwrap();
+        git(
+            &upstream,
+            &[
+                "push",
+                "-q",
+                mirror.to_str().unwrap(),
+                "HEAD:refs/mirror/heads/main",
+            ],
+        );
+        let wt = repo
+            .create_worktree(
+                &ctx,
+                CreateWorktree {
+                    project_id: project,
+                    delivery_id: delivery,
+                    branch: BranchName::new("gantry/fixture"),
+                    base_ref: "main".into(),
+                    base_sha: base,
+                },
+            )
+            .await
+            .unwrap();
+        let lock = repo
+            .acquire_lock(
+                &ctx,
+                &wt.id,
+                LockHolder::Engine,
+                &delivery,
+                Duration::from_secs(3600),
+            )
+            .await
+            .unwrap();
+        let mut tx = store.begin_write().await.unwrap();
+        let rev = tx.read().config_rev(None);
+        tx.append(NewEvent {
+            ty: EventType::SettingsUpdated, subject: Subject::parse("settings").unwrap(), project_id: None,
+            actor: Actor::new(ActorKind::User, "test"), causation_id: None, correlation_id: None,
+            data: json!({"scope":"global", "resource":"github", "schema_version":1,
+                "base_rev":rev.as_u64(), "value":{"commit_identity":{"name":"Fixture Bot","email":"bot@example.invalid"}},
+                "relaxes":[], "secret_changes":[]}), dedup_key: None,
+        }).await.unwrap();
+        tx.commit().await.unwrap();
+
+        if let Some(parent) = upstream.join(path).parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(upstream.join(path), "hello\nworld\n").unwrap();
+        git(&upstream, &["add", path]);
+        let patch = git(
+            &upstream,
+            &["diff", "--cached", "--full-index", "--no-renames", "HEAD"],
+        );
+        let tree = GitOid::parse(git(&upstream, &["write-tree"]).trim()).unwrap();
+        let digest = store
+            .cas()
+            .put(patch.as_bytes(), gantry_store::CasKind::Artifact)
+            .await
+            .unwrap();
+        let attempt = ids.next().unwrap();
+        let sandbox_id = sandbox_id_for(&attempt);
+        let sandbox = Arc::new(FakeSandboxService::new());
+        let mut cfg = engine_cfg::runner_config();
+        cfg.repo = slug;
+        let ports = AttemptPorts {
+            repo: repo.clone(),
+            sandbox: sandbox.clone(),
+            policy,
+            forge,
+            cas: Arc::new(store.cas()),
+            adapter: Arc::new(StubWorkerAdapter::new()),
+            clock: clock.clone(),
+            entropy: Arc::new(SeqEntropy::new(99)),
+        };
+        let cfg = Arc::new(cfg);
+        let runner = AttemptRunner::new(ports.clone(), cfg.clone());
+        let preview = AttemptRunner::new(
+            AttemptPorts {
+                entropy: Arc::new(SeqEntropy::new(99)),
+                ..ports
+            },
+            cfg,
+        );
+        let plan = AttemptPlan {
+            attempt_id: attempt,
+            node_id: ids.next().unwrap(),
+            workflow_id: ids.next().unwrap(),
+            role: Role::Single,
+            exec: Exec::Sandbox,
+            critical: false,
+            n: 1,
+            base_sha: base,
+            pr_base_sha: None,
+            tokens_total: 100_000,
+            wall_time_s: 900,
+            model: ResolvedModel {
+                provider_id: "anthropic".into(),
+                model: "claude-test".into(),
+                reasoning_effort: gantry_core::level::Effort::Medium,
+                attempt_wall_s: 900,
+            },
+            upstream: vec![],
+            previous: vec![],
+            instructions: TrustedInstructions::compose("single", "fixture"),
+            refs: vec![],
+            lock: Some(lock.clone()),
+            resume: false,
+        };
+        let cx = AttemptContext {
+            project_id: project,
+            delivery_id: delivery,
+            level_effective: Level::Low,
+            graph_rev: 1,
+            revision_round: 0,
+            required: true,
+            upstream: vec![],
+        };
+        // 替身无 staging；摘要取派发 JobSpec 的规范化字节，不覆盖真实 staging 的 nonce。
+        let job = preview.assemble(&plan, &cx, &ctx).await.unwrap().job;
+        let job_sha256 =
+            sha256(&gantry_core::canon::jcs(&serde_json::to_value(&job).unwrap()).unwrap());
+        let result = serde_json::to_vec(&json!({
+            "protocol": "gantry-worker/1", "job_id": attempt, "job_sha256": job_sha256,
+            "status": "succeeded", "summary": "fixture", "error": null,
+            "structured_output": {"kind":"build", "changes_summary":"fixed"},
+            "artifacts": {"patch": {"path":"changes.patch", "sha256":digest,
+                "bytes":patch.len(), "base_sha":base, "files_changed":1}, "report":null, "proposals":null},
+            "flags": {"suspected_injection":[]},
+            "usage_reported": {"input_tokens":0, "output_tokens":0, "cache_read_tokens":0,
+                "cache_write_tokens":0, "turns":1, "tool_calls":1},
+            "agent": {"kind":"claude-code", "version":"1.0.0", "model":"claude-test"},
+            "started_at":now, "ended_at":now,
+        })).unwrap();
+        let result_digest = store
+            .cas()
+            .put(&result, gantry_store::CasKind::Artifact)
+            .await
+            .unwrap();
+        let mut outcome = FakeSandboxService::success_outcome(attempt, sandbox_id);
+        outcome.files.insert(
+            ArtifactName::new("changes.patch"),
+            FileArtifact {
+                sha256: digest,
+                bytes: patch.len() as u64,
+            },
+        );
+        outcome.files.insert(
+            ArtifactName::new("result.json"),
+            FileArtifact {
+                sha256: result_digest,
+                bytes: result.len() as u64,
+            },
+        );
+        sandbox.script_outcome(attempt, sandbox_id, outcome);
+        let finalized = runner.run(&plan, &cx, &ctx).await.unwrap();
+        let submitted_job = sandbox
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                gantry_fakes::sandbox::SandboxCall::Submit { spec, .. } => Some(spec.job),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(job, submitted_job);
+        let bundle_bytes = store
+            .cas()
+            .get_bytes(&finalized.result_ref.unwrap(), 1 << 20)
+            .await
+            .unwrap()
+            .unwrap();
+        let bundle: ResultBundle = serde_json::from_slice(&bundle_bytes).unwrap();
+        bundle.validate().unwrap();
+        assert_eq!(bundle.job_id, attempt);
+        assert_eq!(bundle.job_sha256, job_sha256);
+        assert_eq!(bundle.files[&BundleFileName::ChangesPatch].sha256, digest);
+        assert_eq!(
+            bundle.files[&BundleFileName::ResultJson].sha256,
+            result_digest
+        );
+        assert_eq!(
+            store
+                .cas()
+                .get_bytes(&digest, patch.len())
+                .await
+                .unwrap()
+                .unwrap(),
+            patch.as_bytes()
+        );
+        assert_eq!(
+            store
+                .cas()
+                .get_bytes(&result_digest, result.len())
+                .await
+                .unwrap()
+                .unwrap(),
+            result
+        );
+        assert_eq!(bundle.classification.failure_class, finalized.failure_class);
+        assert_eq!(
+            bundle.classification.failure_detail,
+            finalized.failure_detail
+        );
+        let validation = bundle.validation.unwrap().patch.unwrap();
+        assert_eq!(validation.sha256, digest);
+        assert_eq!(validation.files, 1);
+        if path == "README.md" {
+            assert_eq!(finalized.status, AttemptStatus::Succeeded);
+            let PatchResult::Committed {
+                commit,
+                tree: result_tree,
+                sha256: result_digest,
+            } = finalized.patch
+            else {
+                panic!("expected committed patch")
+            };
+            assert_eq!((result_tree, result_digest), (tree, digest));
+            assert_eq!(
+                (validation.verdict, validation.result_tree),
+                (PatchVerdict::Allow, Some(tree))
+            );
+            assert_eq!(repo.branch_head(&wt.id).await.unwrap(), commit);
+            let record = repo.provenance(&project, &commit).await.unwrap().unwrap();
+            assert_eq!(
+                (
+                    record.parent,
+                    record.tree_oid,
+                    record.patch_sha256,
+                    record.job_id,
+                    record.worktree_id
+                ),
+                (base, tree, digest, attempt, wt.id)
+            );
+            let raw = git(&mirror, &["cat-file", "commit", &commit.to_string()]);
+            assert!(raw.contains(&format!("tree {tree}\nparent {base}\n")));
+            assert!(raw.ends_with(&format!("Gantry-Attempt: {attempt}\n")));
+        } else {
+            assert_eq!(finalized.status, AttemptStatus::Failed);
+            assert_eq!(finalized.failure_class, Some(FailureClass::PolicyDenied));
+            assert_eq!(
+                finalized.failure_detail.unwrap().as_str(),
+                "policy.path_protected:workflows"
+            );
+            let PatchResult::Denied { patch: denied, .. } = finalized.patch else {
+                panic!("expected denied patch")
+            };
+            assert_eq!(
+                (denied.reference, denied.paths),
+                (digest, vec![path.to_owned()])
+            );
+            assert_eq!(
+                (validation.verdict, validation.result_tree),
+                (PatchVerdict::Deny, None)
+            );
+            assert!(
+                store
+                    .cas()
+                    .stat(&digest)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .quarantined
+            );
+            assert_eq!(repo.branch_head(&wt.id).await.unwrap(), base);
+            let refs = git(
+                &mirror,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            );
+            assert!(!refs.contains(&format!("refs/gantry/attempt/{attempt}")));
+            let denied_events = events(&store, EventType::PolicyDenied).await;
+            let rejected_events = events(&store, EventType::PatchRejected).await;
+            assert_eq!((denied_events.len(), rejected_events.len()), (1, 1));
+            assert_eq!(rejected_events[0].causation_id, Some(denied_events[0].id));
+            let rejected: PatchRejectedData =
+                serde_json::from_value(rejected_events[0].data.clone()).unwrap();
+            assert_eq!(
+                (rejected.job_id, rejected.sha256, rejected.reason),
+                (attempt, digest, PatchRejectReason::PolicyDenied)
+            );
+            assert!(rejected
+                .reasons
+                .iter()
+                .any(|r| r.code.as_str() == "policy.path_protected:workflows"));
+        }
+        sandbox.release(&ctx, &attempt).await.unwrap();
+        repo.release_lock(&ctx, &lock).await.unwrap();
+    }
 }
 
 #[tokio::test]
