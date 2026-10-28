@@ -407,7 +407,21 @@ async fn idle_stream_reconnects_and_lagging_reconnects_immediately() {
     let env = paired("idle", &pki, &pki, server.port);
     let sink = Arc::new(Collect::default());
     env.shell.events_open(None, sink.clone()).unwrap();
-    wait_until(|| sink.events() == vec![1, 2, 3]).await;
+    let mut observed = false;
+    for _ in 0..400 {
+        if sink.events() == vec![1, 2, 3] {
+            observed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        observed,
+        "等待超时: events={:?}, phases={:?}, connections={}",
+        sink.events(),
+        sink.phases(),
+        server.seen.lock().unwrap().len()
+    );
     assert!(server.seen.lock().unwrap().len() >= 3);
     assert!(sink.phases().contains(&"reconnecting".to_string()));
 }
