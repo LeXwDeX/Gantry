@@ -705,6 +705,69 @@ async fn settle_converges_and_repeated_ticks_are_idempotent() {
 // 事件路由与游标
 // ---------------------------------------------------------------------------
 
+#[tokio::test]
+async fn cursor_advance_waits_for_write_transaction() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let h = Harness::new().await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    router.poll(&BTreeSet::new()).await.unwrap();
+    let target = router.low_water();
+    assert!(target > Seq::ZERO);
+
+    let mut tx = h.store.begin_write().await.unwrap();
+    tx.advance_cursor("other", target).await.unwrap();
+    let advance = router.advance_cursor();
+    tokio::pin!(advance);
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(matches!(advance.as_mut().poll(&mut cx), Poll::Pending));
+    assert_eq!(h.store.cursors().load(CURSOR).await.unwrap(), Seq::ZERO);
+    tx.commit().await.unwrap();
+    assert_eq!(advance.await.unwrap(), target);
+    assert_eq!(h.store.cursors().load("other").await.unwrap(), target);
+    assert_eq!(h.store.cursors().load(CURSOR).await.unwrap(), target);
+
+    // 无需推进时，即使有写事务也不应等待写门。
+    let tx = h.store.begin_write().await.unwrap();
+    let advance = router.advance_cursor();
+    tokio::pin!(advance);
+    assert!(matches!(advance.as_mut().poll(&mut cx), Poll::Ready(Ok(seq)) if seq == target));
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn cursor_advance_rechecks_after_waiting_for_writer() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let h = Harness::new().await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    router.poll(&BTreeSet::new()).await.unwrap();
+    let target = router.low_water();
+    let later = h
+        .runner
+        .write(
+            "worktree.created",
+            WORKTREE,
+            ActorKind::Engine,
+            h.delivery,
+            json!({"worktree_id": WORKTREE, "project_id": PROJECT, "delivery_id": h.delivery,
+                   "branch": "gantry/x", "base_ref": "main", "base_sha": BASE_SHA}),
+        )
+        .await;
+    assert!(later > target);
+    let mut tx = h.store.begin_write().await.unwrap();
+    tx.advance_cursor(CURSOR, later).await.unwrap();
+    let advance = router.advance_cursor();
+    tokio::pin!(advance);
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(matches!(advance.as_mut().poll(&mut cx), Poll::Pending));
+    tx.commit().await.unwrap();
+    assert_eq!(advance.await.unwrap(), later);
+    assert_eq!(h.store.cursors().load(CURSOR).await.unwrap(), later);
+}
+
 /// 空闲执行体不拖住游标：只有"已投递未处理"的执行体决定低水位。
 #[tokio::test]
 async fn idle_actors_do_not_hold_the_cursor() {

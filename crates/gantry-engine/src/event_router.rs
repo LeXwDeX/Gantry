@@ -181,8 +181,14 @@ impl EventRouter {
         let target = self.low_water();
         let current = self.store.cursors().load(CURSOR).await?;
         if target > current {
-            self.store.cursors().advance(CURSOR, target).await?;
-            return Ok(target);
+            let mut tx = self.store.begin_write().await?;
+            let current = self.store.cursors().load(CURSOR).await?;
+            if target > current {
+                tx.advance_cursor(CURSOR, target).await?;
+                tx.commit().await?;
+                return Ok(target);
+            }
+            return Ok(current);
         }
         Ok(current)
     }
