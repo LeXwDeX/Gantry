@@ -45,7 +45,21 @@ jobs:
         run: openssl version
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: 测试前采集 Linux 资源用量
+        if: runner.os == 'Linux'
+        run: |
+          df -h .
+          df -i .
+          free -h
+          du -sh target || true
       - run: cargo test --locked --workspace --all-features
+      - name: 测试后采集 Linux 资源用量
+        if: ${{ always() && runner.os == 'Linux' }}
+        run: |
+          df -h .
+          df -i .
+          free -h
+          du -sh target || true
 
   msrv:
     name: Rust 1.85 (MSRV)
