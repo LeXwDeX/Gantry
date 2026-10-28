@@ -243,6 +243,52 @@ async fn committed_state_survives_reopen() {
 }
 
 #[tokio::test]
+async fn duplicate_append_allows_cursor_commit_and_rollback() {
+    let dir = Dir::new("duplicate-cursor");
+    let seq = {
+        let store = open(&dir, 1_700_000_000_000).await.unwrap();
+        let mut tx = store.begin_write().await.unwrap();
+        let Appended::New(event) = tx.append(message_posted("msg-1")).await.unwrap() else {
+            panic!("expected a new event");
+        };
+        let seq = event.seq;
+        assert_eq!(seq.as_u64(), 1);
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin_write().await.unwrap();
+        assert!(matches!(
+            tx.append(message_posted("msg-1")).await.unwrap(),
+            Appended::Duplicate { existing_seq } if existing_seq == seq
+        ));
+        tx.advance_cursor("conversation", seq).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(store.events().head().await.unwrap(), seq);
+        assert_eq!(store.cursors().load("conversation").await.unwrap(), seq);
+
+        let mut tx = store.begin_write().await.unwrap();
+        assert!(matches!(
+            tx.append(message_posted("msg-1")).await.unwrap(),
+            Appended::Duplicate { existing_seq } if existing_seq == seq
+        ));
+        tx.advance_cursor("rollback", seq).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(store.cursors().load("rollback").await.unwrap(), Seq::ZERO);
+        seq
+    };
+
+    let store = open(&dir, 1_700_000_100_000).await.unwrap();
+    assert_eq!(store.events().head().await.unwrap(), seq);
+    assert_eq!(store.cursors().load("conversation").await.unwrap(), seq);
+    assert_eq!(store.cursors().load("rollback").await.unwrap(), Seq::ZERO);
+    let mut tx = store.begin_write().await.unwrap();
+    assert!(matches!(
+        tx.append(message_posted("msg-1")).await.unwrap(),
+        Appended::Duplicate { existing_seq } if existing_seq == seq
+    ));
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn rolled_back_and_uncommitted_writes_are_not_persisted() {
     let dir = Dir::new("rollback");
     {
