@@ -10,9 +10,9 @@ use std::collections::BTreeSet;
 use common::{ts, BASE_SHA, DELIVERY, PROJECT, T0};
 use gantry_core::canon::{GitOid, SubjectDigest};
 use gantry_core::entities::{
-    Actor, ActorKind, ApprovalAction, AttemptStatus, BudgetLedger, ForgeActionKind, InboxKind,
-    MergeMethod, NodeStatus, PolicyActionId, PullRequestRef, Seq, Severity, Stage, StageStatus,
-    Tier, TokenUsage,
+    Actor, ActorKind, ApprovalAction, AttemptStatus, BudgetLedger, DecisionKind, EvidenceKind,
+    EvidenceRef, ForgeActionKind, InboxKind, InboxPayload, MergeMethod, NodeStatus, PolicyActionId,
+    PullRequestRef, Seq, Severity, Stage, StageStatus, Tier, TokenUsage,
 };
 use gantry_core::events::{Event, EventType, NewEvent, Subject};
 use gantry_core::forge::ActionPayload;
@@ -120,6 +120,7 @@ struct Sim {
     state: DeliveryState,
     seq: u64,
     stages: Vec<Stage>,
+    raised_payloads: Vec<InboxPayload>,
 }
 
 impl Sim {
@@ -131,6 +132,7 @@ impl Sim {
             state,
             seq: 1,
             stages: vec![Stage::Spec],
+            raised_payloads: Vec::new(),
         }
     }
 
@@ -202,6 +204,7 @@ impl Sim {
     }
 
     fn raise(&mut self, request: &gantry_core::ports::inbox::RaiseRequest) {
+        self.raised_payloads.push(request.payload.clone());
         let id = gantry_core::ids::InboxId::from_parts(T0 as u64, self.seq as u128)
             .unwrap()
             .to_string();
@@ -1576,6 +1579,11 @@ fn protected_workflows_raise_manual_action_with_patch() {
     assert_eq!(node_status(&sim), NodeStatus::Failed);
     let item = sim.state.open_inbox.values().next().unwrap().clone();
     assert_eq!(item.kind, InboxKind::DecisionNeeded);
+    assert!(matches!(
+        sim.raised_payloads.last(),
+        Some(InboxPayload::DecisionNeeded { kind: DecisionKind::ManualAction, patch: Some(patch), .. })
+            if patch.reference.to_string() == PATCH_SHA && patch.paths == [".github/workflows/x.yml"]
+    ));
     assert_eq!(
         item.reason_code.unwrap().as_str(),
         "policy.path_protected:workflows"
@@ -1610,6 +1618,11 @@ fn protected_lockfile_raises_escalation_with_patch_evidence() {
     assert_eq!(node_status(&sim), NodeStatus::Failed);
     let item = sim.state.open_inbox.values().next().unwrap().clone();
     assert_eq!(item.kind, InboxKind::Escalation);
+    assert!(matches!(
+        sim.raised_payloads.last(),
+        Some(InboxPayload::Escalation { evidence, .. })
+            if evidence.iter().any(|entry| matches!(entry, EvidenceRef::Result { kind: EvidenceKind::Result, reference } if reference.to_string() == PATCH_SHA))
+    ));
     assert_eq!(
         item.reason_code.unwrap().as_str(),
         "policy.path_protected:lockfiles"
