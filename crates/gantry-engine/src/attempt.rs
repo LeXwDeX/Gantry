@@ -326,6 +326,9 @@ pub(crate) fn sandbox_error_class(error: &SandboxError) -> EffectErrorClass {
         SandboxError::NotFound => EffectErrorClass::Defect {
             what: "sandbox_job_not_found",
         },
+        SandboxError::JobIdentityUnavailable { .. } => EffectErrorClass::Defect {
+            what: "sandbox_job_identity_unavailable",
+        },
     }
 }
 

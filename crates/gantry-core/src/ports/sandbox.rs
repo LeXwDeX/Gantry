@@ -184,6 +184,9 @@ pub enum WorkspaceMode {
 pub struct JobOutcome {
     pub job_id: AttemptId,
     pub sandbox_id: SandboxId,
+    /// 最终 job.json 原始字节的可信摘要，来自 stage 并经服务端元数据保存。
+    /// None 表示没有可信摘要，包括正常的启动前取消。
+    pub job_sha256: Option<Sha256Digest>,
     pub terminal: TerminalFacts,
     pub partial: bool,
     pub files: BTreeMap<ArtifactName, CasObject>,
@@ -285,20 +288,20 @@ pub struct UnfinishedAttempt {
 
 /// `recover` 对单个未终结尝试的判定（engine.md §7.14.6 E4）。
 ///
-/// 区分"从未受理"与"受理后丢失"：前者由引擎以同一 `SandboxSpec` 重新
+/// 区分允许重新准备与受理后丢失：前者由引擎以同一 `SandboxSpec` 重新
 /// `submit`，不计为失败；后者终结为 `infra.lost`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveredJob {
     /// 已受理且仍在推进（运行中，或尚未启动、由 sandbox 重新走排队 / 创建 /
-    /// 注入阶段）；引擎继续 `wait`。
+    /// 注入阶段，或拒绝任务的收尾正在推进）；引擎继续 `wait`。
     Running(JobHandle),
-    /// 已受理且已停止，产物可提取；`wait` 直接返回 `JobOutcome`（容器已不在
-    /// 但 `out/` 完整时 `terminal.cause = Lost`）。
+    /// 已受理且已停止；`wait` 稳定返回 `JobOutcome` 或 `JobIdentityUnavailable`。
     Exited(JobHandle),
     /// 受理后丢失：容器不在且产物不可提取；`wait` 返回 `Infra { Lost }`，
     /// 引擎终结为 `infra.lost`。
     Lost(JobHandle),
-    /// 未知 job：没有任何受理记录（从未受理）；引擎应重新 `submit`。
+    /// 从未受理，或新格式记录经相位与运行时事实确认从未启动，清理准备
+    /// 残留并持久记录 Accepted 后请求重入；引擎以相同 ID 重新提交完整 spec。
     Unknown { job_id: AttemptId },
 }
 
@@ -334,6 +337,15 @@ pub enum SandboxError {
         detail: InfraDetail,
         message: String,
     },
+    /// 已受理任务无法可信恢复；稳定终态，不属于普通基础设施自动重试。
+    /// usage 为 Some 时须是已确认吊销、job_id 匹配且 incomplete=false 的 Egress 最终计量。
+    /// None 仅限可信事实证明从未启动且未签发 job token，即无须结算用量。
+    /// 计量未获取、不完整或吊销未确认时不得公开终态。
+    #[error("sandbox job identity unavailable: {message}")]
+    JobIdentityUnavailable {
+        message: String,
+        usage: Option<Box<crate::egress::FinalUsage>>,
+    },
     #[error("invalid sandbox spec: {0}")]
     InvalidSpec(String),
     #[error("sandbox job not found")]
@@ -357,7 +369,7 @@ pub enum InfraDetail {
 #[async_trait]
 pub trait SandboxService: Send + Sync {
     /// 受理一个 job（按 `job_id` 幂等）。返回 `Ok` 之前受理记录已持久化，
-    /// 重启后 `recover` 不会把它判为 [`RecoveredJob::Unknown`]。
+    /// 重启后只有确认从未启动的新格式记录可按准备重入例外返回 Unknown。
     async fn submit(&self, ctx: &ActorCtx, spec: SandboxSpec) -> Result<JobHandle, SandboxError>;
 
     /// 等待终态；可重复调用，同一 job 恒返回同一结果。
@@ -371,7 +383,10 @@ pub trait SandboxService: Send + Sync {
     async fn release(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError>;
 
     /// `gantryd` 重启后接管未终结的尝试。按输入顺序为每个
-    /// `UnfinishedAttempt` 恰好返回一项（E4）。
+    /// `UnfinishedAttempt` 恰好返回一项（E4）；新格式记录经相位及运行时
+    /// 事实确认从未启动时可清理残留、保存 Accepted 并返回 Unknown，要求
+    /// 同 ID 重提完整 spec。不可验证的已受理任务不能返回 Unknown 或 Lost，
+    /// 也不能中断其他任务的恢复结果。
     async fn recover(
         &self,
         ctx: &ActorCtx,

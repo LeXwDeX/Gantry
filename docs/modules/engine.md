@@ -521,6 +521,8 @@ flowchart LR
 
 ### 7.8 尝试生命周期、终结管线与失败处理
 
+**任务身份例外（#362）**：缺少可信摘要时，不执行 V5 / V6，不生成 bundle；真实运行时分类、禁止自动重试、错误终结和清理顺序按 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。本契约切片只添加端口及编译适配，上述行为尚未实现；`JobIdentityUnavailable` 当前映射为 `Defect` 的 `EffectFailed` 路径不会保证 attempt / node 终结，后续 runner 必须专门拦截并生成 `Finalized`。
+
 **派发（对应 worker-protocol §3.2 阶段 0）**：
 
 1. 预留预算（§7.9）；`models.resolve(...)`（`purpose = Sandbox`）得到 `ResolvedModel`（provider、model、推理深度，及 `sandbox` 部分的 adapter、`attempt_wall_s`、`max_turns`；`level_effective` 与 `critical` 参与取值，config §3.2–§3.3）。
@@ -560,7 +562,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 | `exec.bad_job` | 不重试（引擎或镜像缺陷）→ 上报 |
 | `exec.agent_failed` | 重试 1 次；`result.error.kind = max_turns` 不重试 → 上报（`retryable_hint` 是自报，仅作线索） |
 | `exec.output_invalid` | 带反馈重试（反馈以 `upstream_output` 材料进入）；仍无效 → 上报 |
-| `infra.*` | 新沙盒重试；`infra.lost` 来自恢复（§7.13） |
+| `infra.*` | 通常新沙盒重试；`infra.lost` 来自恢复（§7.13）；`infra.job_identity_unavailable` 是稳定终态，绝不自动重试（[任务身份契约](../interfaces/worker-protocol.md#job-identity)） |
 | `budget.tokens` | 不重试；`budget.exhausted`；上报 `budget_exhausted` |
 | `policy.path_protected:workflows`（任何里程碑，P-48） | 不重试；上报 `decision_needed`（`payload.kind = manual_action`，`reason_code = policy.path_protected:workflows`），附补丁（CAS 引用）供用户手动应用；选项 `done`（primary）/ `abandon`（P-79） |
 | `policy.path_protected:<依赖清单 / lockfile 等>`（M1） | 不重试；**必须**上报 `escalation`（`reason_code = policy.path_protected:<rule_id>`），证据 = `policy.denied` 与 `patch.rejected` 事件、路径列表；M2 起这类补丁走 `patch_apply_protected` 审批 |
@@ -671,7 +673,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - **持久化**：引擎没有自己的表。游标按低水位推进、落后于实际处理进度（§7.14.1）；"事件已处理"靠决策幂等而不是游标精确一次。
 - **启动恢复**：
   1. 读所有非终结交付单元，以及仍有未清理资源的 `abandoned` / `closed` 交付单元（排队中的 Outbox、未终结尝试、活跃审批、未移除的工作树）的投影，折叠游标之后的事件，重建 `DeliveryState`；
-  2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`（worker-protocol §3.5）：仍在运行（`Running`）→ 继续监督；已退出（`Exited`）→ 直接 `collect` 并走终结管线；受理后丢失（`Lost`）→ 终结为 `infra_error`（`infra.lost`）并按 §7.8 重试；从未受理（`Unknown`）→ 以同一 `job_id` / `sandbox_id` 重新 `submit`，不计为失败（E4）；`direct` 尝试没有沙盒，按 `infra.lost` 重试；终结后 `release`；再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
+  2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`：`Running` 包括拒绝收尾，继续等待；`Exited` 的 `wait` 稳定返回 outcome 或身份不可恢复错误；普通 `Lost` 按 §7.8。`Unknown` 包含从未受理或新格式已受理但证明从未启动并持久重置 `Accepted` 的准备重入，引擎以相同 job / sandbox ID 重新提交完整 `SandboxSpec`；这不是旧任务重新执行。身份不可验证时不得通过 `Lost` / `Unknown` 触发重试，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)；`direct` 尝试没有沙盒，按 `infra.lost` 重试；计量和终结同事务提交后 `release`，再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
   3. 终结管线内的补丁提交幂等：先查 `attempt.finished` 是否已存在 `result_tree`，再由 `repo` 按 `refs/gantry/attempt/<job_id>` 查已有提交，已存在则不重复提交；
   4. 对每个交付单元补一次 `decide(Tick)`：应有未建的 Workflow / 悬空的上报项（`dedup_key` 相同则 `Deduped`）都会被补齐（阶段事件与入队之间的崩溃窗口由 §7.14.1 的期望动作集合补齐；同一幂等键不会重复）；
   5. 锁租约过期的工作树由 `repo` 回收；引擎重新 `acquire_lock` 取得新的 `LockToken`。
@@ -1031,7 +1033,7 @@ pub struct AttemptPlan {
     pub instructions: TrustedInstructions,                     // 角色模板 + user_text（I5，W5）；引擎内部新类型，只能由这两者构造
     pub refs: Vec<Ref>,                                        // 供 ForgeReader::discussion 取材料（P-59）
     pub lock: Option<LockToken>,                               // exec = sandbox 时必填（commit_patch 要它）
-    pub resume: bool,                                          // Recover 重发：Runner 先 SandboxService::recover，job 从未被受理才 submit（E4）
+    pub resume: bool,                                          // Recover 重发：Runner 先 recover，Unknown 时按 E4 及任务身份契约重新 submit
 }
 ```
 
@@ -1058,7 +1060,7 @@ pub struct AttemptPlan {
 | `Append(attempt.finished)` + `budget.charged`（tokens / wall_time）+ `node.finished`（节点因此进入终态时） | 该尝试无 `attempt.finished`；`Finalized.attempt_id` 匹配 | `Report::AttemptFinalized` |
 | `Effect(ReleaseSandbox)`、`Effect(ReleaseLock)` | 对应 `attempt.finished` 已提交；锁不再被其他未终结尝试使用。执行体在 `ReleaseLock` 发出时清除 `lock_owner` 中该项，所以自动重试必须重新 `AcquireLock` 拿新令牌，不会复用已释放的令牌 | 同上，及 `Tick(Recover)` |
 | `Append(node.retry_requested)` + `Resolve`（该节点的 `escalation(attempt_failed)`，`Resolution::System`） | 节点 `failed`、交付单元非终态；最近一次失败若是 `policy.path_protected:*`，须已有 `granted` 的 `patch_apply_protected` 审批；若是 `budget.*`，须在该维度最近一次 `budget.exhausted` 之后写过 `budget.limit_raised`（#73）。任一不满足 → `Reply(Err(InvalidState))` 并附原因。同一决策关闭该上报，`stage_status` 回到 `running`，重试才能通过派发总闸。**幂等优先**（#73）：执行体在求值前按 `ctx.dedup_key` 查日志，同一请求已生效 → 直接回首次结果 `Ok`、不写事件；新请求照常检查（如对已不是 `failed` 的节点 → `InvalidState`）。首次被拒时不写事件，同一请求再发会重新求值 | `Command::RetryNode` |
-| `Append(node.retry_requested)`（`by = engine`） | **追加额度后继续**（#73）：当前图中节点 `failed`、最近一次失败是 `budget.*`，该维度（`tokens_by_tier.<节点 tier>`）最近一次 `budget.exhausted` 之后有 `budget.limit_raised`；`may_dispatch`（`budget_exhausted` 已关闭）。节点回到 `queued` 后走正常派发；重放时节点已不是 `failed`，不重复 | `Tick(Settle)`（`raise_cap` 写完 `budget.limit_raised` 后的收敛轮） |
+| `Append(node.retry_requested)`（`by = engine`） | **追加额度后继续**（#73）：当前图中节点 `failed`、最近一次失败是 `budget.*`，该维度（`tokens_by_tier.<节点 tier>`）最近一次 `budget.exhausted` 之后有 `budget.limit_raised`；`may_dispatch`（`budget_exhausted` 已关闭）。没有可信 bundle / `result_ref` 时不得自动重排，见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)；节点回到 `queued` 后走正常派发 | `Tick(Settle)`（`raise_cap` 写完 `budget.limit_raised` 后的收敛轮） |
 | `Resolve`（`escalation(models_not_configured)`） | 收到 `settings.updated` 后 `env.models` 已有所需表项 | `Observed(SettingsUpdated)` |
 | `Append(budget.charged(forge_writes))` | `outbox.succeeded` 的动作属于本交付单元且尚未记账 | `Observed(OutboxSucceeded)` |
 | `Append(budget.exhausted)` + `Raise(budget_exhausted)` | 某维度 `used ≥ limit`，**或**下一步必须的动作只因该维度不足而无法产出（例如进入阶段要建的图需要 `k` 个节点而 `used.nodes + k > limit.nodes`；追加一轮时 `rounds` / `nodes` 不够；预留结果为零）；且本阶段尚无同维度 `budget.exhausted`。`data` 仍为 `{dimension, limit, used}`，与"已用尽"共用同一形状；不出现"追加一半的图"（§7.5） | 记账后或前置条件因预算不满足时的 `Tick(Settle)` |
@@ -1084,7 +1086,7 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E3 | **已落地（#66）**：policy.md §6.1 规定引擎发起的动作 `Deny` 必带 `ReportHint`，`reason_code` 只取 data-model 上报词表已列的码，不新增词表项；`FakePolicy` 对违约脚本直接 panic。原缺口：`PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报。其余 `DenyReason` 的码已由 #133 补齐：`policy.action_denied:<deny_reason>`；`HeadMismatch` 不带 `ReportHint`，引擎 `reconcile_now` 后重判（policy.md §6.1） | 引擎按 `ReportHint` 上报 | M1（`merge_pr` 以外的动作） |
 | E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**`ActionKey` 衔接已定（#125，方案 1）**：执行体开事务前按 `(result_ref, proposal_id)` 从 CAS 预取原文进只读的 `DecideEnv.proposals`（7.14.2、7.14.3），`expected_actions` 用它算 `create_pr` 的完整意图与 `ActionKey`，`decide` 仍纯、不读 CAS；forge-actions §2.2 不改 | 引擎投影读入 `AttemptState.accepted_open_pr`；`DecideEnv` 增加 `proposals`（#69），`create_pr` 路径使用它（#70） | M1（体验；不阻塞） |
 | E6 | **已落地（#67）**：data-model 上报词表给 `escalation(outbox_failed:<code>)` 增加选项 `retry`（primary）/ `abandon`，`payload` 增加 `action_id`（`core` 校验：`outbox_failed:<code>` 时必填、其余不得出现）；`notify` 按词表校验选项。原缺口：Outbox 终态失败后用户重做（`epoch + 1`）没有入口，§9 却写"由用户决定是否重试" | 引擎投影读入 `OpenInbox.action_id` 与 `retried`，`epoch` 规则见 7.14.4 | M1（失败路径；成功路径不受影响） |
-| E4 | **已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`），区分"job 从未被受理"与"受理后丢失"；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`，不把未起沙盒的尝试判成 `infra.lost` | 见 sandbox.md §6.1、§7.10；`FakeSandboxService` 按受理集合分类 | M1（"重启一致"） |
+| E4 | **原四种恢复结果已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`）；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`。新格式已受理但确认从未启动的准备重入例外及身份拒绝仍待实现，见 [任务身份契约](../interfaces/worker-protocol.md#job-identity) | 见 sandbox.md §6.1、§7.10；现有替身按受理集合分类 | M1（"重启一致"） |
 
 E1、E4 都已落地：本地提交 OID 落盘到 `attempt.finished.result_commit`，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果。§12.2"重启一致"在引擎投影读入 `result_commit` 前不能宣布通过。
 
