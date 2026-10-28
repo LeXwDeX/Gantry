@@ -11,7 +11,6 @@ use std::time::Duration;
 #[allow(dead_code)]
 mod engine_cfg;
 
-use async_trait::async_trait;
 use gantry_core::canon::{sha256, GitOid, RepoSlug};
 use gantry_core::entities::{Actor, ActorKind, LockHolder, Seq};
 use gantry_core::events::{EventType, NewEvent, PatchRejectedData, PatchValidatedData, Subject};
@@ -39,43 +38,10 @@ use gantry_fakes::policy::FakePolicy;
 use gantry_fakes::{
     forge::FakeForge, inbox::FakeInbox, sandbox::FakeSandboxService, worker::StubWorkerAdapter,
 };
-use gantry_repo::cas::{CasKind, PatchCas};
 use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
 use gantry_store::testing::{FakeClock, SeqEntropy};
-use gantry_store::{Cas, EventFilter, Store, StoreConfig, StoreDeps, TypePattern};
+use gantry_store::{EventFilter, Store, StoreConfig, StoreDeps, TypePattern};
 use serde_json::json;
-
-// 仅供本测试接线，不代表生产装配已经使用 store 的 CAS。
-struct TestCas(Cas);
-
-#[async_trait]
-impl PatchCas for TestCas {
-    async fn get_bytes(
-        &self,
-        digest: &gantry_core::ports::CasRef,
-        max: usize,
-    ) -> Result<Option<Vec<u8>>, RepoError> {
-        self.0.get_bytes(digest, max).await.map_err(cas_error)
-    }
-
-    async fn put(
-        &self,
-        bytes: &[u8],
-        kind: CasKind,
-    ) -> Result<gantry_core::ports::CasRef, RepoError> {
-        let kind = match kind {
-            CasKind::Artifact => gantry_store::CasKind::Artifact,
-            CasKind::Quarantine => gantry_store::CasKind::Quarantine,
-        };
-        self.0.put(bytes, kind).await.map_err(cas_error)
-    }
-}
-
-fn cas_error(error: gantry_store::StoreError) -> RepoError {
-    RepoError::Io {
-        message: error.to_string(),
-    }
-}
 
 struct TempDir {
     path: PathBuf,
@@ -205,7 +171,7 @@ async fn open_repo(store: &Store, dir: &Path, clock: Arc<FakeClock>, ids: Arc<Id
             clock,
             ids,
             policy: Arc::new(FakePolicy::new_in(store.clone())),
-            cas: Arc::new(TestCas(store.cas())),
+            cas: Arc::new(store.cas()),
         },
     )
     .await
