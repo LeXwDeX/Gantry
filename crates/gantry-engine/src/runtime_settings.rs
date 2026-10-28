@@ -10,8 +10,8 @@ use gantry_core::ports::sandbox::{GroupName, ProfileName, Timers, Trust};
 use gantry_core::settings::resource::{Egress, Levels, Models, Policies, Sandbox};
 use gantry_core::time::Timestamp;
 use gantry_core::worker::{
-    PatchLimits, PatchMode, ProposalKind, ProposalsMode, ReportMode, StructuredSchema,
-    ToolConstraints,
+    output_schema, PatchLimits, PatchMode, ProposalKind, ProposalsMode, ReportMode,
+    StructuredSchema, ToolConstraints,
 };
 
 use crate::actor::ActorConfig;
@@ -31,7 +31,6 @@ pub const DEFAULT_CLEANUP_LEASE: Duration = Duration::from_secs(60);
 pub const DEFAULT_DISCUSSION_MAX_COMMENTS: u32 = 50;
 /// M1 worker 当前的提议条数硬上限（worker-protocol §5.1）。
 pub const M1_WORKER_MAX_PROPOSALS: u32 = 20;
-const BUILD_SCHEMA: &[u8] = include_bytes!("../../../schemas/worker/output.build.schema.json");
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeSettingsError {
@@ -71,8 +70,8 @@ fn safe_millis(value: u64, field: &'static str) -> Result<(), RuntimeSettingsErr
 
 /// 所有设置必须来自 `config_rev` 的同一项目生效快照。
 /// `models` 是调用方用同一修订调用 `models.resolve` 得到的表，空表保持空。
-/// `build_schema` 必须与本版本的内置 build schema 原始字节一致。调用方还必须将同一份字节
-/// 提供给 sandbox 的 `OutputSchemas`：sandbox 按 schema id 独立获取资产，本函数无法检查它。
+/// `build_schema` 必须与 core 内置查询返回的 build schema 原始字节一致。
+/// sandbox 的生产 `OutputSchemas` 适配器使用同一来源；装配时仍须显式注入。
 /// `now` 是调用方提供的当前时间；租约和空闲期限只在该时点检查可序列化范围。
 /// 创建交付单元时，调用方须从同一快照选档并调用 `create::budget_from_level`。
 #[allow(clippy::too_many_arguments)]
@@ -95,7 +94,7 @@ pub fn from_settings(
     if config_rev != model_rev {
         return Err(RuntimeSettingsError::ModelRevisionMismatch);
     }
-    if build_schema != BUILD_SCHEMA {
+    if output_schema("gantry.worker.output.build/1") != Some(build_schema) {
         return Err(RuntimeSettingsError::Invalid("build_schema"));
     }
     for (field, value) in [

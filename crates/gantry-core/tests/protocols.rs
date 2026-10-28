@@ -224,6 +224,79 @@ fn forge_status_comment_state_and_target_are_typed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn output_schema_registry_returns_exact_generated_bytes() {
+    let cases: [(&str, &[u8]); 11] = [
+        (
+            "plan",
+            include_bytes!("../../../schemas/worker/output.plan.schema.json"),
+        ),
+        (
+            "build",
+            include_bytes!("../../../schemas/worker/output.build.schema.json"),
+        ),
+        (
+            "verify",
+            include_bytes!("../../../schemas/worker/output.verify.schema.json"),
+        ),
+        (
+            "review",
+            include_bytes!("../../../schemas/worker/output.review.schema.json"),
+        ),
+        (
+            "reasoner",
+            include_bytes!("../../../schemas/worker/output.reasoner.schema.json"),
+        ),
+        (
+            "arbiter",
+            include_bytes!("../../../schemas/worker/output.arbiter.schema.json"),
+        ),
+        (
+            "answer",
+            include_bytes!("../../../schemas/worker/output.answer.schema.json"),
+        ),
+        (
+            "summarize",
+            include_bytes!("../../../schemas/worker/output.summarize.schema.json"),
+        ),
+        (
+            "admission",
+            include_bytes!("../../../schemas/worker/output.admission.schema.json"),
+        ),
+        (
+            "intent",
+            include_bytes!("../../../schemas/worker/output.intent.schema.json"),
+        ),
+        (
+            "classify",
+            include_bytes!("../../../schemas/worker/output.classify.schema.json"),
+        ),
+    ];
+    for (kind, expected) in cases {
+        let id = format!("gantry.worker.output.{kind}/1");
+        let actual = gantry_core::worker::output_schema(&id).unwrap();
+        assert_eq!(actual, expected, "{id}");
+        assert_eq!(
+            gantry_core::canon::sha256(actual),
+            gantry_core::canon::sha256(expected)
+        );
+        assert_eq!(actual.last(), Some(&b'\n'));
+    }
+    for id in [
+        "",
+        "build/1",
+        "gantry.worker.output.unknown/1",
+        "gantry.worker.output.Build/1",
+        "Gantry.worker.output.build/1",
+        "gantry.worker.output.build/2",
+        "gantry.worker.output.build/01",
+        "gantry.worker.output.single/1",
+        "gantry.worker.output.heal/1",
+    ] {
+        assert_eq!(gantry_core::worker::output_schema(id), None, "{id}");
+    }
+}
+
+#[test]
 fn worker_job_spec_fixture_validates() {
     let mut value = parse(JOB_SPEC);
     value["future_field"] = json!(true);

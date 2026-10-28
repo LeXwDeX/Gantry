@@ -1173,7 +1173,7 @@ impl EngineRuntime {
 impl DeliveryControl for EngineRuntime { … }               // §6；api 的控制路由直接持有它（#73）
 ```
 
-**设置换算**：`runtime_settings::from_settings` 接收同一项目生效修订的五类类型化设置 `Models`、`Levels`、`Policies`、`Sandbox`、`Egress`，以及同修订已解析的模型表和可信项目事实。它检查模型表修订与配置修订一致、沙盒 worker 模型与配置匹配、默认 Egress profile 及其组存在，并校验相关数值范围；它不自行读取存储或解析模型。无模型时保持空表，不虚构模型。M1 `Single` 沿用 build schema：保留已公开的 `build_schema` 入参，须对照 [core 共同来源](../interfaces/worker-protocol.md#output-schema-registry)查询 `gantry.worker.output.build/1` 的结果逐字节校验；查询失败或字节不符时换算返回错误，不生成设置。sandbox 生产适配器同样委托该来源，换算函数本身不验证沙盒侧资产。该接线是后续实现要求，非当前实现完成声明。创建交付单元时，调用方仍须从同一快照选档并用已有 `create::budget_from_level` 固化预算。
+**设置换算**：`runtime_settings::from_settings` 接收同一项目生效修订的五类类型化设置 `Models`、`Levels`、`Policies`、`Sandbox`、`Egress`，以及同修订已解析的模型表和可信项目事实。它检查模型表修订与配置修订一致、沙盒 worker 模型与配置匹配、默认 Egress profile 及其组存在，并校验相关数值范围；它不自行读取存储或解析模型。无模型时保持空表，不虚构模型。M1 `Single` 沿用 build schema：保留已公开的 `build_schema` 入参，须对照 [core 共同来源](../interfaces/worker-protocol.md#output-schema-registry)查询 `gantry.worker.output.build/1` 的结果逐字节校验；查询失败或字节不符时换算返回错误，不生成设置。sandbox 生产适配器同样委托该来源，换算函数本身不验证沙盒侧资产。core 查询、引擎校验和沙盒适配器已具备；真实 `gantryd` 装配仍为 `NotReady`，接线由 #105 负责。创建交付单元时，调用方仍须从同一快照选档并用已有 `create::budget_from_level` 固化预算。
 
 换算对墙钟时限、空闲超时、终止宽限和锁租约做带溢出检查的上界校验：锁租约的秒数由墙钟时限、宽限和锁租约余量相加，四项分别检查秒数转毫秒以及与 `Timestamp::MAX_MILLIS` 相加，避免 `u64` 或 `i64` 运算溢出。`from_settings` 还显式接收调用方提供的可信 `now: Timestamp`，以纯函数方式使用 `Timestamp::checked_add_secs` 检查该时点的最大锁租约和空闲截止时间能否表示。校验失败时返回错误，不溢出或静默夹取。此检查只覆盖传入的时点，不保证持续派发时的截止时间可表示；长运行后的再校验由 #322 跟踪。
 
@@ -1422,7 +1422,7 @@ M1 的执行体在主循环里串行处理（交付单元之间也串行），�
 
 骨架没有定的点；"本文暂用"不是决定，实现者不得自行拍板，需要时开 Issue。
 
-当前实现的限制另由以下 issue 跟踪：多节点并发预算守恒 #317，安全原子热加载 #318，生产 schema 注册表 #319，默认档位及其限制 #320；模型解析、`settings.updated` 自动订阅和真实生产装配归 #105。当前设置换算不补造缺失模型，只配置 M1 `Single` 的 build schema，不能据此认定其他角色或档位已经可运行（§7.15）。
+当前实现的限制另由以下 issue 跟踪：多节点并发预算守恒 #317，安全原子热加载 #318，默认档位及其限制 #320；模型解析、`settings.updated` 自动订阅和真实生产装配归 #105。#319 的共同 schema 查询与沙盒适配器已具备，但尚未接入真实生产装配。当前设置换算不补造缺失模型，只配置 M1 `Single` 的 build schema，不能据此认定其他角色或档位已经可运行（§7.15）。
 
 | # | 问题 | 本文暂用 | 影响 |
 | --- | --- | --- | --- |

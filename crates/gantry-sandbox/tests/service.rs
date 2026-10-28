@@ -41,13 +41,13 @@ use gantry_sandbox::driver::LogStream;
 use gantry_sandbox::fake::{
     DriverCall, FailPoint, FakeBehavior, FakeDriver, FakeOutEntry, FakeScript, SIGKILL, SIGTERM,
 };
-use gantry_sandbox::service::seams::{ArtifactStore, CasKind, MemoryArtifacts, StaticSchemas};
+use gantry_sandbox::service::seams::{ArtifactStore, BuiltinSchemas, CasKind, MemoryArtifacts};
 use gantry_sandbox::service::{SandboxConfig, SandboxDeps, SandboxManager};
 use gantry_sandbox::spec::{NetworkAttach, Runtime};
 use gantry_store::{Store, StoreDeps};
 
 const JOB: &str = include_str!("../../gantry-core/fixtures/protocol/worker/job_spec.json");
-const SCHEMA: &[u8] = br#"{"type":"object"}"#;
+const SCHEMA: &[u8] = include_bytes!("../../../schemas/worker/output.build.schema.json");
 const MS: i64 = 1_700_000_000_000;
 
 fn ctx() -> ActorCtx {
@@ -401,8 +401,6 @@ fn manager_with_artifacts(
             trailers: Vec::new(),
         },
     );
-    let mut schemas = BTreeMap::new();
-    schemas.insert(job.output.structured_schema.id.clone(), SCHEMA.to_vec());
     SandboxManager::new(
         SandboxDeps {
             driver: Arc::clone(driver),
@@ -411,7 +409,7 @@ fn manager_with_artifacts(
             store: store.clone(),
             clock: clock.clone(),
             artifacts,
-            schemas: Arc::new(StaticSchemas(schemas)),
+            schemas: Arc::new(BuiltinSchemas),
         },
         SandboxConfig {
             workspaces_dir: root.path().to_path_buf(),
@@ -517,6 +515,17 @@ async fn golden_path() {
     let handle = h.service.submit(&ctx(), spec(1)).await.unwrap();
     assert_eq!((handle.job_id, handle.sandbox_id), (att(1), sbx(1)));
     let outcome = h.service.wait(&att(1)).await.unwrap();
+    let staged = std::fs::read(
+        h.root
+            .path()
+            .join(sbx(1).to_string())
+            .join("inputs/output.schema.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        staged,
+        gantry_core::worker::output_schema("gantry.worker.output.build/1").unwrap()
+    );
     assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
     assert_eq!(outcome.terminal.exit_code, Some(0));
     assert!(!outcome.partial);
@@ -568,6 +577,43 @@ async fn golden_path() {
     h.service.release(&ctx(), &att(1)).await.unwrap();
     assert!(h.egress.log().contains(&format!("forget {}", att(1))));
     assert!(!h.root.path().join(sbx(1).to_string()).exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn builtin_schema_rejects_unknown_ids_and_wrong_digest_before_start() {
+    for (n, id, bad_digest) in [
+        (201, "gantry.worker.output.unknown/1", false),
+        (202, "gantry.worker.output.build/2", false),
+        (203, "gantry.worker.output.Build/1", false),
+        (204, "gantry.worker.output.build/1", true),
+    ] {
+        let h = harness(1);
+        let mut s = spec(n);
+        s.job.output.structured_schema.id = id.into();
+        if bad_digest {
+            s.job.output.structured_schema.sha256 = sha256(b"wrong");
+        }
+        h.service.submit(&ctx(), s).await.unwrap();
+        assert!(matches!(
+            h.service.wait(&att(n)).await,
+            Err(SandboxError::InvalidSpec(_))
+        ));
+        let calls = h.driver.calls();
+        assert!(calls.iter().any(|c| matches!(c, DriverCall::Create { .. })));
+        assert!(!calls.iter().any(|c| matches!(c, DriverCall::Start(_))));
+        assert!(calls.iter().any(|c| matches!(c, DriverCall::Remove(_))));
+        assert_eq!(h.driver.container_count(), 0);
+        assert_eq!(
+            h.egress.log(),
+            vec![format!("issue {}", att(n)), format!("revoke {}", att(n))]
+        );
+        assert!(!h
+            .root
+            .path()
+            .join(sbx(n).to_string())
+            .join("inputs")
+            .exists());
+    }
 }
 
 #[tokio::test(start_paused = true)]

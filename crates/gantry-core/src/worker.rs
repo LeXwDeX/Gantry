@@ -24,6 +24,46 @@ use crate::time::Timestamp;
 pub const PROTOCOL_VERSION: &str = "gantry-worker/1";
 pub const PROGRESS_EVENT_VERSION: u8 = 1;
 
+/// 按完整 ID 返回内置结构化输出 schema 的原始字节。
+pub fn output_schema(id: &str) -> Option<&'static [u8]> {
+    match id {
+        "gantry.worker.output.plan/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.plan.schema.json"
+        )),
+        "gantry.worker.output.build/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.build.schema.json"
+        )),
+        "gantry.worker.output.verify/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.verify.schema.json"
+        )),
+        "gantry.worker.output.review/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.review.schema.json"
+        )),
+        "gantry.worker.output.reasoner/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.reasoner.schema.json"
+        )),
+        "gantry.worker.output.arbiter/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.arbiter.schema.json"
+        )),
+        "gantry.worker.output.answer/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.answer.schema.json"
+        )),
+        "gantry.worker.output.summarize/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.summarize.schema.json"
+        )),
+        "gantry.worker.output.admission/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.admission.schema.json"
+        )),
+        "gantry.worker.output.intent/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.intent.schema.json"
+        )),
+        "gantry.worker.output.classify/1" => Some(include_bytes!(
+            "../../../schemas/worker/output.classify.schema.json"
+        )),
+        _ => None,
+    }
+}
+
 /// `protocol` 字段固定 `gantry-worker/1`。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorkerProtocol;
