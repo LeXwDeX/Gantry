@@ -1,11 +1,12 @@
 //! 尚无契约端口的依赖：CAS 与结构化输出 schema 注册表（契约缺口 1、6，见 #95 评论）。
 //!
-//! 这两个接口只在 sandbox 内部使用，不进 `core::ports`：store 交付 `Store::cas()`、
-//! core 交付 schema 注册表之后，换成正式实现即可。内存实现只供测试。
+//! 这两个接口只在 sandbox 内部使用，不进 `core::ports`。CAS 可使用 `Store::cas()`；
+//! schema 注册表仍待 core 交付。内存实现只供测试。
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use gantry_core::canon::{sha256, Sha256Digest};
 use gantry_core::ports::sandbox::CasObject;
 
@@ -16,11 +17,40 @@ pub enum CasKind {
     Progress,
 }
 
+#[async_trait]
 pub trait ArtifactStore: Send + Sync {
     /// 写入不透明字节，返回服务端重算的摘要与大小。
-    fn put(&self, bytes: &[u8], kind: CasKind) -> Result<CasObject, String>;
+    async fn put(&self, bytes: &[u8], kind: CasKind) -> Result<CasObject, String>;
     /// 读出 `repo` 返回的 `diff.patch` 等对象。
-    fn get(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, String>;
+    async fn get(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, String>;
+}
+
+#[async_trait]
+impl ArtifactStore for gantry_store::Cas {
+    async fn put(&self, bytes: &[u8], kind: CasKind) -> Result<CasObject, String> {
+        let kind = match kind {
+            CasKind::Artifact => gantry_store::CasKind::Artifact,
+            CasKind::Progress => gantry_store::CasKind::Progress,
+        };
+        let sha256 = gantry_store::Cas::put(self, bytes, kind)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(CasObject {
+            sha256,
+            bytes: bytes.len() as u64,
+        })
+    }
+
+    async fn get(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, String> {
+        // Store 当前创建的 CAS 均使用这一上限；可配置时需重新对齐（OQ-S10）。
+        gantry_store::Cas::get_bytes(
+            self,
+            digest,
+            gantry_store::cas::DEFAULT_MAX_OBJECT_BYTES as usize,
+        )
+        .await
+        .map_err(|err| err.to_string())
+    }
 }
 
 pub trait OutputSchemas: Send + Sync {
@@ -53,8 +83,9 @@ impl MemoryArtifacts {
     }
 }
 
+#[async_trait]
 impl ArtifactStore for MemoryArtifacts {
-    fn put(&self, bytes: &[u8], kind: CasKind) -> Result<CasObject, String> {
+    async fn put(&self, bytes: &[u8], kind: CasKind) -> Result<CasObject, String> {
         let digest = sha256(bytes);
         self.objects
             .lock()
@@ -67,7 +98,7 @@ impl ArtifactStore for MemoryArtifacts {
         })
     }
 
-    fn get(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, String> {
+    async fn get(&self, digest: &Sha256Digest) -> Result<Option<Vec<u8>>, String> {
         Ok(self
             .objects
             .lock()
