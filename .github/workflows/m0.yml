@@ -52,7 +52,11 @@ jobs:
           df -i .
           free -h
           du -sh target || true
-      - run: cargo test --locked --workspace --all-features
+          du -sh target/debug/deps target/debug/incremental || true
+      - if: runner.os == 'Linux'
+        run: cargo test --locked --workspace --all-features --config 'profile.test.incremental=false'
+      - if: runner.os != 'Linux'
+        run: cargo test --locked --workspace --all-features
       - name: 测试后采集 Linux 资源用量
         if: ${{ always() && runner.os == 'Linux' }}
         run: |
@@ -60,6 +64,7 @@ jobs:
           df -i .
           free -h
           du -sh target || true
+          du -sh target/debug/deps target/debug/incremental || true
 
   msrv:
     name: Rust 1.85 (MSRV)
