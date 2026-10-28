@@ -54,7 +54,7 @@ jobs:
           du -sh target || true
           du -sh target/debug/deps target/debug/incremental || true
       - if: runner.os == 'Linux'
-        run: cargo test --locked --workspace --all-features --config 'profile.test.incremental=false' --config 'profile.test.debug=1'
+        run: cargo test --locked --workspace --all-features --config 'profile.test.incremental=false' --config 'profile.test.debug=0'
       - if: runner.os != 'Linux'
         run: cargo test --locked --workspace --all-features
       - name: 测试后采集 Linux 资源用量
@@ -65,6 +65,7 @@ jobs:
           free -h
           du -sh target || true
           du -sh target/debug/deps target/debug/incremental || true
+          du -a -B1 target/debug/deps | sort -nr | perl -ne 'print if $. <= 31' || true
 
   msrv:
     name: Rust 1.85 (MSRV)
