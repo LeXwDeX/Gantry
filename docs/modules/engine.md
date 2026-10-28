@@ -1173,7 +1173,7 @@ impl EngineRuntime {
 impl DeliveryControl for EngineRuntime { … }               // §6；api 的控制路由直接持有它（#73）
 ```
 
-**设置换算**：`runtime_settings::from_settings` 接收同一项目生效修订的五类类型化设置 `Models`、`Levels`、`Policies`、`Sandbox`、`Egress`，以及同修订已解析的模型表和可信项目事实。它检查模型表修订与配置修订一致、沙盒 worker 模型与配置匹配、默认 Egress profile 及其组存在，并校验相关数值范围；它不自行读取存储或解析模型。无模型时保持空表，不虚构模型。M1 `Single` 的 build schema 必须与仓库生成的 `schemas/worker/output.build.schema.json` 字节一致；调用方还须向 sandbox 的 `OutputSchemas` 提供相同来源的字节，换算函数不能验证沙盒侧资产，生产注册表由 #319 跟踪。创建交付单元时，调用方仍须从同一快照选档并用已有 `create::budget_from_level` 固化预算。
+**设置换算**：`runtime_settings::from_settings` 接收同一项目生效修订的五类类型化设置 `Models`、`Levels`、`Policies`、`Sandbox`、`Egress`，以及同修订已解析的模型表和可信项目事实。它检查模型表修订与配置修订一致、沙盒 worker 模型与配置匹配、默认 Egress profile 及其组存在，并校验相关数值范围；它不自行读取存储或解析模型。无模型时保持空表，不虚构模型。M1 `Single` 沿用 build schema：保留已公开的 `build_schema` 入参，须对照 [core 共同来源](../interfaces/worker-protocol.md#output-schema-registry)查询 `gantry.worker.output.build/1` 的结果逐字节校验；查询失败或字节不符时换算返回错误，不生成设置。sandbox 生产适配器同样委托该来源，换算函数本身不验证沙盒侧资产。该接线是后续实现要求，非当前实现完成声明。创建交付单元时，调用方仍须从同一快照选档并用已有 `create::budget_from_level` 固化预算。
 
 换算对墙钟时限、空闲超时、终止宽限和锁租约做带溢出检查的上界校验：锁租约的秒数由墙钟时限、宽限和锁租约余量相加，四项分别检查秒数转毫秒以及与 `Timestamp::MAX_MILLIS` 相加，避免 `u64` 或 `i64` 运算溢出。`from_settings` 还显式接收调用方提供的可信 `now: Timestamp`，以纯函数方式使用 `Timestamp::checked_add_secs` 检查该时点的最大锁租约和空闲截止时间能否表示。校验失败时返回错误，不溢出或静默夹取。此检查只覆盖传入的时点，不保证持续派发时的截止时间可表示；长运行后的再校验由 #322 跟踪。
 
@@ -1356,6 +1356,7 @@ M1 的执行体在主循环里串行处理（交付单元之间也串行），�
 
 ### 12.2 M1 验收（`be-engine`，Low 档端到端；对应 milestones M1 退出标准）
 
+- [ ] **schema 共同来源**：`from_settings` 接受与 core build 查询结果逐字节相同的 `build_schema`；字节不符或查询失败时返回错误，不生成设置；`Single` 的 ID、路径和摘要与沙盒注入的同源字节一致。
 - [ ] **端到端（替身）**：`create_delivery(Low)` → `FakeSandboxService` 回放 `single` 黄金结果（含补丁与 `open_pr` 提议）→ `FakeRepo` 判 `allow` → 入队 `push_branch`、`create_pr`（`depends_on` 正确）→ `FakeForge` 注入 `check_suite_completed(success)` → 阶段序列恰为 `spec → implement → propose → review → merge → closed`，其中 `spec → implement` 的 `reason = admission_skipped`，`review` 只等 CI（P-55）。
 - [ ] **合并需要审批**：进入 `merge` 时引擎调 `PolicyPort::decide_action(MergePr)` 得 `NeedsApproval`、`request_approval` 并上报 `approval_needed`；审批授予前 Outbox 无 `merge_pr`；授予后再次 `decide_action` 得 `Allow`，入队的 `merge_pr` 带该审批 ID 且 `expected_head_sha` = 审批的 `subject_digest`；`Deny` 时不入队并按 `ReportHint` 上报。
 - [ ] **新推送使审批失效**：`FakeForge` 注入 `pr_synchronized` / `FakePolicy` 发 `approval.invalidated` → `merge → review`，原 `approval_needed` 被引擎 `resolve`，head 变化后旧 `judged_head` 不再满足 T10。

@@ -1157,6 +1157,17 @@ claude -p \
 
 本文所有示例 JSON 应作为这些 schema 的正例测试数据。
 
+<a id="output-schema-registry"></a>
+### 11.1.1 结构化输出 schema 的可信来源
+
+服务端以 `gantry_core::worker::output_schema(id: &str) -> Option<&'static [u8]>` 为共同的可信只读来源（D-20）。它精确匹配 `gantry.worker.output.<kind>/1`，其中 `kind` 仅为 `plan`、`build`、`verify`、`review`、`reasoner`、`arbiter`、`answer`、`summarize`、`admission`、`intent`、`classify`。未知 ID、大小写变体和未知 major 返回 `None`；`single` 与 `heal` 沿用 §4.3 的 `build`，不新增别名。可查询全部 11 种格式不代表 M1 引擎启用其他角色。
+
+每项返回编译时内嵌的 `schemas/worker/output.<kind>.schema.json` 原始字节，包含文件结尾换行；不在运行时读文件、重新序列化或做 JCS 规范化。`xtask` 仍是这些文件的唯一生成源，`cargo --locked xtask schemas --check` 检查生成文件漂移。引擎与沙盒使用同一版本的这些字节；`output.structured_schema.sha256` 是对原始字节计算的 `sha256:` 摘要，`path` 仍为 `/gantry/inputs/output.schema.json`，线上 ID、路径和摘要格式不变。
+
+沙盒生产 `OutputSchemas` 适配器委托该入口；`StaticSchemas` 只用于测试。M1 常规冷启动路径在 worker 启动前校验 ID、路径与摘要：未知 ID 或摘要不符返回 `InvalidSpec`，不运行 worker；可以已经创建容器，须按既有生命周期清理。M2 预热池仍按 §3.2 的提议处理，不由本规则启用。本规则不启用插件、动态注册或仓库配置来源。注册表与接线仍需后续实现，真实 `gantryd` 装配仍为 `NotReady`，由 #105 跟踪。
+
+实现验收须逐项比较 11 个 ID 的查询结果与对应生成文件原始字节及其摘要，并验证未知 ID、大小写变体、未知 major 和 `single` / `heal` 别名均返回 `None`。
+
 ### 11.2 事件
 
 | 事件 | 状态 | 说明 |

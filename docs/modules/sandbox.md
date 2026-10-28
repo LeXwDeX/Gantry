@@ -259,7 +259,7 @@ Accepted → Queued → Creating → Created → Staging → Staged → Starting
    - **包装**：文件 `inputs/materials/<id>.txt`，首尾是 `isolation.begin` / `end` 模板展开的标记行。`kind` 必须在枚举内；`source` 必须匹配 `owner/repo#N` 或 `owner/repo#N/<item_id>`，否则 `InvalidSpec`（标记行不含自由文本，W5）。
    - **登记**：`job.json.materials[]` 记 `id kind source path sha256 bytes truncated original_bytes`，其中 `sha256` / `bytes` 针对**包装后的文件**。
 3. `upstream/<node_id>/`：从 CAS 复制 `files[]`；整个目录按不可信处理，不逐文件包装（适配层内联时用同一 nonce 包装）。
-4. `output.schema.json`：按 `output.structured_schema.id` 从 `core` 的内置 schema 注册表取出，校验 `sha256` 与 `job.json` 声明一致。
+4. `output.schema.json`：生产 `OutputSchemas` 委托 `core` 内置查询，取原始字节并校验 ID、路径和 `sha256`；未知 ID 或摘要不符返回 `InvalidSpec`，不启动 worker，已创建资源按生命周期清理。`StaticSchemas` 只用于测试。共同来源和字节规则见 [worker-protocol §11.1.1](../interfaces/worker-protocol.md#output-schema-registry)。
 5. 写 `job.json`（规范化序列化，字节固定；`job_sha256` 即这些字节的哈希），写 `MANIFEST.json`；用 `schemas/worker/job.schema.json` 校验 `job.json`，不通过 → `InvalidSpec`（引擎缺陷，不启动）。
 6. 全部输入文件 `0444`、目录 `0555`；`out/` 与 `work/` 的属主适配见 §7.7。
 7. 原子创建 `inputs/READY`（临时文件 + `rename`）。worker 总是等待该文件再读 `job.json`（[worker.md §7.1](worker.md#71-运行流程)）：常规路径下它在 `start` 之前就已存在，预热池下在认领并 `stage` 完成后才创建（§7.11）。这样两种路径的 worker 逻辑相同（OQ-S8）。
@@ -441,7 +441,7 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 
 `sandbox` 没有自己的数据库：运行状态是容器标签 + `meta.json`；事实事件经 `store`；产物经 CAS。`meta.json` 与 staging 在 `release()` 或孤儿巡检后删除。
 
-当前本地 CAS 接缝可使用 `Store::cas()`，生产装配尚未接线；结构化输出 schema 注册表仍待 #319。替身驱动测试不代表真实 Podman 验收。
+当前本地 CAS 接缝可使用 `Store::cas()`，生产装配尚未接线；结构化输出 schema 注册表的契约见 §7.2，实现仍待后续工作。替身驱动测试不代表真实 Podman 验收。
 
 ## 8. 不变式与安全要求
 
@@ -543,6 +543,7 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 ### B. staging 与材料打包（M1）
 
 - [ ] `job.json` 通过 `job.schema.json`；`MANIFEST.json` 与实际文件一致；`inputs/` 文件 `0444`、目录 `0555`；`out/` 启动时为空。
+- [ ] 生产 schema 适配器返回与 core 查询相同的原始字节；未知 ID、大小写变体、未知 major 或摘要不符 → `InvalidSpec`，worker 未启动；已创建资源得到清理。
 - [ ] 规范化：NUL、除 `\n` `\t` 外的 C0、ANSI 序列、bidi 控制符、Unicode Tag 字符被去除，计数正确；非法 UTF-8 被替换。
 - [ ] 截断：单条 64 KiB、总量 512 KiB 的边界（`limit` 不截、`limit + 1` 截）；头 + 尾 + 标记；`truncated`、`original_bytes`、`bytes`（包装后大于 `original_bytes`）正确；`sha256` 是包装后文件的哈希。
 - [ ] 材料正文含伪造的 `<<<GANTRY-UNTRUSTED-END …>>>` 或与 nonce 相同的串：标记不生效；nonce 冲突时重新生成（用固定随机源制造冲突）。
