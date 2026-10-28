@@ -538,6 +538,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                     .deps
                     .artifacts
                     .get(&digest)
+                    .await
                     .map_err(|err| infra(InfraDetail::WorkspacePrep, err))?
                     .ok_or_else(|| {
                         infra(InfraDetail::WorkspacePrep, "diff.patch missing from CAS")
@@ -903,22 +904,27 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                     .map_err(driver_infra(InfraDetail::Collect))?
             }
         };
-        let put = |bytes: &[u8], kind: CasKind| {
-            self.inner
-                .deps
-                .artifacts
-                .put(bytes, kind)
-                .map_err(|err| infra(InfraDetail::Collect, err))
-        };
+        let artifacts = &self.inner.deps.artifacts;
         let mut files = BTreeMap::new();
         for (name, bytes) in &intake.files {
-            files.insert(name.clone(), put(bytes, CasKind::Artifact)?);
+            files.insert(
+                name.clone(),
+                artifacts
+                    .put(bytes, CasKind::Artifact)
+                    .await
+                    .map_err(|err| infra(InfraDetail::Collect, err))?,
+            );
         }
         let spool = std::fs::read(self.layout.progress_spool()).unwrap_or_default();
         let progress = if spool.is_empty() {
             None
         } else {
-            Some(put(&spool, CasKind::Progress)?)
+            Some(
+                artifacts
+                    .put(&spool, CasKind::Progress)
+                    .await
+                    .map_err(|err| infra(InfraDetail::Collect, err))?,
+            )
         };
         // 容器已删、日志无从重读时，沿用崩溃前记下的尾部。
         let (stdout_tail, stderr_tail) = match self.meta.tails {
@@ -933,8 +939,14 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 },
             ),
             _ => (
-                put(&run.collector.stdout_tail().contents(), CasKind::Artifact)?,
-                put(&run.collector.stderr_tail().contents(), CasKind::Artifact)?,
+                artifacts
+                    .put(&run.collector.stdout_tail().contents(), CasKind::Artifact)
+                    .await
+                    .map_err(|err| infra(InfraDetail::Collect, err))?,
+                artifacts
+                    .put(&run.collector.stderr_tail().contents(), CasKind::Artifact)
+                    .await
+                    .map_err(|err| infra(InfraDetail::Collect, err))?,
             ),
         };
         self.meta.tails = Some(TailsRecord {
@@ -1033,6 +1045,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             .deps
             .artifacts
             .put(b"", CasKind::Artifact)
+            .await
             .map_err(|err| infra(InfraDetail::Collect, err))?;
         Ok(JobOutcome {
             job_id: self.meta.job_id,

@@ -441,6 +441,8 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 
 `sandbox` 没有自己的数据库：运行状态是容器标签 + `meta.json`；事实事件经 `store`；产物经 CAS。`meta.json` 与 staging 在 `release()` 或孤儿巡检后删除。
 
+当前本地 CAS 接缝可使用 `Store::cas()`，生产装配尚未接线；结构化输出 schema 注册表仍待 #319。替身驱动测试不代表真实 Podman 验收。
+
 ## 8. 不变式与安全要求
 
 | 不变式 | 本模块如何保证 |

@@ -41,7 +41,7 @@ use gantry_sandbox::driver::LogStream;
 use gantry_sandbox::fake::{
     DriverCall, FailPoint, FakeBehavior, FakeDriver, FakeOutEntry, FakeScript, SIGKILL, SIGTERM,
 };
-use gantry_sandbox::service::seams::{MemoryArtifacts, StaticSchemas};
+use gantry_sandbox::service::seams::{ArtifactStore, CasKind, MemoryArtifacts, StaticSchemas};
 use gantry_sandbox::service::{SandboxConfig, SandboxDeps, SandboxManager};
 use gantry_sandbox::spec::{NetworkAttach, Runtime};
 use gantry_store::{Store, StoreDeps};
@@ -367,6 +367,29 @@ fn manager(
     max_concurrent: usize,
     orphan_grace: Duration,
 ) -> SandboxManager<FakeDriver> {
+    manager_with_artifacts(
+        root,
+        driver,
+        egress,
+        store,
+        clock,
+        max_concurrent,
+        orphan_grace,
+        Arc::new(MemoryArtifacts::default()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn manager_with_artifacts(
+    root: &TempRoot,
+    driver: &Arc<FakeDriver>,
+    egress: &Arc<RecordingEgress>,
+    store: &Store,
+    clock: &Arc<TokioClock>,
+    max_concurrent: usize,
+    orphan_grace: Duration,
+    artifacts: Arc<dyn ArtifactStore>,
+) -> SandboxManager<FakeDriver> {
     let repo = FakeRepo::new(gantry_core::time::Timestamp::from_millis(MS));
     let job = base_job();
     repo.insert_commit(
@@ -387,7 +410,7 @@ fn manager(
             egress: egress.clone(),
             store: store.clone(),
             clock: clock.clone(),
-            artifacts: Arc::new(MemoryArtifacts::default()),
+            artifacts,
             schemas: Arc::new(StaticSchemas(schemas)),
         },
         SandboxConfig {
@@ -1464,4 +1487,180 @@ async fn issued_token_carries_the_decision_time_config_rev() {
     h.service.submit(&ctx(), spec(60)).await.unwrap();
     h.service.wait(&att(60)).await.unwrap();
     assert_eq!(*h.egress.issued_revs.lock().unwrap(), vec![DECIDED_REV]);
+}
+
+fn use_artifacts(h: &mut Harness, artifacts: Arc<dyn ArtifactStore>) {
+    h.service = manager_with_artifacts(
+        &h.root,
+        &h.driver,
+        &h.egress,
+        &h.store,
+        &h.clock,
+        h.max_concurrent,
+        h.orphan_grace,
+        artifacts,
+    );
+}
+
+async fn check_object(
+    store: &Store,
+    object: &gantry_core::ports::sandbox::CasObject,
+    bytes: &[u8],
+    kind: gantry_store::CasKind,
+) {
+    assert_eq!(object.sha256, sha256(bytes));
+    assert_eq!(object.bytes, bytes.len() as u64);
+    assert_eq!(
+        store
+            .cas()
+            .get_bytes(&object.sha256, bytes.len())
+            .await
+            .unwrap()
+            .unwrap(),
+        bytes
+    );
+    let stat = store.cas().stat(&object.sha256).await.unwrap().unwrap();
+    assert_eq!((stat.kind, stat.bytes), (kind, bytes.len() as u64));
+}
+
+#[tokio::test(start_paused = true)]
+async fn store_cas_collect_and_cancel() {
+    let mut h = harness(1);
+    let cas = h.store.cas();
+    use_artifacts(&mut h, Arc::new(cas));
+    let mut script = golden_script();
+    script.log.push((
+        Duration::from_secs(4),
+        LogStream::Stdout,
+        b"non-protocol output".to_vec(),
+    ));
+    h.driver.script(sbx(70), script);
+    h.service.submit(&ctx(), spec(70)).await.unwrap();
+    let outcome = h.service.wait(&att(70)).await.unwrap();
+    for (name, bytes) in [
+        ("result.json", &br#"{"status":"succeeded"}"#[..]),
+        ("changes.patch", &b"diff --git a/x b/x\n"[..]),
+        ("report.md", &b"# done\n"[..]),
+        ("proposals.json", &b"[]"[..]),
+    ] {
+        check_object(
+            &h.store,
+            &outcome.files[&gantry_core::ports::sandbox::ArtifactName::new(name)],
+            bytes,
+            gantry_store::CasKind::Artifact,
+        )
+        .await;
+    }
+    let spool = std::fs::read(
+        h.root
+            .path()
+            .join(sbx(70).to_string())
+            .join("progress.spool.jsonl"),
+    )
+    .unwrap();
+    assert!(!spool.is_empty());
+    check_object(
+        &h.store,
+        outcome.progress.as_ref().unwrap(),
+        &spool,
+        gantry_store::CasKind::Progress,
+    )
+    .await;
+    check_object(
+        &h.store,
+        &outcome.stdout_tail,
+        b"non-protocol output\n",
+        gantry_store::CasKind::Artifact,
+    )
+    .await;
+    check_object(
+        &h.store,
+        &outcome.stderr_tail,
+        b"warning: x\n",
+        gantry_store::CasKind::Artifact,
+    )
+    .await;
+    h.service.release(&ctx(), &att(70)).await.unwrap();
+
+    h.driver.script(sbx(71), long_running());
+    h.service.submit(&ctx(), spec(71)).await.unwrap();
+    h.service.submit(&ctx(), spec(72)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    h.service.cancel(&ctx(), &att(72)).await.unwrap();
+    let cancelled = h.service.wait(&att(72)).await.unwrap();
+    assert_eq!(cancelled.terminal.cause, TerminalCause::KilledCancel);
+    assert!(cancelled.files.is_empty() && cancelled.progress.is_none());
+    check_object(
+        &h.store,
+        &cancelled.stdout_tail,
+        b"",
+        gantry_store::CasKind::Artifact,
+    )
+    .await;
+    assert_eq!(cancelled.stdout_tail, cancelled.stderr_tail);
+    h.service.cancel(&ctx(), &att(71)).await.unwrap();
+    h.service.wait(&att(71)).await.unwrap();
+}
+
+struct FailNthPut {
+    cas: gantry_store::Cas,
+    count: std::sync::atomic::AtomicUsize,
+    fail_at: usize,
+}
+
+#[async_trait]
+impl ArtifactStore for FailNthPut {
+    async fn put(
+        &self,
+        bytes: &[u8],
+        kind: CasKind,
+    ) -> Result<gantry_core::ports::sandbox::CasObject, String> {
+        if self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == self.fail_at {
+            return Err("injected CAS failure".into());
+        }
+        ArtifactStore::put(&self.cas, bytes, kind).await
+    }
+
+    async fn get(
+        &self,
+        digest: &gantry_core::canon::Sha256Digest,
+    ) -> Result<Option<Vec<u8>>, String> {
+        ArtifactStore::get(&self.cas, digest).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_collect_preserves_prior_cas_object_and_cleans_up() {
+    let mut h = harness(1);
+    let failure = Arc::new(FailNthPut {
+        cas: h.store.cas(),
+        count: Default::default(),
+        fail_at: 2,
+    });
+    use_artifacts(&mut h, failure.clone());
+    h.driver.script(sbx(73), golden_script());
+    h.service.submit(&ctx(), spec(73)).await.unwrap();
+    let err = h.service.wait(&att(73)).await.unwrap_err();
+    assert!(
+        matches!(err, SandboxError::Infra { detail: InfraDetail::Collect, ref message } if message.contains("injected CAS failure")),
+        "{err:?}"
+    );
+    assert_eq!(failure.count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // BTreeMap 顺序下首个产物为 changes.patch。
+    let bytes = b"diff --git a/x b/x\n";
+    assert_eq!(
+        h.store
+            .cas()
+            .get_bytes(&sha256(bytes), bytes.len())
+            .await
+            .unwrap()
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(h.driver.container_count(), 0);
+    assert!(!h.root.path().join(sbx(73).to_string()).exists());
+    assert_eq!(
+        h.egress.log(),
+        vec![format!("issue {}", att(73)), format!("revoke {}", att(73))]
+    );
 }
