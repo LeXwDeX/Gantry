@@ -112,7 +112,7 @@ pub trait EgressControl: Send + Sync {
     async fn job_usage(&self, job_id: &AttemptId) -> Result<JobUsage, EgressError>;
     /// 原子地"取最终计量并吊销令牌"。幂等：重复调用返回同一份 FinalUsage，直到 forget_job。
     async fn revoke_job_token(&self, job_id: &AttemptId) -> Result<FinalUsage, EgressError>;
-    /// engine 在 attempt.finished 落库后经 SandboxService::release 触发。TTL（默认 24 h）到期也会自动遗忘。
+    /// engine 结算和 attempt.finished 提交后经 SandboxService::release 触发；前置条件见 egress-control §4.2。
     async fn forget_job(&self, job_id: &AttemptId) -> Result<(), EgressError>;
 
     // ---- svc_token（P-50、P-74：每个 gantryd 进程一枚）----
@@ -191,7 +191,7 @@ pub struct EgressStatus { pub applied_rev: Seq, pub health: Health /* ok | degra
 
 `status()` 的形状对应 [config §2.8](../interfaces/config.md#28-catalog-与-status-的响应结构)；设置状态字段统一为 `applied_rev`（C26）。
 
-**调用顺序**（与 worker-protocol §3.2 一致）：`issue_job_token` → 建容器（令牌经 `ExecSpec.env` 写入沙盒）→ `stage` → 启动 → …… → `collect` → `revoke_job_token` → 销毁；`attempt.finished` 落库后 `forget_job`。
+**调用顺序**（与 worker-protocol §3.2 一致）：`issue_job_token` → 建容器（令牌经 `ExecSpec.env` 写入沙盒）→ `stage` → 启动 → …… → `collect` → `revoke_job_token` → 销毁；结算与 `attempt.finished` 提交后经 `release` 调用 `forget_job`。
 
 ### 6.3 `models` 的直接调用约定（P-50、P-74）
 
@@ -252,7 +252,7 @@ struct JobState {
 - 存储：`<data_dir>/egress.db`（SQLite，WAL）：`job_tokens`（令牌哈希与 job 元数据）、`svc_tokens`（令牌哈希、`issued_to`、状态）、`usage_jobs`、`usage_calls`、`final_usage`、`inflight`、`secret_versions`（元数据，值在 `secrets`）、`applied_config`（最后一次已应用的视图，**不含任何值**）。
 - 用量在每个请求**完成时**同步提交（一次 WAL 提交）；请求**开始**时先在 `inflight` 写一行，完成后删除。重启时遗留的 `inflight` 行让对应 job 置 `incomplete = true`——用量是下界，**绝不静默丢失**。
 - 重启后：载入 `job_tokens`、`svc_tokens` 与最后一次 `applied_config`，继续服务（两种令牌都不因 Egress 重启而失效，egress-control §8）；运行中的沙盒不受影响，归属不变。`gantryd` 重连后若自己的 config rev 更新则重发 `apply_config`。
-- `final_usage` 在 `revoke_job_token` 时写入，`forget_job` 或 TTL 后删除，保证 `collect` 与 `attempt.finished` 之间崩溃的重放得到同一份数字。
+- job 登记与 `final_usage` 的保留、显式遗忘及数据库重启规则以 [egress-control §4.2 和 §8](../interfaces/egress-control.md#8-测试与验收) 为准；未释放的记录长期增长，未设置容量上限。
 
 ### 7.3 模型 API 反向代理流水线
 
@@ -387,7 +387,7 @@ struct JobState {
 | `gantryd` 不可达 | 数据面照常服务已签发令牌的 job；新签发不可能发生；控制面请求在其恢复后补做；`status` 不变 |
 | 审计写失败 | 拒绝新请求并 `unhealthy`（OQ-E10） |
 | `issue_job_token` 失败 | `sandbox` 归 `infra.egress`，新沙盒重试 |
-| `revoke_job_token` 对未知 job | 若 `final_usage` 仍在则返回之；否则 `NotFound`（`sandbox` 视为 `infra.egress` 并用零用量标 `incomplete`） |
+| `revoke_job_token` 对未知 job | `NotFound` 不证明零用量或结算完成；任务身份拒绝路径按 [worker-protocol §14](../interfaces/worker-protocol.md#job-identity) 阻断 |
 | 磁盘 / 内存不足 | 拒绝新连接，`unhealthy`；不降低任何校验 |
 
 ## 10. 配置
@@ -415,7 +415,6 @@ struct JobState {
 | `egress.limits.request_body_bytes` / `request_header_bytes` | 32 MiB / 16 KiB | [建议值，待调优] |
 | `egress.limits.job_inflight` / `job_requests_per_min` | 8 / 120 | [建议值，待调优] |
 | `egress.limits.tunnel_idle_s` / `tunnel_max_s` / `tunnel_bytes` / `job_tunnel_bytes` | 60 / 1800 / 1 GiB / 4 GiB | [建议值，待调优]，OQ-E6 |
-| `egress.final_usage_ttl_s` | 86400 | `forget_job` 之前最终用量的保留期 |
 | `egress.audit.retention_days` | 未定 | 对应 config OQ-21 |
 
 ## 11. 可观测性
@@ -442,7 +441,7 @@ struct JobState {
 - [ ] 有效令牌从非沙盒网段使用 → 403（`token.source_not_allowed`）；`svc_token` 用在沙盒侧监听器、`job_token` 用在 `svc_model` → 403。
 - [ ] 沙盒侧请求带 `x-gantry-caller`、`x-gantry-job`、`x-gantry-call-id` 等头：被忽略、被剥离，归属不变（上游收到的头集合里没有它们）。
 - [ ] `issue_job_token` 对同一 `job_id` 幂等；`egress.db` 里只有令牌哈希，没有令牌明文。
-- [ ] `revoke_job_token` 后同一令牌立即 403；`revoke_job_token` 重复调用返回逐字段相同的 `FinalUsage`；`forget_job` 后再 `revoke_job_token` → `NotFound`；TTL 到期自动遗忘（假时钟）。
+- [ ] `revoke_job_token` 后同一令牌立即 403；重复吊销返回相同快照，显式遗忘后的行为及跨旧 TTL、日志过期、数据库重启的验收见 [egress-control §8](../interfaces/egress-control.md#8-测试与验收)。
 - [ ] 重启 `egress` 进程：令牌、用量、封顶状态恢复，运行中的 job 继续被正确归属；重启时在途的请求使该 job `incomplete = true`；`svc_token` 继续有效（登记表持久化）；`gantryd` 重启后签发新 `svc_token` → 旧令牌 403，`revoked_previous` 列出它（P-74）。
 - [ ] 签发时的 provider 与路径中的 provider 不一致 → 403。
 
@@ -534,6 +533,6 @@ struct JobState {
 | OQ-E8 | `*.example.com`（"一层前缀通配"）是否匹配多层子域 | 白名单宽度 | 只匹配恰好多一层标签（更严） |
 | OQ-E9 | 各 provider kind 的上游路径 / 方法白名单、可转发头名单、鉴权头方案，以及 Anthropic 用量字段名（均 **需核实当前 API**）；第二个 provider kind 的接入方式 | G1、G2 | Anthropic 的 §7.3 / §7.4 列表 |
 | OQ-E10 | 审计：保留期（config OQ-21）、哈希链的范围与起始里程碑、写失败时是否真的应该拒绝新请求（可用性 vs 审计完整性） | G6、G9 | 保留期未定；M3 哈希链；写失败即拒绝 |
-| OQ-E11 | 最终用量 `final_usage` 的保留期与 `forget_job` 的触发责任（本文：`sandbox.release` + TTL 24 h）；登记表在 `egress` 重启后的有效期 | 恢复语义 | 如 §7.2 |
+| OQ-E11 | **已决：D-22**。最终用量与登记保留至结算、终结提交后显式 `release`；本地删除条件及重启规则见 [egress-control §8](../interfaces/egress-control.md#8-测试与验收)。本项为契约决定，不表示现有代码已修复 | 恢复语义 | 不按 TTL 自动遗忘 |
 | OQ-E12 | M3 "沙盒逃逸检测告警"中 `egress` 提供的信号（无效或跨网段使用的 `job_token`、伪造头、对控制面地址的探测）如何上报——`egress` 不写事件，是经 `status()` / 拉取接口，还是别的通道 | M3 | 仅审计 + 指标 |
 | OQ-E13 | `sandbox_ro` 角色是否需要包仓库（config OQ-16）：是否按角色区分出网档案 | 白名单最小化 | 单一档案 |

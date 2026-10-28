@@ -180,7 +180,7 @@
 | 幂等 | 已吊销则返回同一份 `FinalUsage`，直到 `DELETE`；`job_id` 不存在 → `404 not_found` |
 | `capped` / `incomplete` | `capped`：曾因 `tokens_total` 切断请求（对应 worker-protocol §9 的 `budget.tokens`）。`incomplete`：有请求在途时 Egress 崩溃，或上游用量不可解析而按保守估计计入，数字是下界或估计 |
 | `GET …/usage` | 同形状，`state: "active"`、无 `revoked_at`，是当前快照，供进度展示与预警 |
-| `DELETE …` | `attempt.finished` 落库之后由 `sandbox` 调用（`SandboxService::release`）；之后 `revoke` / `usage` 返回 `404`。未调用时 Egress 在吊销后 24 h **[提议]** 自动遗忘 |
+| `DELETE …` | 可信调用方在 engine 结算和 `attempt.finished` 提交后经 `SandboxService::release` 显式调用；本地删除前置条件与保留规则见 §8「最终计量保留」（D-22）。删除后 `revoke` / `usage` 返回 `404`；不存在的 job 删除幂等成功 |
 
 `sandbox` 把 `FinalUsage.usage` 交给 `engine`，写入 `Attempt.usage` 与 `attempt.finished`，并据 `weighted_tokens` 记一次 `budget.charged`（交付台账或会话台账）。§4.5 里 `caller.kind = job` 的记录只用于进度与预警，**不重复记账** **[提议]**（OQ-4）。
 
@@ -411,11 +411,11 @@
 | --- | --- | --- | --- |
 | —（连接被关闭） | — | 对端进程用户不符（§2.2） | 部署错误，不重试；`gantryd` 健康检查报 `egress` 不可用 |
 | 400 | `invalid_request` | JSON 语法错误、查询参数错误 | 调用方缺陷，不重试 |
-| 404 | `not_found` | `job_id`、`svc_token_id`、`staged_id` 不存在，或路由不存在 | `revoke` 遇到它说明已遗忘，按"已吊销"处理；调用级关闭遇到它说明路径 token 从未签发，调用方缺陷 |
+| 404 | `not_found` | `job_id`、`svc_token_id`、`staged_id` 不存在，或路由不存在 | `revoke` 遇到它不证明零用量或结算完成；任务身份拒绝路径按 worker-protocol §14 阻断。调用级关闭遇到它说明路径 token 从未签发，调用方缺陷 |
 | 409 | `binding_mismatch` | 同一 `job_id` 以不同绑定签发 | 引擎缺陷，不重试，`infra.egress` |
 | 409 | `job_revoked` | 对已吊销的 `job_id` 签发 | 新尝试用新 `job_id` |
 | 409 | `stale_rev` | 下发的配置 `rev` 小于已应用的 | 忽略（已有更新的视图） |
-| 409 | `conflict` | `request_id` 重放但内容不同；回收仍被引用的 secret；调用级关闭时路径 token 对该 `call_id` 没有已接受请求、而该调用的已接受请求属于别的 token（egress-call-terminal §2） | 调用方缺陷；调用级关闭改用有关联的 token |
+| 409 | `conflict` | `request_id` 重放但内容不同；回收仍被引用的 secret；job 删除前置条件不满足（§8）；调用级关闭时路径 token 对该 `call_id` 没有已接受请求、而该调用的已接受请求属于别的 token（egress-call-terminal §2） | 调用方修正前置条件；调用级关闭改用有关联的 token |
 | 410 | `staged_expired` | 激活过期的暂存项 | 重新暂存 |
 | 410 | `cursor_expired` | 用量游标早于保留窗口 | 见 §4.5 |
 | 422 | `validation_failed` | 字段缺失 / 越界 / 未知字段；`groups` 不在档案内；`secret_ref` 不合规；附 `errors[]` | 调用方缺陷或配置未同步 |
@@ -440,6 +440,10 @@
 
 ## 8. 测试与验收
 
+**最终计量保留（D-22）**：job 登记和持久化的 `FinalUsage` 保留至可信调用方显式 `DELETE`，不按吊销后的时间自动遗忘。Egress 不查询 `store`，不新增 `settled` / `pinned` 字段；`DELETE` 表示调用方已完成结算与 `attempt.finished` 提交。Registry 本地验证：job 不存在则幂等成功；active、仅令牌过期而未显式吊销、未显式 `revoke`、没有已持久化最终快照或仍有在途请求时返回 `409 conflict`，状态不变；只有已显式吊销、最终快照已持久化且在途数为零才可删除，先删除数据库记录再删除内存记录。`DELETE` 不得隐式吊销或丢弃在途计量。身份拒绝路径的 `incomplete` 和其他阻断条件仍按 [worker-protocol §14](worker-protocol.md#job-identity) 约束调用方 `release`；Registry 不代替通用预算策略。
+
+逐请求用量日志的时间清理与 §4.5 游标过期规则不变，不能删除独立保存的 job 汇总；文件 SQLite 重启后仍可读取相同最终快照，并保留拒绝对已吊销 job 重签的状态。缺少最终数据不等于零用量或已结算。公开名称 `RegistryOptions.final_usage_ttl_s` 与 `FINAL_USAGE_TTL_S` 保留为已废弃兼容名称，不再控制删除；不是新的引导配置。未 `release` 的记录会长期增长，目前未设容量上限，不用 TTL 抹去证据。服务调用、密钥、审计和令牌有效期规则不变。
+
 `EgressStub`（M0）实现本文全部控制面操作，并提供一个能接收 `/j/…` 与 `/s/…` 的假数据面（返回脚本化的模型响应与用量）。一致性测试对 `EgressStub` 与真实 Egress 同样运行：
 
 - [ ] 非 `gantry` 用户连接 `egress.sock` → 连接被关闭、无 HTTP 响应、审计有 `control.peer_not_allowed`；`gantry-sbx` 用户无法打开该 socket。
@@ -454,6 +458,7 @@
 - [ ] 调用级关闭与终结证明：见 [egress-call-terminal.md](egress-call-terminal.md) §7。
 - [ ] 配置视图：`rev` 回退 → `409 stale_rev`；非法视图（含 `api.github.com`）→ `422 config_invalid`，旧视图继续生效、`health = degraded`。
 - [ ] Egress 重启：已签发未吊销的令牌继续有效（登记表持久化，只存哈希）；有在途请求的尝试 `incomplete = true`。
+- [ ] 真实 Egress 的文件 SQLite：非零最终快照跨旧 24 h TTL、逐请求用量日志过期及重启仍逐字段相同，重签已吊销 job 仍被拒；active、仅过期未吊销、排空中或无已持久快照的删除均为 `409` 且状态不变，显式吊销并排空后删除成功，重复删除成功。身份拒绝的结算、终结、`release` 顺序符合 worker-protocol §14。
 - [ ] 访问日志与审计里没有任何令牌原文（对日志做令牌前缀 `gjt1_` / `gst1_` 的全文搜索）。
 
 ## 9. 开放问题

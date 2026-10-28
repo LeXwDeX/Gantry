@@ -29,6 +29,7 @@
 | D-19 | **`budget_exhausted` 的 `raise_cap`**（P-79）：每选一次，给耗尽的那个维度追加一份该档模板的原值（如 `rounds` 3 → 6）；新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`），其契约见 [#129](https://github.com/LeXwDeX/gantry/issues/129)；operator 即可操作，不需要签名，只在桌面档案出现 | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-11 |
 | D-20 | **结构化输出 schema 共同来源**：`core` 提供编译内嵌生成字节的只读查询，供 `engine` 与 `sandbox` 使用；未知 ID 或摘要漂移失败闭合。保留既有线上 ID、路径、摘要规则和 `from_settings` 的 `build_schema` 入参；具体契约见 [worker-protocol §11.1.1](interfaces/worker-protocol.md#output-schema-registry)，实现与生产接线另行交付 | 用户授权协调会话选择保守方案（#319） |
 | D-21 | **任务摘要与旧任务恢复**：可信摘要仅来自最终 `job.json` 字节，经服务端元数据交付；缺可信摘要时禁止产物放行与自动重试，保留历史结果。采用 [worker-protocol 任务身份契约](interfaces/worker-protocol.md#job-identity) 的三态恢复和终结规则，先冻结契约再实现 | 用户 2026-10-28 授权协调会话采用保守升级策略（#362） |
+| D-22 | **恢复请求与最终计量边界**：请求绑定冲突整批预验证并拒绝，不污染已受理任务；有效请求的持久证据错误仍逐任务收尾。Egress 保留登记和最终计量直到可信调用方在结算与终结提交后显式遗忘，并只验证本地删除前置条件。详见 [任务身份契约](interfaces/worker-protocol.md#job-identity) 与 [Egress 控制面 §4.2](interfaces/egress-control.md#42-吊销-job_token查询与遗忘)；行为另行实现 | 用户 2026-10-28 授权协调会话决定（#362） |
 
 D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计算与工作树隔离推导出的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 行新增的用户机制决定；机制见待契约批准提案节的 P-83–P-86。
 

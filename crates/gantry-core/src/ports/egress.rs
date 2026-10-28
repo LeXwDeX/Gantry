@@ -282,12 +282,16 @@ pub trait EgressControl: Send + Sync {
 
     async fn job_usage(&self, job_id: &AttemptId) -> Result<JobUsage, EgressError>;
 
+    /// 吊销并取得最终快照；显式遗忘前保留该快照，不按 TTL 自动删除。
     async fn revoke_job_token(
         &self,
         job_id: &AttemptId,
         ctx: &ActorCtx,
     ) -> Result<FinalUsage, EgressError>;
 
+    /// 调用方须先完成结算和 attempt.finished 提交；不存在时幂等成功。
+    /// 已显式吊销、最终快照已持久化且无在途请求才可删除，否则 Conflict。
+    /// 完整规则见 egress-control.md §4.2、§8；身份拒绝另遵守 worker-protocol §14。
     async fn forget_job(&self, job_id: &AttemptId, ctx: &ActorCtx) -> Result<(), EgressError>;
 
     async fn service_token(&self, ctx: &ActorCtx) -> Result<SvcTokenGrant, EgressError>;

@@ -372,17 +372,22 @@ pub trait SandboxService: Send + Sync {
     /// 重启后只有确认从未启动的新格式记录可按准备重入例外返回 Unknown。
     async fn submit(&self, ctx: &ActorCtx, spec: SandboxSpec) -> Result<JobHandle, SandboxError>;
 
-    /// 等待终态；可重复调用，同一 job 恒返回同一结果。
+    /// 等待终态；可重复调用，同一 job 恒返回同一结果。仅在成功绑定后调用；
+    /// 恢复请求被拒后不得直接 wait 绕过绑定。
     async fn wait(&self, job_id: &AttemptId) -> Result<JobOutcome, SandboxError>;
 
-    /// 采样节流后的展示数据；丢包无影响。
+    /// 采样节流后的展示数据；丢包无影响。仅在成功绑定后调用。
     fn progress(&self, job_id: &AttemptId) -> BoxStream<'static, ProgressSample>;
 
+    /// 可信引擎内部端口；仅在成功绑定后调用。
     async fn cancel(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError>;
 
+    /// 可信引擎内部端口；仅在成功绑定、结算与 attempt.finished 提交后调用。
     async fn release(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError>;
 
-    /// `gantryd` 重启后接管未终结的尝试。按输入顺序为每个
+    /// `gantryd` 重启后接管未终结的尝试。在 submit_lock 内纯预验证输入批次
+    /// 与已知槽位的 job / sandbox / project 绑定；冲突在任何副作用前整批
+    /// 返回 InvalidSpec，完全相同的重复项幂等。有效请求按输入顺序为每个
     /// `UnfinishedAttempt` 恰好返回一项（E4）；新格式记录经相位及运行时
     /// 事实确认从未启动时可清理残留、保存 Accepted 并返回 Unknown，要求
     /// 同 ID 重提完整 spec。不可验证的已受理任务不能返回 Unknown 或 Lost，
