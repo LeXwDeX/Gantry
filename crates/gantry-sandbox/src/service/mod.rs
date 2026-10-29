@@ -1008,9 +1008,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                         format!("recovery intake failed: {err}"),
                     ))
                 }
-                Err(_) => {
-                    return Err(infra(InfraDetail::Collect, "recovery intake timed out"))
-                }
+                Err(_) => return Err(infra(InfraDetail::Collect, "recovery intake timed out")),
             };
             if let Some(intake) = intake {
                 // 已过 Destroying：容器是本服务删的，终止事实以 meta.json 为准。
@@ -1504,11 +1502,9 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             }
             return Ok(slot.handle);
         }
-        if self
-            .jobs()
-            .iter()
-            .any(|(job_id, slot)| *job_id != spec.job_id && slot.handle.sandbox_id == spec.sandbox_id)
-        {
+        if self.jobs().iter().any(|(job_id, slot)| {
+            *job_id != spec.job_id && slot.handle.sandbox_id == spec.sandbox_id
+        }) {
             return Err(SandboxError::InvalidSpec(
                 "sandbox is already bound to a different job".into(),
             ));

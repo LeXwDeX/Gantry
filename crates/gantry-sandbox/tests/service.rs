@@ -3085,11 +3085,9 @@ async fn blocked_project_mismatch_does_not_expose_the_owner_outcome() {
         h.service.recover(&ctx(), &[unfinished(owner)]).await,
         Err(SandboxError::InvalidSpec(_))
     ));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut wait)
-            .await
-            .is_err()
-    );
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
+        .await
+        .is_err());
     let calls = h.driver.calls();
     let egress = h.egress.log();
     assert_eq!(
