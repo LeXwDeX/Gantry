@@ -292,16 +292,17 @@ pub struct UnfinishedAttempt {
 /// `submit`，不计为失败；后者终结为 `infra.lost`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecoveredJob {
-    /// 已受理且仍在推进（运行中，或尚未启动、由 sandbox 重新走排队 / 创建 /
-    /// 注入阶段，或拒绝任务的收尾正在推进）；引擎继续 `wait`。
+    /// 已受理且仍在推进（包括拒绝收尾），或恢复查询仍待核实。后者不证明
+    /// 已受理或正在运行；引擎等待期间按退避再次 `recover` 同一绑定。
     Running(JobHandle),
     /// 已受理且已停止；`wait` 稳定返回 `JobOutcome` 或 `JobIdentityUnavailable`。
     Exited(JobHandle),
     /// 受理后丢失：容器不在且产物不可提取；`wait` 返回 `Infra { Lost }`，
     /// 引擎终结为 `infra.lost`。
     Lost(JobHandle),
-    /// 从未受理，或新格式记录经相位与运行时事实确认从未启动，清理准备
-    /// 残留并持久记录 Accepted 后请求重入；引擎以相同 ID 重新提交完整 spec。
+    /// 可信完整查询证明无受理痕迹，或新格式记录的身份、相位和运行时事实
+    /// 证明从未启动，清理残留并持久记录 Accepted 后请求重入；引擎以相同 ID
+    /// 重提完整 spec。查询失败或不完整不是无受理痕迹的证明。
     Unknown { job_id: AttemptId },
 }
 
@@ -321,7 +322,7 @@ pub struct SweepReport {
     pub errors: Vec<String>,
 }
 
-/// 运行中 / 排队中 / 上限 / 预热池。
+/// 运行中 / 排队中 / 上限 / 预热池；不完整快照不能作为已确认空闲容量。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CapacitySnapshot {
     pub running: u32,
@@ -368,30 +369,34 @@ pub enum InfraDetail {
 /// 引擎面的沙盒服务。`engine` 只依赖它，不接触容器驱动。
 #[async_trait]
 pub trait SandboxService: Send + Sync {
-    /// 受理一个 job（按 `job_id` 幂等）。返回 `Ok` 之前受理记录已持久化，
-    /// 重启后只有确认从未启动的新格式记录可按准备重入例外返回 Unknown。
+    /// 受理一个 job（按 `job_id` 幂等）。返回 `Ok` 之前受理记录已持久化；
+    /// 仅有待核实的内存绑定不能虚报受理，也不能提前启动。
     async fn submit(&self, ctx: &ActorCtx, spec: SandboxSpec) -> Result<JobHandle, SandboxError>;
 
     /// 等待终态；可重复调用，同一 job 恒返回同一结果。仅在成功绑定后调用；
-    /// 恢复请求被拒后不得直接 wait 绕过绑定。
+    /// 恢复请求被拒后不得直接 wait 绕过绑定。待核实且无可信结果时保持等待，
+    /// 不得因尚未确认受理误报 NotFound 或终态；等待不阻塞同绑定再次 recover。
+    /// 交接重提时不得仅因槽位替换误报 NotFound / ShuttingDown 或使用旧结果。
     async fn wait(&self, job_id: &AttemptId) -> Result<JobOutcome, SandboxError>;
 
     /// 采样节流后的展示数据；丢包无影响。仅在成功绑定后调用。
     fn progress(&self, job_id: &AttemptId) -> BoxStream<'static, ProgressSample>;
 
-    /// 可信引擎内部端口；仅在成功绑定后调用。
+    /// 可信引擎内部端口；仅在成功绑定后调用。待核实及重提交接期间不能丢失
+    /// 有效取消；暂时的 NotFound 不代表取消已完成。
     async fn cancel(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError>;
 
     /// 可信引擎内部端口；仅在成功绑定、结算与 attempt.finished 提交后调用。
     async fn release(&self, ctx: &ActorCtx, job_id: &AttemptId) -> Result<(), SandboxError>;
 
-    /// `gantryd` 重启后接管未终结的尝试。在 submit_lock 内纯预验证输入批次
-    /// 与已知槽位的 job / sandbox / project 绑定；冲突在任何副作用前整批
-    /// 返回 InvalidSpec，完全相同的重复项幂等。有效请求按输入顺序为每个
-    /// `UnfinishedAttempt` 恰好返回一项（E4）；新格式记录经相位及运行时
-    /// 事实确认从未启动时可清理残留、保存 Accepted 并返回 Unknown，要求
-    /// 同 ID 重提完整 spec。不可验证的已受理任务不能返回 Unknown 或 Lost，
-    /// 也不能中断其他任务的恢复结果。
+    /// `gantryd` 重启后接管未终结的尝试，也可再次查询相同绑定。在 submit_lock
+    /// 内纯预验证整个输入批次和既有槽位（包括待核实槽位）的 job / sandbox /
+    /// project 绑定；冲突在任何副作用前整批返回 InvalidSpec，完全相同的重复项
+    /// 幂等。有效请求按输入顺序为每个 `UnfinishedAttempt` 恰好返回一项（E4）。
+    /// 单项查询和有效批次均有界，长期待核实项不能使健康项无限等待；同绑定的
+    /// 在途核实合并或串行化，后续查询不能永久缓存首次 Running。查询失败或
+    /// 不完整返回待核实的 Running，不得据此返回 Unknown 或 Lost；明确的身份
+    /// 证据问题按任务身份契约逐 job 拒绝收尾，不中断其他任务。
     async fn recover(
         &self,
         ctx: &ActorCtx,

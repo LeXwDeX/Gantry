@@ -673,7 +673,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - **持久化**：引擎没有自己的表。游标按低水位推进、落后于实际处理进度（§7.14.1）；"事件已处理"靠决策幂等而不是游标精确一次。
 - **启动恢复**：
   1. 读所有非终结交付单元，以及仍有未清理资源的 `abandoned` / `closed` 交付单元（排队中的 Outbox、未终结尝试、活跃审批、未移除的工作树）的投影，折叠游标之后的事件，重建 `DeliveryState`；
-  2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`：`Running` 包括拒绝收尾，继续等待；`Exited` 的 `wait` 稳定返回 outcome 或身份不可恢复错误；普通 `Lost` 按 §7.8。`Unknown` 包含从未受理或新格式已受理但证明从未启动并持久重置 `Accepted` 的准备重入，引擎以相同 job / sandbox ID 重新提交完整 `SandboxSpec`；这不是旧任务重新执行。身份不可验证时不得通过 `Lost` / `Unknown` 触发重试，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)；`direct` 尝试没有沙盒，按 `infra.lost` 重试；计量和终结同事务提交后 `release`，再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
+  2. 对每个有 `attempt.started` 而无 `attempt.finished` 的尝试，调用 `SandboxService::recover(unfinished)`：`Running` 包括已受理任务推进、拒绝收尾及恢复查询待核实；它不证明已受理或正在运行。引擎继续 `wait`，同时按有界退避对同一 job / sandbox / project 绑定再次 `recover`，不能让 `wait` 阻塞再查询。`Exited` 的 `wait` 稳定返回 outcome 或身份不可恢复错误；普通 `Lost` 按 §7.8。`Unknown` 包含可信完整查询证明从未受理，或新格式已受理但证明从未启动并持久重置 `Accepted` 的准备重入；完成旧等待的交接后引擎以相同 job / sandbox ID 重提完整 `SandboxSpec`，这不是旧任务重新执行。身份不可验证时不得通过 `Lost` / `Unknown` 触发重试，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)；`direct` 尝试没有沙盒，按 `infra.lost` 重试；计量和终结同事务提交后 `release`，再用存活的 `job_id` 集合调 `sweep_orphans(live)`；
      当前单元素恢复请求若返回请求级 `InvalidSpec`，不得 `submit`、直接 `wait`、产生 `Finalized` 或结算；修正绑定后才可重试。此规则与有效请求中的身份证据拒绝收尾不同，见同一契约。
   3. 终结管线内的补丁提交幂等：先查 `attempt.finished` 是否已存在 `result_tree`，再由 `repo` 按 `refs/gantry/attempt/<job_id>` 查已有提交，已存在则不重复提交；
   4. 对每个交付单元补一次 `decide(Tick)`：应有未建的 Workflow / 悬空的上报项（`dedup_key` 相同则 `Deduped`）都会被补齐（阶段事件与入队之间的崩溃窗口由 §7.14.1 的期望动作集合补齐；同一幂等键不会重复）；
@@ -1087,9 +1087,13 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E3 | **已落地（#66）**：policy.md §6.1 规定引擎发起的动作 `Deny` 必带 `ReportHint`，`reason_code` 只取 data-model 上报词表已列的码，不新增词表项；`FakePolicy` 对违约脚本直接 panic。原缺口：`PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报。其余 `DenyReason` 的码已由 #133 补齐：`policy.action_denied:<deny_reason>`；`HeadMismatch` 不带 `ReportHint`，引擎 `reconcile_now` 后重判（policy.md §6.1） | 引擎按 `ReportHint` 上报 | M1（`merge_pr` 以外的动作） |
 | E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**`ActionKey` 衔接已定（#125，方案 1）**：执行体开事务前按 `(result_ref, proposal_id)` 从 CAS 预取原文进只读的 `DecideEnv.proposals`（7.14.2、7.14.3），`expected_actions` 用它算 `create_pr` 的完整意图与 `ActionKey`，`decide` 仍纯、不读 CAS；forge-actions §2.2 不改 | 引擎投影读入 `AttemptState.accepted_open_pr`；`DecideEnv` 增加 `proposals`（#69），`create_pr` 路径使用它（#70） | M1（体验；不阻塞） |
 | E6 | **已落地（#67）**：data-model 上报词表给 `escalation(outbox_failed:<code>)` 增加选项 `retry`（primary）/ `abandon`，`payload` 增加 `action_id`（`core` 校验：`outbox_failed:<code>` 时必填、其余不得出现）；`notify` 按词表校验选项。原缺口：Outbox 终态失败后用户重做（`epoch + 1`）没有入口，§9 却写"由用户决定是否重试" | 引擎投影读入 `OpenInbox.action_id` 与 `retried`，`epoch` 规则见 7.14.4 | M1（失败路径；成功路径不受影响） |
-| E4 | **原四种恢复结果已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`）；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`。新格式已受理但确认从未启动的准备重入例外及身份拒绝仍待实现，见 [任务身份契约](../interfaces/worker-protocol.md#job-identity) | 见 sandbox.md §6.1、§7.10；现有替身按受理集合分类 | M1（"重启一致"） |
+| E4 | **原四种恢复结果已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`）；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`。准备重入、身份拒绝及 `Running` 的待核实语义与再查询仍待实现，见 [任务身份契约](../interfaces/worker-protocol.md#job-identity) | 见 sandbox.md §6.1、§7.10；现有替身按受理集合分类 | M1（"重启一致"） |
 
-E1、E4 都已落地：本地提交 OID 落盘到 `attempt.finished.result_commit`，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果。§12.2"重启一致"在引擎投影读入 `result_commit` 前不能宣布通过。
+E1 与 E4 原四种结果已落地：本地提交 OID 落盘到 `attempt.finished.result_commit`，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果；这不证明 #362 的恢复扩展已实现。§12.2"重启一致"在引擎投影读入 `result_commit` 前不能宣布通过。
+
+E4 的后续实现须核对 `recover` 返回的数量、顺序、每项 job ID 与带句柄结果的 sandbox ID；空结果或错配不得当作 `Unknown`。每个绑定只允许一个结果裁决点：稳定 `wait` 终态先胜出时停止本地再查询并忽略迟到响应；可信 `Unknown` 先胜出时先交接旧等待，再同 ID 重提完整 spec。迟到结果不能再次产生 `Finalized`、结算或副作用；取消本地等待 future 不等于调用 `sandbox.cancel`。旧等待不能仅因交接槽位替换误报 `NotFound` / `ShuttingDown`，也不能把旧结果用于新提交。
+
+有效取消在待核实槽位建立前、待核实期间及 `Unknown` 后到重提前均不能丢失；暂时的 `NotFound` 不代表取消完成。启动前取消先行生效则不得启动，已启动则按既有停止流程处理，取消与超时以先记录者胜。崩溃后依据可信持久事实重放已生效取消；没有可靠依据时不得声称取消完成。引擎不得把不完整容量快照当作已确认的空闲容量。详细边界与后续实现验收见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)，不改变普通非身份错误计量口径。
 
 #### 7.14.7 `GraphTemplate` 的 `TemplateCx` 与 `ExitRule`
 
@@ -1369,6 +1373,8 @@ M1 的执行体在主循环里串行处理（交付单元之间也串行），�
 - [ ] **release**：每个 `attempt.finished` 落库后调用 `SandboxService::release`：进程不重启时恰一次，跨重启至少一次且幂等（sandbox.md §12 的 `release` 幂等），未终结的尝试从不被 `release`；重启后对存活 `job_id` 调 `sweep_orphans`。
 - [ ] **重启一致**：在每个崩溃点（`delivery.created` 后、`attempt.started` 后、`collect` 后提交前、提交后 `attempt.finished` 前、入队后、`outbox.succeeded` 后）杀掉引擎并重建，最终状态与不崩溃一致；`outbox` 表中同一幂等键只有一行；同一 `job_id` 只有一个本地提交；没有重复的 `attempt.started`。
 - [ ] **恢复请求冲突**：单元素 `recover` 返回请求级 `InvalidSpec` 时不 `submit`、不 `wait`、不产生 `Finalized` 或结算；见 [任务身份契约 §14.4](../interfaces/worker-protocol.md#job-identity)。
+- [ ] **恢复待核实**：`Running` 时 `wait` 未完成也会按退避有界再次查询同一绑定；首轮超时或查询失败后不重提、不终结或结算，后续可信结果可推进。空结果、数量、顺序、job ID 或句柄的 sandbox ID 错配均不得触发重提；有界批次中健康项不被长期待核实项无限阻塞。
+- [ ] **恢复交接与取消**：交错触发稳定 `wait` 终态、可信 `Unknown`、有效取消与崩溃，断言每绑定只终结和结算一次，旧等待不因交接误报错误或把旧结果用于新提交；取消本地等待不杀沙盒，启动前取消先行生效时不启动。覆盖槽位建立前、待核实期间、`Unknown` 后及重提前的取消，重启后不丢已生效取消；详细条件见 [任务身份契约 §14.4](../interfaces/worker-protocol.md#job-identity)。
 - [ ] **不重复创建 PR**：重放 T6 的决策得到相同的 `create_pr` 幂等键（与 `FakeForge` 联测：崩溃发生在"GitHub 已创建、本地未记录"时不新增 PR）。黄金结果带 `open_pr` 提议时，重启（`env.proposals` 清空后重新预取）前后的幂等键相同。
 - [ ] **提议原文**（#125）：`env.proposals` 中为 `Found` → `create_pr` 的 `title` / `body` / `draft` 等于提议原文；为 `Missing`（结果对象无该 `proposal_id`）→ 用交付单元标题与模板正文，并记错误日志、不上报；键不在表中 → 不产出 `create_pr` 的 `JudgeAction`，预取完成后的 `Tick(Settle)` 才产出；预取遇 CAS 瞬时错误 → 不记成 `Missing`，重试成功后意图取原文。`decide` 在测试中不访问 CAS（测试替身的 CAS 只被执行体调用）。
 - [ ] **受保护路径**：`FakeRepo` 对 `.github/workflows/x.yml` 补丁返回 `deny(policy.path_protected:workflows)` → 尝试 `failed(policy_denied, policy.path_protected:workflows)`；写 `decision_needed`（`payload.kind = manual_action`）且附补丁引用；对 `Cargo.lock` 补丁写 `escalation`（`policy.path_protected:lockfiles`）且 `payload.evidence` 含 `patch.rejected` 引用；两者都无任何 Outbox 行、不自动重试、`stage_status = waiting_human`（P-48）。
