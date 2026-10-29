@@ -235,7 +235,11 @@ async fn assemble_variant(
         } else {
             ModuleInfo::new("store", Fake, "in-memory log; SQLite store not wired")
         },
-        ModuleInfo::new("engine", Real, "EngineRuntime; settings via from_settings"),
+        ModuleInfo::new(
+            "engine",
+            Real,
+            "EngineRuntime; settings via from_settings; model table is a test fixture",
+        ),
         ModuleInfo::new("notify", Real, ""),
         if real_policy {
             ModuleInfo::new(

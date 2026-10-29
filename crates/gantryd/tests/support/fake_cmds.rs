@@ -3,7 +3,7 @@
 //! 这些命令替代还没接线的入口（api 的 `POST /v1/deliveries` 等），只注册在
 //! 测试进程里，服务端二进制里没有。
 
-use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, SettingsResource};
+use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, SettingsResource, Tier};
 use gantry_core::ids::{ActionId, DeliveryId, MessageId, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::settings::defaults::builtin_resolved;
@@ -243,6 +243,9 @@ struct CreateArgs {
     source_message_id: MessageId,
     title: String,
     user_text: String,
+    /// 测试用：覆盖 worker 层级的 token 预算（0 表示预算耗尽）。
+    #[serde(default)]
+    budget_worker_tokens: Option<u64>,
 }
 
 /// Low 档交付单元；台账取 `levels.low` 的内置默认（尚无 settings 写入路径）。
@@ -262,6 +265,10 @@ async fn create_delivery(assembly: &Assembly, args: Value) -> Response {
         Ok(id) => id,
         Err(error) => return Response::err("internal", error.to_string()),
     };
+    let mut budget = budget_from_level(&levels.low);
+    if let Some(tokens) = args.budget_worker_tokens {
+        budget.limits.tokens_by_tier.insert(Tier::Worker, tokens);
+    }
     let delivery = NewDelivery {
         id,
         project_id: args.project_id,
@@ -272,7 +279,7 @@ async fn create_delivery(assembly: &Assembly, args: Value) -> Response {
         source_message_id: args.source_message_id,
         user_text: args.user_text,
         issues: Vec::new(),
-        budget: budget_from_level(&levels.low),
+        budget,
         config_rev,
         actor: Actor::new(ActorKind::System, FAKE_ACTOR),
     };
