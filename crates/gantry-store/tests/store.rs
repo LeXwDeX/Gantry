@@ -2045,3 +2045,46 @@ async fn event_data_over_the_limit_is_rejected() {
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn watch_head_notifies_replay_then_live_without_gaps() {
+    let store = store().await;
+    let before = 3u64;
+    let live = 12u64;
+    {
+        let mut tx = store.begin_write().await.unwrap();
+        for _ in 0..before {
+            tx.append(message_posted()).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    let mut heads = store.events().watch_head();
+    let mut tasks = Vec::new();
+    for _ in 0..live {
+        let store = store.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut tx = store.begin_write().await.unwrap();
+            tx.append(message_posted()).await.unwrap();
+            tx.commit().await.unwrap();
+        }));
+    }
+    let target = Seq::new(before + live).unwrap();
+    while *heads.borrow_and_update() < target {
+        heads.changed().await.unwrap();
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(*heads.borrow(), target);
+
+    let head = *heads.borrow();
+    let page = store
+        .events()
+        .scan(Seq::new(before).unwrap(), &EventFilter::default(), 200)
+        .await
+        .unwrap();
+    assert_eq!(page.scanned_to, head);
+    let seqs: Vec<u64> = page.events.iter().map(|event| event.seq.as_u64()).collect();
+    assert_eq!(seqs, (before + 1..=head.as_u64()).collect::<Vec<_>>());
+}
