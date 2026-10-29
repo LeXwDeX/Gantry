@@ -76,6 +76,7 @@ impl Scratch {
             r#"
 [server]
 control_socket = "{}"
+data_dir = "{}"
 
 [server.api]
 public_url = "https://gantry.test"
@@ -88,7 +89,8 @@ public_url = "https://hooks.gantry.test/github"
 recipients = ["age1test"]
 journal_target = "/srv/gantry-test/revocations.journal"
 "#,
-            dir.join("control.sock").display()
+            dir.join("control.sock").display(),
+            dir.join("data").display()
         );
         std::fs::write(dir.join("gantry.toml"), config).unwrap();
         Self { dir, owner }
@@ -498,13 +500,23 @@ fn server_binary_has_no_fakes_flags() {
 }
 
 #[test]
-fn server_binary_refuses_to_start_without_a_persistent_store() {
+fn server_binary_opens_store_then_refuses_missing_modules() {
     let scratch = Scratch::new();
     let config = scratch.config();
     let output = run_to_exit(&["--config", config.to_str().unwrap()]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("store"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("persistent SQLite store"),
+        "store 不应再是缺失项：{stderr}"
+    );
+    assert!(stderr.contains("forge"), "下一个缺失模块：{stderr}");
     assert!(!scratch.socket().exists());
+    assert!(
+        scratch.dir.join("data/gantry.db").exists(),
+        "SQLite store 应已打开：{:?}",
+        scratch.dir.join("data")
+    );
 }
 
 #[test]
