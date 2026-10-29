@@ -130,15 +130,12 @@ impl Daemon {
         Self::start(fake_gantryd(scratch, control_uid), scratch)
     }
 
-    fn spawn_real_policy(scratch: &Scratch) -> Self {
+    /// 真实 policy，但不自动授予审批：用例显式调用 `fake.real_grant`。
+    fn spawn_manual(scratch: &Scratch) -> Self {
         let mut command = fake_gantryd(scratch, scratch.uid());
         command.env(
             support::CHILD_ENV,
-            format!(
-                "{}\n{}\nreal-policy",
-                scratch.config().display(),
-                scratch.uid()
-            ),
+            format!("{}\n{}\nmanual", scratch.config().display(), scratch.uid()),
         );
         Self::start(command, scratch)
     }
@@ -342,12 +339,10 @@ fn status_reports_profile_and_module_providers() {
             .unwrap_or_else(|| panic!("{module} missing from {status}"))["provider"]
             .clone()
     };
-    for module in ["engine", "notify"] {
+    for module in ["engine", "notify", "policy"] {
         assert_eq!(provider(module), "real", "{module}");
     }
-    for module in [
-        "store", "policy", "forge", "repo", "sandbox", "models", "egress",
-    ] {
+    for module in ["store", "forge", "repo", "sandbox", "models", "egress"] {
         assert_eq!(provider(module), "fake", "{module}");
     }
 }
@@ -573,6 +568,57 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
     assert_eq!(stages[0].1, "admission_skipped");
     let status = client.ok(json!({"cmd": "status"}));
     assert_eq!(status["engine"]["degraded"], json!({}), "{status}");
+
+    // 默认路径的审批由 fake.drive 自动完成，但仍必须走真实 policy 的设备签名：
+    // granted 事件带测试设备公钥指纹，且 grant 先于对应 merge 入队。
+    let (_, events) = read_log(&mut client);
+    let requested = events
+        .iter()
+        .find(|event| {
+            event["type"] == "approval.requested"
+                && event["correlation_id"] == delivery
+                && event["data"]["action"] == "merge_pr"
+        })
+        .unwrap_or_else(|| panic!("no merge_pr approval requested: {events:?}"));
+    let approval = requested["subject"].clone();
+    let granted = events
+        .iter()
+        .find(|event| event["type"] == "approval.granted" && event["subject"] == approval)
+        .unwrap_or_else(|| panic!("approval {approval} was not granted: {events:?}"));
+    let merge = events
+        .iter()
+        .find(|event| {
+            event["type"] == "outbox.enqueued"
+                && event["correlation_id"] == delivery
+                && event["data"]["action"]["kind"] == "merge_pr"
+        })
+        .unwrap_or_else(|| panic!("no merge_pr enqueued: {events:?}"));
+    assert_eq!(
+        granted["data"]["device_id"],
+        json!(support::fake_cmds::TEST_DEVICE_ID)
+    );
+    assert_eq!(granted["data"]["approval_id"], approval);
+    assert_eq!(
+        granted["data"]["approval_pubkey_fpr"],
+        json!(support::fake_cmds::test_device_fingerprint())
+    );
+    assert!(
+        requested["data"]["subject_digest"].is_string(),
+        "approval subject digest is the signed PR head: {requested}"
+    );
+    assert!(
+        requested["seq"].as_u64() < granted["seq"].as_u64(),
+        "grant must follow request: {requested} / {granted}"
+    );
+    assert!(
+        granted["seq"].as_u64() < merge["seq"].as_u64(),
+        "merge must be enqueued after grant: {granted} / {merge}"
+    );
+    assert_eq!(merge["data"]["action"]["requires_approval"], approval);
+    assert_eq!(
+        merge["data"]["action"]["payload"]["expected_head_sha"],
+        requested["data"]["subject_digest"]
+    );
 
     // 停机：引擎主循环随控制通道一起退出，进程以 0 退出。
     assert!(daemon.terminate().success());
@@ -866,7 +912,7 @@ async fn fake_forge_snapshot_update_waits_for_store_transaction() {
 
 fn real_policy_approval(invalid: bool) {
     let scratch = Scratch::new();
-    let daemon = Daemon::spawn_real_policy(&scratch);
+    let daemon = Daemon::spawn_manual(&scratch);
     let mut client = Client::connect(&scratch);
     let status = client.ok(json!({"cmd": "status"}));
     assert_eq!(status["profile"], "fakes");
@@ -1127,6 +1173,51 @@ fn sqlite_child_rejects_hard_links_in_the_store() {
     }
 }
 
+/// SQLite 先以空模块列表打开，再以生产模块列表重开：policy 私有表按生产注册
+/// 建表并持久化，重开后仍可读回。
+#[tokio::test]
+async fn sqlite_store_opens_empty_then_with_production_modules() {
+    use gantry_core::ids::{Clock, IdGen};
+    use gantry_store::{Store, StoreConfig, StoreDeps};
+
+    let scratch = Scratch::new();
+    let dir = scratch.dir.join("data");
+    let deps = || {
+        let clock: Arc<dyn Clock> = Arc::new(gantryd::assembly::SystemClock);
+        let ids = Arc::new(IdGen::new(
+            clock.clone(),
+            Arc::new(gantryd::assembly::OsEntropy),
+        ));
+        StoreDeps { clock, ids }
+    };
+
+    let store = Store::open(StoreConfig::new(&dir), deps(), &[])
+        .await
+        .expect("open with no modules");
+    drop(store);
+
+    let modules = gantryd::assembly::module_specs();
+    let store = Store::open(StoreConfig::new(&dir), deps(), &modules)
+        .await
+        .expect("reopen with production modules");
+    let mut tx = store.begin_write().await.expect("write lease");
+    tx.module_conn("policy")
+        .insert("policy_challenges", "probe", &json!({"nonce": "n"}))
+        .expect("policy table is registered");
+    tx.commit().await.expect("commit probe");
+    drop(store);
+
+    let store = Store::open(StoreConfig::new(&dir), deps(), &modules)
+        .await
+        .expect("reopen after writing a module row");
+    let snapshot = store.snapshot().await.expect("snapshot");
+    let row: Option<Value> = snapshot
+        .module_conn("policy")
+        .get("policy_challenges", "probe")
+        .expect("read policy table");
+    assert_eq!(row, Some(json!({"nonce": "n"})));
+}
+
 /// 在工作树清理和游标追平后杀死测试进程，以同一 SQLite 目录重启。
 #[test]
 fn sqlite_store_survives_process_crash_and_restart() {
@@ -1144,7 +1235,7 @@ fn sqlite_store_survives_process_crash_and_restart() {
         ("notify", "real"),
         ("forge", "fake"),
         ("repo", "fake"),
-        ("policy", "fake"),
+        ("policy", "real"),
         ("sandbox", "fake"),
     ] {
         let module = modules

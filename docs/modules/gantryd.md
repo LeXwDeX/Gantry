@@ -83,7 +83,7 @@ pub trait CommandSet: Send + Sync {
 
 | 装配 | 在哪里 | 用途 |
 | --- | --- | --- |
-| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store；其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
+| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store 与 notify 生产构造函数；policy 构造函数已就绪但依赖 forge，待 forge 片接入；其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
 | 替身装配 `assemble_fakes` | `tests/support/`（只用 dev-dependency） | 进程级测试。测试二进制带 `GANTRYD_FAKES_CHILD` 重新执行自身，作为"用替身装配的 gantryd"子进程 |
 
 替身装配的当前构成（`status` 原样报告）：
@@ -91,16 +91,24 @@ pub trait CommandSet: Send + Sync {
 | 模块 | 提供方 | 说明 |
 | --- | --- | --- |
 | engine | 真实 | `EngineRuntime`，配置取 engine 测试夹具 |
-| notify | 真实 | `Notify` |
-| store | 替身 | 内存日志 + CAS |
-| policy | 替身 | `FakePolicy`；合并审批按脚本放行（真实 policy 需要设备签名） |
+| notify | 真实 | `assembly::build_notify`（`Notify`） |
+| store | 替身 / 真实 | 默认内存日志 + CAS；设置 SQLite 目录时用真实 store |
+| policy | 真实 | `assembly::build_policy`（`PolicyEngine` + `PolicyApprovals`）；合并审批由测试设备密钥签名 |
 | forge | 替身 | `FakeForge` |
 | repo | 替身 | `EventedRepo`（`FakeRepo` 外包一层，写 `worktree.*` / `patch.validated`） |
 | sandbox | 替身 | `GoldenSandbox`（受理时写入 `single` 黄金结果） |
 | worker / models / egress / conversation | 替身 | `gantry-fakes` 对应替身 |
 | secrets / pki / api | 未装配 | 不计入 `Assembly` 字段：api 是 `serve` 的服务任务；pki、secrets 在 `assemble_real` 内构造并注入消费者；M1.4 接线时补齐 |
 
-某个模块换成真实实现时，只把它的构造从替身装配挪进 `assemble_real`，不改模块代码。
+某个模块换成真实实现时，生产构造函数写进 `src/assembly.rs`，测试装配与
+`assemble_real` 共用同一条构造路径；替换时只改调用点与 `status` 表，不改模块代码。
+模块私有表由 `assembly::module_specs` 统一登记；SQLite 数据目录先用空列表打开、
+再以完整列表重开必须可用（本片用例）。
+
+**本片的真实构造不等于后台任务已运行。** policy / notify 目前只在装配期构造并被
+同步调用：`gantry_policy::invalidation` 的事件订阅与过期清扫、`gantry_notify::AutoClose`
+的触发循环尚未由 `serve` 启动。`status` 报 `real` 只表示实例来自生产构造函数，
+不代表这些后台循环已在运行；生命周期接入归后续切片。
 
 ### 7.2 启动与停机
 
@@ -108,7 +116,7 @@ pub trait CommandSet: Send + Sync {
 
 ### 7.3 进程级测试的驱动
 
-替身装配额外注册 `fake.*` 命令组（只在测试里编译）：`fake.create_delivery`、`fake.events`、`fake.end_bootstrap`，以及 `fake.drive`——每次调用扮演一轮 forge 执行器（认领并完成 Outbox 动作）、GitHub（PR 快照）与审批设备（授予待决审批）。父进程只经控制通道反复调用并观察阶段，不触碰执行体内部。
+替身装配额外注册 `fake.*` 命令组（只在测试里编译）：`fake.create_delivery`、`fake.events`、`fake.end_bootstrap`，以及 `fake.drive`——每次调用扮演一轮 forge 执行器（认领并完成 Outbox 动作）、GitHub（PR 快照）与审批设备（challenge + 测试设备密钥签名授予待决审批）；`manual` 模式关掉自动授予，用于签名正负对照。父进程只经控制通道反复调用并观察阶段，不触碰执行体内部。
 
 ## 8. 不变式与安全要求
 
@@ -144,9 +152,12 @@ pub trait CommandSet: Send + Sync {
 - [x] CLI：从引导配置取套接字路径；`bootstrap-set` 在引导期前后的行为；uid 被拒与守护进程不在时退出码 1；用法错误退出码 2 且不连守护进程；`doctor host --json`（进程级）。
 - [x] `github.setup.*` 替身命令符合 deploy 接线约定，应答不含密钥（进程级）。
 - [x] engine.md §12.2「端到端（替身）」主路径在独立 gantryd 进程里跑通：阶段序列恰为 `spec → implement → propose → review → merge → closed`，`spec → implement` 的 `reason = admission_skipped`，无 degraded（进程级）。
+- [x] SQLite store 先以空模块列表打开、再以生产模块列表重开，policy 私有表可读写（组件测试）。
+- [x] 真实 policy / notify 经生产构造函数装配；合并审批由测试设备密钥签名，正负签名对照通过（进程级）。
 
 ## 13. 开放问题
 
 - **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供，但 gantryd 尚未调用：替身装配仍用手写配置，控制通道 `status` 只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
-- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）；其余模块按端口挪入后才能真正启动。
+- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_policy` / `build_notify`，`status` 报 real；`assemble_real` 目前只调用 `build_notify`，policy 依赖 `ForgeReader`，待 forge 片接入。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
+- **policy / notify 后台生命周期**：`PolicyEngine` / `PolicyApprovals` / `Notify` 的实例构造已接入，但 `gantry_policy::invalidation` 的订阅与过期清扫、`gantry_notify::AutoClose` 的触发循环尚未由 `serve` 启动；归后续切片。在此之前，真实构造只覆盖同步调用路径。
 - **`Type=notify`**：deploy 的单元约定 `READY=1`，gantryd 尚未发送（需要 sd_notify，归后续切片）。
