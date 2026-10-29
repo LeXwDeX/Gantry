@@ -16,6 +16,9 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use gantry_core::canon::ApprovalPayload;
+use p256::ecdsa::signature::Signer as _;
 use serde_json::{json, Value};
 
 const BIN: &str = env!("CARGO_BIN_EXE_gantryd");
@@ -77,6 +80,7 @@ impl Scratch {
 [server]
 control_socket = "{}"
 data_dir = "{}"
+secrets_dir = "{}"
 
 [server.api]
 public_url = "https://gantry.test"
@@ -87,12 +91,18 @@ public_url = "https://hooks.gantry.test/github"
 
 [backup]
 recipients = ["age1test"]
-journal_target = "/srv/gantry-test/revocations.journal"
+journal_target = "{}"
 "#,
             dir.join("control.sock").display(),
-            dir.join("data").display()
+            dir.join("data").display(),
+            dir.join("secrets").display(),
+            dir.join("journal-backup/revocations.journal").display()
         );
         std::fs::write(dir.join("gantry.toml"), config).unwrap();
+        let config =
+            gantryd::config::BootConfig::load(&dir.join("gantry.toml")).expect("scratch config");
+        // 测试的显式初始化：真实 secrets 实例、测试 CA 与设备材料都落在本 scratch 内。
+        support::provision_test_pki(&config, &dir);
         Self { dir, owner }
     }
 
@@ -328,7 +338,8 @@ fn status_reports_profile_and_module_providers() {
     let _daemon = Daemon::spawn(&scratch, scratch.uid());
     let status = Client::connect(&scratch).ok(json!({"cmd": "status"}));
     assert_eq!(status["profile"], "fakes");
-    assert_eq!(status["head_seq"], 0);
+    // 测试设备在装配期经真实配对服务登记，日志里已有 `device.paired`。
+    assert!(status["head_seq"].as_u64().unwrap() >= 1, "{status}");
     assert_eq!(status["engine"]["degraded"], json!({}));
     let provider = |module: &str| {
         status["modules"]
@@ -339,7 +350,7 @@ fn status_reports_profile_and_module_providers() {
             .unwrap_or_else(|| panic!("{module} missing from {status}"))["provider"]
             .clone()
     };
-    for module in ["engine", "notify", "policy"] {
+    for module in ["engine", "notify", "policy", "secrets", "pki"] {
         assert_eq!(provider(module), "real", "{module}");
     }
     for module in ["store", "forge", "repo", "sandbox", "models", "egress"] {
@@ -413,7 +424,9 @@ fn create_delivery_appends_one_event_and_dedupes_by_message() {
         .filter(|event| event["type"] == "delivery.created")
         .collect();
     assert_eq!(created.len(), 1, "{events:?}");
-    assert_eq!(events[0]["type"], "delivery.created");
+    // 装配期先登记测试设备；建单事件紧随其后。
+    assert_eq!(events[0]["type"], "device.paired");
+    assert_eq!(events[1]["type"], "delivery.created");
     assert_eq!(created[0]["subject"], first);
     assert_eq!(created[0]["data"]["budget"]["template"], "low.single");
 }
@@ -570,7 +583,11 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
     assert_eq!(status["engine"]["degraded"], json!({}), "{status}");
 
     // 默认路径的审批由 fake.drive 自动完成，但仍必须走真实 policy 的设备签名：
-    // granted 事件带测试设备公钥指纹，且 grant 先于对应 merge 入队。
+    // granted 事件带真实配对设备登记的公钥指纹，且 grant 先于对应 merge 入队。
+    let device = client.ok(json!({"cmd": "fake.device_info"}));
+    assert_eq!(device["device"]["status"], "active", "{device}");
+    assert_eq!(device["device"]["role"], "approver", "{device}");
+    assert_eq!(device["count"], 1, "{device}");
     let (_, events) = read_log(&mut client);
     let requested = events
         .iter()
@@ -593,14 +610,11 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
                 && event["data"]["action"]["kind"] == "merge_pr"
         })
         .unwrap_or_else(|| panic!("no merge_pr enqueued: {events:?}"));
-    assert_eq!(
-        granted["data"]["device_id"],
-        json!(support::fake_cmds::TEST_DEVICE_ID)
-    );
+    assert_eq!(granted["data"]["device_id"], device["device"]["id"]);
     assert_eq!(granted["data"]["approval_id"], approval);
     assert_eq!(
         granted["data"]["approval_pubkey_fpr"],
-        json!(support::fake_cmds::test_device_fingerprint())
+        device["device"]["approval_pubkey_fpr"]
     );
     assert!(
         requested["data"]["subject_digest"].is_string(),
@@ -864,7 +878,9 @@ async fn fake_forge_snapshot_update_waits_for_store_transaction() {
     use gantry_core::canon::GitOid;
     use gantry_core::ports::ForgeReader;
 
-    let (_assembly, handles) = support::assemble_fakes(None, true).await;
+    let scratch = Scratch::new();
+    let config = gantryd::config::BootConfig::load(&scratch.config()).expect("scratch config");
+    let (_assembly, handles) = support::assemble_fakes(&config, &scratch.dir, None, true).await;
     let store = handles.store.clone();
     let forge = handles.forge.clone();
     let transaction = store.begin_write().await.unwrap();
@@ -920,6 +936,8 @@ fn real_policy_approval(invalid: bool) {
         ("policy", "real"),
         ("engine", "real"),
         ("notify", "real"),
+        ("secrets", "real"),
+        ("pki", "real"),
         ("store", "fake"),
         ("forge", "fake"),
         ("repo", "fake"),
@@ -929,7 +947,6 @@ fn real_policy_approval(invalid: bool) {
         ("egress", "fake"),
         ("conversation", "fake"),
         ("api", "absent"),
-        ("pki", "absent"),
     ] {
         assert!(
             status["modules"]
@@ -966,6 +983,14 @@ fn real_policy_approval(invalid: bool) {
         json!({"kind": "pr", "repo": "acme/web", "number": 12})
     );
     let approval = &requested["subject"];
+    let device = client.ok(json!({"cmd": "fake.device_info"}));
+    assert_eq!(device["device"]["status"], "active", "{device}");
+    assert_eq!(device["device"]["role"], "approver", "{device}");
+    assert_eq!(device["count"], 1, "{device}");
+    assert_eq!(
+        device["device"]["approval_pubkey_fpr"], device["signing_pubkey_fpr"],
+        "the paired device must carry the test approval key: {device}"
+    );
     let response = client
         .call(json!({"cmd": "fake.real_grant", "args": {"id": approval, "invalid": invalid}}));
     if invalid {
@@ -993,6 +1018,11 @@ fn real_policy_approval(invalid: bool) {
                 break;
             }
         } else if let (Some(granted), Some(merge)) = (granted, merge) {
+            assert_eq!(granted["data"]["device_id"], device["device"]["id"]);
+            assert_eq!(
+                granted["data"]["approval_pubkey_fpr"],
+                device["device"]["approval_pubkey_fpr"]
+            );
             assert!(requested["seq"].as_u64() < granted["seq"].as_u64());
             assert!(granted["seq"].as_u64() < merge["seq"].as_u64());
             assert_eq!(merge["data"]["action"]["requires_approval"], *approval);
@@ -1006,10 +1036,280 @@ fn real_policy_approval(invalid: bool) {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+    if invalid {
+        assert_eq!(
+            client.ok(json!({"cmd": "fake.real_approval", "args": {"id": approval}}))["status"],
+            "pending",
+            "a rejected signature must not change the approval"
+        );
+    }
     assert_eq!(
         client.ok(json!({"cmd": "status"}))["engine"]["degraded"],
         json!({})
     );
+    assert!(daemon.terminate().success());
+}
+
+fn create_delivery(client: &mut Client) -> Value {
+    client.ok(json!({"cmd": "fake.create_delivery", "args": {
+        "project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login",
+        "user_text": "修复登录超时"
+    }}))["delivery_id"]
+        .clone()
+}
+
+fn wait_for_merge_approval(client: &mut Client, delivery: &Value) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        let (_, events) = read_log(client);
+        if let Some(event) = events.iter().find(|event| {
+            event["type"] == "approval.requested" && event["correlation_id"] == *delivery
+        }) {
+            return event.clone();
+        }
+        assert!(Instant::now() < deadline, "no approval: {events:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn granted_event<'a>(events: &'a [Value], approval: &Value) -> Option<&'a Value> {
+    events
+        .iter()
+        .find(|event| event["type"] == "approval.granted" && event["subject"] == *approval)
+}
+
+fn merge_enqueued<'a>(events: &'a [Value], delivery: &Value) -> Option<&'a Value> {
+    events.iter().find(|event| {
+        event["type"] == "outbox.enqueued"
+            && event["correlation_id"] == *delivery
+            && event["data"]["action"]["kind"] == "merge_pr"
+    })
+}
+
+/// 有界轮询直到看到 grant 与 merge 入队；用于正向对照，避免把异步后台处理当成失败。
+fn expect_grant_and_merge(
+    client: &mut Client,
+    delivery: &Value,
+    approval: &Value,
+    timeout: Duration,
+    context: &str,
+) -> (Value, Value) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        let (_, events) = read_log(client);
+        let granted = granted_event(&events, approval);
+        let merge = merge_enqueued(&events, delivery);
+        if let (Some(granted), Some(merge)) = (granted, merge) {
+            return (granted.clone(), merge.clone());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{context}: grant or merge did not appear before the deadline; granted={granted:?} merge={merge:?} events={events:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// 在有界观察窗口内持续驱动；每次读取日志都确认没有该审批的 grant、没有该交付的 merge 入队。
+fn expect_no_grant_or_merge(
+    client: &mut Client,
+    delivery: &Value,
+    approval: &Value,
+    window: Duration,
+    context: &str,
+) {
+    let deadline = Instant::now() + window;
+    loop {
+        client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        let (_, events) = read_log(client);
+        assert!(
+            granted_event(&events, approval).is_none(),
+            "{context}: unexpected grant: {events:?}"
+        );
+        assert!(
+            merge_enqueued(&events, delivery).is_none(),
+            "{context}: unexpected merge enqueue: {events:?}"
+        );
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        client.ok(json!({"cmd": "fake.real_approval", "args": {"id": approval}}))["status"],
+        "pending",
+        "{context}: approval must remain pending after the observation window"
+    );
+}
+
+/// 真实 `StoreAdmin::revoke` 之后，实时目录不再提供审批公钥：grant 被拒，交付不入队合并。
+#[test]
+fn revoked_device_cannot_grant_or_enqueue_merge() {
+    let scratch = Scratch::new();
+    let daemon = Daemon::spawn_manual(&scratch);
+    let mut client = Client::connect(&scratch);
+    let delivery = create_delivery(&mut client);
+    let requested = wait_for_merge_approval(&mut client, &delivery);
+    let approval = requested["subject"].clone();
+
+    let revoked = client.ok(json!({"cmd": "fake.revoke_device"}));
+    assert_eq!(revoked["revoked"], true, "{revoked}");
+    let device = client.ok(json!({"cmd": "fake.device_info"}));
+    assert_eq!(device["device"]["status"], "revoked", "{device}");
+
+    let response = client.call(json!({"cmd": "fake.real_grant", "args": {"id": approval}}));
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("approval key"),
+        "{response}"
+    );
+
+    expect_no_grant_or_merge(
+        &mut client,
+        &delivery,
+        &approval,
+        Duration::from_secs(1),
+        "revoked device",
+    );
+
+    // revoke 内同步追加并 fsync 本地与备份目标：两行内容相同，且都指向被吊销设备。
+    let local = std::fs::read_to_string(scratch.dir.join("journal/revocations.journal"))
+        .expect("local revocation journal");
+    let backup = std::fs::read_to_string(scratch.dir.join("journal-backup/revocations.journal"))
+        .expect("backup revocation journal");
+    assert_eq!(local, backup, "journal copies must match");
+    let rows: Vec<Value> = local
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("journal line is JSON"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["device_id"], device["device"]["id"], "{rows:?}");
+    assert!(daemon.terminate().success());
+}
+
+/// 已发出的 challenge 在设备被吊销后不能完成 grant：提交时重新读取设备，不复用 challenge 快照。
+#[test]
+fn revoked_after_challenge_cannot_complete_grant_or_enqueue_merge() {
+    let scratch = Scratch::new();
+    let daemon = Daemon::spawn_manual(&scratch);
+    let mut client = Client::connect(&scratch);
+    let delivery = create_delivery(&mut client);
+    let requested = wait_for_merge_approval(&mut client, &delivery);
+    let approval = requested["subject"].clone();
+
+    let challenge = client.ok(json!({"cmd": "fake.challenge", "args": {"id": approval}}));
+    let payload: ApprovalPayload =
+        serde_json::from_value(challenge["payload"].clone()).expect("challenge payload");
+    let signature: p256::ecdsa::Signature =
+        support::test_signing_key().sign(&payload.signing_bytes().expect("signing bytes"));
+    let signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+    let revoked = client.ok(json!({"cmd": "fake.revoke_device"}));
+    assert_eq!(revoked["revoked"], true, "{revoked}");
+    let response = client.call(json!({
+        "cmd": "fake.grant_submission",
+        "args": {"id": approval, "nonce": challenge["nonce"], "signature": signature}
+    }));
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("approval key"),
+        "{response}"
+    );
+
+    expect_no_grant_or_merge(
+        &mut client,
+        &delivery,
+        &approval,
+        Duration::from_secs(1),
+        "revoked-after-challenge device",
+    );
+    assert!(daemon.terminate().success());
+}
+
+/// 正向对照：同一 challenge + 独立签名 + 提交路径在设备未吊销时可以完成 grant 并入队合并。
+#[test]
+fn challenge_then_submission_succeeds_without_revocation() {
+    let scratch = Scratch::new();
+    let daemon = Daemon::spawn_manual(&scratch);
+    let mut client = Client::connect(&scratch);
+    let delivery = create_delivery(&mut client);
+    let requested = wait_for_merge_approval(&mut client, &delivery);
+    let approval = requested["subject"].clone();
+
+    let challenge = client.ok(json!({"cmd": "fake.challenge", "args": {"id": approval}}));
+    let payload: ApprovalPayload =
+        serde_json::from_value(challenge["payload"].clone()).expect("challenge payload");
+    let signature: p256::ecdsa::Signature =
+        support::test_signing_key().sign(&payload.signing_bytes().expect("signing bytes"));
+    let signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+    let response = client.ok(json!({
+        "cmd": "fake.grant_submission",
+        "args": {"id": approval, "nonce": challenge["nonce"], "signature": signature}
+    }));
+    assert_eq!(response["status"], "granted");
+
+    let (granted, merge) = expect_grant_and_merge(
+        &mut client,
+        &delivery,
+        &approval,
+        Duration::from_secs(30),
+        "challenge then submission",
+    );
+    assert_eq!(granted["data"]["approval_id"], approval, "{granted}");
+    assert_eq!(merge["data"]["action"]["requires_approval"], approval);
+    assert_eq!(
+        merge["data"]["action"]["payload"]["expected_head_sha"],
+        requested["data"]["subject_digest"]
+    );
+    assert!(daemon.terminate().success());
+}
+
+#[test]
+fn unregistered_device_cannot_grant_or_enqueue_merge() {
+    let scratch = Scratch::new();
+    let daemon = Daemon::spawn_manual(&scratch);
+    let mut client = Client::connect(&scratch);
+    let delivery = create_delivery(&mut client);
+    let requested = wait_for_merge_approval(&mut client, &delivery);
+    let approval = requested["subject"].clone();
+
+    let response = client.call(json!({
+        "cmd": "fake.real_grant",
+        "args": {"id": approval, "device": "unregistered"}
+    }));
+    assert_eq!(response["ok"], false, "{response}");
+    assert_eq!(response["error"]["message"], "device not found");
+
+    expect_no_grant_or_merge(
+        &mut client,
+        &delivery,
+        &approval,
+        Duration::from_secs(1),
+        "unregistered device",
+    );
+
+    // 正向对照：同一审批、同一条路径，只有已登记设备能完成 grant 并入队合并。
+    assert_eq!(
+        client.ok(json!({"cmd": "fake.real_grant", "args": {"id": approval}}))["status"],
+        "granted"
+    );
+    let (granted, merge) = expect_grant_and_merge(
+        &mut client,
+        &delivery,
+        &approval,
+        Duration::from_secs(30),
+        "registered device after unregistered rejection",
+    );
+    assert_eq!(granted["data"]["approval_id"], approval, "{granted}");
+    assert_eq!(merge["data"]["action"]["requires_approval"], approval);
     assert!(daemon.terminate().success());
 }
 
@@ -1216,6 +1516,11 @@ async fn sqlite_store_opens_empty_then_with_production_modules() {
         .get("policy_challenges", "probe")
         .expect("read policy table");
     assert_eq!(row, Some(json!({"nonce": "n"})));
+    let rows: Vec<(String, Value)> = snapshot
+        .module_conn("pki")
+        .scan("pki_ca", "", None, 10)
+        .expect("pki table is registered");
+    assert!(rows.is_empty());
 }
 
 /// 在工作树清理和游标追平后杀死测试进程，以同一 SQLite 目录重启。
@@ -1236,6 +1541,8 @@ fn sqlite_store_survives_process_crash_and_restart() {
         ("forge", "fake"),
         ("repo", "fake"),
         ("policy", "real"),
+        ("secrets", "real"),
+        ("pki", "real"),
         ("sandbox", "fake"),
     ] {
         let module = modules
@@ -1246,7 +1553,11 @@ fn sqlite_store_survives_process_crash_and_restart() {
     }
     assert_eq!(status["engine"]["degraded"], json!({}));
     let runtime = client.ok(json!({"cmd": "fake.runtime_status"}));
-    assert_eq!(runtime["startup_cursor"], 0);
+    // 新库的持久化游标仍为 0；`device.paired` 增加的是日志 head，不是游标。
+    assert_eq!(runtime["startup_cursor"], 0, "{runtime}");
+    let device = client.ok(json!({"cmd": "fake.device_info"}));
+    assert_eq!(device["count"], 1, "{device}");
+    let device_id = device["device"]["id"].clone();
 
     let create = json!({
         "cmd": "fake.create_delivery",
@@ -1375,6 +1686,13 @@ fn sqlite_store_survives_process_crash_and_restart() {
         .iter()
         .any(|module| module["module"] == "store" && module["provider"] == "real"));
     assert_eq!(status["engine"]["degraded"], json!({}));
+    let reopened_device = client.ok(json!({"cmd": "fake.device_info"}));
+    assert_eq!(reopened_device["count"], 1, "{reopened_device}");
+    assert_eq!(
+        reopened_device["device"]["id"], device_id,
+        "restart must reuse the paired device, not pair a second one"
+    );
+    assert_eq!(reopened_device["device"]["status"], "active");
     let runtime = client.ok(json!({"cmd": "fake.runtime_status"}));
     assert!(runtime["startup_cursor"].as_u64().unwrap() >= before_cursor);
     assert!(runtime["cursor"].as_u64().unwrap() >= before_cursor);

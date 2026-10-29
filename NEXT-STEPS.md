@@ -4,13 +4,13 @@
 
 ## 现状（2026-10-29）
 
-代码基线 `main@37c61ef`（#362 的 PR #366 已合入）。M1.3 里程碑已关闭，收尾评审见 [M1.3 收尾评审](docs/reviews/2026-10-29-m13-closeout-review.md)。
+本轮工作基于 `main@93dd239`（PR #397 已合入；#393–#396、#374 等也已合入）。M1.3 里程碑已关闭，收尾评审见 [M1.3 收尾评审](docs/reviews/2026-10-29-m13-closeout-review.md)。
 
 - **M0 已合入。** 领域核心、端口、内存存储、测试替身、内存模拟接口和浏览器模拟场景前端都在 `main` 上；M0 契约文本已于 2026-10-27 由用户统一批准。
 - **M1.1、M1.2、M1.3 的 issue 与里程碑均已关闭。** M1.1 18/18、M1.2 16/16、M1.3 6/6。#289 于 2026-10-29 依用户确认关闭：PR #323 提供了 `from_settings`、`EqualShareReservation` 与 `status()`；真实消费路径归 #105，自动热加载归 #318，在途预留归 #317。已关闭 issue 不等于每条规格边界都已满足，评审发现见 [M1.1–M1.3 评审](docs/reviews/2026-10-27-m1-closeout-review.md) 与 M1.3 收尾评审。
 - **服务端各模块已有 crate 与测试。** 证据主要来自替身、模块测试和 #105 已合入的本机联测切片（SQLite 跨进程重启、真实策略审批、Forge 执行前审批消费、真实 Git 仓库与持久存储、仓库/沙盒与存储 CAS、执行器补丁策略链）；#319 的内置 schema 注册表与 #362 的任务身份已合入。真实 GitHub、模型、Podman、密钥环境尚未联合验证。
-- **生产装配**：`assemble_real` 仍总是返回 `NotReady`（`crates/gantryd/src/assembly.rs:93-99`），生产二进制没有替身回退。替身装配在 `crates/gantryd/tests/support/`，仍用手写引擎配置；#323 的三个入口在 engine 之外尚无调用方，控制通道 `status` 未用 `status()`，生产命令组为空。切入点已写入 [#105 评论](https://github.com/LeXwDeX/gantry/issues/105#issuecomment-6487468346)。
-- **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock、仅 mock 可联网等边界已静态核对；Tauri 适配器没有自动化测试（#370），真实服务端联调尚未证明。
+- **生产装配**：`assemble_real` 仍返回 `NotReady`，生产二进制没有替身回退。PR #397 合入了 policy / notify 的生产构造函数；现已加入 `build_secrets` / `build_pki`（含 pki 私有表注册），并由进程级测试装配实际使用。生产仍未打开 secrets / pki：生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定；`pki.ca_dir` 是另一个缺口，尚无 BootConfig 字段映射。替身装配在 `crates/gantryd/tests/support/`，已用 `from_settings` 换算引擎配置并由 `fake.runtime_status` 读取运行时 `status()`；手写 `ModelTable` 仍保留，生产 `assemble_real` 尚未完整接线，生产命令组为空。切入点已写入 [#105 评论](https://github.com/LeXwDeX/gantry/issues/105#issuecomment-6487468346)。
+- **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock、仅 mock 可联网等边界已静态核对；Tauri 适配器的参数形状与前端路由表已有对账测试（#370，PR #374），但不覆盖真实 IPC 与服务端联调，真实服务端联调仍未证明。
 - **工作区**：20 个 package，即 19 个 `crates/*` 加 `apps/desktop/src-tauri/shell-core`（package `gantry-desktop-shell`）。Tauri 应用本身在 `apps/desktop/src-tauri`，因系统 WebView 依赖不在根 workspace。
 - **验收口径**：A + B 级全绿才记为「M1 本机验收通过」，C 级全绿才记为「M1 退出」（#87）。当前三级证据都未全部取得。
 - **已知外部阻塞**：GitHub Actions 因账户计费问题未启动（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
@@ -19,9 +19,10 @@
 
 **未实现或未验证**：
 - 真实装配（#105）、真实 GitHub App、模型、Podman、目标主机与代码签名；桌面端真实 API 联调。
-- #362 任务身份的真实 Podman 与生产装配路径。
-- store 的剩余 §12 验收条目（#267）和 api 的读路由 / 共用用例（#280）。
-- 评审确认的问题 #293–#310（文档项 #299）、#317–#322，以及 M1.3 收尾评审新登记的 #367–#371；逐项见 issue 与评审记录。
+- secrets / pki 的生产配置与生命周期：生产凭据来源（主密钥来源与名称，OQ-2 / OPS-08）、`pki.ca_dir` 的 BootConfig 映射与 `Pki::tick` 调度尚未接线；吊销日志在 `revoke` 内同步写本地与备份。测试里的 `real` 只覆盖本机临时目录与软件密钥。
+- #362 已关闭，但其真实 Podman 与生产装配路径仍未验证。
+- api 的读路由 / 共用用例（#280，仍开放）。
+- 评审确认的问题 #293–#310（文档项 #299）、#317–#322；M1.3 收尾评审登记的 #367–#371 已关闭（#370 由 PR #374 完成），不再列为未完成项。
 - #311–#315 是尚待复核的疑点，不代表已证实缺陷。
 - 远端 CI 诊断项 #346、#347、#352。
 
@@ -62,15 +63,15 @@ M0.9 只剩 #86；#82–#85、#122、#135、#179、#292 已关闭。M1.1（18/18
 
 ### 当前优先级（2026-10-29 起）
 
-1. **#105**：A 级跨泳道集成与真实装配，当前主线。第一步建议让替身装配改走 `from_settings` 与 `EqualShareReservation`，使进程级 §12.2 用例覆盖真实换算，再逐个替换替身；接线时一并核对 #317–#322，`settings.bootstrap_set` 的参数契约先按 #371 单独提契约 PR。
-2. **#280、#267**：可与 #105 并行。
-3. **M1.3 收尾评审的独立小项**：#367（deploy doctor 衔接）、#369（shell-core token 清零）、#370（前端适配器对账测试）无前置，可穿插；#368 需先改规格。
+1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（手写 `ModelTable` 保留）；下一步逐个替换 forge、repo、models、sandbox、worker、egress、conversation 与 api；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。
+2. **#280**：api 读路由 / 共用用例，可与 #105 并行。#267 已关闭（PR #393–#395）。
+3. **M1.3 收尾评审的小项**：#367、#368、#369、#370、#371 均已关闭（PR #374、#376、#390、#391/#392 等）；真实主机检查归 #106。
 4. **#106 → #107**：B 级本机 Ubuntu 虚拟机、C 级外部资源。两项都要先征求用户确认，C 级还需要真实资源。
 5. **M2-prep**：#108 → #109 → #110 按顺序推进；可与 M1 并行，不阻塞 M1.4。
 
 ### 本轮新发现
 
-M1.3 收尾评审（2026-10-29）新登记：#367 deploy doctor 未检查区域与安装脚本退出码衔接、`install-state.json` 不可读时失败闭合、`--page` 文件权限；#368 控制通道客户端对端校验（需先改规格）；#369 shell-core 配对 token 清零与审批/地址绑定澄清；#370 前端 Tauri 适配器与路由表对账测试；#371 `settings.bootstrap_set` 参数契约与替身白名单。另在 #105 写入接线切入点，在 #315 补充已授权审批恢复路径的待复核点。
+M1.3 收尾评审（2026-10-29）新登记：#367 deploy doctor 未检查区域与安装脚本退出码衔接、`install-state.json` 不可读时失败闭合、`--page` 文件权限；#368 控制通道客户端对端校验；#369 shell-core 配对 token 清零与审批/地址绑定澄清；#370 前端 Tauri 适配器与路由表对账测试；#371 `settings.bootstrap_set` 参数契约与替身白名单。上述 #367–#369、#371 已关闭，#370 已由 PR #374 完成。另在 #105 写入接线切入点，在 #315 补充已授权审批恢复路径的待复核点。
 
 上一轮（2026-10-27）确认的问题仍按 #293–#310 跟踪，#311–#315 仍是待复核疑点。
 
@@ -88,7 +89,7 @@ M1.1 的 18 个 issue（#58、#64–#75、#80、#125、#129、#133、#277）已�
 
 服务端泳道见 [M1.2](https://github.com/LeXwDeX/gantry/milestone/3)（#87–#100、#150、#220，16 个 issue 与里程碑均已关闭），组装、桌面与部署见 [M1.3](https://github.com/LeXwDeX/gantry/milestone/4)（#101–#104、#289、#291 均已关闭，里程碑已关闭）。
 
-这些泳道已有 crate、模块测试和替身对接。**测试替身通过不等于真实模块已在生产装配中协同运行**：`gantryd::assemble_real` 仍返回 `NotReady`，SQLite 存储尚未接入生产装配；真实 GitHub、Podman、模型、密钥环境和桌面真实 API 联调都未验证。#289 引擎前置已合入但尚无调用方，真实装配由 #105 推进，不能把已关闭的泳道 issue 当成端到端完成。
+这些泳道已有 crate、模块测试和替身对接。**测试替身通过不等于真实模块已在生产装配中协同运行**：`gantryd::assemble_real` 已打开 SQLite 存储，但其余模块尚未接齐，仍返回 `NotReady`；真实 GitHub、Podman、模型、密钥环境和桌面真实 API 联调都未验证。#289 的引擎前置已由测试装配调用（PR #377），生产 `assemble_real` 尚未调用；真实装配由 #105 推进，不能把已关闭的泳道 issue 当成端到端完成。
 
 #104 已关闭，但实机两次幂等执行、`systemd-analyze verify`、`nft -c` 及依赖 root、systemd 或沙盒的 doctor 检查延期到 #106；见 [#104 评论](https://github.com/LeXwDeX/gantry/issues/104#issuecomment-6433339355)和 [PR #207](https://github.com/LeXwDeX/gantry/pull/207)。#106 需先征求用户确认本机虚拟机环境。
 
@@ -97,6 +98,22 @@ M1.1 的 18 个 issue（#58、#64–#75、#80、#125、#129、#133、#277）已�
 见 [M1.4](https://github.com/LeXwDeX/gantry/milestone/5)：#105（A 级跨泳道集成）、#106（B 级本机 Ubuntu 虚拟机）。两项通过后才算「M1 本机验收通过」。
 
 A 级先按 [M1 验收证据分级](docs/m1-acceptance.md) §3 的 A 列，用真实模块替换替身并通过 engine.md §12.2；B 级再把每条退出标准做成可重复脚本。B 级不需要任何第三方账号，但 #106 需要用户先确认本机虚拟机与 Podman 环境。
+
+**#105 替换清单与本机测试结果（不代表生产已运行）：**
+
+| 模块 | 测试装配状态 | 说明 |
+| --- | --- | --- |
+| store | 内存 / SQLite 两种 | 默认内存；设置 SQLite 目录时真实 `Store`，崩溃重启联测复用同一设备与日志 |
+| engine | 真实 | `EngineRuntime` 与 `from_settings`；模型表仍是测试夹具 |
+| policy | 真实 | `assembly::build_policy`；审批用真实设备登记公钥验签 |
+| notify | 真实 | `assembly::build_notify` |
+| pki | 测试中真实构造 | `assembly::build_pki`；测试 CA、公开 pairing 登记设备、真实吊销与 journal |
+| secrets | 测试中真实构造 | `assembly::build_secrets`；M1 仅 Forge/Pki，不含 Egress，显式测试初始化 |
+| forge / repo / models / sandbox / worker / egress / conversation | 替身 | 仍使用 `gantry-fakes` 对应替身；部分执行器联测使用真实 forge 与 `FakeGitHub` |
+| api | 未装配 | 尚未接入 `serve` |
+| 后台任务 | 未接线 | policy invalidation、notify AutoClose、`Pki::tick` 均未由 `serve` 启动；sandbox 的 `BuiltinSchemas` 留到 sandbox 片 |
+
+`assemble_real` 仍返回 `NotReady`；本清单只说明 A 级测试装配的替换进度，**不表示 A 级已通过**，也不替代 B / C 级证据。
 
 ### 阶段 5：C 级外部资源
 

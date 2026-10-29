@@ -8,9 +8,14 @@
 //! 就绪前它拒绝启动，不退回内存存储（失败闭合）。替身装配在
 //! `tests/support`，只用 dev-dependency，不进服务端二进制。
 //!
-//! 各模块的生产构造函数（[`build_policy`]、[`build_notify`]）也在这里：它们只接收
-//! 引导配置、settings 与已打开的 store（及其端口依赖），供 `assemble_real` 与测试
-//! 装配共用，保证“替换替身”验证的是同一条生产构造路径。
+//! 各模块的生产构造函数（[`build_policy`]、[`build_notify`]、[`build_secrets`]、
+//! [`build_pki`]）也在这里：它们只接收引导配置、settings 与已打开的 store（及其端口
+//! 依赖），供 `assemble_real` 与测试装配共用，保证“替换替身”验证的是同一条生产
+//! 构造路径。
+//!
+//! `secrets` 与 `pki` 的生产构造入口已经就绪，但 `assemble_real` **不**打开它们：
+//! 主密钥来源未定（secrets.md OQ-2、deploy OPS-08），`pki.ca_dir` 尚无引导配置
+//! 字段映射；接线前必须先确定配置与进程加固顺序。
 
 use std::sync::Arc;
 
@@ -24,10 +29,14 @@ use gantry_core::ports::policy::PolicyPort;
 use gantry_core::ports::repo::{RepoService, WorktreeLocks};
 use gantry_core::ports::sandbox::SandboxService;
 use gantry_core::ports::worker::WorkerAdapter;
+use gantry_core::ports::{SecretSink, SecretsError};
+use gantry_core::secret::Consumer;
 use gantry_core::time::Timestamp;
 use gantry_engine::runtime::EngineRuntime;
 use gantry_notify::Notify;
+use gantry_pki::{Pki, PkiConfig, PkiError};
 use gantry_policy::{PolicyApprovals, PolicyDeps, PolicyEngine};
+use gantry_secrets::{MasterKeySource, Secrets, SecretsConfig};
 use gantry_store::{ModuleSpec, Store, StoreConfig, StoreDeps};
 use serde::Serialize;
 
@@ -102,7 +111,42 @@ pub struct Assembly {
 /// 内置的 `inbox_items` 投影里，不需要私有表。sandbox 的 `BuiltinSchemas` 属于
 /// sandbox 片，本片不构造 sandbox，也不注入。
 pub fn module_specs() -> Vec<ModuleSpec> {
-    vec![gantry_policy::POLICY_MODULE]
+    vec![
+        gantry_policy::POLICY_MODULE,
+        gantry_pki::store_schema::module_spec(),
+    ]
+}
+
+/// `gantryd` 的 M1 实例承载的 `secrets` 使用方：Forge、Pki（secrets.md §10；
+/// deploy.md §7.4 在 M4 才加入 Notify）。**不包含 Egress**：Egress 是独立进程、
+/// 独立实例与独立主密钥。
+pub fn secrets_consumers() -> Vec<Consumer> {
+    vec![Consumer::Forge, Consumer::Pki]
+}
+
+/// `secrets` 的生产构造：使用引导配置的 `server.secrets_dir`，只 `open` 已有
+/// 实例，绝不 `init`（初始化归 deploy）。
+pub fn build_secrets(
+    config: &crate::config::BootConfig,
+    master_key: Box<dyn MasterKeySource>,
+) -> Result<Secrets, SecretsError> {
+    Secrets::open(SecretsConfig::new(
+        &config.server.secrets_dir,
+        secrets_consumers(),
+        master_key,
+    ))
+}
+
+/// `pki` 的生产构造。`config`、store、按 `Consumer::Pki` 限定的 secrets 句柄与
+/// 时钟/熵均由调用方给出；本函数只调用真实 [`Pki::open`]。
+pub async fn build_pki(
+    config: PkiConfig,
+    store: &Store,
+    secrets: Arc<dyn SecretSink>,
+    clock: Arc<dyn Clock>,
+    entropy: Arc<dyn Entropy>,
+) -> Result<Pki, PkiError> {
+    Pki::open(config, store.clone(), secrets, clock, entropy).await
 }
 
 /// policy 的生产构造：`PolicyEngine`（`PolicyPort`）与 `ApprovalService` 共用同一
@@ -137,8 +181,10 @@ pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
 /// 真实装配。各模块按端口接入的顺序见 `tests/support` 的替身装配。
 ///
 /// 当前已接持久化 store 与 notify 生产构造函数；policy 构造函数已就绪，待 forge
-/// 接入后调用。其余模块（repo、sandbox、worker、models、egress、api、pki、secrets）
-/// 尚未接线，因此仍拒绝启动（失败闭合）。
+/// 接入后调用。secrets / pki 的构造函数（[`build_secrets`]、[`build_pki`]）也已
+/// 就绪，但主密钥来源未定（secrets.md OQ-2、deploy OPS-08），`pki.ca_dir` 尚无
+/// 引导配置字段映射，因此这里不打开它们。其余模块（repo、sandbox、worker、models、
+/// egress、api、pki、secrets）尚未接线，仍拒绝启动（失败闭合）。
 pub async fn assemble_real(config: &crate::config::BootConfig) -> Result<Assembly, AssemblyError> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(OsEntropy)));
@@ -155,6 +201,7 @@ pub async fn assemble_real(config: &crate::config::BootConfig) -> Result<Assembl
     // notify 只依赖 store 与 ID 生成，生产路径可以先构造；消费方（engine/api）
     // 尚未接线，因此本片只保留构造点，不把实例放进 `Assembly`。
     let _notify = build_notify(&store, ids);
+    // 生产凭据来源和 CA 配置尚未接入，不在这里猜测或初始化。
     Err(AssemblyError::NotReady {
         module: "forge",
         why: "real forge/engine/api wiring is not complete (gantryd.md §7.1); \

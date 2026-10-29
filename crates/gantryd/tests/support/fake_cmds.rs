@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gantry_core::canon::{sha256, GitOid};
+use gantry_core::canon::GitOid;
 use gantry_core::entities::{
     Approval, ApprovalStatus, ForgeActionKind, GithubPrRef, GithubRef, Seq, Stage,
 };
@@ -35,18 +35,23 @@ use gantryd::assembly::{OsEntropy, SystemClock};
 
 use super::FakeHandles;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use gantry_core::entities::{DeviceRole, DeviceStatus};
+use gantry_core::entities::DevicePlatform;
 use gantry_core::ports::{ActorCtx, ClientProfile};
+use gantry_pki::admin::{DeviceAdmin, RevokeOutcome};
+use gantry_pki::directory::DeviceDirectory;
 use gantry_policy::{
     service::{DeviceKey, GrantRequest},
     ApprovalService,
 };
+use gantry_store::Page;
 use gantryd::assembly::Assembly;
 use gantryd::control::{CommandSet, Response};
 use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
 
 /// `fake.*` 命令的固定执行者；与真实设备 / 主机命令区分开。
 const FAKE_ACTOR: &str = "gantryd_fake";
+/// 未登记的设备 id（格式合法、目录里不存在），用于负向对照。
+const UNREGISTERED_DEVICE_ID: &str = "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM";
 
 pub struct FakeCommands {
     pub assembly: Arc<Assembly>,
@@ -242,6 +247,10 @@ impl CommandSet for FakeCommands {
             },
             "fake.drive" => self.drive(args).await,
             "fake.real_grant" => self.real_grant(args).await,
+            "fake.challenge" => self.challenge(args).await,
+            "fake.grant_submission" => self.grant_submission(args).await,
+            "fake.device_info" => self.device_info().await,
+            "fake.revoke_device" => self.revoke_device().await,
             "fake.real_execute" => self.real_execute(args).await,
             "fake.enqueue_merge_probe" => self.enqueue_merge_probe(args).await,
             "fake.real_approval" => {
@@ -440,9 +449,7 @@ impl FakeCommands {
                     .find(|(_, approval)| approval.status == ApprovalStatus::Pending)
                     .map(|(id, _)| *id);
                 if let Some(id) = pending {
-                    if let Err(error) =
-                        grant_with_test_device(&self.fakes.approvals, &id, false).await
-                    {
+                    if let Err(error) = self.grant(&id, false).await {
                         return Response::err("policy", error);
                     }
                     self.drive_state().granted = Some(id);
@@ -557,75 +564,231 @@ impl FakeCommands {
             return Response::err("bad_request", "expected approval id");
         };
         let invalid = args.get("invalid").and_then(Value::as_bool) == Some(true);
-        match grant_with_test_device(&self.fakes.approvals, &id, invalid).await {
+        let device = if args.get("device").and_then(Value::as_str) == Some("unregistered") {
+            UNREGISTERED_DEVICE_ID.parse().expect("fixture device id")
+        } else {
+            self.fakes.test_device
+        };
+        match self.grant_for(&device, &id, invalid).await {
             Ok(approval) => Response::ok(json!({"id": approval.id, "status": approval.status})),
             Err(error) => Response::err("policy", error),
         }
     }
-}
 
-/// 固定公开测试密钥，只在测试进程的内存中使用。
-const TEST_APPROVAL_KEY: [u8; 32] = [7; 32];
-pub const TEST_DEVICE_ID: &str = "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM";
-
-/// 测试设备公钥指纹（`approval.granted.data.approval_pubkey_fpr`）。
-pub fn test_device_fingerprint() -> String {
-    let key = SigningKey::from_slice(&TEST_APPROVAL_KEY).expect("test key");
-    sha256(key.verifying_key().to_encoded_point(false).as_bytes()).to_string()
-}
-
-fn test_device(key: &SigningKey) -> DeviceKey {
-    DeviceKey {
-        device_id: TEST_DEVICE_ID.parse().expect("fixture"),
-        role: DeviceRole::Approver,
-        profile: ClientProfile::Desktop,
-        status: DeviceStatus::Active,
-        approval_pubkey_fpr: sha256(key.verifying_key().to_encoded_point(false).as_bytes()),
-        verifying_key: *key.verifying_key(),
-    }
-}
-
-/// 以测试设备身份完成 challenge + 签名 + grant；`invalid` 用另一把密钥签名，走真实验签失败。
-async fn grant_with_test_device(
-    approvals: &gantry_policy::PolicyApprovals,
-    id: &ApprovalId,
-    invalid: bool,
-) -> Result<Approval, String> {
-    let key = SigningKey::from_slice(&TEST_APPROVAL_KEY).expect("test key");
-    let device = test_device(&key);
-    let challenge = approvals
-        .challenge(id, &device)
-        .await
-        .map_err(|error| error.to_string())?;
-    let signer = if invalid {
-        SigningKey::from_slice(&[8; 32]).expect("test key")
-    } else {
-        key
-    };
-    let signature: Signature = signer.sign(&challenge.payload.signing_bytes().expect("payload"));
-    let ctx = ActorCtx {
-        actor: Actor::new(ActorKind::Device, device.device_id.to_string()),
-        device: Some(device.device_id),
-        role: Some(device.role),
-        client_profile: Some(device.profile),
-        request_id: "01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().expect("fixture"),
-        idempotency_key: None,
-        dedup_key: None,
-        causation_id: None,
-    };
-    approvals
-        .grant(
-            GrantRequest {
-                approval_id: *id,
-                device,
-                nonce: challenge.payload.nonce.to_string(),
-                signature: URL_SAFE_NO_PAD.encode(signature.to_bytes()),
-                current_subject: None,
+    /// 实时读取设备目录与登记公钥；不缓存角色、状态或公钥，吊销立即生效。
+    async fn device_key(&self, id: &gantry_core::ids::DeviceId) -> Result<DeviceKey, String> {
+        let directory = self.fakes.pki.directory();
+        let device = directory
+            .get(id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("device not found")?;
+        let verifying_key = directory
+            .verifying_key(id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("device approval key is not available")?;
+        let approval_pubkey_fpr = device
+            .approval_pubkey_fpr
+            .ok_or("device has no approval key")?;
+        Ok(DeviceKey {
+            device_id: device.id,
+            role: device.role,
+            profile: match device.platform {
+                DevicePlatform::Windows | DevicePlatform::Macos => ClientProfile::Desktop,
+                DevicePlatform::Ios => ClientProfile::Mobile,
             },
-            &ctx,
+            status: device.status,
+            approval_pubkey_fpr,
+            verifying_key,
+        })
+    }
+
+    /// 返回真实 `approvals.challenge` 的 payload，供测试用自己的审批私钥签名。
+    async fn challenge(&self, args: Value) -> Response {
+        let Some(Ok(id)) = args
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::parse::<ApprovalId>)
+        else {
+            return Response::err("bad_request", "expected approval id");
+        };
+        let device = self.device_key(&self.fakes.test_device).await;
+        let device = match device {
+            Ok(device) => device,
+            Err(error) => return Response::err("policy", error),
+        };
+        match self.fakes.approvals.challenge(&id, &device).await {
+            Ok(challenge) => Response::ok(json!({
+                "payload": challenge.payload,
+                "nonce": challenge.payload.nonce.to_string(),
+            })),
+            Err(error) => Response::err("policy", error.to_string()),
+        }
+    }
+
+    /// 提交测试已经签好的 challenge：提交时重新读取设备，不复用 challenge 时的快照。
+    async fn grant_submission(&self, args: Value) -> Response {
+        let Some(Ok(id)) = args
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::parse::<ApprovalId>)
+        else {
+            return Response::err("bad_request", "expected approval id");
+        };
+        let Some(nonce) = args.get("nonce").and_then(Value::as_str) else {
+            return Response::err("bad_request", "expected nonce");
+        };
+        let Some(signature) = args.get("signature").and_then(Value::as_str) else {
+            return Response::err("bad_request", "expected signature");
+        };
+        match self
+            .submit_grant(&self.fakes.test_device, &id, nonce, signature)
+            .await
+        {
+            Ok(approval) => Response::ok(json!({"id": approval.id, "status": approval.status})),
+            Err(error) => Response::err("policy", error),
+        }
+    }
+
+    /// 用测试设备自己的审批私钥完成 challenge + 签名 + grant；`invalid` 用另一把密钥，
+    /// 走真实 `policy` 验签失败。
+    async fn grant_for(
+        &self,
+        device_id: &gantry_core::ids::DeviceId,
+        id: &ApprovalId,
+        invalid: bool,
+    ) -> Result<Approval, String> {
+        let device = self.device_key(device_id).await?;
+        let challenge = self
+            .fakes
+            .approvals
+            .challenge(id, &device)
+            .await
+            .map_err(|error| error.to_string())?;
+        let signer = if invalid {
+            SigningKey::from_slice(&[8; 32]).expect("wrong test key")
+        } else {
+            super::test_signing_key()
+        };
+        let signature: Signature =
+            signer.sign(&challenge.payload.signing_bytes().expect("payload"));
+        let signature = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+        // 新请求重新读取设备：challenge 之后被吊销时，这里拿不到审批公钥。
+        self.submit_grant(
+            device_id,
+            id,
+            &challenge.payload.nonce.to_string(),
+            &signature,
         )
         .await
-        .map_err(|error| error.to_string())
+    }
+
+    /// 真正提交 grant 的唯一路径：每次都重新从 `DeviceDirectory` 读取设备与公钥。
+    async fn submit_grant(
+        &self,
+        device_id: &gantry_core::ids::DeviceId,
+        id: &ApprovalId,
+        nonce: &str,
+        signature: &str,
+    ) -> Result<Approval, String> {
+        let device = self.device_key(device_id).await?;
+        let ctx = ActorCtx {
+            actor: Actor::new(ActorKind::Device, device.device_id.to_string()),
+            device: Some(device.device_id),
+            role: Some(device.role),
+            client_profile: Some(device.profile),
+            request_id: self
+                .assembly
+                .ids
+                .next_ulid()
+                .map_err(|error| error.to_string())?,
+            idempotency_key: None,
+            dedup_key: None,
+            causation_id: None,
+        };
+        self.fakes
+            .approvals
+            .grant(
+                GrantRequest {
+                    approval_id: *id,
+                    device,
+                    nonce: nonce.to_owned(),
+                    signature: signature.to_owned(),
+                    current_subject: None,
+                },
+                &ctx,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn grant(&self, id: &ApprovalId, invalid: bool) -> Result<Approval, String> {
+        self.grant_for(&self.fakes.test_device, id, invalid).await
+    }
+
+    /// 测试设备的实时身份与登记指纹，以及目录里的设备总数（防止第二次配对冒充 approver）。
+    async fn device_info(&self) -> Response {
+        let directory = self.fakes.pki.directory();
+        let device = match directory.get(&self.fakes.test_device).await {
+            Ok(Some(device)) => device,
+            Ok(None) => return Response::err("pki", "test device not found"),
+            Err(error) => return Response::err("pki", error.to_string()),
+        };
+        let mut count = 0;
+        let mut cursor = None;
+        loop {
+            let page = match directory
+                .list(&Page {
+                    limit: 200,
+                    cursor,
+                    ..Page::default()
+                })
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => return Response::err("pki", error.to_string()),
+            };
+            count += page.items.len();
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Response::ok(json!({
+            "device": device,
+            "count": count,
+            "signing_pubkey_fpr": super::test_signing_fingerprint(),
+        }))
+    }
+
+    /// 用真实的 `StoreAdmin::revoke` 吊销测试设备；吊销日志写到 scratch 内的本地与备份目标。
+    async fn revoke_device(&self) -> Response {
+        let mut tx = match self.fakes.store.begin_write().await {
+            Ok(tx) => tx,
+            Err(error) => return Response::err("store", error.to_string()),
+        };
+        let actor = Actor::new(ActorKind::System, "gantryd_test");
+        let outcome = self
+            .fakes
+            .pki
+            .admin()
+            .revoke(&mut tx, &self.fakes.test_device, &actor)
+            .await;
+        match outcome {
+            Ok(outcome) => match tx.commit().await {
+                Ok(_) => Response::ok(json!({
+                    "device_id": self.fakes.test_device.to_string(),
+                    "revoked": matches!(outcome, RevokeOutcome::Revoked(_)),
+                })),
+                Err(error) => Response::err("store", error.to_string()),
+            },
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Response::err("pki", error.to_string())
+            }
+        }
+    }
 }
 
 /// FakeForge 的直接写绕过 Store 写门；持租约期间不得开始另一个写事务。

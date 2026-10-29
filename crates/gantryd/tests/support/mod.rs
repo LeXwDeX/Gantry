@@ -7,19 +7,21 @@
 pub mod engine_cfg;
 pub mod fake_cmds;
 
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use gantry_core::canon::GitOid;
-use gantry_core::entities::{MergeMethod, Project, PullRequestRef};
+use gantry_core::entities::{
+    Actor, ActorKind, Device, DevicePlatform, MergeMethod, Project, PullRequestRef,
+};
 use gantry_core::ids::ActionId;
-use gantry_core::ids::{Clock, IdGen, ProjectId};
+use gantry_core::ids::{Clock, DeviceId, IdGen, ProjectId, Ulid};
 use gantry_core::ports::inbox::InboxPort;
-use gantry_core::ports::ForgeReader;
-use gantry_core::secret::SecretString;
+use gantry_core::ports::{ActorCtx, Expect, ForgeReader, SecretSink, SecretSource, SecretValue};
+use gantry_core::secret::{Consumer, SecretName, SecretString};
 use gantry_engine::actor::PrSnapshots;
 use gantry_engine::runtime::{EnginePorts, EngineRuntime};
 use gantry_fakes::github::FakeGitHub;
@@ -32,14 +34,23 @@ use gantry_forge::{
     CrashPoint, Executor, ExecutorDeps, ExecutorOptions, FaultInjector, Forge, ForgeConfig,
     Permission, ProjectBinding, StaticTokenProvider,
 };
+use gantry_pki::bootstrap::{self, BootstrapParams, MemoryFsProbe};
+use gantry_pki::csr::encode_approval_pubkey;
+use gantry_pki::directory::DeviceDirectory;
+use gantry_pki::journal::RevocationJournal;
+use gantry_pki::open::{INTERMEDIATE_KEY_SECRET, SERVER_KEY_SECRET};
+use gantry_pki::pairing_service::{NewDevice, PairingConfig};
+use gantry_pki::{CertPolicy, P256PublicKey, Pki, PkiConfig};
 use gantry_policy::PolicyApprovals;
-use gantry_store::{Store, StoreConfig, StoreDeps};
+use gantry_secrets::{MasterKey, MasterKeySource, Secrets, SecretsConfig, StaticMasterKey};
+use gantry_store::{Page, Store, StoreConfig, StoreDeps};
 use gantryd::assembly::{
-    build_notify, build_policy, module_specs, Assembly, ModuleInfo, OsEntropy, Profile, Provider,
-    SystemClock,
+    build_notify, build_pki, build_policy, build_secrets, module_specs, secrets_consumers,
+    Assembly, ModuleInfo, OsEntropy, Profile, Provider, SystemClock,
 };
 use gantryd::config::BootConfig;
 use gantryd::control::{CommandSet, ControlAuth};
+use p256::ecdsa::SigningKey;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 子进程要执行的测试名（`--exact` 过滤）。
@@ -71,6 +82,227 @@ pub struct FakeHandles {
     pub repo: Arc<FakeRepo>,
     pub sandbox: Arc<GoldenSandbox>,
     pub real_executor: Option<(Executor, FakeGitHub)>,
+    /// 真实构造的测试 PKI；设备经公开 `pairing()` 注册，审批经 `directory()` 实时读取。
+    pub pki: Arc<Pki>,
+    pub test_device: DeviceId,
+}
+
+/// 测试设备的审批签名密钥种子；只存在于测试进程内存。
+pub const TEST_APPROVAL_KEY: [u8; 32] = [7; 32];
+/// 测试实例的主密钥种子；只在测试临时目录里使用。
+pub const TEST_MASTER_KEY: [u8; 32] = [9; 32];
+/// 测试设备名，用于重启后识别已登记设备而不是重复配对。
+pub const TEST_DEVICE_NAME: &str = "gantryd test device";
+/// 测试 CA 材料在 scratch 下的目录名。
+pub const TEST_CA_DIR: &str = "pki-ca";
+
+pub fn test_signing_key() -> SigningKey {
+    SigningKey::from_slice(&TEST_APPROVAL_KEY).expect("test approval key")
+}
+
+/// 测试设备登记的 `approval_pubkey` 指纹（SPKI DER 的 SHA-256）。
+pub fn test_signing_fingerprint() -> gantry_core::canon::Sha256Digest {
+    let point = test_signing_key().verifying_key().to_encoded_point(false);
+    let key = P256PublicKey::from_uncompressed_point(point.as_bytes()).expect("test approval key");
+    key.fingerprint()
+}
+
+fn test_master_key() -> Box<dyn MasterKeySource> {
+    Box::new(StaticMasterKey::new(MasterKey::from_bytes(TEST_MASTER_KEY)))
+}
+
+fn test_actor_ctx() -> ActorCtx {
+    ActorCtx {
+        actor: Actor::new(ActorKind::System, "gantryd-test"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: Ulid::from_parts(1, 1).expect("fixture"),
+        idempotency_key: None,
+        dedup_key: None,
+        causation_id: None,
+    }
+}
+
+/// 测试专用内存盘探测：`bootstrap` 要求 tmpfs / ramfs，测试目录不是。
+struct TestMemoryFs;
+
+impl MemoryFsProbe for TestMemoryFs {
+    fn is_memory_fs(&self, _dir: &Path) -> std::io::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// 在测试临时目录里一次性准备好 secrets 实例与 CA 材料（父进程调用，子进程只打开）。
+///
+/// 这是**测试**的显式初始化；生产的 [`build_secrets`] 只 `open`，不会走到这里。
+pub fn provision_test_pki(config: &BootConfig, test_dir: &Path) {
+    let secrets_dir = &config.server.secrets_dir;
+    if !secrets_dir.exists() {
+        Secrets::init(SecretsConfig::new(
+            secrets_dir,
+            secrets_consumers(),
+            test_master_key(),
+        ))
+        .expect("initialize test secrets");
+    }
+    let secrets = build_secrets(config, test_master_key()).expect("open test secrets");
+    let ca_dir = test_dir.join(TEST_CA_DIR);
+    if !ca_dir.join(bootstrap::ROOT_CRT).exists() {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&ca_dir)
+            .expect("create test ca dir");
+        std::fs::set_permissions(&ca_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("test ca dir mode");
+        bootstrap::run_with(
+            BootstrapParams {
+                server_names: config.server.api.san.clone(),
+                root_passphrase: SecretString::new("test passphrase".into()),
+                install_id: "gantryd-test".into(),
+                out_dir: ca_dir.clone(),
+                policy: CertPolicy::default(),
+            },
+            &SystemClock,
+            &OsEntropy,
+            &TestMemoryFs,
+        )
+        .expect("bootstrap test ca");
+    }
+    // deploy 的引导步骤：两把私钥进 Pki 命名空间，再删掉临时明文。
+    let scoped = secrets.scoped(Consumer::Pki).expect("pki secrets");
+    let ctx = test_actor_ctx();
+    for (name, file) in [
+        (INTERMEDIATE_KEY_SECRET, bootstrap::INTERMEDIATE_KEY),
+        (SERVER_KEY_SECRET, bootstrap::SERVER_KEY),
+    ] {
+        let name = SecretName::parse(name).expect("secret name");
+        if !scoped.present(&name).expect("secret presence") {
+            let value = std::fs::read(ca_dir.join(file)).expect("bootstrap key");
+            scoped
+                .put(&name, SecretValue::from_bytes(value), Expect::Absent, &ctx)
+                .expect("store pki key");
+        }
+        match std::fs::remove_file(ca_dir.join(file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove plaintext pki key: {error}"),
+        }
+    }
+    for dir in [
+        test_dir.join("journal"),
+        config
+            .backup
+            .journal_target
+            .parent()
+            .expect("journal target parent")
+            .to_path_buf(),
+    ] {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .expect("create journal dir");
+    }
+}
+
+async fn open_test_pki(
+    config: &BootConfig,
+    test_dir: &Path,
+    store: &Store,
+    secrets: &Secrets,
+    clock: Arc<dyn Clock>,
+) -> Pki {
+    let scoped: Arc<dyn SecretSink> = Arc::new(secrets.scoped(Consumer::Pki).expect("pki secrets"));
+    let pki_config = PkiConfig {
+        ca_dir: test_dir.join(TEST_CA_DIR),
+        root_key_scan_dirs: vec![
+            test_dir.join(TEST_CA_DIR),
+            config.server.data_dir.clone(),
+            config.server.secrets_dir.clone(),
+        ],
+        journal: RevocationJournal::new(
+            test_dir.join("journal/revocations.journal"),
+            config.backup.journal_target.clone(),
+        ),
+        server_names: config.server.api.san.clone(),
+        cert_policy: CertPolicy::default(),
+        pairing: PairingConfig::new(config.server.api.public_url.clone()),
+    };
+    build_pki(pki_config, store, scoped, clock, Arc::new(OsEntropy))
+        .await
+        .expect("test pki")
+}
+
+async fn find_test_device(pki: &Pki) -> Option<Device> {
+    let mut cursor = None;
+    loop {
+        let page = pki
+            .directory()
+            .list(&Page {
+                limit: 200,
+                cursor,
+                ..Page::default()
+            })
+            .await
+            .expect("list devices");
+        if let Some(device) = page
+            .items
+            .into_iter()
+            .find(|device| device.name == TEST_DEVICE_NAME)
+        {
+            return Some(device);
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return None,
+        }
+    }
+}
+
+/// 首次启动经公开配对服务登记测试设备；重启时按名字复用，避免重复配对与第二台设备。
+async fn ensure_test_device(pki: &Pki) -> DeviceId {
+    if let Some(device) = find_test_device(pki).await {
+        assert_eq!(
+            device.approval_pubkey_fpr,
+            Some(test_signing_fingerprint()),
+            "a device with the test name but a different approval key must not be reused"
+        );
+        return device.id;
+    }
+    let approval = test_signing_key().verifying_key().to_encoded_point(false);
+    let approval =
+        P256PublicKey::from_uncompressed_point(approval.as_bytes()).expect("approval key");
+    let ticket = pki
+        .pairing()
+        .open_session(0)
+        .await
+        .expect("pairing session");
+    let client = rcgen::KeyPair::generate().expect("client key");
+    let csr = rcgen::CertificateParams::default()
+        .serialize_request(&client)
+        .expect("csr")
+        .pem()
+        .expect("csr pem");
+    let response = pki
+        .pairing()
+        .redeem(gantry_pki::pairing_service::PairRequest {
+            token: ticket.token.expose_secret().to_owned(),
+            csr_pem: csr,
+            approval_pubkey: Some(encode_approval_pubkey(&approval)),
+            device: NewDevice {
+                name: TEST_DEVICE_NAME.into(),
+                platform: DevicePlatform::Macos,
+            },
+        })
+        .await
+        .expect("pair test device");
+    assert_eq!(
+        response.device.role,
+        gantry_core::entities::DeviceRole::Approver,
+        "the first desktop device must be the approver"
+    );
+    response.device.id
 }
 
 struct CrashAfterConsume(AtomicBool);
@@ -84,17 +316,21 @@ pub fn project_id() -> ProjectId {
     engine_cfg::PROJECT.parse().expect("fixture")
 }
 
-/// engine（`EngineRuntime`）、notify 与 policy 用真实实现；store 默认内存，可选
-/// SQLite。policy 与 notify 经 `gantryd::assembly` 的生产构造函数装配；真实 policy
-/// 的合并审批由 `fake.drive` 用测试设备密钥签名（`auto_approve`）。
+/// engine（`EngineRuntime`）、notify、policy、secrets 与 pki 用真实实现；store 默认
+/// 内存，可选 SQLite。secrets / pki 经 `gantryd::assembly` 的生产构造函数打开，
+/// 测试设备经真实配对服务登记；`fake.drive` 用该设备登记过的审批密钥签名。
 pub async fn assemble_fakes(
+    config: &BootConfig,
+    test_dir: &Path,
     sqlite_dir: Option<&Path>,
     auto_approve: bool,
 ) -> (Assembly, FakeHandles) {
-    assemble_variant(sqlite_dir, false, auto_approve).await
+    assemble_variant(config, test_dir, sqlite_dir, false, auto_approve).await
 }
 
 async fn assemble_variant(
+    config: &BootConfig,
+    test_dir: &Path,
     sqlite_dir: Option<&Path>,
     real_executor: bool,
     auto_approve: bool,
@@ -115,6 +351,9 @@ async fn assemble_variant(
             .expect("SQLite store"),
         None => Store::open_in_memory_sync_with(deps, &modules).expect("in-memory store"),
     };
+    let secrets = Arc::new(build_secrets(config, test_master_key()).expect("test secrets"));
+    let pki = Arc::new(open_test_pki(config, test_dir, &store, &secrets, clock.clone()).await);
+    let test_device = ensure_test_device(&pki).await;
     let base = GitOid::parse(engine_cfg::BASE).expect("fixture");
     let now = clock.now();
 
@@ -243,8 +482,16 @@ async fn assemble_variant(
             "EgressStub; real egress is a separate process",
         ),
         ModuleInfo::new("conversation", Fake, "FakeConversation"),
-        ModuleInfo::new("secrets", Absent, "no consumer wired yet"),
-        ModuleInfo::new("pki", Absent, "no consumer wired yet"),
+        ModuleInfo::new(
+            "secrets",
+            Real,
+            "FileSecrets; M1 Forge/Pki only (Notify joins in M4), never Egress",
+        ),
+        ModuleInfo::new(
+            "pki",
+            Real,
+            "Pki; test CA, device paired via pairing service, revocation journal in scratch",
+        ),
         ModuleInfo::new("api", Absent, "not wired yet"),
     ];
 
@@ -274,6 +521,8 @@ async fn assemble_variant(
         repo,
         sandbox,
         real_executor,
+        pki,
+        test_device,
     };
     (assembly, handles)
 }
@@ -289,16 +538,17 @@ pub fn child_main(spec: &str) {
         None => (uid, true, false),
     };
     let config_path = PathBuf::from(config);
+    let scratch = config_path
+        .parent()
+        .expect("config parent")
+        .canonicalize()
+        .expect("scratch directory");
+    let temp = std::env::temp_dir().canonicalize().expect("temp directory");
+    assert_eq!(scratch.parent(), Some(temp.as_path()));
+    assert_eq!(std::fs::metadata(&scratch).unwrap().mode() & 0o777, 0o700);
+    let config = BootConfig::load(&config_path).expect("child config");
     let sqlite_dir = std::env::var_os(CHILD_SQLITE_ENV).map(|dir| {
         let dir = PathBuf::from(dir);
-        let scratch = config_path
-            .parent()
-            .expect("config parent")
-            .canonicalize()
-            .expect("scratch directory");
-        let temp = std::env::temp_dir().canonicalize().expect("temp directory");
-        assert_eq!(scratch.parent(), Some(temp.as_path()));
-        assert_eq!(std::fs::metadata(&scratch).unwrap().mode() & 0o777, 0o700);
         let metadata = std::fs::symlink_metadata(&dir).expect("SQLite directory");
         assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
         let inherited = std::fs::File::from(
@@ -318,7 +568,6 @@ pub fn child_main(spec: &str) {
         reject_symlinks(&dir);
         dir
     });
-    let config = BootConfig::load(&config_path).expect("child config");
     let uid: u32 = uid.parse().expect("child uid");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -326,9 +575,16 @@ pub fn child_main(spec: &str) {
         .unwrap();
     runtime.block_on(async {
         let (assembly, handles) = if real_executor {
-            assemble_variant(sqlite_dir.as_deref(), true, false).await
+            assemble_variant(&config, &scratch, sqlite_dir.as_deref(), true, false).await
         } else {
-            assemble_fakes(sqlite_dir.as_deref(), auto_approve).await
+            assemble_variant(
+                &config,
+                &scratch,
+                sqlite_dir.as_deref(),
+                false,
+                auto_approve,
+            )
+            .await
         };
         let assembly = Arc::new(assembly);
         let commands: Vec<Arc<dyn CommandSet>> = vec![Arc::new(
