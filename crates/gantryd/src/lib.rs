@@ -69,7 +69,7 @@ impl Options {
 /// 服务端入口：真实装配，控制通道只放行 root。
 pub async fn run(options: Options) -> Result<(), StartError> {
     let config = BootConfig::load(&options.config)?;
-    let assembly = Arc::new(assemble_real()?);
+    let assembly = Arc::new(assemble_real(&config).await?);
     serve(&config, assembly, Vec::new(), ControlAuth::ROOT).await
 }
 
@@ -153,16 +153,5 @@ mod tests {
         ] {
             assert!(matches!(parse(args), Err(StartError::Usage(_))), "{args:?}");
         }
-    }
-
-    #[test]
-    fn real_assembly_refuses_until_store_is_persistent() {
-        assert!(matches!(
-            assemble_real(),
-            Err(AssemblyError::NotReady {
-                module: "store",
-                ..
-            })
-        ));
     }
 }

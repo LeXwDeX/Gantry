@@ -22,7 +22,7 @@ use gantry_core::ports::sandbox::SandboxService;
 use gantry_core::ports::worker::WorkerAdapter;
 use gantry_core::time::Timestamp;
 use gantry_engine::runtime::EngineRuntime;
-use gantry_store::Store;
+use gantry_store::{Store, StoreConfig, StoreDeps};
 use serde::Serialize;
 
 /// 装配来源；`status` 原样报告。
@@ -67,6 +67,8 @@ pub enum AssemblyError {
         module: &'static str,
         why: &'static str,
     },
+    #[error(transparent)]
+    Store(#[from] gantry_store::StoreError),
 }
 
 /// 装配好的进程内模块。字段即端口；没有实现的端口不出现。
@@ -91,11 +93,22 @@ pub struct Assembly {
 }
 
 /// 真实装配。各模块按端口接入的顺序见 `tests/support` 的替身装配。
-pub fn assemble_real() -> Result<Assembly, AssemblyError> {
+///
+/// 当前已接持久化 store；其余模块（forge、repo、sandbox、worker、models、egress、
+/// api、pki、secrets）尚未接线，因此仍拒绝启动（失败闭合）。
+pub async fn assemble_real(config: &crate::config::BootConfig) -> Result<Assembly, AssemblyError> {
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(OsEntropy)));
+    let _store = Store::open(
+        StoreConfig::new(&config.server.data_dir),
+        StoreDeps { clock, ids },
+        &[],
+    )
+    .await?;
     Err(AssemblyError::NotReady {
-        module: "store",
-        why: "persistent SQLite store (store.md §7) is not wired yet; \
-              refusing to run on an in-memory log",
+        module: "forge",
+        why: "real forge/engine/api wiring is not complete (gantryd.md §7.1); \
+              persistent store is open, refusing to run without the remaining modules",
     })
 }
 
