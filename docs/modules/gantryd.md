@@ -7,7 +7,7 @@
 ## 1. 职责
 
 - 读取引导配置 `/etc/gantry/gantry.toml`（deploy.md §10），校验后启动；配置非法时在绑定任何套接字之前退出。
-- 装配：为每个跨模块端口构造一个实现（真实或替身），放进 `Assembly`；模块之间只经端口相连（P-51）。
+- 装配：为每个跨模块端口构造一个实现（真实或替身），放进 `Assembly`；模块之间只经端口相连（P-51）。`Assembly` 只放 `core::ports` 端口：`api` 作为 `serve` 的服务任务启动（与控制通道并列）；`pki`、`secrets` 在 `assemble_real` 内构造后注入消费者（forge、egress、notify、api 与控制通道的 `PkiControl`），不进 `Assembly` 字段。
 - 启动并托管引擎运行时 `EngineRuntime`（engine.md §7.15）：`run` 到停机，停机时与控制通道一起退出。
 - 本机控制通道 `server.control_socket`（默认 `/run/gantry/control.sock`）：鉴权、行 JSON 协议、命令分派（OPS-07 的落地方案，见 §6.2）。
 - 主机 CLI `gantry`：解析参数后分派给各模块的库函数（`gantry-deploy` 的 `github setup` / `doctor` / `settings bootstrap-set`），与运行中的 `gantryd` 只经控制通道交互。
@@ -98,7 +98,7 @@ pub trait CommandSet: Send + Sync {
 | repo | 替身 | `EventedRepo`（`FakeRepo` 外包一层，写 `worktree.*` / `patch.validated`） |
 | sandbox | 替身 | `GoldenSandbox`（受理时写入 `single` 黄金结果） |
 | worker / models / egress / conversation | 替身 | `gantry-fakes` 对应替身 |
-| secrets / pki / api | 未装配 | 尚无消费方 |
+| secrets / pki / api | 未装配 | 不计入 `Assembly` 字段：api 是 `serve` 的服务任务；pki、secrets 在 `assemble_real` 内构造并注入消费者；M1.4 接线时补齐 |
 
 某个模块换成真实实现时，只把它的构造从替身装配挪进 `assemble_real`，不改模块代码。
 
