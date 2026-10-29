@@ -967,44 +967,61 @@ async fn unknown_verdict_keeps_the_old_wait_for_resubmission() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn deferred_cancel_survives_resubmission_after_unknown() {
     use std::os::unix::fs::PermissionsExt;
 
-    let h = harness(1);
-    let n = 572;
-    h.driver.fail_next(FailPoint::List);
-    assert_eq!(
-        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
-        vec![RecoveredJob::Running(handle(n))]
-    );
-    let job = att(n);
-    let wait = h.service.wait(&job);
-    tokio::pin!(wait);
-    h.service.cancel(&ctx(), &job).await.unwrap();
-    // 让取消依据暂时无法落盘：重试确认 Unknown 后进入 Deferred。
-    std::fs::set_permissions(h.root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    std::fs::set_permissions(h.root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    // 重提必须兑现已记录但尚未落盘的取消，不能启动。
-    h.driver.script(
-        sbx(n),
-        FakeScript {
-            behavior: FakeBehavior::ExitAfter {
-                after: Duration::from_secs(1),
-                code: 0,
-                honor_term: true,
+    for confirmed_unknown in [false, true] {
+        let h = harness(1);
+        let n = if confirmed_unknown { 573 } else { 572 };
+        h.driver.fail_next(FailPoint::List);
+        assert_eq!(
+            h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+            vec![RecoveredJob::Running(handle(n))]
+        );
+        let job = att(n);
+        let wait = h.service.wait(&job);
+        tokio::pin!(wait);
+        if confirmed_unknown {
+            // 先让后台确认 Unknown，再制造取消持久化失败。
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                .await
+                .is_err());
+        }
+        h.service.cancel(&ctx(), &job).await.unwrap();
+        // 让取消依据暂时无法落盘：重试确认 Unknown 后进入 Deferred。
+        std::fs::set_permissions(h.root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(
+            std::fs::write(h.root.path().join("probe"), b"x").is_err(),
+            "test requires a directory that rejects writes"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        std::fs::set_permissions(h.root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
+            .await
+            .is_err());
+        // 重提必须兑现已记录但尚未落盘的取消，不能启动。
+        h.driver.script(
+            sbx(n),
+            FakeScript {
+                behavior: FakeBehavior::ExitAfter {
+                    after: Duration::from_secs(1),
+                    code: 0,
+                    honor_term: true,
+                },
+                ..FakeScript::default()
             },
-            ..FakeScript::default()
-        },
-    );
-    h.service.submit(&ctx(), spec(n)).await.unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(10), &mut wait)
-        .await
-        .expect("deferred cancellation must survive resubmission")
-        .unwrap();
-    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
-    assert_eq!(starts(&h), 0);
+        );
+        h.service.submit(&ctx(), spec(n)).await.unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), &mut wait)
+            .await
+            .expect("deferred cancellation must survive resubmission")
+            .unwrap();
+        assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+        assert_eq!(starts(&h), 0);
+    }
 }
 
 #[tokio::test(start_paused = true)]
