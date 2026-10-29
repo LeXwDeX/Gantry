@@ -1,9 +1,9 @@
-//! `gantry doctor`（deploy.md §7.14）：`ok` / `warn` / `fail`，`--json` 供自动化，
-//! 退出码 `0` / `1`（有警告）/ `2`（有失败）。
+//! `gantry doctor`（deploy.md §7.14）：`ok` / `warn` / `unchecked` / `fail`，`--json` 供自动化，
+//! 退出码 `0` / `1`（有警告）/ `3`（有未检查区域）/ `2`（有失败）。
 //!
 //! M1 子集：`host` 区域的 `--test-mode` 标红、`webhook` 区域的外部可达检查（§7.6 验证 ②）。
 //! 其余检查需要 root、systemd、真实 GitHub 或沙盒，随 M1.4（#106）逐项补齐；未实现的
-//! 区域报 `warn`，不冒充通过。
+//! 区域报 `unchecked`，不冒充通过。
 
 use serde::Serialize;
 use serde_json::Value;
@@ -20,6 +20,7 @@ pub const AREAS: &[&str] = &[
 pub enum Status {
     Ok,
     Warn,
+    Unchecked,
     Fail,
 }
 
@@ -28,6 +29,7 @@ impl Status {
         match self {
             Status::Ok => "ok",
             Status::Warn => "warn",
+            Status::Unchecked => "unchecked",
             Status::Fail => "fail",
         }
     }
@@ -75,6 +77,7 @@ impl Report {
         match self.worst() {
             Status::Ok => 0,
             Status::Warn => 1,
+            Status::Unchecked => 3,
             Status::Fail => 2,
         }
     }
@@ -168,7 +171,7 @@ fn not_implemented(area: &'static str) -> Check {
     Check::new(
         area,
         "pending",
-        Status::Warn,
+        Status::Unchecked,
         "M1.4 补齐（#106），本次未检查",
     )
 }

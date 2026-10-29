@@ -602,6 +602,7 @@ doctor_area() {
   case "$rc" in
     0) ;;
     1) warn "doctor $area 有警告" ;;
+    3) warn "未检查区域：${area}（M1.4 补齐后生效，见上方输出）" ;;
     *) die "$code" "$message" ;;
   esac
 }
@@ -644,6 +645,7 @@ step_doctor() {
   case "$rc" in
     0) ;;
     1) warn "doctor 有警告" ;;
+    3) warn "未检查区域：见上方 unchecked 行（M1.4 补齐后生效）" ;;
     *) die "$EXIT_DOCTOR" "doctor 有失败项" ;;
   esac
 }

@@ -183,6 +183,34 @@ test_single_area_doctor_warns_do_not_abort() {
   rm -rf "$stub"
 }
 
+test_single_area_doctor_unchecked_continues() {
+  local stub rc=0
+  stub="$(mktemp -d)"
+  printf '#!/bin/sh\nexit 3\n' >"$stub/gantry"
+  chmod +x "$stub/gantry"
+  PATH="$stub:$PATH" doctor_area webhook 40 "不应中止" || rc=$?
+  assert_eq "$rc" 0
+  rm -rf "$stub"
+}
+
+test_step_doctor_exit_codes() {
+  local stub want rc
+  stub="$(mktemp -d)"
+  for want in 0 1 3; do
+    printf '#!/bin/sh\nexit %s\n' "$want" >"$stub/gantry"
+    chmod +x "$stub/gantry"
+    rc=0
+    ( PATH="$stub:$PATH" step_doctor ) 2>/dev/null || rc=$?
+    assert_eq "$rc" 0 "总 doctor 退出码 $want 应继续"
+  done
+  printf '#!/bin/sh\nexit 2\n' >"$stub/gantry"
+  chmod +x "$stub/gantry"
+  rc=0
+  ( PATH="$stub:$PATH" step_doctor ) 2>/dev/null || rc=$?
+  assert_eq "$rc" 60 "总 doctor 退出码 2 应中止"
+  rm -rf "$stub"
+}
+
 test_single_area_doctor_failure_aborts() {
   local stub rc=0
   stub="$(mktemp -d)"
