@@ -209,7 +209,7 @@
 | 14 | `gantry github setup` 创建并安装 App | §7.5；**需要浏览器**；完成后 `doctor github` 通过 |
 | 15 | 引导期写入（可选） | §7.9；只在需要覆盖默认值时（例如自建 worker 镜像） |
 | 16 | 拉取沙盒基础镜像并做冒烟 | 官方 worker 镜像按发布包锁定的摘要拉取（`sandbox.base_image` 的默认值，P-66）；起一个金丝雀沙盒，验证"访问 `github.com` / `api.github.com` 失败、环境里没有密钥、读不到服务端端口"（M1 退出标准的主机侧前提） |
-| 17 | `gantry doctor` | 全部通过或仅警告 |
+| 17 | `gantry doctor` | 无失败项；警告与未检查区域逐条列出 |
 | 18 | 备份 | 配置 `age` 收件人（公钥）与目的地，启用定时器，**立即做一次备份并校验** |
 | 19 | 输出下一步 | 提示运行 `gantry pair`；打印 CA 指纹与离线保存提醒 |
 
@@ -469,7 +469,16 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 
 ### 7.14 `gantry doctor`
 
-输出 `ok` / `warn` / `fail`，`--json` 供自动化，退出码 `0` / `1`（有警告）/ `2`（有失败）**[提议]**。分区：
+输出 `ok` / `warn` / `unchecked` / `fail`，`--json` 供自动化。`unchecked` 表示该区域尚未实现，`detail` 写明归属 issue。退出码 **[提议]**：
+
+| 退出码 | 条件 |
+| --- | --- |
+| `0` | 全部 `ok` |
+| `1` | 有 `warn`，无 `unchecked` / `fail` |
+| `3` | 有 `unchecked`，无 `fail` |
+| `2` | 有 `fail` |
+
+优先级 `fail > unchecked > warn > ok`。分区：
 
 | 区域 | 检查 |
 | --- | --- |
