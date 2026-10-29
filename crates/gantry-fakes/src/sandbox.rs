@@ -92,7 +92,7 @@ struct JobEntry {
     /// 成功 `submit` 过；`script` 预放 spec 不算受理。
     accepted: bool,
     runtime: FakeRuntime,
-    outcome: JobOutcome,
+    outcome: Result<JobOutcome, SandboxError>,
     progress: Vec<ProgressSample>,
     canceled: bool,
     released: bool,
@@ -103,6 +103,7 @@ struct JobEntry {
 struct State {
     jobs: BTreeMap<AttemptId, JobEntry>,
     calls: Vec<SandboxCall>,
+    recover_reply: Option<Result<Vec<RecoveredJob>, SandboxError>>,
 }
 
 struct VecStream {
@@ -147,17 +148,43 @@ impl FakeSandboxService {
                 spec: None,
                 accepted: false,
                 runtime: FakeRuntime::default(),
-                outcome: JobOutcome {
+                outcome: Ok(JobOutcome {
                     job_id,
                     sandbox_id,
                     ..outcome
-                },
+                }),
                 progress: Vec::new(),
                 canceled: false,
                 released: false,
                 swept: false,
             },
         );
+    }
+
+    /// 给已脚本化的 job 注入稳定的 wait 错误。
+    pub fn script_wait_error(&self, job_id: AttemptId, error: SandboxError) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state
+            .jobs
+            .get_mut(&job_id)
+            .expect("script the job first")
+            .outcome = Err(error);
+    }
+
+    /// 测试端口违约时注入 recover 返回值。
+    pub fn script_recover_reply(&self, reply: Vec<RecoveredJob>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .recover_reply = Some(Ok(reply));
+    }
+
+    /// 测试恢复请求被拒绝时注入端口错误。
+    pub fn script_recover_error(&self, error: SandboxError) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .recover_reply = Some(Err(error));
     }
 
     pub fn script(&self, spec: SandboxSpec, outcome: JobOutcome) {
@@ -211,7 +238,8 @@ impl FakeSandboxService {
         JobOutcome {
             job_id,
             sandbox_id,
-            job_sha256: None, // 可信摘要链路尚未接线。
+            // 服务端替身声明，独立于 worker 结果文件。
+            job_sha256: Some(sha256(b"job.json")),
             terminal: TerminalFacts {
                 cause: TerminalCause::Exited,
                 exit_code: Some(0),
@@ -284,7 +312,7 @@ impl SandboxService for FakeSandboxService {
                 message: "fake sandbox job was lost".into(),
             });
         }
-        Ok(entry.outcome.clone())
+        entry.outcome.clone()
     }
 
     fn progress(&self, job_id: &AttemptId) -> BoxStream<'static, ProgressSample> {
@@ -350,6 +378,9 @@ impl SandboxService for FakeSandboxService {
             ctx: ctx.clone(),
             unfinished: unfinished.to_vec(),
         });
+        if let Some(reply) = &state.recover_reply {
+            return reply.clone();
+        }
         let recovered = unfinished
             .iter()
             .map(|attempt| {

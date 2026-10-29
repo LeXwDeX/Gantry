@@ -110,6 +110,12 @@ pub struct SignalRecord {
 pub enum FailPoint {
     Create,
     Start,
+    /// 启动已生效但调用方收到错误。
+    StartAfterLaunch,
+    /// 启动后阻止运行相位的元数据保存。
+    BlockRunningMeta,
+    Stop,
+    List,
     PrepareDirs,
     ReadOut,
     Remove,
@@ -206,6 +212,31 @@ impl FakeDriver {
         if let Some(container) = state.containers.remove(id) {
             container.status_tx.send_replace(ContainerStatus::Exited);
         }
+    }
+
+    /// 受控完成运行中的替身容器，并在退出时写出指定产物。
+    pub fn complete(
+        &self,
+        id: &ContainerId,
+        out: Vec<(String, FakeOutEntry)>,
+    ) -> Result<(), DriverError> {
+        let mut state = self.lock();
+        let container = state.containers.get_mut(id).ok_or(DriverError::NotFound)?;
+        if container.status != ContainerStatus::Running {
+            return Err(DriverError::WrongState("complete"));
+        }
+        container.script.out = out;
+        Self::finish(
+            &mut state,
+            id,
+            ExitFacts {
+                exit_code: Some(0),
+                signal: None,
+                oom_killed: false,
+                finished_at: None,
+            },
+        );
+        Ok(())
     }
 
     fn take_failure(&self, point: FailPoint, op: &'static str) -> Result<(), DriverError> {
@@ -400,7 +431,7 @@ impl SandboxDriver for FakeDriver {
     async fn start(&self, id: &ContainerId) -> Result<(), DriverError> {
         self.lock().calls.push(DriverCall::Start(id.clone()));
         self.take_failure(FailPoint::Start, "start")?;
-        let behavior = {
+        let (behavior, meta_tmp) = {
             let mut state = self.lock();
             let container = state.containers.get_mut(id).ok_or(DriverError::NotFound)?;
             match container.status {
@@ -411,8 +442,14 @@ impl SandboxDriver for FakeDriver {
             container.status = ContainerStatus::Running;
             container.started_at = Some(Instant::now());
             container.status_tx.send_replace(ContainerStatus::Running);
-            container.script.behavior
+            (
+                container.script.behavior,
+                container.layout.meta_json().with_extension("json.tmp"),
+            )
         };
+        if self.lock().failures.remove(&FailPoint::BlockRunningMeta) {
+            std::fs::create_dir(meta_tmp).map_err(|err| DriverError::Io(err.to_string()))?;
+        }
         let (after, exit) = match behavior {
             FakeBehavior::ExitAfter { after, code, .. } => (
                 after,
@@ -432,7 +469,9 @@ impl SandboxDriver for FakeDriver {
                     finished_at: None,
                 },
             ),
-            FakeBehavior::Forever { .. } => return Ok(()),
+            FakeBehavior::Forever { .. } => {
+                return self.take_failure(FailPoint::StartAfterLaunch, "start");
+            }
         };
         let state = Arc::clone(&self.state);
         let id = id.clone();
@@ -441,7 +480,7 @@ impl SandboxDriver for FakeDriver {
             let mut state = state.lock().unwrap_or_else(|p| p.into_inner());
             FakeDriver::finish(&mut state, &id, exit);
         });
-        Ok(())
+        self.take_failure(FailPoint::StartAfterLaunch, "start")
     }
 
     async fn stop(&self, id: &ContainerId, grace: Duration) -> Result<(), DriverError> {
@@ -449,6 +488,7 @@ impl SandboxDriver for FakeDriver {
             id: id.clone(),
             grace,
         });
+        self.take_failure(FailPoint::Stop, "stop")?;
         let mut rx = self.status_rx(id)?;
         if *rx.borrow() == ContainerStatus::Created {
             // 未启动的容器直接视为已停止。
@@ -586,6 +626,7 @@ impl SandboxDriver for FakeDriver {
     }
 
     async fn list(&self, selector: &LabelSelector) -> Result<Vec<ContainerSummary>, DriverError> {
+        self.take_failure(FailPoint::List, "list")?;
         let mut state = self.lock();
         state.calls.push(DriverCall::List);
         Ok(state

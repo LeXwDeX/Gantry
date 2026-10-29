@@ -178,7 +178,9 @@ pub fn retry_rule(detail: &str) -> RetryRule {
         d if d.starts_with("verdict.") => RetryRule::NotAFailure,
         "timeout.wall" => RetryRule::Once,
         "timeout.idle" => RetryRule::UpToMax,
-        "exec.oom" | "exec.bad_job" | "budget.tokens" => RetryRule::Never,
+        "exec.oom" | "exec.bad_job" | "budget.tokens" | "infra.job_identity_unavailable" => {
+            RetryRule::Never
+        }
         "exec.killed" | "exec.worker_crash" | "exec.protocol" | "exec.model_api" => {
             RetryRule::UpToMax
         }

@@ -149,6 +149,7 @@ fn retry_rules_follow_section_7_8() {
         ("exec.agent_failed", RetryRule::Once),
         ("exec.output_invalid", RetryRule::UpToMax),
         ("infra.lost", RetryRule::UpToMax),
+        ("infra.job_identity_unavailable", RetryRule::Never),
         ("infra.sandbox_create", RetryRule::UpToMax),
         ("budget.tokens", RetryRule::Never),
         ("policy.path_protected:workflows", RetryRule::Never),

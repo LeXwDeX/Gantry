@@ -31,7 +31,7 @@ use crate::host::{AllowPattern, Host};
 use crate::review::{review, ProviderUpstream, ReviewedConfig};
 use crate::token::{mint_job_token, mint_svc_token, TokenHash};
 
-/// 吊销后自动遗忘最终用量的时长（egress-control §4.2，24 h [提议]）。
+/// 已废弃的兼容名称；最终用量仅由显式遗忘删除，此值被忽略。
 pub const FINAL_USAGE_TTL_S: u64 = 86_400;
 /// 用量记录保留期（egress-control §4.5，7 天 [提议]）。
 pub const USAGE_RETENTION_S: u64 = 7 * 86_400;
@@ -66,6 +66,7 @@ pub struct RegistryOptions {
     pub source_check_enforced: bool,
     /// 关闭调用、吊销 job 时等待在途请求结束的上限；超时返回 `unavailable`，调用方重试。
     pub drain_timeout: Duration,
+    /// 已废弃的兼容字段；最终用量仅由显式遗忘删除，此值被忽略。
     pub final_usage_ttl_s: u64,
     pub usage_retention_s: u64,
     pub staged_ttl_s: u64,
@@ -1866,6 +1867,17 @@ fn forget(state: &mut State, job_id: &AttemptId) -> Result<(), ControlError> {
     let Some(row) = state.jobs.get(job_id) else {
         return Ok(());
     };
+    if row.revoked_at.is_none()
+        || row.final_usage.is_none()
+        || state
+            .inflight
+            .values()
+            .any(|row| matches!(&row.owner, InflightOwner::Job { job_id: id } if id == job_id))
+    {
+        return Err(ControlError::Conflict(
+            "job must be revoked and drained before deletion".into(),
+        ));
+    }
     let hashes: Vec<Sha256Digest> = row.hashes().collect();
     state
         .db
@@ -1877,21 +1889,8 @@ fn forget(state: &mut State, job_id: &AttemptId) -> Result<(), ControlError> {
     Ok(())
 }
 
-/// 惰性清理：吊销超过 TTL 的 job 自动遗忘；满保留期的用量记录删除（与证明过期同一边界）。
+/// 惰性清理满保留期的逐请求用量记录（与证明过期同一边界）。
 fn sweep(state: &mut State, now: Timestamp, options: &RegistryOptions) -> Result<(), ControlError> {
-    let stale: Vec<AttemptId> = state
-        .jobs
-        .values()
-        .filter(|row| {
-            row.revoked_at
-                .and_then(|at| at.checked_add_secs(options.final_usage_ttl_s))
-                .is_some_and(|deadline| now >= deadline)
-        })
-        .map(|row| row.request.job_id)
-        .collect();
-    for job_id in stale {
-        forget(state, &job_id)?;
-    }
     let cutoff = now.as_millis() - (options.usage_retention_s as i64) * 1000;
     if state
         .usage
@@ -1917,5 +1916,92 @@ fn problem(pointer: &str, message: &str) -> ProblemError {
     ProblemError {
         pointer: pointer.to_owned(),
         message: message.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn forget_rejects_even_persisted_final_with_inflight() {
+        let request: IssueJobTokenRequest = serde_json::from_value(json!({
+            "job_id": "att_01JBX4Q9ZK3M8T5V2N7RHC6WYD",
+            "sandbox_id": "sbx_01JBX4R2M6P8Q1S3T5V7W9Y0ZA",
+            "project_id": "prj_01JBX2C7Q5N8D4F6G9H3K1M0PA",
+            "ledger": { "subject": "delivery", "id": "dlv_01JBX3A8E2R5T7V9W1Y4Z6B0CD" },
+            "tier": "worker", "provider": "anthropic", "profile": "default",
+            "groups": ["model_api"], "tokens_total": 1000,
+            "token_weights": { "input": 1.0, "output": 1.0, "cache_read": 1.0, "cache_write": 1.0 },
+            "wall_time_s": 1800, "config_rev": 7
+        }))
+        .unwrap();
+        let job_id = request.job_id;
+        let now = Timestamp::from_millis(1_793_000_000_000);
+        let mut job = JobRow {
+            request,
+            active_hash: None,
+            retired_hashes: Vec::new(),
+            issued_at: now,
+            expires_at: now,
+            usage: TokenUsage::default(),
+            weighted_tokens: 0,
+            capped: false,
+            incomplete: false,
+            upstream_errors: UpstreamErrors::default(),
+            consecutive_errors: 0,
+            denied: DeniedCounters::default(),
+            revoked_at: Some(now),
+            final_usage: None,
+        };
+        let mut final_usage = job.snapshot();
+        final_usage.state = JobTokenState::Revoked;
+        final_usage.revoked_at = Some(now);
+        job.final_usage = Some(final_usage);
+        let inflight = InflightRow {
+            owner: InflightOwner::Job { job_id },
+            provider: "anthropic".into(),
+            model: "test".into(),
+            started_at: now,
+        };
+        let mut db = Db::open_in_memory().unwrap();
+        db.tx(|tx| {
+            tx.put(Table::Jobs, &job_id.to_string(), &job)?;
+            tx.put(Table::Inflight, "0", &inflight)
+        })
+        .unwrap();
+        let mut state = State {
+            db,
+            config: None,
+            last_apply_error: None,
+            jobs: BTreeMap::from([(job_id, job)]),
+            job_by_hash: HashMap::new(),
+            svcs: BTreeMap::new(),
+            svc_by_hash: HashMap::new(),
+            usage: Vec::new(),
+            next_seq: 0,
+            pruned_through: 0,
+            calls: BTreeMap::new(),
+            inflight: BTreeMap::from([(0, inflight)]),
+            next_inflight: 1,
+            staged: BTreeMap::new(),
+            audit_failed: false,
+        };
+        assert!(matches!(
+            forget(&mut state, &job_id),
+            Err(ControlError::Conflict(_))
+        ));
+        assert!(state.jobs.contains_key(&job_id));
+        assert_eq!(state.inflight.len(), 1);
+        assert_eq!(state.db.load::<JobRow>(Table::Jobs).unwrap().len(), 1);
+        assert_eq!(
+            state.db.load::<InflightRow>(Table::Inflight).unwrap().len(),
+            1
+        );
+        state.db.tx(|tx| tx.delete(Table::Inflight, "0")).unwrap();
+        state.inflight.clear();
+        forget(&mut state, &job_id).unwrap();
+        assert!(state.db.load::<JobRow>(Table::Jobs).unwrap().is_empty());
     }
 }

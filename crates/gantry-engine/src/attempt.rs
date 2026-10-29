@@ -13,8 +13,6 @@
 //!   `usage_reported` 不改变结论；用量取 `JobOutcome` 的 Egress 计量。
 //!
 //! 已知近似（规格缺口，见最终报告）：
-//! - V3 的 `job_sha256` 无法核对：`sandbox.stage` 重新生成 nonce 并填 `materials` 后才算出
-//!   `job.json` 的字节，`JobOutcome` 不回传该摘要。
 //! - `exec = direct`（`models.invoke_direct`）不在本切片；收到时返回缺陷错误。
 //! - 进度采样转发为 `attempt.progress`（展示用）不在本切片。
 
@@ -23,6 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gantry_core::canon::{jcs, sha256, GitOid, RepoSlug, Sha256Digest};
+use gantry_core::egress::{FinalUsage, JobTokenState};
 use gantry_core::entities::{
     role_profile, AttemptStatus, Exec, FailureClass, FailureDetail, PatchRef, Ref, Role,
     SandboxLimits, Seq, TokenUsage, TokenWeights, Verdict,
@@ -58,7 +57,9 @@ use gantry_core::worker::{
 };
 
 use crate::classify::{classify, Classification, PatchCheck, RunFacts};
-use crate::decide::{AttemptPlan, EffectErrorClass, Finalized, OutputSignals, PatchResult};
+use crate::decide::{
+    AttemptPlan, EffectErrorClass, Finalized, OutputSignals, PatchResult, RetryBlocked,
+};
 use crate::decide::{ProposalMissing, ProposalOutcome, ProposalRef, ProposalText};
 use crate::state::DeliveryState;
 
@@ -456,42 +457,52 @@ impl AttemptRunner {
                 sandbox_id,
                 project_id: cx.project_id,
             }];
-            let recovered = self
-                .ports
-                .sandbox
-                .recover(ctx, &unfinished)
-                .await
-                .map_err(RunnerError::Sandbox)?;
-            match recovered.first() {
-                Some(RecoveredJob::Running(_) | RecoveredJob::Exited(_)) => need_submit = false,
-                Some(RecoveredJob::Lost(_)) => {
+            let recovered = match self.ports.sandbox.recover(ctx, &unfinished).await {
+                Ok(recovered) => recovered,
+                Err(SandboxError::JobIdentityUnavailable { usage, .. }) => {
+                    return self.identity_failure(plan, usage);
+                }
+                Err(error) => return Err(RunnerError::Sandbox(error)),
+            };
+            match recovered.as_slice() {
+                [RecoveredJob::Running(handle) | RecoveredJob::Exited(handle)]
+                    if handle.job_id == plan.attempt_id && handle.sandbox_id == sandbox_id =>
+                {
+                    need_submit = false;
+                }
+                [RecoveredJob::Lost(handle)]
+                    if handle.job_id == plan.attempt_id && handle.sandbox_id == sandbox_id =>
+                {
                     return Ok(self.infra_failure(plan, InfraDetail::Lost));
                 }
-                Some(RecoveredJob::Unknown { .. }) | None => {}
+                [RecoveredJob::Unknown { job_id }] if *job_id == plan.attempt_id => {}
+                _ => return Err(RunnerError::Defect("sandbox_recovery_mismatch")),
             }
         }
-        let job = if need_submit {
+        if need_submit {
             let spec = self.assemble(plan, cx, ctx).await?;
-            let job = spec.job.clone();
             match self.ports.sandbox.submit(ctx, spec).await {
                 Ok(_) => {}
                 Err(SandboxError::Infra { detail, .. }) => {
                     return Ok(self.infra_failure(plan, detail));
                 }
+                Err(SandboxError::JobIdentityUnavailable { usage, .. }) => {
+                    return self.identity_failure(plan, usage);
+                }
                 Err(error) => return Err(RunnerError::Sandbox(error)),
             }
-            Some(job)
-        } else {
-            None
-        };
+        }
         let outcome = match self.ports.sandbox.wait(&plan.attempt_id).await {
             Ok(outcome) => outcome,
             Err(SandboxError::Infra { detail, .. }) => {
                 return Ok(self.infra_failure(plan, detail));
             }
+            Err(SandboxError::JobIdentityUnavailable { usage, .. }) => {
+                return self.identity_failure(plan, usage);
+            }
             Err(error) => return Err(RunnerError::Sandbox(error)),
         };
-        self.finalize(plan, cx, ctx, &outcome, job.as_ref()).await
+        self.finalize(plan, cx, ctx, &outcome).await
     }
 
     /// 组装 `SandboxSpec`（§7.8 第 3 步）。公开以便测试断言隔离与配置快照。
@@ -776,6 +787,7 @@ impl AttemptRunner {
             status: AttemptStatus::Failed,
             failure_class: Some(FailureClass::InfraError),
             failure_detail: FailureDetail::parse(code).ok(),
+            retry_blocked: None,
             result_ref: None,
             usage_metered: TokenUsage::default(),
             weighted_tokens: 0,
@@ -788,6 +800,29 @@ impl AttemptRunner {
         }
     }
 
+    /// 身份拒绝只能结算已吊销且完整的最终计量；None 是端口证明的零用量。
+    fn identity_failure(
+        &self,
+        plan: &AttemptPlan,
+        usage: Option<Box<FinalUsage>>,
+    ) -> Result<Finalized, RunnerError> {
+        let mut finalized = self.infra_failure(plan, InfraDetail::Lost);
+        if let Some(usage) = usage {
+            if usage.job_id != plan.attempt_id
+                || usage.state != JobTokenState::Revoked
+                || usage.revoked_at.is_none()
+                || usage.incomplete
+            {
+                return Err(RunnerError::Defect("sandbox_final_usage_invalid"));
+            }
+            finalized.usage_metered = usage.usage;
+            finalized.weighted_tokens = usage.weighted_tokens;
+        }
+        finalized.failure_detail = FailureDetail::parse("infra.job_identity_unavailable").ok();
+        finalized.retry_blocked = Some(RetryBlocked::JobIdentityUnavailable);
+        Ok(finalized)
+    }
+
     /// 终结管线 V1、V3–V6 与分类（§7.8，worker-protocol §8.1）。
     async fn finalize(
         &self,
@@ -795,8 +830,13 @@ impl AttemptRunner {
         cx: &AttemptContext,
         ctx: &ActorCtx,
         outcome: &JobOutcome,
-        submitted: Option<&JobSpec>,
     ) -> Result<Finalized, RunnerError> {
+        if outcome.job_id != plan.attempt_id
+            || outcome.sandbox_id != sandbox_id_for(&plan.attempt_id)
+            || (outcome.job_sha256.is_none() && outcome.egress.incomplete)
+        {
+            return Err(RunnerError::Defect("sandbox_final_usage_invalid"));
+        }
         let role = self
             .config
             .roles
@@ -862,8 +902,7 @@ impl AttemptRunner {
             .write_bundle(
                 plan,
                 outcome,
-                submitted,
-                check.result.as_ref(),
+                check.result.as_ref().filter(|_| facts.protocol_ok),
                 &classification,
                 collected_at,
                 patch.summary.clone(),
@@ -880,6 +919,10 @@ impl AttemptRunner {
                 .detail
                 .as_deref()
                 .and_then(|d| FailureDetail::parse(d).ok()),
+            retry_blocked: outcome
+                .job_sha256
+                .is_none()
+                .then_some(RetryBlocked::JobIdentityUnavailable),
             result_ref,
             usage_metered: outcome.usage_metered,
             weighted_tokens: outcome.weighted_tokens,
@@ -907,6 +950,9 @@ impl AttemptRunner {
             protocol_ok: false,
             structured: None,
         };
+        if outcome.job_sha256.is_none() {
+            return Ok(invalid);
+        }
         let Some(file) = outcome.files.get(&ArtifactName::new(RESULT_JSON)) else {
             return Ok(invalid);
         };
@@ -930,7 +976,9 @@ impl AttemptRunner {
         else {
             return Ok(invalid);
         };
-        let mut ok = result.job_id == plan.attempt_id && result.summary.chars().count() <= 1000;
+        let mut ok = result.job_id == plan.attempt_id
+            && outcome.job_sha256 == Some(result.job_sha256)
+            && result.summary.chars().count() <= 1000;
         ok &= match result.status {
             ResultStatus::Succeeded => structured.is_some(),
             ResultStatus::Failed | ResultStatus::Cancelled => result.error.is_some(),
@@ -1298,23 +1346,14 @@ impl AttemptRunner {
         &self,
         plan: &AttemptPlan,
         outcome: &JobOutcome,
-        submitted: Option<&JobSpec>,
         result: Option<&ResultJson>,
         classification: &Classification,
         collected_at: Timestamp,
         patch: Option<PatchValidationSummary>,
         proposals: Vec<ProposalDispositionEntry>,
     ) -> Result<Option<Sha256Digest>, RunnerError> {
-        // job_sha256：sandbox 不回传 job.json 的摘要（契约缺口）。有合法 result.json 时取其声明，
-        // 否则取引擎提交的 JobSpec 的 JCS 摘要（与 staging 后的字节不同，仅作关联）。
-        let job_sha256 = match (result, submitted) {
-            (Some(result), _) => result.job_sha256,
-            (None, Some(job)) => serde_json::to_value(job)
-                .ok()
-                .and_then(|v| jcs(&v).ok())
-                .map(|bytes| sha256(&bytes))
-                .unwrap_or_else(|| sha256(plan.attempt_id.to_string().as_bytes())),
-            (None, None) => sha256(plan.attempt_id.to_string().as_bytes()),
+        let Some(job_sha256) = outcome.job_sha256 else {
+            return Ok(None);
         };
         let mut files = BTreeMap::new();
         for (name, object) in &outcome.files {

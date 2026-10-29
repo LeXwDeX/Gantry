@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gantry_core::canon::{sha256, GitOid, IdempotencyKey, RepoSlug, SubjectDigest};
+use gantry_core::canon::{sha256, GitOid, IdempotencyKey, RepoSlug, Sha256Digest, SubjectDigest};
+use gantry_core::egress::{DeniedCounters, FinalUsage, JobTokenState, UpstreamErrors};
 use gantry_core::entities::{
     Actor, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, DeliveryOrigin, Exec,
     FailureClass, ForgeActionKind, LockHolder, NodeStatus, PatchRef, Ref, Role, SandboxLimits,
@@ -25,7 +26,8 @@ use gantry_core::ports::policy::{
 };
 use gantry_core::ports::repo::{LockToken, PatchOutcome, RepoService};
 use gantry_core::ports::sandbox::{
-    ArtifactName, GroupName, ProfileName, ProgressSample, SandboxSpec, Timers, Timings,
+    ArtifactName, GroupName, JobHandle, ProfileName, ProgressSample, RecoveredJob, SandboxError,
+    SandboxSpec, TerminalCause, TerminalFacts, TimerKind as SandboxTimerKind, Timers, Timings,
 };
 use gantry_core::ports::worker::WorkerAdapter;
 use gantry_core::settings::resource::{
@@ -41,14 +43,14 @@ use gantry_core::worker::{
 };
 use gantry_engine::actor::EffectRunner;
 use gantry_engine::attempt::{
-    fetch_proposal_text, sandbox_id_for, AttemptContext, AttemptPorts, AttemptRunner, ResultCas,
-    RoleOutput, RunnerConfig,
+    fetch_proposal_text, sandbox_id_for, AttemptContext, AttemptPorts, AttemptRunner, CasError,
+    ResultCas, RoleOutput, RunnerConfig,
 };
 use gantry_engine::create::{budget_from_level, NewDelivery};
 use gantry_engine::decide::{
     AttemptPlan, Effect, EffectErrorClass, EffectKey, EffectReport, Finalized, Input,
-    InputIdentity, PatchResult, ProposalRef, ProposalText, ResolvedModel, TickReason, TimerKind,
-    TrustedInstructions,
+    InputIdentity, PatchResult, ProposalRef, ProposalText, ResolvedModel, RetryBlocked, TickReason,
+    TimerKind, TrustedInstructions,
 };
 use gantry_engine::effects::PortEffects;
 use gantry_engine::engine::{load_delivery_state, Engine};
@@ -453,13 +455,19 @@ impl H {
         files.insert(ArtifactName::new("result.json"), result);
         let mut outcome = FakeSandboxService::success_outcome(attempt, sandbox_id_for(&attempt));
         outcome.terminal.exit_code = Some(spec.exit_code);
+        if let Some(terminal) = spec.terminal {
+            outcome.terminal = terminal;
+        }
+        outcome.job_sha256 = spec.trusted_sha256;
+        outcome.egress.capped = spec.capped;
+        outcome.egress.incomplete = spec.incomplete;
         outcome.files = files;
         outcome.usage_metered = spec.metered;
         outcome.weighted_tokens = spec.weighted;
         outcome.timings = Timings {
             created: Some(ts(T0)),
-            staged: Some(ts(T0 + 100)),
-            started: Some(ts(T0 + 1_000)),
+            staged: (!spec.never_started).then_some(ts(T0 + 100)),
+            started: (!spec.never_started).then_some(ts(T0 + 1_000)),
             stopped: Some(ts(T0 + 62_500)),
             collected: Some(ts(T0 + 63_000)),
         };
@@ -475,6 +483,12 @@ struct OutcomeSpec {
     proposals: Option<Value>,
     metered: TokenUsage,
     weighted: u64,
+    trusted_sha256: Option<Sha256Digest>,
+    worker_sha256: Sha256Digest,
+    terminal: Option<TerminalFacts>,
+    capped: bool,
+    incomplete: bool,
+    never_started: bool,
 }
 
 impl Default for OutcomeSpec {
@@ -486,6 +500,12 @@ impl Default for OutcomeSpec {
             proposals: None,
             metered: TokenUsage::new(1_000, 200, 0, 0, 3),
             weighted: 2_000,
+            trusted_sha256: Some(sha256(b"job.json")),
+            worker_sha256: sha256(b"job.json"),
+            terminal: None,
+            capped: false,
+            incomplete: false,
+            never_started: false,
         }
     }
 }
@@ -500,7 +520,7 @@ fn result_json(
     json!({
         "protocol": "gantry-worker/1",
         "job_id": attempt,
-        "job_sha256": sha256(b"job.json"),
+        "job_sha256": spec.worker_sha256,
         "status": spec.status,
         "summary": format!("worker summary {INJECT}"),
         "error": if succeeded { Value::Null } else {
@@ -746,6 +766,420 @@ async fn result_job_id_mismatch_is_protocol_failure() {
     assert_eq!(detail(&finalized), Some("exec.protocol"));
 }
 
+fn open_pr(attempt: AttemptId) -> Value {
+    json!({"protocol": "gantry-worker/1", "job_id": attempt, "proposals": [{
+        "id": "p1", "kind": "open_pr", "target": null,
+        "params": {"title": "fix", "body": "body", "draft": false}, "rationale": "done"
+    }]})
+}
+
+#[tokio::test]
+async fn trusted_and_worker_digests_are_independent_and_gate_all_outputs() {
+    let h = H::new().await;
+    for (seed, trusted, worker) in [
+        (201, Some(sha256(b"server")), sha256(b"worker")),
+        (202, None, sha256(b"worker")),
+    ] {
+        let attempt = id(seed);
+        h.script(
+            attempt,
+            OutcomeSpec {
+                trusted_sha256: trusted,
+                worker_sha256: worker,
+                patch: Some(b"diff --git a/src/lib.rs b/src/lib.rs\n".to_vec()),
+                proposals: Some(open_pr(attempt)),
+                ..OutcomeSpec::default()
+            },
+        )
+        .await;
+        let plan = h.plan(attempt);
+        let f = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+        assert_eq!(detail(&f), Some("exec.protocol"));
+        assert!(matches!(f.patch, PatchResult::None));
+        assert!(f.proposals.is_empty());
+        assert!(h.repo.patch_outcome(&attempt).is_none(), "V5 must not run");
+        assert!(h.repo.commit_record(&attempt).is_none());
+        assert_eq!(h.policy.proposal_calls(), 0, "V6 must not run");
+        match trusted {
+            Some(server_digest) => {
+                assert_eq!(f.retry_blocked, None);
+                let bytes = h
+                    .cas
+                    .get(&f.result_ref.unwrap(), 1 << 20)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let bundle: gantry_core::worker::ResultBundle =
+                    serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(bundle.job_sha256, server_digest);
+                assert_ne!(bundle.job_sha256, worker);
+                assert!(bundle.validation.is_none());
+            }
+            None => {
+                assert_eq!(f.retry_blocked, Some(RetryBlocked::JobIdentityUnavailable));
+                assert_eq!(f.result_ref, None);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_digest_preserves_runtime_priority_and_blocks_retry() {
+    let h = H::new().await;
+    let terminal = TerminalFacts {
+        cause: TerminalCause::Exited,
+        exit_code: Some(0),
+        signal: None,
+        oom: false,
+        timer: None,
+        cancel_requested: false,
+    };
+    let cases = [
+        (
+            "cancel.requested",
+            TerminalFacts {
+                cause: TerminalCause::KilledCancel,
+                cancel_requested: true,
+                ..terminal.clone()
+            },
+            true,
+            true,
+        ),
+        (
+            "timeout.idle",
+            TerminalFacts {
+                cause: TerminalCause::KilledTimer,
+                timer: Some(SandboxTimerKind::Idle),
+                cancel_requested: true,
+                ..terminal.clone()
+            },
+            true,
+            false,
+        ),
+        (
+            "exec.oom",
+            TerminalFacts {
+                cause: TerminalCause::KilledRuntime,
+                oom: true,
+                ..terminal.clone()
+            },
+            true,
+            false,
+        ),
+        ("budget.tokens", terminal.clone(), true, false),
+        ("exec.protocol", terminal.clone(), false, false),
+    ];
+    for (index, (expected, facts, capped, never_started)) in cases.into_iter().enumerate() {
+        let attempt = id(210 + index as u128);
+        h.script(
+            attempt,
+            OutcomeSpec {
+                trusted_sha256: None,
+                terminal: Some(facts),
+                capped,
+                never_started,
+                metered: if never_started {
+                    TokenUsage::default()
+                } else {
+                    TokenUsage::new(1_000, 200, 0, 0, 3)
+                },
+                weighted: if never_started { 0 } else { 2_000 },
+                patch: Some(b"diff\n".to_vec()),
+                proposals: Some(open_pr(attempt)),
+                ..OutcomeSpec::default()
+            },
+        )
+        .await;
+        let plan = h.plan(attempt);
+        let f = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+        assert_eq!(detail(&f), Some(expected));
+        assert_eq!(f.retry_blocked, Some(RetryBlocked::JobIdentityUnavailable));
+        assert_eq!(f.result_ref, None);
+        assert!(h.repo.patch_outcome(&attempt).is_none());
+        assert!(f.proposals.is_empty());
+        assert_eq!(
+            f.usage_metered,
+            if never_started {
+                TokenUsage::default()
+            } else {
+                TokenUsage::new(1_000, 200, 0, 0, 3)
+            }
+        );
+        if never_started {
+            assert_eq!(f.status, AttemptStatus::Cancelled);
+        }
+    }
+    assert_eq!(h.policy.proposal_calls(), 0);
+}
+
+struct UnavailableCas;
+
+#[async_trait::async_trait]
+impl ResultCas for UnavailableCas {
+    async fn get(&self, _: &Sha256Digest, _: usize) -> Result<Option<Vec<u8>>, CasError> {
+        Err(CasError::Unavailable("must not read worker output".into()))
+    }
+    async fn put_artifact(&self, _: &[u8]) -> Result<Sha256Digest, CasError> {
+        Err(CasError::Unavailable("must not write artifacts".into()))
+    }
+    async fn put_bundle(
+        &self,
+        _: &gantry_core::worker::ResultBundle,
+    ) -> Result<Sha256Digest, CasError> {
+        Err(CasError::Unavailable("must not write bundle".into()))
+    }
+}
+
+#[tokio::test]
+async fn missing_digest_finishes_without_reading_or_writing_cas() {
+    let h = H::new().await;
+    let previous = id(218);
+    h.script(previous, OutcomeSpec::default()).await;
+    let previous_plan = h.plan(previous);
+    let historical = h
+        .runner(3)
+        .run(&previous_plan, &h.cx(&previous_plan), &ctx())
+        .await
+        .unwrap();
+    let historical_ref = historical.result_ref.unwrap();
+    let historical_bytes = h.cas.get(&historical_ref, 1 << 20).await.unwrap().unwrap();
+    let attempt = id(219);
+    h.script(
+        attempt,
+        OutcomeSpec {
+            trusted_sha256: None,
+            ..OutcomeSpec::default()
+        },
+    )
+    .await;
+    let mut ports = h.ports.clone();
+    ports.cas = Arc::new(UnavailableCas);
+    let runner = AttemptRunner::new(ports, Arc::new(runner_config(3)));
+    let plan = h.plan(attempt);
+    let f = runner.run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+    assert_eq!(detail(&f), Some("exec.protocol"));
+    assert_eq!(f.result_ref, None);
+    assert_eq!(f.usage_metered, TokenUsage::new(1_000, 200, 0, 0, 3));
+    assert_eq!(historical.result_ref, Some(historical_ref));
+    assert_eq!(
+        h.cas.get(&historical_ref, 1 << 20).await.unwrap().unwrap(),
+        historical_bytes
+    );
+}
+
+#[tokio::test]
+async fn trusted_digest_is_used_in_bundle_even_without_a_valid_result() {
+    let h = H::new().await;
+    let attempt = id(240);
+    let mut outcome = FakeSandboxService::success_outcome(attempt, sandbox_id_for(&attempt));
+    outcome.job_sha256 = Some(sha256(b"server-stage"));
+    h.sandbox
+        .script_outcome(attempt, sandbox_id_for(&attempt), outcome);
+    let plan = h.plan(attempt);
+    let f = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+    assert_eq!(detail(&f), Some("exec.protocol"));
+    let bytes = h
+        .cas
+        .get(&f.result_ref.unwrap(), 1 << 20)
+        .await
+        .unwrap()
+        .unwrap();
+    let bundle: gantry_core::worker::ResultBundle = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(bundle.job_sha256, sha256(b"server-stage"));
+    assert!(bundle.validation.is_none());
+}
+
+#[tokio::test]
+async fn trusted_digest_mismatch_does_not_override_runtime_timeout_or_oom() {
+    let h = H::new().await;
+    for (seed, facts, expected) in [
+        (
+            241,
+            TerminalFacts {
+                cause: TerminalCause::KilledTimer,
+                exit_code: None,
+                signal: None,
+                oom: false,
+                timer: Some(SandboxTimerKind::Wall),
+                cancel_requested: false,
+            },
+            "timeout.wall",
+        ),
+        (
+            242,
+            TerminalFacts {
+                cause: TerminalCause::KilledRuntime,
+                exit_code: None,
+                signal: Some(9),
+                oom: true,
+                timer: None,
+                cancel_requested: false,
+            },
+            "exec.oom",
+        ),
+    ] {
+        let attempt = id(seed);
+        h.script(
+            attempt,
+            OutcomeSpec {
+                trusted_sha256: Some(sha256(b"server")),
+                worker_sha256: sha256(b"worker"),
+                terminal: Some(facts),
+                patch: Some(b"diff\n".to_vec()),
+                proposals: Some(open_pr(attempt)),
+                ..OutcomeSpec::default()
+            },
+        )
+        .await;
+        let plan = h.plan(attempt);
+        let f = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+        assert_eq!(detail(&f), Some(expected));
+        assert_eq!(f.retry_blocked, None);
+        let bytes = h
+            .cas
+            .get(&f.result_ref.unwrap(), 1 << 20)
+            .await
+            .unwrap()
+            .unwrap();
+        let bundle: gantry_core::worker::ResultBundle = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(bundle.job_sha256, sha256(b"server"));
+        assert!(h.repo.patch_outcome(&attempt).is_none());
+    }
+    assert_eq!(h.policy.proposal_calls(), 0);
+}
+
+fn final_usage(job_id: AttemptId) -> FinalUsage {
+    FinalUsage {
+        job_id,
+        state: JobTokenState::Revoked,
+        revoked_at: Some(ts(T0)),
+        usage: TokenUsage::new(4_000, 200, 100, 0, 5),
+        weighted_tokens: 5_010,
+        capped: false,
+        incomplete: false,
+        upstream_errors: UpstreamErrors::default(),
+        denied: DeniedCounters::default(),
+    }
+}
+
+#[tokio::test]
+async fn identity_error_finishes_with_trusted_usage_or_proven_zero() {
+    let h = H::new().await;
+    for (seed, usage) in [(220, None), (221, Some(final_usage(id(221))))] {
+        let attempt = id(seed);
+        h.script(attempt, OutcomeSpec::default()).await;
+        h.sandbox.script_wait_error(
+            attempt,
+            SandboxError::JobIdentityUnavailable {
+                message: "unverifiable".into(),
+                usage: usage.clone().map(Box::new),
+            },
+        );
+        let plan = h.plan(attempt);
+        let f = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+        assert_eq!(f.status, AttemptStatus::Failed);
+        assert_eq!(f.failure_class, Some(FailureClass::InfraError));
+        assert_eq!(detail(&f), Some("infra.job_identity_unavailable"));
+        assert_eq!(f.retry_blocked, Some(RetryBlocked::JobIdentityUnavailable));
+        assert_eq!(f.result_ref, None);
+        assert_eq!(
+            f.usage_metered,
+            usage.as_ref().map_or(TokenUsage::default(), |u| u.usage)
+        );
+        assert_eq!(
+            f.weighted_tokens,
+            usage.as_ref().map_or(0, |u| u.weighted_tokens)
+        );
+        let mut resumed = plan.clone();
+        resumed.resume = true;
+        let again = h
+            .runner(3)
+            .run(&resumed, &h.cx(&resumed), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(detail(&again), detail(&f));
+        assert_eq!(again.usage_metered, f.usage_metered);
+    }
+    assert_eq!(h.submitted().len(), 2, "resume must not resubmit");
+}
+
+#[tokio::test]
+async fn invalid_identity_metering_never_yields_a_finalized_result() {
+    let h = H::new().await;
+    let attempt = id(230);
+    let good = final_usage(attempt);
+    let cases = [
+        FinalUsage {
+            job_id: id(231),
+            ..good.clone()
+        },
+        FinalUsage {
+            state: JobTokenState::Active,
+            ..good.clone()
+        },
+        FinalUsage {
+            revoked_at: None,
+            ..good.clone()
+        },
+        FinalUsage {
+            incomplete: true,
+            ..good
+        },
+    ];
+    for usage in cases {
+        h.script(attempt, OutcomeSpec::default()).await;
+        h.sandbox.script_wait_error(
+            attempt,
+            SandboxError::JobIdentityUnavailable {
+                message: "unverifiable".into(),
+                usage: Some(Box::new(usage)),
+            },
+        );
+        let plan = h.plan(attempt);
+        assert!(matches!(
+            h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await,
+            Err(gantry_engine::attempt::RunnerError::Defect(
+                "sandbox_final_usage_invalid"
+            ))
+        ));
+    }
+    h.script(
+        attempt,
+        OutcomeSpec {
+            trusted_sha256: None,
+            incomplete: true,
+            ..OutcomeSpec::default()
+        },
+    )
+    .await;
+    let plan = h.plan(attempt);
+    assert!(h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.is_err());
+    assert!(!h
+        .sandbox
+        .calls()
+        .iter()
+        .any(|c| matches!(c, SandboxCall::Release { .. })));
+}
+
+#[tokio::test]
+async fn wrong_sandbox_outcome_never_yields_a_finalized_result() {
+    let h = H::new().await;
+    let attempt = id(245);
+    let mut outcome = FakeSandboxService::success_outcome(attempt, sandbox_id_for(&attempt));
+    outcome.sandbox_id = sandbox_id_for(&id(246));
+    h.sandbox
+        .script_outcome(attempt, sandbox_id_for(&id(246)), outcome);
+    let plan = h.plan(attempt);
+    assert!(matches!(
+        h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await,
+        Err(gantry_engine::attempt::RunnerError::Defect(
+            "sandbox_final_usage_invalid"
+        ))
+    ));
+    assert_eq!(h.policy.proposal_calls(), 0);
+    assert!(h.repo.patch_outcome(&attempt).is_none());
+}
+
 #[tokio::test]
 async fn structured_output_of_wrong_kind_is_output_invalid() {
     let h = H::new().await;
@@ -944,6 +1378,84 @@ async fn resume_resubmits_only_unknown_jobs() {
     let lost = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
     assert_eq!(lost.failure_class, Some(FailureClass::InfraError));
     assert_eq!(detail(&lost), Some("infra.lost"));
+}
+
+#[tokio::test]
+async fn recovery_port_mismatch_never_resubmits_or_settles() {
+    let h = H::new().await;
+    let attempt = id(243);
+    let other = id(244);
+    h.script(attempt, OutcomeSpec::default()).await;
+    let mut plan = h.plan(attempt);
+    plan.resume = true;
+    for reply in [
+        vec![],
+        vec![RecoveredJob::Unknown { job_id: other }],
+        vec![RecoveredJob::Running(JobHandle {
+            job_id: attempt,
+            sandbox_id: sandbox_id_for(&other),
+        })],
+    ] {
+        h.sandbox.script_recover_reply(reply);
+        assert!(matches!(
+            h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await,
+            Err(gantry_engine::attempt::RunnerError::Defect(
+                "sandbox_recovery_mismatch"
+            ))
+        ));
+    }
+    assert!(h.submitted().is_empty());
+    assert!(!h
+        .sandbox
+        .calls()
+        .iter()
+        .any(|c| matches!(c, SandboxCall::Wait { .. } | SandboxCall::Release { .. })));
+}
+
+#[tokio::test]
+async fn recovery_invalid_spec_never_waits_submits_finalizes_or_settles() {
+    let h = H::new().await;
+    let attempt = id(245);
+    let mut plan = h.plan(attempt);
+    plan.resume = true;
+    h.sandbox
+        .script_recover_error(SandboxError::InvalidSpec("conflicting identity".into()));
+    let before = h.store.events().head().await.unwrap();
+    assert!(matches!(
+        h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await,
+        Err(gantry_engine::attempt::RunnerError::Sandbox(
+            SandboxError::InvalidSpec(_)
+        ))
+    ));
+
+    let (fx, mut rx) = effects(&h, 3);
+    assert!(fx
+        .run(&h.state, Effect::RunAttempt(Box::new(plan)), &ctx())
+        .await
+        .is_none());
+    let (delivery, report, identity) = next(&mut rx).await;
+    assert_eq!(delivery, h.delivery);
+    assert_eq!(identity, InputIdentity::Report(EffectKey::Run(attempt)));
+    assert!(matches!(
+        report,
+        Input::Report(EffectReport::EffectFailed {
+            key: EffectKey::Run(id),
+            error: EffectErrorClass::Defect { what: "sandbox_invalid_spec" }
+        }) if id == attempt
+    ));
+    let calls = h.sandbox.calls();
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        assert!(matches!(
+            call,
+            SandboxCall::Recover { unfinished, .. }
+                if unfinished.len() == 1
+                    && unfinished[0].job_id == attempt
+                    && unfinished[0].sandbox_id == sandbox_id_for(&attempt)
+                    && unfinished[0].project_id == h.project
+        ));
+    }
+    assert_eq!(h.store.events().head().await.unwrap(), before);
 }
 
 // ---------------------------------------------------------------------------

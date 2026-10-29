@@ -13,7 +13,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gantry_core::egress::SandboxTier;
+use gantry_core::egress::{FinalUsage, JobTokenState, SandboxTier};
 use gantry_core::entities::{SandboxStatus, Tier, TokenUsage, WorktreeSnapshot};
 use gantry_core::events::{
     AttemptProgressKind, EventType, NewEvent, SandboxCreatedData, SandboxDestroyedData, Subject,
@@ -32,10 +32,14 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit};
 use tokio::time::Instant;
 
-use super::meta::{CasRef, Meta, Phase, Resume, TailsRecord, TerminalReason};
+use super::meta::{
+    CasRef, Meta, Phase, RecoveryKind, RecoveryRecord, Resume, TailsRecord, TerminalReason,
+};
 use super::seams::CasKind;
-use super::{infra, Command, Inner, Occupancy, Outcome};
-use crate::driver::{DriverError, ExitFacts, LogCursor, SandboxDriver};
+use super::{infra, recovery_path, Command, Inner, Occupancy, Outcome};
+use crate::driver::{
+    ContainerStatus, DriverError, ExitFacts, LabelSelector, LogCursor, SandboxDriver,
+};
 use crate::intake::{IntakePlan, IntakeResult};
 use crate::invariants::{validate_invariants, InvariantContext};
 use crate::progress::{LineOutcome, ProgressCollector, ProgressLimits};
@@ -118,6 +122,8 @@ pub(super) struct JobActor<D> {
     container: Option<ContainerId>,
     created_event: bool,
     cancel_requested: bool,
+    /// 准备重入时，前一次准备已签发或可能签发令牌。
+    reentered_with_token: bool,
     /// `revoke` 的结果只取一次（错误出口的统一清理可能再次调用）。
     revoked: Option<(TokenUsage, u64, EgressFlags)>,
     /// 已执行过 `cleanup_failed`。
@@ -156,6 +162,11 @@ pub(super) enum RecoverMode {
     CancelledBeforeStart,
     /// 受理后丢失：吊销、记 `sandbox.destroyed(lost)`，`wait` 返回 `Infra{Lost}`。
     Lost,
+    /// 身份不可验证：保留依据，停止已有进程并等待可信最终计量。
+    Reject {
+        record: RecoveryRecord,
+        permit: Option<Option<OwnedSemaphorePermit>>,
+    },
 }
 
 /// 运行结束时的事实。
@@ -167,16 +178,19 @@ struct Run {
 }
 
 impl<D: SandboxDriver + 'static> JobActor<D> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         inner: Arc<Inner<D>>,
         ctx: ActorCtx,
         spec: SandboxSpec,
         layout: StagingLayout,
+        mut meta: Meta,
         commands: mpsc::UnboundedReceiver<Command>,
         progress: broadcast::Sender<ProgressSample>,
         occupancy: Arc<Mutex<Occupancy>>,
     ) -> Self {
-        let mut meta = Meta::new(spec.job_id, spec.sandbox_id);
+        let reentered_with_token = meta.token_issued;
+        meta.project_id = Some(spec.project_id);
         meta.resume = Some(Resume {
             project_id: spec.project_id,
             io: spec.io.clone(),
@@ -204,6 +218,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             container: None,
             created_event: false,
             cancel_requested: false,
+            reentered_with_token,
             revoked: None,
             cleaned: false,
         }
@@ -234,6 +249,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             occupancy,
             timings: meta.timings.into(),
             cancel_requested: meta.cancel_requested,
+            reentered_with_token: false,
             meta,
             container,
             created_event,
@@ -285,10 +301,21 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
     }
 
     pub(super) async fn run(mut self, permit: oneshot::Receiver<OwnedSemaphorePermit>) -> Outcome {
-        let result = self.run_inner(permit).await;
+        let mut result = self.run_inner(permit).await;
+        if self.reentered_with_token
+            && self.meta.deadline_ms.is_none()
+            && result.is_err()
+            && !matches!(&result, Err(SandboxError::JobIdentityUnavailable { .. }))
+        {
+            let record = self
+                .rejection_record("reentered preparation failed with a previously issued token");
+            result = self.reject(record, None).await;
+        }
         // 所有错误出口统一清理：容器、令牌、staging 不随许可一起泄漏。
         if let Err(err) = &result {
-            self.cleanup_failed(err).await;
+            if !matches!(err, SandboxError::JobIdentityUnavailable { .. }) {
+                self.cleanup_failed(err).await;
+            }
         }
         self.set_occupancy(Occupancy::Done);
         result
@@ -296,9 +323,31 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
 
     /// 恢复出的 job 的入口（§7.10）。
     pub(super) async fn run_recovered(mut self, mode: RecoverMode) -> Outcome {
-        let result = self.recover_inner(mode).await;
+        let reject_mode = matches!(mode, RecoverMode::Reject { .. });
+        let mut result = self.recover_inner(mode).await;
+        let metadata_failed = matches!(&result, Err(SandboxError::Infra { detail: InfraDetail::WorkspacePrep, message }) if message.starts_with("meta.json:"))
+            && self.meta.deadline_ms.is_some();
+        if !reject_mode
+            && !matches!(&result, Err(SandboxError::JobIdentityUnavailable { .. }))
+            && result.is_err()
+            && (self.meta.job_sha256.is_none() || metadata_failed)
+        {
+            let record = RecoveryRecord {
+                job_id: self.meta.job_id,
+                sandbox_id: self.meta.sandbox_id,
+                project_id: self.project_id,
+                kind: RecoveryKind::Reject {
+                    message: "legacy job outcome unavailable".into(),
+                    no_usage: false,
+                    delivered: false,
+                },
+            };
+            result = self.reject(record, None).await;
+        }
         if let Err(err) = &result {
-            self.cleanup_failed(err).await;
+            if !matches!(err, SandboxError::JobIdentityUnavailable { .. }) {
+                self.cleanup_failed(err).await;
+            }
         }
         self.set_occupancy(Occupancy::Done);
         result
@@ -307,6 +356,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
     async fn recover_inner(&mut self, mode: RecoverMode) -> Outcome {
         match mode {
             RecoverMode::Supervise { id, exited, permit } => {
+                let mut lease = Some(permit);
                 self.set_occupancy(Occupancy::Holding);
                 let wall_time = Duration::from_secs(self.resume().wall_time_s);
                 let now = self.now().as_millis();
@@ -317,7 +367,15 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 if self.timings.started.is_none() {
                     self.timings.started = Some(self.now());
                 }
-                self.phase(Phase::Running)?;
+                if matches!(
+                    self.meta.phase,
+                    Phase::Starting | Phase::Running | Phase::Stopping
+                ) && self.phase(Phase::Running).is_err()
+                {
+                    let record =
+                        self.rejection_record("metadata persistence failed during recovery");
+                    return self.reject(record, lease).await;
+                }
                 // deadline 按持久化的 UTC 时刻重建，不因重启而延长。
                 let wall = Duration::from_millis(deadline_ms.saturating_sub(now).max(0) as u64);
                 let preset = if exited {
@@ -326,13 +384,19 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                     self.meta.terminal_reason
                 };
                 let outcome = match self.supervise(&id, wall, preset).await {
-                    Ok(run) => self.collect_and_destroy(&id, run, None).await,
+                    Ok(run) if run.lost && self.meta.job_sha256.is_none() => {
+                        Err(infra(InfraDetail::Lost, "legacy runtime facts unavailable"))
+                    }
+                    Ok(run) => self.collect_and_destroy(&id, run, None, &mut lease).await,
                     Err(err) => Err(err),
                 };
-                match permit {
-                    Some(permit) => drop(permit),
-                    None => self.inner.settle_overdraft(),
+                if matches!(&outcome, Err(SandboxError::Infra { detail: InfraDetail::WorkspacePrep, message }) if message.starts_with("meta.json:"))
+                {
+                    let record =
+                        self.rejection_record("metadata persistence failed during recovery");
+                    return self.reject(record, lease).await;
                 }
+                self.release_recovered_capacity(&mut lease);
                 outcome
             }
             RecoverMode::Collect { id, intake, lost } => {
@@ -344,13 +408,15 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                     lost,
                     collector,
                 };
-                self.collect_and_destroy(&id, run, Some(intake)).await
+                self.collect_and_destroy(&id, run, Some(intake), &mut None)
+                    .await
             }
-            RecoverMode::CancelledBeforeStart => self.finish_without_start().await,
+            RecoverMode::CancelledBeforeStart => self.finish_without_start(&mut None).await,
             RecoverMode::Lost => Err(infra(
                 InfraDetail::Lost,
                 "sandbox lost across a restart (container and out/ unavailable)",
             )),
+            RecoverMode::Reject { record, permit } => self.reject(record, permit).await,
         }
     }
 
@@ -389,39 +455,82 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 if command == Some(Command::Cancel) {
                     self.cancel_requested = true;
                 }
-                return self.finish_without_start().await;
+                return self.finish_without_start(&mut None).await;
             }
             permit = permit => permit.map_err(|_| SandboxError::ShuttingDown)?,
         };
         self.set_occupancy(Occupancy::Holding);
-        let outcome = self.run_with_permit().await;
+        let mut permit = Some(permit);
+        let mut outcome = self.run_with_permit(&mut permit).await;
+        if matches!(&outcome, Err(SandboxError::Infra { detail: InfraDetail::WorkspacePrep, message }) if message.starts_with("meta.json:"))
+            && self.meta.deadline_ms.is_some()
+        {
+            outcome = self
+                .reject_uncertain_start(
+                    &mut permit,
+                    "metadata persistence failed after start became possible",
+                )
+                .await;
+        }
         drop(permit);
         outcome
     }
 
-    async fn run_with_permit(&mut self) -> Outcome {
+    async fn run_with_permit(&mut self, permit: &mut Option<OwnedSemaphorePermit>) -> Outcome {
         if self.poll_cancel() {
-            return self.finish_without_start().await;
+            return self.finish_without_start(permit).await;
         }
         let grant = self.prepare().await?;
         drop(grant);
         if self.poll_cancel() {
             // create / stage 阶段被取消：不 start，直接销毁，不取产物（§7.5）。
-            return self.finish_without_start().await;
+            return self.finish_without_start(permit).await;
         }
         let id = self.container.clone().expect("prepared container");
         // deadline 在 start 之前落盘：start 之后、Running 写盘之前崩溃，恢复也不会重发整段墙钟。
         let wall = Duration::from_secs(self.resume().wall_time_s);
         self.meta.deadline_ms = Some(self.now().as_millis() + wall.as_millis() as i64);
         self.phase(Phase::Starting)?;
-        self.driver()
-            .start(&id)
-            .await
-            .map_err(driver_infra(InfraDetail::SandboxCreate))?;
+        if let Err(err) = self.driver().start(&id).await {
+            let state =
+                tokio::time::timeout(Duration::from_secs(5), self.driver().inspect(&id)).await;
+            if !matches!(state, Ok(Ok(ref state)) if state.status == ContainerStatus::Created
+                && state.labels.get(LABEL_JOB_ID) == Some(&self.meta.job_id.to_string())
+                && state.labels.get(LABEL_SANDBOX_ID) == Some(&self.meta.sandbox_id.to_string())
+                && state.labels.get(LABEL_MANAGED).is_some_and(|v| v == "1"))
+            {
+                return self
+                    .reject_uncertain_start(permit, "start failed with an unknown execution state")
+                    .await;
+            }
+            return Err(driver_infra(InfraDetail::SandboxCreate)(err));
+        }
         self.timings.started = Some(self.now());
         self.phase(Phase::Running)?;
         let run = self.supervise(&id, wall, None).await?;
-        self.collect_and_destroy(&id, run, None).await
+        self.collect_and_destroy(&id, run, None, &mut None).await
+    }
+
+    fn rejection_record(&self, message: &str) -> RecoveryRecord {
+        RecoveryRecord {
+            job_id: self.meta.job_id,
+            sandbox_id: self.meta.sandbox_id,
+            project_id: self.project_id,
+            kind: RecoveryKind::Reject {
+                message: message.into(),
+                no_usage: false,
+                delivered: false,
+            },
+        }
+    }
+
+    async fn reject_uncertain_start(
+        &mut self,
+        permit: &mut Option<OwnedSemaphorePermit>,
+        message: &str,
+    ) -> Outcome {
+        let record = self.rejection_record(message);
+        self.reject(record, permit.take().map(Some)).await
     }
 
     /// 签发令牌 → 建目录 → 准备工作区 → 建容器（未启动）→ staging。
@@ -554,7 +663,8 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             diff_patch: diff.as_deref(),
             upstream: &[],
         };
-        stage(&self.layout, &request, &mut OsNonce).map_err(stage_error)?;
+        let staged = stage(&self.layout, &request, &mut OsNonce).map_err(stage_error)?;
+        self.meta.job_sha256 = Some(Some(staged.job_sha256));
         self.timings.staged = Some(self.now());
         self.phase(Phase::Staged)?;
         Ok(grant)
@@ -783,15 +893,41 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         self.phase(Phase::Stopping)?;
         if reason != TerminalReason::RuntimeExit {
             let grace = Duration::from_secs(self.resume().kill_grace_s);
-            if self.driver().stop(id, grace).await.is_err() {
+            if self.meta.job_sha256.is_none() {
+                self.stop_for_identity(id, grace).await?;
+            } else if self.driver().stop(id, grace).await.is_err() {
                 let _ = self.driver().kill(id).await;
             }
         }
         // 循环里没等到退出（计时器 / 取消，或恢复时沿用已写盘的原因）：现在等。
         if exit.is_none() && !lost {
-            match exit_wait.await {
-                Ok(Ok(facts)) => exit = Some(facts),
-                _ => lost = true,
+            if self.meta.job_sha256.is_none() {
+                let mut delay = Duration::from_millis(250);
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(5), &mut exit_wait).await {
+                        Ok(Ok(Ok(facts))) => {
+                            exit = Some(facts);
+                            break;
+                        }
+                        Ok(Ok(Err(DriverError::NotFound))) => {
+                            lost = true;
+                            break;
+                        }
+                        _ => {
+                            exit_wait.abort();
+                            tokio::time::sleep(delay).await;
+                            delay = (delay * 2).min(Duration::from_secs(5));
+                            let driver = Arc::clone(&self.inner.deps.driver);
+                            let id = id.clone();
+                            exit_wait = self.inner.spawn(async move { driver.wait(&id).await });
+                        }
+                    }
+                }
+            } else {
+                match exit_wait.await {
+                    Ok(Ok(facts)) => exit = Some(facts),
+                    _ => lost = true,
+                }
             }
         }
         let mut reader = reader;
@@ -814,6 +950,42 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             lost,
             collector,
         })
+    }
+
+    async fn stop_for_identity(
+        &self,
+        id: &ContainerId,
+        grace: Duration,
+    ) -> Result<(), SandboxError> {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            let stopped = tokio::time::timeout(
+                grace.saturating_add(Duration::from_secs(5)),
+                self.driver().stop(id, grace),
+            )
+            .await;
+            if !matches!(stopped, Ok(Ok(()))) {
+                let _ = tokio::time::timeout(Duration::from_secs(5), self.driver().kill(id)).await;
+            }
+            match tokio::time::timeout(Duration::from_secs(5), self.driver().inspect(id)).await {
+                Ok(Ok(state)) if state.status == ContainerStatus::Exited => return Ok(()),
+                Ok(Ok(state)) if state.status == ContainerStatus::Created => {
+                    return Err(infra(
+                        InfraDetail::Lost,
+                        "legacy runtime reports an unstarted container",
+                    ))
+                }
+                Ok(Err(DriverError::NotFound)) => {
+                    return Err(infra(
+                        InfraDetail::Lost,
+                        "legacy runtime container disappeared",
+                    ))
+                }
+                _ => {}
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
     }
 
     fn spawn_log_reader(
@@ -891,6 +1063,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         id: &ContainerId,
         run: Run,
         intake: Option<IntakeResult>,
+        lease: &mut Option<Option<OwnedSemaphorePermit>>,
     ) -> Outcome {
         self.phase(Phase::Collecting)?;
         let intake_was_preread = intake.is_some();
@@ -959,15 +1132,39 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
                 bytes: stderr_tail.bytes,
             },
         });
-        self.timings.collected = Some(self.now());
+        if self.timings.collected.is_none() {
+            self.timings.collected = Some(self.now());
+        }
         self.phase(Phase::Collected)?;
 
-        let (usage, weighted, egress) = self.revoke().await;
+        // 旧记录必须先释放已停止容器，再等待完整计量；等待不占计算槽位。
+        let legacy = self.meta.job_sha256.is_none();
+        if legacy {
+            self.meta.identity_diagnostic =
+                Some("waiting for confirmed complete egress usage".into());
+            self.phase(Phase::Destroying)?;
+            self.remove_for_identity(id).await;
+            self.phase(Phase::Destroyed)?;
+            self.release_recovered_capacity(lease);
+        }
+        let (usage, weighted, egress) = if legacy {
+            let usage = self.complete_usage().await;
+            self.meta.identity_finalized = true;
+            self.meta.identity_diagnostic = None;
+            self.phase(Phase::Destroyed)?;
+            (
+                usage.usage,
+                usage.weighted_tokens,
+                flags(usage.capped, false),
+            )
+        } else {
+            self.revoke().await
+        };
         let terminal = terminal_facts(&run, self.cancel_requested);
         let outcome = JobOutcome {
             job_id: self.meta.job_id,
             sandbox_id: self.meta.sandbox_id,
-            job_sha256: None, // 可信摘要链路尚未接线。
+            job_sha256: self.meta.job_sha256.flatten(),
             partial: terminal.cause != TerminalCause::Exited,
             terminal,
             files,
@@ -982,9 +1179,13 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             timings: self.timings,
         };
 
-        self.phase(Phase::Destroying)?;
+        if !legacy {
+            self.phase(Phase::Destroying)?;
+        }
         // 销毁失败留给孤儿巡检，不影响分类（§9）。
-        let _ = self.driver().remove(id).await;
+        if !legacy {
+            let _ = self.driver().remove(id).await;
+        }
         let final_status = if run.lost {
             SandboxStatus::Lost
         } else {
@@ -992,8 +1193,169 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         };
         self.append_destroyed(final_status, cause_text(outcome.terminal.cause))
             .await;
-        self.phase(Phase::Destroyed)?;
+        if !legacy {
+            self.phase(Phase::Destroyed)?;
+        }
         Ok(outcome)
+    }
+
+    fn release_recovered_capacity(&self, lease: &mut Option<Option<OwnedSemaphorePermit>>) {
+        if let Some(permit) = lease.take() {
+            match permit {
+                Some(permit) => drop(permit),
+                None => self.inner.settle_overdraft(),
+            }
+            self.set_occupancy(Occupancy::Done);
+        }
+    }
+
+    /// 每次远程调用有时限；保留记录并退避，直到完整吊销可交付。
+    async fn complete_usage(&self) -> FinalUsage {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            let call = self
+                .inner
+                .deps
+                .egress
+                .revoke_job_token(&self.meta.job_id, &self.ctx);
+            if let Ok(Ok(usage)) = tokio::time::timeout(Duration::from_secs(5), call).await {
+                if usage.job_id == self.meta.job_id
+                    && usage.state == JobTokenState::Revoked
+                    && usage.revoked_at.is_some()
+                    && !usage.incomplete
+                {
+                    return usage;
+                }
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+    }
+
+    async fn remove_for_identity(&self, id: &ContainerId) {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            if matches!(
+                tokio::time::timeout(Duration::from_secs(5), self.driver().remove(id)).await,
+                Ok(Ok(())) | Ok(Err(DriverError::NotFound))
+            ) {
+                return;
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+    }
+
+    async fn reject(
+        &mut self,
+        mut record: RecoveryRecord,
+        mut lease: Option<Option<OwnedSemaphorePermit>>,
+    ) -> Outcome {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            let saved = {
+                let _guard = self.inner.submit_lock.lock().await;
+                record.save(&recovery_path(&self.layout))
+            };
+            if saved.is_ok() {
+                break;
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+        if lease.is_some() {
+            self.set_occupancy(Occupancy::Holding);
+        }
+        let mut labels = BTreeMap::new();
+        labels.insert(LABEL_MANAGED.to_owned(), "1".to_owned());
+        labels.insert(LABEL_JOB_ID.to_owned(), record.job_id.to_string());
+        labels.insert(LABEL_SANDBOX_ID.to_owned(), record.sandbox_id.to_string());
+        let selector = LabelSelector(labels);
+        loop {
+            let listed =
+                tokio::time::timeout(Duration::from_secs(5), self.driver().list(&selector)).await;
+            if let Ok(Ok(containers)) = listed {
+                if !containers.is_empty() && lease.is_none() {
+                    let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
+                    if permit.is_none() {
+                        self.inner
+                            .debt
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    lease = Some(permit);
+                    self.set_occupancy(Occupancy::Holding);
+                }
+                let mut removed = true;
+                for container in containers {
+                    if container.status == ContainerStatus::Running {
+                        let killed = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            self.driver().kill(&container.id),
+                        )
+                        .await;
+                        if !matches!(killed, Ok(Ok(())) | Ok(Err(DriverError::NotFound))) {
+                            removed = false;
+                            continue;
+                        }
+                        let inspected = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            self.driver().inspect(&container.id),
+                        )
+                        .await;
+                        if !matches!(inspected, Ok(Ok(ref state)) if state.status != ContainerStatus::Running)
+                            && !matches!(inspected, Ok(Err(DriverError::NotFound)))
+                        {
+                            removed = false;
+                            continue;
+                        }
+                    }
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.driver().remove(&container.id),
+                    )
+                    .await;
+                    if !matches!(result, Ok(Ok(())) | Ok(Err(DriverError::NotFound))) {
+                        removed = false;
+                    }
+                }
+                if removed {
+                    break;
+                }
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+        self.release_recovered_capacity(&mut lease);
+        self.set_occupancy(Occupancy::Done);
+        let RecoveryKind::Reject {
+            message, no_usage, ..
+        } = &record.kind
+        else {
+            unreachable!()
+        };
+        let message = message.clone();
+        let no_usage = *no_usage;
+        let usage = if no_usage {
+            None
+        } else {
+            Some(Box::new(self.complete_usage().await))
+        };
+        if let RecoveryKind::Reject { delivered, .. } = &mut record.kind {
+            *delivered = true;
+        }
+        let mut delay = Duration::from_millis(250);
+        loop {
+            let saved = {
+                let _guard = self.inner.submit_lock.lock().await;
+                record.save(&recovery_path(&self.layout))
+            };
+            if saved.is_ok() {
+                break;
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(5));
+        }
+        Err(SandboxError::JobIdentityUnavailable { message, usage })
     }
 
     /// 吊销令牌并取最终计量；在所有路径上都执行（§7.9）。
@@ -1024,20 +1386,47 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
     }
 
     /// 尚未启动（排队中或 create / stage 阶段被取消）：销毁、吊销、不取产物。
-    async fn finish_without_start(&mut self) -> Outcome {
+    async fn finish_without_start(&mut self, permit: &mut Option<OwnedSemaphorePermit>) -> Outcome {
         self.cancel_requested = true;
         let _ = self.meta.record_reason(TerminalReason::Cancel);
+        let strict_usage = (self.meta.job_sha256.flatten().is_none()
+            || self.reentered_with_token
+            || self.meta.identity_diagnostic.is_some()
+            || self.meta.identity_finalized)
+            && self.meta.token_issued;
+        if strict_usage {
+            self.meta.identity_diagnostic =
+                Some("waiting for confirmed complete egress usage".into());
+        }
         self.phase(Phase::Destroying)?;
         if let Some(id) = self.container.clone() {
-            let _ = self.driver().remove(&id).await;
+            if strict_usage {
+                self.remove_for_identity(&id).await;
+            } else {
+                let _ = self.driver().remove(&id).await;
+            }
         }
-        let (usage, weighted, mut egress) = self.revoke().await;
+        if strict_usage {
+            drop(permit.take());
+            self.set_occupancy(Occupancy::Done);
+        }
+        let (usage, weighted, mut egress) = if strict_usage {
+            self.phase(Phase::Destroyed)?;
+            let usage = self.complete_usage().await;
+            self.meta.identity_finalized = true;
+            self.meta.identity_diagnostic = None;
+            self.phase(Phase::Destroyed)?;
+            (
+                usage.usage,
+                usage.weighted_tokens,
+                flags(usage.capped, false),
+            )
+        } else {
+            self.revoke().await
+        };
         if !self.meta.token_issued {
             egress.incomplete = false;
         }
-        let _ = self.driver().purge_staging(&self.layout).await;
-        // purge 会删掉 meta.json；重建它，release 之前仍能判断受理过。
-        let _ = std::fs::create_dir_all(self.layout.dir());
         self.append_destroyed(SandboxStatus::Destroyed, "cancelled_before_start")
             .await;
         self.phase(Phase::Destroyed)?;
@@ -1051,7 +1440,7 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
         Ok(JobOutcome {
             job_id: self.meta.job_id,
             sandbox_id: self.meta.sandbox_id,
-            job_sha256: None, // 可信摘要链路尚未接线。
+            job_sha256: self.meta.job_sha256.flatten(),
             terminal: TerminalFacts {
                 cause: TerminalCause::KilledCancel,
                 exit_code: None,
@@ -1087,7 +1476,11 @@ impl<D: SandboxDriver + 'static> JobActor<D> {
             let _ = self.driver().remove(&id).await;
         }
         let _ = self.revoke().await;
-        let _ = self.driver().purge_staging(&self.layout).await;
+        // D-22：令牌已签发时，meta/staging 是 release 遗忘登记的归属与计量依据，
+        // 必须保留到显式 release。
+        if !self.meta.token_issued {
+            let _ = self.driver().purge_staging(&self.layout).await;
+        }
         let final_status = match err {
             SandboxError::Infra {
                 detail: InfraDetail::Lost,

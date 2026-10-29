@@ -33,7 +33,7 @@ use gantry_engine::decide::{
     Command, CommandRejection, DecideEnv, DecideSeed, Decision, Effect, EffectKey, EffectReport,
     EngineConsts, EngineSettings, Finalized, Input, InputIdentity, ModelKey, ModelTable, Observed,
     ObservedData, OutputSignals, PatchResult, ProjectFacts, ProposalOutcome, ProposalTexts,
-    ReservationPolicy, ResolvedModel, SandboxLimits, TemplateRegistry, TickReason,
+    ReservationPolicy, ResolvedModel, RetryBlocked, SandboxLimits, TemplateRegistry, TickReason,
 };
 use gantry_engine::state::{ActionKey, DeliveryState, OpenInbox};
 use serde_json::{json, Value};
@@ -423,6 +423,7 @@ fn finalized(sim: &Sim, proposals: Vec<ProposalOutcome>) -> Finalized {
         status: AttemptStatus::Succeeded,
         failure_class: None,
         failure_detail: None,
+        retry_blocked: None,
         result_ref: Some(serde_json::from_value(json!(RESULT_REF)).unwrap()),
         usage_metered: TokenUsage::default(),
         weighted_tokens: 0,
@@ -572,7 +573,9 @@ fn fail_running(
     };
     f.failure_class = Some(class);
     f.failure_detail = Some(gantry_core::entities::FailureDetail::parse(detail).unwrap());
-    f.result_ref = None;
+    if class != gantry_core::entities::FailureClass::BudgetExhausted {
+        f.result_ref = None;
+    }
     f.patch = patch;
     sim.report(EffectReport::AttemptFinalized(f), EffectKey::Run(attempt))
 }
@@ -1967,6 +1970,143 @@ fn budget_failed_node_is_requeued_after_raise_cap() {
     assert_eq!(node_status(&sim), NodeStatus::Running);
     // 重放：节点已不是 failed，不再排队。
     assert!(!types(&sim.tick()).contains(&"node.retry_requested"));
+}
+
+#[test]
+fn budget_without_result_ref_is_not_requeued_even_after_raise() {
+    let mut sim = dispatched();
+    let node = node_id(&sim);
+    let mut f = finalized(&sim, vec![]);
+    f.status = AttemptStatus::Failed;
+    f.failure_class = Some(FailureClass::BudgetExhausted);
+    f.failure_detail = Some(gantry_core::entities::FailureDetail::parse("budget.tokens").unwrap());
+    f.result_ref = None;
+    f.patch = PatchResult::None;
+    let attempt = f.attempt_id;
+    sim.report(EffectReport::AttemptFinalized(f), EffectKey::Run(attempt));
+    let item = sim
+        .state
+        .open_inbox
+        .values()
+        .find(|i| i.kind == InboxKind::BudgetExhausted)
+        .unwrap()
+        .clone();
+    let observed = choose(&mut sim, &item, "raise_cap", Some(item.clone()));
+    let out = on_event(&sim, observed);
+    sim.apply(out);
+    assert!(sim.state.may_dispatch());
+    assert!(!types(&sim.tick()).contains(&"node.retry_requested"));
+    assert!(!sim
+        .tick()
+        .iter()
+        .any(|d| matches!(d, Decision::Effect(Effect::RunAttempt(_)))));
+    let out = command(
+        &sim,
+        Command::RetryNode {
+            node_id: node,
+            ctx: ctx(None),
+        },
+    );
+    assert_eq!(types(&out), vec!["node.retry_requested"]);
+    assert_eq!(replies(&out), vec![&Ok(())]);
+}
+
+#[test]
+fn missing_identity_stops_retry_independent_of_runtime_failure_detail() {
+    for (class, detail) in [
+        (FailureClass::Timeout, "timeout.wall"),
+        (FailureClass::ExecFailed, "exec.protocol"),
+        (FailureClass::InfraError, "infra.job_identity_unavailable"),
+        (FailureClass::BudgetExhausted, "budget.tokens"),
+    ] {
+        let mut sim = dispatched();
+        let node = node_id(&sim);
+        let mut f = finalized(&sim, vec![]);
+        f.status = AttemptStatus::Failed;
+        f.failure_class = Some(class);
+        f.failure_detail = Some(gantry_core::entities::FailureDetail::parse(detail).unwrap());
+        f.retry_blocked = Some(RetryBlocked::JobIdentityUnavailable);
+        f.result_ref = None;
+        f.patch = PatchResult::None;
+        let attempt = f.attempt_id;
+        let out = sim.decide(
+            Input::Report(EffectReport::AttemptFinalized(f.clone())),
+            InputIdentity::Report(EffectKey::Run(attempt)),
+        );
+        assert!(out.iter().any(|d| matches!(d, Decision::Raise(req) if matches!(
+            &req.payload, InboxPayload::Escalation { reason_code, node_id, attempt_id, .. }
+                if reason_code.as_str() == "attempt_failed" && *node_id == Some(node) && *attempt_id == Some(attempt)
+        ))));
+        sim.apply(out);
+        assert_eq!(node_status(&sim), NodeStatus::Failed);
+        for tick in [
+            TickReason::Settle,
+            TickReason::Recover,
+            TickReason::Timer {
+                at: Timestamp::from_millis(T0 + 9_000_000),
+                kind: gantry_engine::decide::TimerKind::RetryBackoff { node_id: node },
+            },
+        ] {
+            let out = sim.decide(Input::Tick(tick.clone()), InputIdentity::Tick(tick));
+            assert!(!out
+                .iter()
+                .any(|d| matches!(d, Decision::Effect(Effect::RunAttempt(_)))));
+        }
+        let replay = sim.decide(
+            Input::Report(EffectReport::AttemptFinalized(f)),
+            InputIdentity::Report(EffectKey::Run(attempt)),
+        );
+        assert!(replay.is_empty());
+        assert_eq!(attempts(&sim), 1);
+        if detail == "budget.tokens" {
+            let budget = sim
+                .state
+                .open_inbox
+                .values()
+                .find(|i| i.kind == InboxKind::BudgetExhausted)
+                .unwrap()
+                .clone();
+            let chosen = choose(&mut sim, &budget, "raise_cap", Some(budget.clone()));
+            let out = on_event(&sim, chosen);
+            sim.apply(out);
+        }
+        let out = command(
+            &sim,
+            Command::RetryNode {
+                node_id: node,
+                ctx: ctx(None),
+            },
+        );
+        assert_eq!(types(&out), vec!["node.retry_requested"]);
+        assert_eq!(replies(&out), vec![&Ok(())]);
+        assert!(out.iter().any(|d| matches!(d, Decision::Resolve { .. })));
+    }
+}
+
+#[test]
+fn cancelled_before_start_with_no_digest_still_cancels_without_escalation() {
+    let mut sim = dispatched();
+    let mut f = finalized(&sim, vec![]);
+    f.status = AttemptStatus::Cancelled;
+    f.failure_class = Some(FailureClass::Cancelled);
+    f.failure_detail =
+        Some(gantry_core::entities::FailureDetail::parse("cancel.requested").unwrap());
+    f.retry_blocked = Some(RetryBlocked::JobIdentityUnavailable);
+    f.result_ref = None;
+    f.patch = PatchResult::None;
+    let attempt = f.attempt_id;
+    let decisions = sim.decide(
+        Input::Report(EffectReport::AttemptFinalized(f)),
+        InputIdentity::Report(EffectKey::Run(attempt)),
+    );
+    assert!(!decisions.iter().any(|d| matches!(d, Decision::Raise(_))));
+    sim.apply(decisions);
+    assert_eq!(node_status(&sim), NodeStatus::Cancelled);
+    assert_eq!(attempts(&sim), 1);
+    assert!(!sim
+        .tick()
+        .iter()
+        .any(|d| matches!(d, Decision::Effect(Effect::RunAttempt(_)))));
 }
 
 /// RetryNode 前置（#73 决定 2）：受保护路径失败时，没有已授予的补丁审批 → InvalidState；授予后 → Ok。

@@ -13,6 +13,7 @@
 //! `approval` / `live_approvals_for_pr` 不推进 Store revision。
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,6 +117,7 @@ fn expires_at(now: Timestamp, ttl: Duration) -> Timestamp {
 pub struct FakePolicy {
     store: gantry_store::Store,
     clock: Option<Arc<FakeClock>>,
+    proposal_calls: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for FakePolicy {
@@ -149,7 +151,11 @@ impl FakePolicy {
         store
             .register_module_state(STATE_KEY, PolicyState::new(now))
             .expect("policy module state must register");
-        Self { store, clock }
+        Self {
+            store,
+            clock,
+            proposal_calls: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     fn state(&self) -> PolicyState {
@@ -208,6 +214,10 @@ impl FakePolicy {
         self.write_state(|state| {
             state.proposals.insert(proposal_id, decision);
         });
+    }
+
+    pub fn proposal_calls(&self) -> usize {
+        self.proposal_calls.load(Ordering::Relaxed)
     }
 
     pub fn script_patch_verdict(&self, attempt_id: AttemptId, verdict: PatchPolicyVerdict) {
@@ -777,6 +787,7 @@ impl PolicyPort for FakePolicy {
         items: &[Proposal],
         _ctx: &ActorCtx,
     ) -> Result<Vec<ProposalDecision>, PolicyError> {
+        self.proposal_calls.fetch_add(1, Ordering::Relaxed);
         let state = self.state();
         Ok(items
             .iter()

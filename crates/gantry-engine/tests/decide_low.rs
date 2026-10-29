@@ -419,6 +419,7 @@ fn finalized(sim: &Sim, proposals: Vec<ProposalOutcome>) -> Finalized {
         status: AttemptStatus::Succeeded,
         failure_class: None,
         failure_detail: None,
+        retry_blocked: None,
         result_ref: Some(serde_json::from_value(json!(RESULT_REF)).unwrap()),
         usage_metered: TokenUsage::default(),
         weighted_tokens: 0,

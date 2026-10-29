@@ -275,6 +275,11 @@ async fn job_token_lifecycle(subject: &dyn Subject) {
     assert_eq!(model_call(&base, &[]).await, 200);
     let usage = control.job_usage(&job(1).job_id).await.unwrap();
     assert_eq!(usage.usage.requests, 1);
+    assert_eq!(
+        conflict_code(control.forget_job(&job(1).job_id, &ctx()).await),
+        "conflict"
+    );
+    assert_eq!(control.job_usage(&job(1).job_id).await.unwrap(), usage);
 
     // 同绑定重签：新令牌可用、旧令牌失效、用量不清零。
     let again = control.issue_job_token(job(1), &ctx()).await.unwrap();
@@ -317,6 +322,12 @@ async fn job_token_lifecycle(subject: &dyn Subject) {
         "job_revoked"
     );
     control.forget_job(&job(1).job_id, &ctx()).await.unwrap();
+    control.forget_job(&job(1).job_id, &ctx()).await.unwrap();
+    assert_eq!(model_call(&base, &[]).await, 403);
+    assert_eq!(
+        control.job_usage(&job(1).job_id).await,
+        Err(EgressError::NotFound)
+    );
     assert_eq!(
         control.revoke_job_token(&job(1).job_id, &ctx()).await,
         Err(EgressError::NotFound)
@@ -510,7 +521,15 @@ async fn conversation_retries_across_midnight_keep_the_first_day() {
         .await
         .unwrap();
     assert!(!first.reissued);
+    assert_eq!(
+        conflict_code(real.client.forget_job(&req.job_id, &ctx()).await),
+        "conflict"
+    );
     real.clock.advance_secs(86_400);
+    assert_eq!(
+        conflict_code(real.client.forget_job(&req.job_id, &ctx()).await),
+        "conflict"
+    );
     let retry = real
         .client
         .issue_job_token(req.clone(), &ctx())

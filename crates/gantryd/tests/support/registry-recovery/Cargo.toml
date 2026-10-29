@@ -1,0 +1,25 @@
+# 独立验收清单，不改变根工作区的锁文件。
+[package]
+name = "gantry-362-registry-recovery-evidence"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+
+[workspace]
+
+[lib]
+path = "../registry_recovery.rs"
+
+[dependencies]
+gantry-core = { path = "../../../../gantry-core", features = ["testing"] }
+gantry-store = { path = "../../../../gantry-store", features = ["testing"] }
+gantry-engine = { path = "../../../../gantry-engine" }
+gantry-sandbox = { path = "../../../../gantry-sandbox", features = ["testing"] }
+gantry-egress = { path = "../../../../gantry-egress" }
+gantry-fakes = { path = "../../../../gantry-fakes" }
+gantry-policy = { path = "../../../../gantry-policy" }
+gantry-repo = { path = "../../../../gantry-repo" }
+async-trait = "0.1"
+getrandom = "0.3"
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

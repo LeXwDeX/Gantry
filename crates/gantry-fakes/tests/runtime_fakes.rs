@@ -1273,8 +1273,9 @@ async fn egress_stub_rejects_expired_job_tokens() {
     let mut egress = EgressStub::with_default_config();
     egress.set_job_token_ttl(Duration::from_millis(1));
     let ctx = ctx();
+    let request = job_token_request();
     let grant = egress
-        .issue_job_token(job_token_request(), &ctx)
+        .issue_job_token(request.clone(), &ctx)
         .await
         .expect("issue");
     let url = grant
@@ -1286,6 +1287,18 @@ async fn egress_stub_rejects_expired_job_tokens() {
     let (status, _, body) = http("POST", &url, &[], "{}");
     assert_eq!(status, 403);
     assert!(body.contains("token_invalid"));
+    let usage = egress.job_usage(&request.job_id).await.unwrap();
+    assert!(matches!(
+        egress.forget_job(&request.job_id, &ctx).await,
+        Err(gantry_core::ports::egress::EgressError::Conflict { .. })
+    ));
+    assert_eq!(egress.job_usage(&request.job_id).await.unwrap(), usage);
+    egress
+        .revoke_job_token(&request.job_id, &ctx)
+        .await
+        .unwrap();
+    egress.forget_job(&request.job_id, &ctx).await.unwrap();
+    egress.forget_job(&request.job_id, &ctx).await.unwrap();
     egress.shutdown();
 }
 
