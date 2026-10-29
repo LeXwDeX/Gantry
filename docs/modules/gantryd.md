@@ -83,7 +83,7 @@ pub trait CommandSet: Send + Sync {
 
 | 装配 | 在哪里 | 用途 |
 | --- | --- | --- |
-| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。持久存储（SQLite）接入前拒绝启动，不退回内存日志（失败闭合） |
+| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store；其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
 | 替身装配 `assemble_fakes` | `tests/support/`（只用 dev-dependency） | 进程级测试。测试二进制带 `GANTRYD_FAKES_CHILD` 重新执行自身，作为"用替身装配的 gantryd"子进程 |
 
 替身装配的当前构成（`status` 原样报告）：
@@ -114,7 +114,7 @@ pub trait CommandSet: Send + Sync {
 
 - **I1 沙盒只计算**：控制套接字 0600、仅 root，永不挂入沙盒（deploy.md §12）。
 - **I7 配置分层**：引导配置 `deny_unknown_fields`，settings 键写进来即拒绝。
-- **失败闭合**：真实装配缺持久存储时拒绝启动；对端 uid 不符时不读命令；引导配置非法时不绑定套接字。
+- **失败闭合**：真实装配缺 SQLite store 或模块接线时拒绝启动；对端 uid 不符时不读命令；引导配置非法时不绑定套接字。
 - **替身不进生产**：`gantry-fakes` 与 `gantry-store/testing` 只作为 dev-dependency；`cargo tree -p gantryd -e normal --all-features` 不含它们。
 
 ## 9. 错误与恢复
@@ -148,5 +148,5 @@ pub trait CommandSet: Send + Sync {
 ## 13. 开放问题
 
 - **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供，但 gantryd 尚未调用：替身装配仍用手写配置，控制通道 `status` 只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
-- **持久存储**：SQLite store 接入后 `assemble_real` 才能启动；届时把 notify、真实 policy 等按端口挪入。
+- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）；其余模块按端口挪入后才能真正启动。
 - **`Type=notify`**：deploy 的单元约定 `READY=1`，gantryd 尚未发送（需要 sd_notify，归后续切片）。

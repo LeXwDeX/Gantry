@@ -73,7 +73,7 @@ pub fn runtime_settings() -> RuntimeSettings {
     else {
         unreachable!()
     };
-    // 模型表是测试手写的一条映射（reasoning_effort 固定 Low）；B3 接 models 后改为由设置推导。
+    // 模型表是测试手写的一条映射（reasoning_effort 固定 Low）；C2 接 models 后改为由设置推导。
     // 见 #105 的 B1 评审补记。
     let table = ModelTable::from([(
         ModelKey {
