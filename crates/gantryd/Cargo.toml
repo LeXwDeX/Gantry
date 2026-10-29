@@ -19,6 +19,8 @@ gantry-core = { path = "../gantry-core" }
 gantry-store = { path = "../gantry-store" }
 gantry-engine = { path = "../gantry-engine" }
 gantry-deploy = { path = "../gantry-deploy" }
+gantry-notify = { path = "../gantry-notify" }
+gantry-policy = { path = "../gantry-policy" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,8 +37,6 @@ rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 gantry-fakes = { path = "../gantry-fakes" }
 gantry-forge = { path = "../gantry-forge" }
-gantry-notify = { path = "../gantry-notify" }
-gantry-policy = { path = "../gantry-policy" }
 gantry-repo = { path = "../gantry-repo" }
 gantry-sandbox = { path = "../gantry-sandbox", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }

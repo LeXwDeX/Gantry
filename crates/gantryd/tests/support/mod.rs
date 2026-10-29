@@ -9,7 +9,7 @@ pub mod fake_cmds;
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,24 +18,26 @@ use gantry_core::entities::{MergeMethod, Project, PullRequestRef};
 use gantry_core::ids::ActionId;
 use gantry_core::ids::{Clock, IdGen, ProjectId};
 use gantry_core::ports::inbox::InboxPort;
-use gantry_core::ports::{ForgeReader, PolicyPort};
+use gantry_core::ports::ForgeReader;
 use gantry_core::secret::SecretString;
 use gantry_engine::actor::PrSnapshots;
 use gantry_engine::runtime::{EnginePorts, EngineRuntime};
 use gantry_fakes::github::FakeGitHub;
 use gantry_fakes::{
     conversation::FakeConversation, egress::EgressStub, evented_repo::EventedRepo,
-    forge::FakeForge, golden::GoldenSandbox, models::FakeModelProvider, policy::FakePolicy,
-    repo::FakeRepo, worker::StubWorkerAdapter,
+    forge::FakeForge, golden::GoldenSandbox, models::FakeModelProvider, repo::FakeRepo,
+    worker::StubWorkerAdapter,
 };
 use gantry_forge::{
     CrashPoint, Executor, ExecutorDeps, ExecutorOptions, FaultInjector, Forge, ForgeConfig,
     Permission, ProjectBinding, StaticTokenProvider,
 };
-use gantry_notify::Notify;
-use gantry_policy::{PolicyApprovals, PolicyDeps, PolicyEngine, POLICY_MODULE};
+use gantry_policy::PolicyApprovals;
 use gantry_store::{Store, StoreConfig, StoreDeps};
-use gantryd::assembly::{Assembly, ModuleInfo, OsEntropy, Profile, Provider, SystemClock};
+use gantryd::assembly::{
+    build_notify, build_policy, module_specs, Assembly, ModuleInfo, OsEntropy, Profile, Provider,
+    SystemClock,
+};
 use gantryd::config::BootConfig;
 use gantryd::control::{CommandSet, ControlAuth};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,21 +49,7 @@ pub const CHILD_ENV: &str = "GANTRYD_FAKES_CHILD";
 /// 仅测试子进程可用；目录必须是测试临时目录下的 `sqlite`。
 pub const CHILD_SQLITE_ENV: &str = "GANTRYD_FAKES_SQLITE_DIR";
 
-/// 测试扮演 GitHub 时写入的 PR 快照（生产里由 forge 同步写 store 投影）。
-#[derive(Default)]
-pub struct Snapshots(pub Mutex<Option<PullRequestRef>>);
-
-#[async_trait]
-impl PrSnapshots for Snapshots {
-    async fn pull_request(&self, _: &ProjectId, number: u64) -> Option<PullRequestRef> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .filter(|pr| pr.number == number)
-    }
-}
-
+/// 引擎经 `FakeForge` 读测试扮演 GitHub 写入的 PR 快照（生产里由 forge 同步写 store 投影）。
 struct ForgeSnapshots(Arc<FakeForge>);
 
 #[async_trait]
@@ -77,12 +65,11 @@ impl PrSnapshots for ForgeSnapshots {
 /// `fake.*` 命令要直接操纵的替身。
 pub struct FakeHandles {
     pub store: Store,
-    pub policy: Option<Arc<FakePolicy>>,
-    pub approvals: Option<PolicyApprovals>,
+    pub approvals: PolicyApprovals,
+    pub auto_approve: bool,
     pub forge: Arc<FakeForge>,
     pub repo: Arc<FakeRepo>,
     pub sandbox: Arc<GoldenSandbox>,
-    pub snapshots: Arc<Snapshots>,
     pub real_executor: Option<(Executor, FakeGitHub)>,
 }
 
@@ -97,20 +84,20 @@ pub fn project_id() -> ProjectId {
     engine_cfg::PROJECT.parse().expect("fixture")
 }
 
-/// engine（`EngineRuntime`）与 notify 用真实实现；store 默认内存，可选 SQLite。
-/// policy 用 `FakePolicy`：§12.2 的合并审批要按脚本放行（真实 policy 需要设备签名）。
-/// 换成真实实现的模块从这里挪到 `gantryd::assembly::assemble_real`。
+/// engine（`EngineRuntime`）、notify 与 policy 用真实实现；store 默认内存，可选
+/// SQLite。policy 与 notify 经 `gantryd::assembly` 的生产构造函数装配；真实 policy
+/// 的合并审批由 `fake.drive` 用测试设备密钥签名（`auto_approve`）。
 pub async fn assemble_fakes(
     sqlite_dir: Option<&Path>,
-    real_policy: bool,
+    auto_approve: bool,
 ) -> (Assembly, FakeHandles) {
-    assemble_variant(sqlite_dir, real_policy, false).await
+    assemble_variant(sqlite_dir, false, auto_approve).await
 }
 
 async fn assemble_variant(
     sqlite_dir: Option<&Path>,
-    real_policy: bool,
     real_executor: bool,
+    auto_approve: bool,
 ) -> (Assembly, FakeHandles) {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(OsEntropy)));
@@ -118,10 +105,7 @@ async fn assemble_variant(
         clock: clock.clone(),
         ids: ids.clone(),
     };
-    let mut modules = Vec::new();
-    if real_policy {
-        modules.push(POLICY_MODULE);
-    }
+    let mut modules = module_specs();
     if real_executor {
         modules.push(gantry_forge::module_spec());
     }
@@ -156,19 +140,10 @@ async fn assemble_variant(
     repo.set_ref(project_id(), "refs/mirror/heads/main", base);
     let evented = Arc::new(EventedRepo::new(repo.clone(), store.clone()));
     let sandbox = Arc::new(GoldenSandbox::new(store.cas(), base, clock.clone()));
-    let (policy, fake_policy, approvals): (Arc<dyn PolicyPort>, _, _) = if real_policy {
-        let policy = Arc::new(PolicyEngine::new(PolicyDeps {
-            store: store.clone(),
-            forge: forge.clone(),
-            clock: clock.clone(),
-            ids: ids.clone(),
-        }));
-        let approvals = PolicyApprovals::new(policy.clone(), Arc::new(OsEntropy));
-        (policy, None, Some(approvals))
-    } else {
-        let policy = Arc::new(FakePolicy::new_in(store.clone()));
-        (policy.clone(), Some(policy), None)
-    };
+    let gantryd::assembly::PolicyStack {
+        port: policy,
+        approvals,
+    } = build_policy(&store, forge.clone(), clock.clone(), ids.clone());
     let real_executor = real_executor.then(|| {
         let github = FakeGitHub::start();
         let real_forge = Forge::new(
@@ -200,8 +175,7 @@ async fn assemble_variant(
             .expect("test executor");
         (executor, github)
     });
-    let snapshots = Arc::new(Snapshots::default());
-    let inbox: Arc<dyn InboxPort> = Arc::new(Notify::new(store.clone(), ids.clone()));
+    let inbox: Arc<dyn InboxPort> = build_notify(&store, ids.clone());
     let worker = Arc::new(StubWorkerAdapter::new());
 
     let engine = EngineRuntime::new(
@@ -217,11 +191,7 @@ async fn assemble_variant(
             cas: Arc::new(store.cas()),
             clock: clock.clone(),
             entropy: Arc::new(OsEntropy),
-            snapshots: Some(if real_policy {
-                Arc::new(ForgeSnapshots(forge.clone()))
-            } else {
-                snapshots.clone()
-            }),
+            snapshots: Some(Arc::new(ForgeSnapshots(forge.clone()))),
         },
         engine_cfg::runtime_settings(),
     )
@@ -240,20 +210,16 @@ async fn assemble_variant(
             Real,
             "EngineRuntime; settings via from_settings; model table is a test fixture",
         ),
-        ModuleInfo::new("notify", Real, ""),
-        if real_policy {
-            ModuleInfo::new(
-                "policy",
-                Real,
-                if real_executor.is_some() {
-                    "PolicyEngine; test device, real merge executor"
-                } else {
-                    "PolicyEngine; test device, fake outbox executor"
-                },
-            )
-        } else {
-            ModuleInfo::new("policy", Fake, "FakePolicy; merge approval is scripted")
-        },
+        ModuleInfo::new("notify", Real, "Notify; production constructor"),
+        ModuleInfo::new(
+            "policy",
+            Real,
+            if real_executor.is_some() {
+                "PolicyEngine; test device, real merge executor"
+            } else {
+                "PolicyEngine; test device, fake outbox executor"
+            },
+        ),
         ModuleInfo::new(
             "forge",
             Fake,
@@ -302,12 +268,11 @@ async fn assemble_variant(
     };
     let handles = FakeHandles {
         store,
-        policy: fake_policy,
         approvals,
+        auto_approve,
         forge,
         repo,
         sandbox,
-        snapshots,
         real_executor,
     };
     (assembly, handles)
@@ -317,11 +282,11 @@ async fn assemble_variant(
 /// （测试进程以非零码退出），与 gantryd 二进制的失败语义一致。
 pub fn child_main(spec: &str) {
     let (config, uid) = spec.split_once('\n').expect("child spec");
-    let (uid, real_policy, real_executor) = match uid.split_once('\n') {
-        Some((uid, "real-policy")) => (uid, true, false),
-        Some((uid, "real-executor")) => (uid, true, true),
-        Some(_) => panic!("invalid child policy"),
-        None => (uid, false, false),
+    let (uid, auto_approve, real_executor) = match uid.split_once('\n') {
+        Some((uid, "manual")) => (uid, false, false),
+        Some((uid, "real-executor")) => (uid, false, true),
+        Some(_) => panic!("invalid child mode"),
+        None => (uid, true, false),
     };
     let config_path = PathBuf::from(config);
     let sqlite_dir = std::env::var_os(CHILD_SQLITE_ENV).map(|dir| {
@@ -361,9 +326,9 @@ pub fn child_main(spec: &str) {
         .unwrap();
     runtime.block_on(async {
         let (assembly, handles) = if real_executor {
-            assemble_variant(sqlite_dir.as_deref(), true, true).await
+            assemble_variant(sqlite_dir.as_deref(), true, false).await
         } else {
-            assemble_fakes(sqlite_dir.as_deref(), real_policy).await
+            assemble_fakes(sqlite_dir.as_deref(), auto_approve).await
         };
         let assembly = Arc::new(assembly);
         let commands: Vec<Arc<dyn CommandSet>> = vec![Arc::new(

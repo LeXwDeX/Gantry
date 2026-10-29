@@ -7,6 +7,10 @@
 //! 服务端二进制只有真实装配 [`assemble_real`]。持久存储（SQLite，store.md §7）
 //! 就绪前它拒绝启动，不退回内存存储（失败闭合）。替身装配在
 //! `tests/support`，只用 dev-dependency，不进服务端二进制。
+//!
+//! 各模块的生产构造函数（[`build_policy`]、[`build_notify`]）也在这里：它们只接收
+//! 引导配置、settings 与已打开的 store（及其端口依赖），供 `assemble_real` 与测试
+//! 装配共用，保证“替换替身”验证的是同一条生产构造路径。
 
 use std::sync::Arc;
 
@@ -22,7 +26,9 @@ use gantry_core::ports::sandbox::SandboxService;
 use gantry_core::ports::worker::WorkerAdapter;
 use gantry_core::time::Timestamp;
 use gantry_engine::runtime::EngineRuntime;
-use gantry_store::{Store, StoreConfig, StoreDeps};
+use gantry_notify::Notify;
+use gantry_policy::{PolicyApprovals, PolicyDeps, PolicyEngine};
+use gantry_store::{ModuleSpec, Store, StoreConfig, StoreDeps};
 use serde::Serialize;
 
 /// 装配来源；`status` 原样报告。
@@ -92,23 +98,68 @@ pub struct Assembly {
     pub modules: Vec<ModuleInfo>,
 }
 
+/// 已接入生产构造函数的模块私有表（store.md §7.10）。notify 的状态在 store
+/// 内置的 `inbox_items` 投影里，不需要私有表。sandbox 的 `BuiltinSchemas` 属于
+/// sandbox 片，本片不构造 sandbox，也不注入。
+pub fn module_specs() -> Vec<ModuleSpec> {
+    vec![gantry_policy::POLICY_MODULE]
+}
+
+/// policy 的生产构造：`PolicyEngine`（`PolicyPort`）与 `ApprovalService` 共用同一
+/// 实例与 store。审批 nonce 用操作系统熵源。
+pub struct PolicyStack {
+    pub port: Arc<dyn PolicyPort>,
+    pub approvals: PolicyApprovals,
+}
+
+pub fn build_policy(
+    store: &Store,
+    forge: Arc<dyn ForgeReader>,
+    clock: Arc<dyn Clock>,
+    ids: Arc<IdGen>,
+) -> PolicyStack {
+    let engine = Arc::new(PolicyEngine::new(PolicyDeps {
+        store: store.clone(),
+        forge,
+        clock,
+        ids,
+    }));
+    let port: Arc<dyn PolicyPort> = engine.clone();
+    let approvals = PolicyApprovals::new(engine, Arc::new(OsEntropy));
+    PolicyStack { port, approvals }
+}
+
+/// notify 的生产构造；状态在 store 的内置投影里，不注册私有表。
+pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
+    Arc::new(Notify::new(store.clone(), ids))
+}
+
 /// 真实装配。各模块按端口接入的顺序见 `tests/support` 的替身装配。
 ///
-/// 当前已接持久化 store；其余模块（forge、repo、sandbox、worker、models、egress、
-/// api、pki、secrets）尚未接线，因此仍拒绝启动（失败闭合）。
+/// 当前已接持久化 store 与 notify 生产构造函数；policy 构造函数已就绪，待 forge
+/// 接入后调用。其余模块（repo、sandbox、worker、models、egress、api、pki、secrets）
+/// 尚未接线，因此仍拒绝启动（失败闭合）。
 pub async fn assemble_real(config: &crate::config::BootConfig) -> Result<Assembly, AssemblyError> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(OsEntropy)));
-    let _store = Store::open(
+    let modules = module_specs();
+    let store = Store::open(
         StoreConfig::new(&config.server.data_dir),
-        StoreDeps { clock, ids },
-        &[],
+        StoreDeps {
+            clock,
+            ids: ids.clone(),
+        },
+        &modules,
     )
     .await?;
+    // notify 只依赖 store 与 ID 生成，生产路径可以先构造；消费方（engine/api）
+    // 尚未接线，因此本片只保留构造点，不把实例放进 `Assembly`。
+    let _notify = build_notify(&store, ids);
     Err(AssemblyError::NotReady {
         module: "forge",
         why: "real forge/engine/api wiring is not complete (gantryd.md §7.1); \
-              persistent store is open, refusing to run without the remaining modules",
+              persistent store and notify are ready, refusing to run without the \
+              remaining modules",
     })
 }
 
