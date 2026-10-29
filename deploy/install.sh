@@ -595,6 +595,17 @@ step_start() {
   done
 }
 
+# 单区域 doctor：0 通过，1 只警告，≥2 失败。未实现区域在 M1 期间返回 1，不能当失败中止。
+doctor_area() {
+  local area="$1" code="$2" message="$3" rc=0
+  gantry doctor "$area" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) warn "doctor $area 有警告" ;;
+    *) die "$code" "$message" ;;
+  esac
+}
+
 step_webhook_ingress() {
   # 入口软件由管理员安装与维护（OPS-18）；这里只给出已渲染的模板位置并做外部可达检查。
   case "$WEBHOOK_MODE" in
@@ -606,7 +617,7 @@ step_webhook_ingress() {
     read -r -p "入口配置好后按回车继续，输入 q 中止：" answer </dev/tty
     [ "$answer" != q ] || die "$EXIT_ABORTED" "已中止"
   fi
-  gantry doctor webhook || die "$EXIT_APP" "webhook 入口不可达（P-65：须先配好入口再创建 App）"
+  doctor_area webhook "$EXIT_APP" "webhook 入口不可达（P-65：须先配好入口再创建 App）"
 }
 
 step_github_app() {
@@ -614,7 +625,7 @@ step_github_app() {
   [ -z "$APP_NAME" ] || args+=(--name "$APP_NAME")
   [ "$TEST_MODE" != 1 ] || args+=(--test-mode)
   gantry "${args[@]}" || die "$EXIT_APP" "GitHub App 创建未完成"
-  gantry doctor github || die "$EXIT_APP" "doctor github 未通过"
+  doctor_area github "$EXIT_APP" "doctor github 未通过"
 }
 
 step_bootstrap_writes() {
@@ -624,7 +635,7 @@ step_bootstrap_writes() {
 }
 
 step_sandbox_smoke() {
-  gantry doctor egress || die "$EXIT_DOCTOR" "金丝雀沙盒检查未通过"
+  doctor_area egress "$EXIT_DOCTOR" "金丝雀沙盒检查未通过"
 }
 
 step_doctor() {

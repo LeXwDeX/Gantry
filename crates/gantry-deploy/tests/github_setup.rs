@@ -154,6 +154,7 @@ fn happy_path_writes_page_polls_and_prints_install_link() {
     let dir = std::env::temp_dir().join(format!("gantry-deploy-setup-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let page_path = dir.join("setup.html");
+    let _ = std::fs::remove_file(&page_path);
     let control = FakeControl::new(vec![
         json!({ "status": "pending" }),
         json!({ "status": "pending" }),
@@ -405,4 +406,60 @@ fn page_escapes_manifest_values() {
     assert!(!html.contains("\"><script>"));
     assert!(html.contains("state=s&amp;x=1"));
     assert_eq!(page_manifest(&html)["name"], "a\"><script>");
+}
+
+#[test]
+fn page_file_is_private_and_refuses_overwrite() {
+    let dir = std::env::temp_dir().join(format!("gantry-deploy-page-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let page_path = dir.join("private.html");
+    let _ = std::fs::remove_file(&page_path);
+
+    let control = FakeControl::new(vec![
+        json!({ "status": "pending" }),
+        json!({ "status": "completed", "app": granted_app() }),
+    ]);
+    run(
+        &args(Some(page_path.clone())),
+        &control,
+        &FakeEntry::ready(),
+    )
+    .0
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&page_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    let before = std::fs::read_to_string(&page_path).unwrap();
+    let control = FakeControl::new(vec![json!({ "status": "pending" })]);
+    let (result, _, _) = run(
+        &args(Some(page_path.clone())),
+        &control,
+        &FakeEntry::ready(),
+    );
+    assert!(matches!(result, Err(SetupError::Io(_))));
+    assert_eq!(std::fs::read_to_string(&page_path).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn page_file_rejects_symlink() {
+    let dir = std::env::temp_dir().join(format!("gantry-deploy-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("target.html");
+    let link = dir.join("link.html");
+    std::fs::write(&target, "sentinel").unwrap();
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let control = FakeControl::new(vec![json!({ "status": "pending" })]);
+    let (result, _, _) = run(&args(Some(link)), &control, &FakeEntry::ready());
+    assert!(matches!(result, Err(SetupError::Io(_))));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "sentinel");
+    let _ = std::fs::remove_dir_all(&dir);
 }

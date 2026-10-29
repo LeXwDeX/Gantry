@@ -138,13 +138,12 @@ fn doctor_cmd(global: &Global, args: Vec<String>, out: &mut dyn Write, err: &mut
     }
 }
 
-/// `install-state.json` 的 `test_mode`；文件缺失或无此键按 `false`。
-fn install_test_mode(path: &Path) -> bool {
+/// `install-state.json` 的 `test_mode`；文件缺失、损坏或无此键返回 `None`，由 doctor 失败闭合。
+fn install_test_mode(path: &Path) -> Option<bool> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|state| state.get("test_mode").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false)
 }
 
 fn settings(global: &Global, args: Vec<String>, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
@@ -205,9 +204,26 @@ mod tests {
     }
 
     #[test]
-    fn test_mode_defaults_to_false() {
-        assert!(!install_test_mode(Path::new(
-            "/nonexistent/install-state.json"
-        )));
+    fn install_state_test_mode_is_fail_closed_when_unreadable() {
+        let dir = std::env::temp_dir().join(format!("gantry-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("install-state.json");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(install_test_mode(&path), None, "缺失");
+
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(install_test_mode(&path), None, "损坏");
+
+        std::fs::write(&path, r#"{"version":"1"}"#).unwrap();
+        assert_eq!(install_test_mode(&path), None, "缺字段");
+
+        std::fs::write(&path, r#"{"test_mode":"false"}"#).unwrap();
+        assert_eq!(install_test_mode(&path), None, "类型错");
+
+        std::fs::write(&path, r#"{"test_mode":true}"#).unwrap();
+        assert_eq!(install_test_mode(&path), Some(true));
+        std::fs::write(&path, r#"{"test_mode":false}"#).unwrap();
+        assert_eq!(install_test_mode(&path), Some(false));
     }
 }

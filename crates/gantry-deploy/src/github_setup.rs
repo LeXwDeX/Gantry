@@ -12,6 +12,7 @@
 //! 应答一律不含 `pem`、`webhook_secret`、`client_secret`；万一出现，本命令拒绝打印并报协议错误。
 
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{json, Map, Value};
@@ -23,6 +24,28 @@ use crate::page;
 use crate::probe::HttpProbe;
 
 pub const DEFAULT_GITHUB_WEB: &str = "https://github.com";
+
+/// 提交页含一次性 `state`：按 0600 创建；`create_new` 拒绝覆盖，也拒绝跟随已有符号链接。
+fn write_page(path: &Path, html: &str) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            std::io::Error::new(
+                e.kind(),
+                "提交页文件已存在（拒绝覆盖或跟随符号链接），换一个路径",
+            )
+        } else {
+            e
+        }
+    })?;
+    file.write_all(html.as_bytes())
+}
 /// setup 会话有效期 [建议值]（deploy.md §7.5 第 2 步）。
 pub const SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -198,7 +221,7 @@ pub fn run(args: &SetupArgs, env: Env<'_>) -> Result<CreatedApp, SetupError> {
     let io = |e: std::io::Error| SetupError::Io(e.to_string());
     match &args.page_path {
         Some(path) => {
-            std::fs::write(path, &html).map_err(io)?;
+            write_page(path, &html).map_err(io)?;
             writeln!(
                 out,
                 "提交页已写到 {}。把它拷到任意一台有浏览器的电脑上打开，在 GitHub 上确认创建 App“{name}”。\n页面不含秘密；会话 {} 分钟内有效。",
