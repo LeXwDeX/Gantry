@@ -6,6 +6,7 @@
 use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, SettingsResource, Tier};
 use gantry_core::ids::{ActionId, DeliveryId, MessageId, ProjectId};
 use gantry_core::level::Level;
+use gantry_core::settings::bootstrap_writable;
 use gantry_core::settings::defaults::builtin_resolved;
 use gantry_core::settings::resource::ResolvedSettings;
 use gantry_engine::{budget_from_level, NewDelivery};
@@ -159,16 +160,53 @@ impl FakeCommands {
         if self.setup().bootstrap_over {
             return not_bootstrap_period();
         }
-        let resource = args.get("resource").and_then(Value::as_str);
-        let values = args.get("values").and_then(Value::as_object);
-        match (resource, values) {
-            (Some(resource), Some(values)) => Response::ok(json!({
-                "resource": resource,
-                "applied": values.keys().collect::<Vec<_>>(),
-            })),
-            _ => Response::err("bad_request", "expected {resource, values}"),
+        let Some(resource) = args.get("resource").and_then(Value::as_str) else {
+            return Response::err("bad_request", "expected {resource, values}");
+        };
+        let Ok(resource_id) = serde_json::from_value::<SettingsResource>(json!(resource)) else {
+            return Response::err("bad_request", format!("unknown resource {resource}"));
+        };
+        let Some(values) = args.get("values").and_then(Value::as_object) else {
+            return Response::err("bad_request", "expected {resource, values}");
+        };
+        if values.is_empty() {
+            return Response::err("bad_request", "values must not be empty");
         }
+        let mut applied = Vec::new();
+        for (key, value) in values {
+            if !bootstrap_key(key) {
+                return Response::err("bad_request", format!("invalid key {key}"));
+            }
+            if !value.is_string() {
+                return Response::err("bad_request", format!("value for {key} must be a string"));
+            }
+            let path = format!("{resource}.{key}");
+            if !bootstrap_writable(resource_id, &path) {
+                return Response::err(
+                    "not_writable",
+                    format!("{path} is not writable during bootstrap"),
+                );
+            }
+            // M1 只接受字符串类型的引导键；对象/数值键走 github setup 回调（deploy.md §7.9）。
+            if path != "sandbox.base_image" {
+                return Response::err(
+                    "not_writable",
+                    format!("{path} is not a string setting; use github setup"),
+                );
+            }
+            applied.push(key.clone());
+        }
+        Response::ok(json!({ "resource": resource, "applied": applied }))
     }
+}
+
+/// 引导期写入的资源内相对键：小写字母、数字、`_`、`.`，长度 ≤ 64。
+fn bootstrap_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.')
 }
 
 fn not_bootstrap_period() -> Response {
