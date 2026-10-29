@@ -79,13 +79,13 @@ test_state_file_roundtrip() {
   local f
   f="$(mktemp -d)/install-state.json"
   ! state_has_step "$f" preflight || fail "空状态不应有步骤"
-  state_mark_step "$f" 0.1.0 preflight
-  state_mark_step "$f" 0.1.0 packages
-  state_mark_step "$f" 0.1.0 preflight
+  state_mark_step "$f" 0.1.0 preflight false
+  state_mark_step "$f" 0.1.0 packages false
+  state_mark_step "$f" 0.1.0 preflight false
   assert_eq "$(state_completed_steps "$f" | tr '\n' ' ')" "preflight packages"
   state_has_step "$f" packages || fail "应记录 packages"
   jq -e '.schema == 1 and .version == "0.1.0" and (.completed | length == 2)' "$f" >/dev/null || fail "状态文件不是预期的 JSON"
-  ! state_mark_step "$f" 0.1.0 'bad step' 2>/dev/null || fail "非法步骤名应被拒绝"
+  ! state_mark_step "$f" 0.1.0 'bad step' false 2>/dev/null || fail "非法步骤名应被拒绝"
 }
 
 run_tests "${BASH_SOURCE[0]}"

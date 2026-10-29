@@ -97,8 +97,8 @@ toml_get() {
 }
 
 # ---- 安装状态文件（/etc/gantry/install-state.json，deploy.md §5）----
-# 形态：{"schema":1,"version":"…","completed":["step",…],"updated_at":"…"}。
-# 只含步骤名（固定标识符）、版本与时间，不含密钥。
+# 形态：{"schema":1,"version":"…","completed":["step",…],"updated_at":"…","test_mode":true|false}。
+# 只含步骤名（固定标识符）、版本、时间与 test_mode，不含密钥。
 
 state_completed_steps() {
   local file="$1"
@@ -112,10 +112,27 @@ state_has_step() {
   state_completed_steps "$file" | grep -qx "$step"
 }
 
-# state_mark_step <文件> <版本> <步骤>：追加步骤并原子替换文件（0640）。
+# state_test_mode <文件>：输出 true 或 false；文件缺失、损坏或缺字段时返回 1。
+state_test_mode() {
+  local file="$1" value
+  [ -f "$file" ] || return 1
+  value="$(tr -d '\n' <"$file" | sed -nE 's/.*"test_mode":(true|false).*/\1/p' | head -n1)"
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# state_test_mode_matches <文件> <true|false>：0 一致，1 不一致，2 不可读 / 缺字段。
+state_test_mode_matches() {
+  local file="$1" want="$2" have
+  have="$(state_test_mode "$file")" || return 2
+  [ "$have" = "$want" ] || return 1
+}
+
+# state_mark_step <文件> <版本> <步骤> <test_mode: true|false>：追加步骤并原子替换文件（0640）。
 state_mark_step() {
-  local file="$1" version="$2" step="$3"
+  local file="$1" version="$2" step="$3" test_mode="$4"
   case "$step" in '' | *[!a-z0-9_-]*) error "步骤名不合法：$step"; return 1 ;; esac
+  case "$test_mode" in true | false) ;; *) error "test_mode 必须是 true 或 false：$test_mode"; return 1 ;; esac
   render_value_ok "$version" || { error "版本号不合法"; return 1; }
   local steps list s tmp now
   steps="$(state_completed_steps "$file")"
@@ -128,7 +145,7 @@ state_mark_step() {
   done
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   tmp="$(mktemp "${file}.XXXXXX")"
-  printf '{"schema":1,"version":"%s","completed":[%s],"updated_at":"%s"}\n' "$version" "$list" "$now" >"$tmp"
+  printf '{"schema":1,"version":"%s","completed":[%s],"updated_at":"%s","test_mode":%s}\n' "$version" "$list" "$now" "$test_mode" >"$tmp"
   chmod 0640 "$tmp"
   mv -f "$tmp" "$file"
 }

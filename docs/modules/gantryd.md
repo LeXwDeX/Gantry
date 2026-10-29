@@ -149,5 +149,4 @@ pub trait CommandSet: Send + Sync {
 
 - **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供，但 gantryd 尚未调用：替身装配仍用手写配置，控制通道 `status` 只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
 - **持久存储**：SQLite store 接入后 `assemble_real` 才能启动；届时把 notify、真实 policy 等按端口挪入。
-- **`doctor` 的 `test_mode`**：`install.sh` 尚未把 `--test-mode` 写入 `install-state.json`，归 deploy（#104 评论）。
 - **`Type=notify`**：deploy 的单元约定 `READY=1`，gantryd 尚未发送（需要 sd_notify，归后续切片）。

@@ -139,7 +139,7 @@ fn doctor_cmd(global: &Global, args: Vec<String>, out: &mut dyn Write, err: &mut
 }
 
 /// `install-state.json` 的 `test_mode`；文件缺失、损坏或无此键返回 `None`，由 doctor 失败闭合。
-fn install_test_mode(path: &Path) -> Option<bool> {
+pub fn install_test_mode(path: &Path) -> Option<bool> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
