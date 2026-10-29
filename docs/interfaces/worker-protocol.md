@@ -1232,7 +1232,7 @@ claude -p \
 <a id="job-identity"></a>
 ## 14. 任务身份与恢复（D-21、D-22、D-23，#362）
 
-**状态**：本节冻结公共端口与目标行为。摘要传递、恢复、终结和放行的完整行为尚待独立实现；当前编译适配不证明这些规则已生效。本节对身份不可验证的例外优先于 §3、§5、§8、§9 的普通流程。
+**状态**：本节冻结公共端口与目标行为。#362 已实现摘要传递、批量预验证、最终计量保留和 D-23 的恢复查询待核实：同一 job 跨重启属于不同 sandbox 时不再误报 `Unknown`，查询短暂失败时返回待核实的 `Running` 并按有界退避再次查询，普通失败保留 release 依据，终结后释放失败也不会丢失待释放元数据；四项均有仓库内回归测试。本机联测覆盖真实执行体、真实 Egress 登记表和提交后释放；真实 Podman 与生产装配未验证（`assemble_real` 仍返回 `NotReady`）。本节尚待独立评审与 §14.4 最终验收。本节对身份不可验证的例外优先于 §3、§5、§8、§9 的普通流程。
 
 ### 14.1 可信摘要
 
@@ -1273,7 +1273,7 @@ claude -p \
 
 若曾运行或可能运行，或者已签发令牌，尚未取得可信完整计量或确认吊销，仍处于拒绝收尾：`recover` 返回 `Running`，`wait` 尚不产生公开终态；保留拒绝记录并输出可定位诊断。`incomplete = true` 同样阻断结算、公开终态和遗忘，不把用量下界当作完整用量；已停止的容器可销毁并释放计算槽位，不必占用槽位等待计量。停止、吊销、取计量只做有界单次调用并退避重试，绝不重新 `start`；服务崩溃后继续收尾。始终无法取得完整计量时保持可诊断阻断，需运维修复来源，不补零结束，不承诺自动恢复。缺摘要旧任务的 outcome 路径遵守同样条件。普通非身份错误的计量语义不在本规则重构范围。
 
-未来 runner 必须专门拦截稳定错误并形成 failed、`infra_error` / `infra.job_identity_unavailable`、明确 `Never` 重试的 `Finalized`；必须终结 attempt 和 node，并用现有 `escalation(attempt_failed)` 诊断携带 node / attempt，不扩展上报原因词表。当前 `Defect` 编译映射只走可能不终结的 `EffectFailed`，不满足此要求。
+runner 必须专门拦截稳定错误并形成 failed、`infra_error` / `infra.job_identity_unavailable`、明确 `Never` 重试的 `Finalized`；必须终结 attempt 和 node，并用现有 `escalation(attempt_failed)` 诊断携带 node / attempt，不扩展上报原因词表。当前 runner 已专门处理此错误，终结事务的模块测试不替代本节全部验收。
 
 缺摘要的已受理旧任务可在引擎内部 `Finalized` 携带独立 `retry_blocked` 原因。`on_finalized` 同事务结算已交付的最终计量并落 `attempt.finished`、`node.finished` 与诊断，提交后释放沙盒和写锁；无需迟到结算系统或可空的 `Finalized` 用量字段。崩溃重放、重试定时器均不得重跑 worker；预算失败没有可信 bundle / `result_ref` 时，`raise_cap` 不自动重排，显式 `RetryNode` 才按原权限处理。不得把已有 `result_ref` 当作历史可信证明。
 

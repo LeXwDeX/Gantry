@@ -1059,7 +1059,9 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -
             if let Some(this) = since.iter_mut().find(|a| a.id == attempt.id) {
                 this.failure_detail = finalized.failure_detail.clone();
             }
-            if will_retry(&detail, since.len() as u32, &since, env) {
+            if finalized.retry_blocked.is_none()
+                && will_retry(&detail, since.len() as u32, &since, env)
+            {
                 None
             } else {
                 // 已终结的交付单元不再上报（放弃收尾中被取消的尝试可能以失败告终）。
@@ -1143,7 +1145,7 @@ fn failure_reports(
             .copied()
             .unwrap_or(0)
             .max(limit);
-        return vec![
+        let mut reports = vec![
             delivery_event(
                 state,
                 EventType::BudgetExhausted,
@@ -1169,6 +1171,23 @@ fn failure_reports(
                 format!("budget:{delivery}:{dimension}"),
             ),
         ];
+        if finalized.retry_blocked.is_some() {
+            reports.push(raise(
+                InboxKind::Escalation,
+                format!("节点 {} 失败：{detail}", node.key),
+                InboxPayload::Escalation {
+                    reason_code: reason("attempt_failed"),
+                    node_id: Some(node.id),
+                    attempt_id: Some(attempt.id),
+                    target_level: None,
+                    action_id: None,
+                    evidence: Vec::new(),
+                    options: None,
+                },
+                attempt_failed_dedup(delivery, node.id),
+            ));
+        }
+        return reports;
     }
     // workflow 受保护路径：任何里程碑都 deny，上报 manual_action 并附补丁（P-48）。
     if detail == "policy.path_protected:workflows" {

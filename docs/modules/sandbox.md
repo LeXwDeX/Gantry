@@ -2,6 +2,8 @@
 
 > 状态：设计 v0.1 · 里程碑：M1 起（M2 / M3 增量） · 泳道：`exec`（见 [milestones.md](../milestones.md)） · crate / 目录：`crates/gantry-sandbox/`
 
+> **#362 实现现状**：`SandboxManager` 保存最终 `job.json` 字节摘要，并先对恢复请求整批预验证。恢复查询短暂失败时返回待核实的 `Running`，并在有界退避后对同一绑定再次查询；同一 job 跨重启属于不同 sandbox 时不再误报 `Unknown`。已签发令牌的普通失败保留 `meta.json` 作为 release 依据，终结后释放失败或重启也不会被孤儿巡检删除，直到显式 `release`。本机联测使用替身驱动、真实执行体和真实 Egress 登记表，覆盖计量保留、终结提交及提交后释放；真实 Podman 与生产装配未验证（`assemble_real` 仍返回 `NotReady`），§14 尚待独立评审和最终验收。
+
 > **协作扩展边界（提议）** —— 多工作树协作的完整语义见 [collaboration.md](../collaboration.md)；**设计提案，待单独契约批准，不替换本文现行规格**。
 >
 > - 跨树材料只作为服务端中介提供的固定快照进入 `SandboxSpec`；本模块不挂载其他工作树，也不接受指向其他树的活动路径。

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use gantry_core::canon::{GitOid, RepoSlug, SubjectDigest};
 use gantry_core::entities::{
     Actor, ActorKind, AttemptStatus, DeliveryOrigin, ForgeActionKind, GithubPrRef, GithubRef,
-    InboxKind, MergeMethod, Project, PullRequestRef, Seq, Stage, Tier, TokenUsage,
+    InboxKind, MergeMethod, NodeStatus, Project, PullRequestRef, Seq, Stage, Tier, TokenUsage,
 };
 use gantry_core::events::{NewEvent, Subject};
 use gantry_core::ids::{DeliveryId, IdGen, MessageId, ProjectId, WorktreeId};
@@ -27,7 +27,7 @@ use gantry_engine::create::{budget_from_level, NewDelivery};
 use gantry_engine::decide::{
     AttemptPlan, Effect, EffectKey, EffectReport, EngineConsts, EngineSettings, Finalized, Input,
     InputIdentity, ModelKey, ModelTable, OutputSignals, PatchResult, ProjectFacts,
-    ReservationPolicy, ResolvedModel, SandboxLimits, TemplateRegistry, TickReason,
+    ReservationPolicy, ResolvedModel, RetryBlocked, SandboxLimits, TemplateRegistry, TickReason,
 };
 use gantry_engine::engine::Engine;
 use gantry_engine::event_router::{EventRouter, CURSOR};
@@ -35,7 +35,7 @@ use gantry_engine::state::DeliveryState;
 use gantry_fakes::forge::FakeForge;
 use gantry_fakes::inbox::FakeInbox;
 use gantry_store::testing::{FakeClock, SeqEntropy};
-use gantry_store::{ClaimOpts, Store, StoreDeps};
+use gantry_store::{ClaimOpts, EventFilter, Store, StoreConfig, StoreDeps};
 use serde_json::json;
 
 const PROJECT: &str = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA";
@@ -72,6 +72,7 @@ struct ScriptRunner {
     judge: Mutex<JudgeMode>,
     effects: Mutex<Vec<Effect>>,
     granted: Mutex<bool>,
+    release_views: Mutex<Vec<(bool, u64, bool)>>,
 }
 
 impl ScriptRunner {
@@ -81,6 +82,7 @@ impl ScriptRunner {
             judge: Mutex::new(JudgeMode::Normal),
             effects: Mutex::new(Vec::new()),
             granted: Mutex::new(false),
+            release_views: Mutex::new(Vec::new()),
         }
     }
 
@@ -144,6 +146,38 @@ impl EffectRunner for ScriptRunner {
     ) -> Option<EffectReport> {
         self.effects.lock().unwrap().push(effect.clone());
         let delivery = state.delivery.id;
+        if matches!(
+            &effect,
+            Effect::ReleaseSandbox { .. } | Effect::ReleaseLock { .. }
+        ) {
+            let committed = gantry_engine::engine::load_delivery_state(&self.store, &delivery)
+                .await
+                .unwrap()
+                .unwrap();
+            let failed = committed
+                .workflows
+                .values()
+                .flat_map(|w| w.nodes.values())
+                .any(|n| {
+                    n.status == NodeStatus::Failed
+                        && n.attempts.iter().any(|a| a.finished_at.is_some())
+                });
+            let used = committed
+                .ledger
+                .used
+                .tokens_by_tier
+                .get(&Tier::Worker)
+                .copied()
+                .unwrap_or(0);
+            let escalation = committed
+                .open_inbox
+                .values()
+                .any(|i| i.kind == InboxKind::Escalation);
+            self.release_views
+                .lock()
+                .unwrap()
+                .push((failed, used, escalation));
+        }
         match effect {
             Effect::EnsureWorktree { branch, base_ref } => {
                 let worktree_id: WorktreeId = WORKTREE.parse().unwrap();
@@ -358,6 +392,10 @@ impl Harness {
         let store = Store::open_in_memory(StoreDeps { clock, ids }, &[])
             .await
             .unwrap();
+        Self::with_store(store).await
+    }
+
+    async fn with_store(store: Store) -> Self {
         let forge = Arc::new(FakeForge::new_in(store.clone()));
         forge.insert_project(Project {
             id: project_id(),
@@ -513,6 +551,7 @@ impl Harness {
             status: AttemptStatus::Succeeded,
             failure_class: None,
             failure_detail: None,
+            retry_blocked: None,
             result_ref: Some(serde_json::from_value(json!(PATCH_SHA)).unwrap()),
             usage_metered: TokenUsage::default(),
             weighted_tokens: 0,
@@ -1059,6 +1098,7 @@ async fn repeated_command_returns_first_result_new_request_is_checked() {
         status: AttemptStatus::Failed,
         failure_class: Some(FailureClass::ExecFailed),
         failure_detail: Some(FailureDetail::parse("exec.bad_job").unwrap()),
+        retry_blocked: None,
         result_ref: None,
         usage_metered: TokenUsage::default(),
         weighted_tokens: 0,
@@ -1110,4 +1150,188 @@ async fn repeated_command_returns_first_result_new_request_is_checked() {
         actor.handle(input, identity).await.unwrap(),
         vec![Err(CommandRejection::InvalidState("node is not failed"))]
     );
+}
+
+#[tokio::test]
+async fn identity_failure_is_committed_before_release_and_survives_sqlite_reopen() {
+    use gantry_core::entities::{FailureClass, FailureDetail};
+
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("g362-identity-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&path).unwrap();
+    let dir = TempDir(path);
+    let deps = || {
+        let clock = Arc::new(FakeClock::new(T0));
+        let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(11))));
+        StoreDeps { clock, ids }
+    };
+    let (delivery, finalized, committed_events) = {
+        let store = Store::open(StoreConfig::new(&dir.0), deps(), &[])
+            .await
+            .unwrap();
+        let h = Harness::with_store(store).await;
+        let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+        let mut actor = h.actor();
+        h.settle(&mut actor).await;
+        h.pump(&mut router, &mut actor).await;
+        let plan = h.runner.plans().remove(0);
+        let before = h.store.events().head().await.unwrap();
+        let finalized = Finalized {
+            attempt_id: plan.attempt_id,
+            node_id: plan.node_id,
+            status: AttemptStatus::Failed,
+            failure_class: Some(FailureClass::InfraError),
+            failure_detail: Some(FailureDetail::parse("infra.job_identity_unavailable").unwrap()),
+            retry_blocked: Some(RetryBlocked::JobIdentityUnavailable),
+            result_ref: None,
+            usage_metered: TokenUsage::new(4_000, 200, 100, 0, 5),
+            weighted_tokens: 5_010,
+            weight_audit: serde_json::from_value(json!({"basis":"job_token", "config_rev":1,
+                "weights":{"input":1.0,"output":5.0,"cache_read":0.1,"cache_write":1.25}}))
+            .unwrap(),
+            wall_time_s: 42,
+            verdict: None,
+            patch: PatchResult::None,
+            proposals: vec![],
+            signals: OutputSignals::default(),
+        };
+        // 先让记账事件校验失败，验证前面已追加的 attempt.finished 也回滚。
+        let mut invalid = finalized.clone();
+        invalid.weight_audit = serde_json::from_value(json!({"basis":"job_token", "config_rev":1,
+            "weights":{"input":0.0,"output":5.0,"cache_read":0.1,"cache_write":1.25}}))
+        .unwrap();
+        assert!(actor
+            .handle(
+                Input::Report(EffectReport::AttemptFinalized(invalid)),
+                InputIdentity::Report(EffectKey::Run(plan.attempt_id))
+            )
+            .await
+            .is_err());
+        assert_eq!(h.store.events().head().await.unwrap(), before);
+        assert!(h.runner.release_views.lock().unwrap().is_empty());
+        assert!(h.state().await.node(&plan.node_id).unwrap().attempts[0]
+            .finished_at
+            .is_none());
+        actor
+            .handle(
+                Input::Report(EffectReport::AttemptFinalized(finalized.clone())),
+                InputIdentity::Report(EffectKey::Run(plan.attempt_id)),
+            )
+            .await
+            .unwrap();
+        let events = h
+            .store
+            .events()
+            .scan(before, &EventFilter::default(), 200)
+            .await
+            .unwrap()
+            .events;
+        let types: Vec<_> = events.iter().map(|e| e.ty.as_str()).collect();
+        assert_eq!(
+            types,
+            vec![
+                "attempt.finished",
+                "budget.charged",
+                "budget.charged",
+                "inbox.raised",
+                "node.finished"
+            ]
+        );
+        assert_eq!(
+            events[0].data["failure_detail"],
+            "infra.job_identity_unavailable"
+        );
+        assert_eq!(events[0].data["usage"]["input_tokens"], 4_000);
+        assert!(events[0].data.get("result_ref").is_none());
+        assert!(events[0].data.get("accepted_open_pr").is_none());
+        assert_eq!(events[1].data["delta"], 5_010);
+        assert_eq!(events[2].data["delta"], 42);
+        assert_eq!(
+            events[3].data["item"]["payload"]["reason_code"],
+            "attempt_failed"
+        );
+        assert_eq!(
+            events[3].data["item"]["payload"]["node_id"],
+            plan.node_id.to_string()
+        );
+        assert_eq!(
+            events[3].data["item"]["payload"]["attempt_id"],
+            plan.attempt_id.to_string()
+        );
+        assert_eq!(
+            h.runner.release_views.lock().unwrap().as_slice(),
+            &[(true, 5_010, true), (true, 5_010, true)]
+        );
+        (h.delivery, finalized, events)
+    };
+    let store = Store::open(StoreConfig::new(&dir.0), deps(), &[])
+        .await
+        .unwrap();
+    let after = store
+        .events()
+        .scan(Seq::ZERO, &EventFilter::default(), 200)
+        .await
+        .unwrap()
+        .events;
+    for event in committed_events {
+        assert!(after.iter().any(|saved| saved == &event));
+    }
+    let state = gantry_engine::engine::load_delivery_state(&store, &delivery)
+        .await
+        .unwrap()
+        .unwrap();
+    let node = state.node(&finalized.node_id).unwrap();
+    assert_eq!(node.status, NodeStatus::Failed);
+    assert_eq!(node.attempts.len(), 1);
+    assert_eq!(node.attempts[0].result_ref, None);
+    assert_eq!(state.ledger.used.tokens_by_tier[&Tier::Worker], 5_010);
+    assert_eq!(state.ledger.used.wall_time, 42);
+
+    let runner = Arc::new(ScriptRunner::new(store.clone()));
+    let mut actor = DeliveryActor::new(
+        delivery,
+        ActorDeps {
+            store: store.clone(),
+            inbox: Arc::new(FakeInbox::new_in(store.clone())),
+            outbox: Arc::new(FakeForge::new_in(store.clone())),
+            effects: runner.clone(),
+            snapshots: Arc::new(Snapshots::default()),
+            cas: Arc::new(store.cas()),
+        },
+        config(),
+    );
+    let head = store.events().head().await.unwrap();
+    actor
+        .handle(
+            Input::Report(EffectReport::AttemptFinalized(finalized.clone())),
+            InputIdentity::Report(EffectKey::Run(finalized.attempt_id)),
+        )
+        .await
+        .unwrap();
+    for tick in [
+        TickReason::Recover,
+        TickReason::Settle,
+        TickReason::Timer {
+            at: Timestamp::from_millis(T0 + 9_000_000),
+            kind: gantry_engine::decide::TimerKind::RetryBackoff {
+                node_id: finalized.node_id,
+            },
+        },
+    ] {
+        actor
+            .handle(Input::Tick(tick.clone()), InputIdentity::Tick(tick))
+            .await
+            .unwrap();
+    }
+    assert!(runner.plans().is_empty());
+    assert_eq!(store.events().head().await.unwrap(), head);
 }

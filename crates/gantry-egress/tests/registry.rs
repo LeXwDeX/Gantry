@@ -33,6 +33,7 @@ struct Harness {
     secrets: Arc<dyn SecretSink>,
     registry: Registry,
     path: Option<PathBuf>,
+    options: RegistryOptions,
 }
 
 fn endpoints() -> Endpoints {
@@ -57,6 +58,10 @@ fn secrets_for(clock: &FakeClock) -> Arc<dyn SecretSink> {
 
 impl Harness {
     fn new() -> Self {
+        Self::new_with_options(options())
+    }
+
+    fn new_with_options(options: RegistryOptions) -> Self {
         let clock = Arc::new(FakeClock::new(T0));
         let secrets = secrets_for(&clock);
         let registry = Registry::open(
@@ -64,7 +69,7 @@ impl Harness {
             clock.clone(),
             Arc::new(SeqEntropy::new(7)),
             secrets.clone(),
-            options(),
+            options.clone(),
         )
         .unwrap();
         Self {
@@ -72,10 +77,15 @@ impl Harness {
             secrets,
             registry,
             path: None,
+            options,
         }
     }
 
     fn on_disk(name: &str) -> Self {
+        Self::on_disk_with_options(name, options())
+    }
+
+    fn on_disk_with_options(name: &str, options: RegistryOptions) -> Self {
         let path = std::env::temp_dir().join(format!(
             "gantry-egress-{name}-{}-{}.db",
             std::process::id(),
@@ -89,7 +99,7 @@ impl Harness {
             clock.clone(),
             Arc::new(OsEntropy),
             secrets.clone(),
-            options(),
+            options.clone(),
         )
         .unwrap();
         Self {
@@ -97,6 +107,7 @@ impl Harness {
             secrets,
             registry,
             path: Some(path),
+            options,
         }
     }
 
@@ -105,13 +116,14 @@ impl Harness {
         let path = self.path.take().expect("on-disk harness");
         let clock = self.clock.clone();
         let secrets = self.secrets.clone();
+        let options = self.options.clone();
         drop(self);
         let registry = Registry::open(
             Db::open(&path).unwrap(),
             clock.clone(),
             Arc::new(OsEntropy),
             secrets.clone(),
-            options(),
+            options.clone(),
         )
         .unwrap();
         Self {
@@ -119,6 +131,7 @@ impl Harness {
             secrets,
             registry,
             path: Some(path),
+            options,
         }
     }
 
@@ -299,6 +312,12 @@ fn token_invalid(result: Result<impl Sized, Denial>) -> &'static str {
         Err(other) => panic!("expected token_invalid, got {other:?}"),
         Ok(_) => panic!("expected token_invalid, got success"),
     }
+}
+
+fn assert_forget_conflict(result: Result<(), ControlError>) {
+    let error = result.unwrap_err();
+    assert!(matches!(&error, ControlError::Conflict(_)));
+    assert_eq!(error.status(), 409);
 }
 
 // ---------------------------------------------------------------------------
@@ -513,17 +532,272 @@ async fn revoke_is_final_idempotent_and_forget_then_not_found() {
 }
 
 #[tokio::test]
-async fn revoked_jobs_are_forgotten_after_the_ttl() {
+async fn revoked_jobs_survive_old_ttl_usage_pruning_and_file_restart() {
+    for ttl in [0, 1] {
+        let mut opts = options();
+        opts.final_usage_ttl_s = ttl;
+        let harness = Harness::on_disk_with_options(&format!("retention-{ttl}"), opts);
+        harness.setup();
+        let (token, req) = harness.issue(1);
+        harness
+            .job_request(&token, TokenUsage::new(41, 13, 7, 3, 1))
+            .unwrap();
+        let final_usage = harness.registry.revoke_job(&req.job_id).await.unwrap();
+        assert_eq!(final_usage.usage, TokenUsage::new(41, 13, 7, 3, 1));
+        assert_eq!(final_usage.weighted_tokens, 64);
+
+        harness.clock.advance_secs(86_400);
+        assert_eq!(
+            harness.registry.job_usage(&req.job_id).unwrap(),
+            final_usage
+        );
+        assert_eq!(
+            harness.registry.revoke_job(&req.job_id).await.unwrap(),
+            final_usage
+        );
+        assert_eq!(
+            harness.registry.issue_job(req.clone()),
+            Err(ControlError::JobRevoked)
+        );
+        assert_eq!(
+            harness
+                .registry
+                .usage_since(None, None)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+
+        harness.clock.advance_secs(6 * 86_400);
+        assert!(harness
+            .registry
+            .usage_since(None, None)
+            .unwrap()
+            .items
+            .is_empty());
+        assert_eq!(
+            harness.registry.job_usage(&req.job_id).unwrap(),
+            final_usage
+        );
+        let harness = harness.restart();
+        assert!(harness
+            .registry
+            .usage_since(None, None)
+            .unwrap()
+            .items
+            .is_empty());
+        assert_eq!(
+            harness.registry.job_usage(&req.job_id).unwrap(),
+            final_usage
+        );
+        assert_eq!(
+            harness.registry.revoke_job(&req.job_id).await.unwrap(),
+            final_usage
+        );
+        assert_eq!(
+            harness.registry.issue_job(req.clone()),
+            Err(ControlError::JobRevoked)
+        );
+        assert_eq!(
+            token_invalid(harness.registry.authenticate(Listener::Sandbox, &token)),
+            "token.revoked"
+        );
+
+        harness.registry.forget_job(&req.job_id).unwrap();
+        harness.registry.forget_job(&req.job_id).unwrap();
+        let harness = harness.restart();
+        assert_eq!(
+            harness.registry.job_usage(&req.job_id),
+            Err(ControlError::NotFound)
+        );
+        assert_eq!(
+            harness.registry.revoke_job(&req.job_id).await,
+            Err(ControlError::NotFound)
+        );
+        assert_eq!(
+            token_invalid(harness.registry.authenticate(Listener::Sandbox, &token)),
+            "token.unknown"
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_sweep_entry_point_preserves_revoked_jobs() {
+    let mut opts = options();
+    opts.final_usage_ttl_s = 1;
+    let harness = Harness::new_with_options(opts);
+    harness.setup();
+    let (_, svc_id) = harness.svc();
+    for entry in 0..7 {
+        let (token, req) = harness.issue(entry + 1);
+        harness.job_request(&token, usage(2, 3)).unwrap();
+        let final_usage = harness.registry.revoke_job(&req.job_id).await.unwrap();
+        harness.clock.advance_secs(86_401);
+        match entry {
+            0 => {
+                harness.registry.issue_job(job_request(100)).unwrap();
+            }
+            1 => {
+                harness.registry.job_usage(&req.job_id).unwrap();
+            }
+            2 => {
+                harness.registry.revoke_job(&req.job_id).await.unwrap();
+            }
+            3 => {
+                harness.registry.usage_since(None, None).unwrap();
+            }
+            4 => {
+                harness
+                    .registry
+                    .svc_token_usage(&svc_id, None, None)
+                    .unwrap();
+            }
+            5 => {
+                harness.registry.call_statement(call(1)).unwrap();
+            }
+            6 => {
+                harness.registry.status().unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            harness.registry.job_usage(&req.job_id).unwrap(),
+            final_usage
+        );
+        assert_eq!(
+            harness.registry.issue_job(req),
+            Err(ControlError::JobRevoked)
+        );
+    }
+}
+
+#[tokio::test]
+async fn forget_rejects_active_and_expired_jobs_without_changing_them() {
     let harness = Harness::configured();
-    let (_, req) = harness.issue(1);
-    harness.registry.revoke_job(&req.job_id).await.unwrap();
-    harness.clock.advance_secs(86_400 - 1);
-    assert!(harness.registry.job_usage(&req.job_id).is_ok());
-    harness.clock.advance_secs(1);
+    let (token, req) = harness.issue(1);
+    harness.job_request(&token, usage(4, 2)).unwrap();
+    let before = harness.registry.job_usage(&req.job_id).unwrap();
+    assert_forget_conflict(harness.registry.forget_job(&req.job_id));
+    assert_eq!(harness.registry.job_usage(&req.job_id).unwrap(), before);
+    assert!(harness
+        .registry
+        .authenticate(Listener::Sandbox, &token)
+        .is_ok());
+
+    harness.clock.advance_secs(1800 + 600);
+    assert_forget_conflict(harness.registry.forget_job(&req.job_id));
+    assert_eq!(harness.registry.job_usage(&req.job_id).unwrap(), before);
     assert_eq!(
-        harness.registry.job_usage(&req.job_id),
-        Err(ControlError::NotFound)
+        token_invalid(harness.registry.authenticate(Listener::Sandbox, &token)),
+        "token.expired"
     );
+    let final_usage = harness.registry.revoke_job(&req.job_id).await.unwrap();
+    assert_eq!(final_usage.usage, before.usage);
+    harness.registry.forget_job(&req.job_id).unwrap();
+}
+
+#[tokio::test]
+async fn forget_rejects_draining_and_unpersisted_final_without_losing_usage() {
+    let harness = Harness::on_disk("forget-draining");
+    harness.setup();
+    let (token, req) = harness.issue(1);
+    let caller = harness
+        .registry
+        .authenticate(Listener::Sandbox, &token)
+        .unwrap();
+    let admitted = harness
+        .registry
+        .admit(&caller, "anthropic", "m", None)
+        .unwrap();
+    let mut revoke = Box::pin(harness.registry.revoke_job(&req.job_id));
+    tokio::select! {
+        biased;
+        result = &mut revoke => panic!("revoke must wait for inflight: {result:?}"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        token_invalid(harness.registry.authenticate(Listener::Sandbox, &token)),
+        "token.revoked"
+    );
+    harness.clock.advance_secs(86_401);
+    let before = harness.registry.job_usage(&req.job_id).unwrap();
+    assert_forget_conflict(harness.registry.forget_job(&req.job_id));
+    assert_eq!(harness.registry.job_usage(&req.job_id).unwrap(), before);
+
+    // 取消吊销等待并完成请求：没有在途请求，但最终快照还没有持久化。
+    drop(revoke);
+    harness.registry.finish(admitted, ok(usage(7, 3))).unwrap();
+    let before_final = harness.registry.job_usage(&req.job_id).unwrap();
+    assert_eq!(before_final.usage, TokenUsage::new(7, 3, 0, 0, 1));
+    assert_forget_conflict(harness.registry.forget_job(&req.job_id));
+    assert_eq!(
+        harness.registry.job_usage(&req.job_id).unwrap(),
+        before_final
+    );
+    let harness = harness.restart();
+    assert_eq!(
+        harness.registry.job_usage(&req.job_id).unwrap(),
+        before_final
+    );
+    assert_forget_conflict(harness.registry.forget_job(&req.job_id));
+    let final_usage = harness.registry.revoke_job(&req.job_id).await.unwrap();
+    assert_eq!(final_usage.usage, before_final.usage);
+    harness.registry.forget_job(&req.job_id).unwrap();
+}
+
+#[tokio::test]
+async fn forget_database_failure_keeps_memory_and_disk() {
+    let harness = Harness::on_disk("forget-failure");
+    harness.setup();
+    let (_, req) = harness.issue(1);
+    let final_usage = harness.registry.revoke_job(&req.job_id).await.unwrap();
+    let conn = rusqlite::Connection::open(harness.path.as_ref().unwrap()).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_job_delete BEFORE DELETE ON jobs BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    ).unwrap();
+    assert!(matches!(
+        harness.registry.forget_job(&req.job_id),
+        Err(ControlError::Unavailable(_))
+    ));
+    assert_eq!(
+        harness.registry.job_usage(&req.job_id).unwrap(),
+        final_usage
+    );
+    drop(conn);
+    let harness = harness.restart();
+    assert_eq!(
+        harness.registry.job_usage(&req.job_id).unwrap(),
+        final_usage
+    );
+    assert_eq!(
+        harness.registry.issue_job(req),
+        Err(ControlError::JobRevoked)
+    );
+}
+
+#[tokio::test]
+async fn incomplete_final_does_not_add_a_registry_settlement_policy() {
+    let harness = Harness::configured();
+    let (token, req) = harness.issue(1);
+    let caller = harness
+        .registry
+        .authenticate(Listener::Sandbox, &token)
+        .unwrap();
+    let admitted = harness
+        .registry
+        .admit(&caller, "anthropic", "m", None)
+        .unwrap();
+    drop(admitted);
+    assert!(
+        harness
+            .registry
+            .revoke_job(&req.job_id)
+            .await
+            .unwrap()
+            .incomplete
+    );
+    harness.registry.forget_job(&req.job_id).unwrap();
 }
 
 #[test]

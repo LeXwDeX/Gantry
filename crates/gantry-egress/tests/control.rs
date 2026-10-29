@@ -294,6 +294,20 @@ async fn job_lifecycle_over_the_socket() {
         .send("GET", &format!("/control/v1/jobs/{id}/usage"), None)
         .await;
     assert_eq!(usage.body["state"], "active");
+    assert_problem(
+        &server
+            .send("DELETE", &format!("/control/v1/jobs/{id}"), None)
+            .await,
+        409,
+        "conflict",
+    );
+    assert_eq!(
+        server
+            .send("GET", &format!("/control/v1/jobs/{id}/usage"), None)
+            .await
+            .body,
+        usage.body
+    );
     let revoked = server
         .send(
             "POST",

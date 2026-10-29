@@ -19,4 +19,4 @@ tokio.workspace = true
 futures-core.workspace = true
 gantry-fakes = { path = "../gantry-fakes" }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
