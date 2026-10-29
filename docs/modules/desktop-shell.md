@@ -265,7 +265,7 @@ stateDiagram-v2
 2. 在硬件中生成两把 P-256 密钥（P-47）：mTLS 客户端密钥（无提示使用）与审批签名密钥（建键时就设访问控制：每次使用都要 Touch ID / Windows Hello）；硬件不可用时 **fail-closed**，不降级为软件密钥（OQ-S2）。
 3. 用 mTLS 客户端密钥生成 CSR（subject 任意，服务端重写，api.md §1.3）；审批签名公钥编码为未压缩点的 base64url（`approval_pubkey`）。
 4. 以固定根 CA 指纹的单向 TLS 连接配对端点，`POST /v1/pair`，体 `{ token, csr, approval_pubkey, device: { name, platform } }`。`401 pair_token_invalid` 不区分原因，提示"重新生成配对串"；响应丢失时 token 已被消耗，同样提示重新生成。
-5. 校验响应：`certificate_chain` 为 `[叶子, 中间 CA, 根]`，叶子的公钥等于本机 mTLS 公钥；根的指纹等于配对串固定的值，链按 §7.1 的规则有效；响应里的 `ca_fingerprint` 等于配对串的；`device.pubkey_fpr` 与本机 mTLS 公钥一致、`device.approval_pubkey_fpr` 与本机审批公钥一致。
+5. 校验响应：`certificate_chain` 为 `[叶子, 中间 CA, 根]`，叶子的公钥等于本机 mTLS 公钥；根的指纹等于配对串固定的值，链按 §7.1 的规则有效；响应里的 `ca_fingerprint` 等于配对串的；`device.pubkey_fpr` 与本机 mTLS 公钥一致、`device.approval_pubkey_fpr` 与本机审批公钥一致；`api_base_url` 必须是 `https://`，主机（不区分大小写）与端口（缺省按 443 显式比较）都等于配对串的 host:port。任何一项不符都配对失败、不保存任何状态；`api_base_url` 不符的 `reason` 为 `api_base_url_mismatch`。
 6. 暂存为 `PendingIdentity`（**尚不可用于 API**），返回 `confirmation_code` 与 `device` 给 UI，由用户与服务端控制台显示的 6 位码人工核对。
 7. `pairing_confirm(true)`：原子写 `identity.json`，用新证书发 `GET /v1/me` 确认可用并记下 `server.log_epoch`，状态转 `paired`；`false`：删除两把密钥与待定证书，提示用户到服务端移除该设备（核对失败时设备在服务端是否已 `active`，OQ-S4）。
 
@@ -298,7 +298,7 @@ stateDiagram-v2
 
    | `reason` | 检查 |
    | --- | --- |
-   | `approval_id_mismatch` | `challenge.approval_id` 等于所请求的 id |
+   | `approval_id_mismatch` | `challenge.approval_id` 与 `challenge.payload.approval_id` 都等于所请求的 id |
    | `device_id_mismatch` | `payload.device_id` 等于本机 `device_id` |
    | `unknown_version` | `payload.v` 已知 |
    | `unsupported_signing` | `signing.alg` = `ES256`，`canonicalization` = `JCS`，`prefix` = `gantry/approval/v1\n` |
@@ -367,7 +367,7 @@ stateDiagram-v2
 | 能力 | 单窗口 `main`；只授予 §6.1 的应用命令权限；Channel / 事件所需的最小核心权限；**不授予远程 URL 的 IPC 能力** |
 | 导航 | `on_navigation` 只放行应用自己的来源；`on_new_window` 一律拒绝；`<a>` 的默认跳转被拦截，外链只经 `open_external` |
 | 其他 | 发布版禁用开发者工具；`withGlobalTauri = false`；单实例锁（避免两个实例争用身份文件与事件流）；原型冻结（Tauri 提供时开启 `freezePrototype`） |
-| 内存 | `SecretString` / `zeroize` 保存秘密 `value`、配对 token；日志与崩溃报告不含这些值 |
+| 内存 | `SecretString` / `zeroize` 保存秘密 `value`、配对 token；日志与崩溃报告不含这些值。已知残留：配对请求体序列化后的 HTTP 字节缓冲由 HTTP 库持有，当前不清零（结构化 token 已用 `Zeroizing<String>` 保存） |
 
 ## 8. 不变式与安全要求
 
