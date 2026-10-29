@@ -383,7 +383,14 @@ table inet gantry {
 | --- | --- | --- |
 | `github` | `app.app_id`、`app.private_key.secret_ref`、`app.webhook_secret.secret_ref`、`commit_identity` | `gantry github setup` 的回调由 `forge` 写入（§7.5，P-69） |
 | `sandbox` | `base_image`：**默认不写**——默认值是随版本发布、固定摘要的官方 worker 镜像（P-66）；只有自建镜像时才用 `gantry settings bootstrap-set` 覆盖 | 镜像如何构建与分发归 `sandbox` / `worker` / CI（OPS-11） |
-| `egress` | `default` 档案与 `model_api` 分组（M1 只要求模型 API，config §8.2） | **[提议]**，归 `egress` 规格确认；若内置默认已含则不写 |
+| `egress` | **M2**；M1 的模型 API 出口走内置默认。`default` 档案与 `model_api` 分组 **[提议]**，归 `egress` 规格确认 | — |
+
+**`settings.bootstrap_set` 参数契约**（#371）：
+
+- 请求：`{resource, values}`；`resource` 是设置资源名，`values` 的键是资源内相对键，值一律字符串。
+- 全路径：`<resource>.<key>`（例如 `sandbox` + `base_image` → `sandbox.base_image`），白名单按 `core::bootstrap_writable(resource, 全路径)` 判定。
+- M1 只接受目标类型为字符串的引导键（如 `sandbox.base_image`、`github.app.private_key.secret_ref`）；数值、对象键（`github.app.app_id`、`github.commit_identity`）由 `github setup` 回调写入，CLI 路径返回 `not_writable`。
+- 错误码：`bad_request`（资源名 / 键名不合法、空值、未知字段、值不是字符串）、`not_writable`（白名单外或目标类型不是字符串）、`not_bootstrap_period`（已有设备配对）。
 
 其余键使用"内置默认随二进制"（config §2.1），不写。
 
