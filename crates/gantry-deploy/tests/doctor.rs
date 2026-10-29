@@ -43,9 +43,9 @@ fn exit_codes_follow_worst_status() {
     assert_eq!(webhook.worst(), Status::Ok, "{}", webhook.render_text());
     assert_eq!(webhook.exit_code(), 0);
 
-    // 未实现的区域报 warn，不冒充通过。
+    // 未实现的区域报 unchecked，不冒充通过。
     let pki = doctor::run(Some("pki"), &ctx).unwrap();
-    assert_eq!(pki.exit_code(), 1);
+    assert_eq!(pki.exit_code(), 3);
 
     let leaky = DoctorContext {
         probe: &LeakyEntry,
@@ -60,6 +60,42 @@ fn exit_codes_follow_worst_status() {
         .map(|c| c.name)
         .collect();
     assert_eq!(failed, ["api_not_exposed"]);
+}
+
+#[test]
+fn unchecked_is_distinct_from_warn() {
+    let ctx = DoctorContext {
+        entry: entry(),
+        test_mode: Some(false),
+        probe: &GoodEntry,
+    };
+    let pki = doctor::run(Some("pki"), &ctx).unwrap();
+    assert_eq!(pki.checks[0].status, Status::Unchecked);
+    assert!(pki.checks[0].detail.contains("#106"));
+    let json = pki.to_json();
+    assert_eq!(json["status"], "unchecked");
+    assert_eq!(json["checks"][0]["status"], "unchecked");
+    assert!(pki.render_text().starts_with("unchecked pki.pending"));
+}
+
+#[test]
+fn fail_outranks_unchecked_in_worst_status() {
+    let ctx = DoctorContext {
+        entry: entry(),
+        test_mode: Some(false),
+        probe: &GoodEntry,
+    };
+    let all = doctor::run(None, &ctx).unwrap();
+    assert_eq!(all.worst(), Status::Unchecked);
+    assert_eq!(all.exit_code(), 3);
+
+    let failing = DoctorContext {
+        test_mode: Some(true),
+        ..ctx
+    };
+    let all = doctor::run(None, &failing).unwrap();
+    assert_eq!(all.worst(), Status::Fail);
+    assert_eq!(all.exit_code(), 2);
 }
 
 #[test]
