@@ -113,6 +113,7 @@ impl Store {
             cfg.dir.join("cas"),
             durable.clone(),
             deps.clock.clone(),
+            deps.ids.entropy(),
             cas::DEFAULT_MAX_OBJECT_BYTES,
         )?;
         Ok(Store {
@@ -180,7 +181,11 @@ impl Store {
     ) -> Result<Store, StoreError> {
         let registry = ModuleRegistry::new(modules)?;
         let log_id = deps.ids.next_ulid().map_err(StoreError::Id)?.to_string();
-        let cas = Cas::in_memory(deps.clock.clone(), cas::DEFAULT_MAX_OBJECT_BYTES);
+        let cas = Cas::in_memory(
+            deps.clock.clone(),
+            deps.ids.entropy(),
+            cas::DEFAULT_MAX_OBJECT_BYTES,
+        );
         Ok(Store {
             inner: Arc::new(RwLock::new(Inner {
                 log_id,

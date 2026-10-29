@@ -326,6 +326,11 @@ impl IdGen {
         }
     }
 
+    /// 构造方注入的熵源；供需要可注入随机性的组件复用（如 CAS 抽样）。
+    pub fn entropy(&self) -> Arc<dyn Entropy> {
+        self.entropy.clone()
+    }
+
     pub fn next<K: IdKind>(&self) -> Result<Id<K>, IdError> {
         let value = self.next_u128()?;
         Ok(Id {
