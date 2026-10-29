@@ -31,7 +31,7 @@ use crate::consts::{SSE_HEARTBEAT, SSE_MAX_LAG_EVENTS, SSE_MAX_STREAMS_PER_DEVIC
 use crate::problem::{Problem, ProblemCode};
 use crate::server::{ApiCore, HandlerRequest, Reply, Services};
 
-/// 回放 / 实时的轮询间隔（store 尚无 `tail` 推送）。
+/// 回放 / 实时的轮询间隔（store 已提供 `watch_head`；本实现仍用轮询，接线归 #296 / #105）。
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// 每次扫描的批量上限（store 的 `scan` 上限）。
 const SCAN_BATCH: u32 = 200;

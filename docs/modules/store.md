@@ -490,6 +490,8 @@ loop:
 
 订阅者没有每连接的内存队列，所以不存在"缓冲溢出丢事件"；`api` 的 `lagging` 关闭只是发送缓冲的事。
 
+**M1 已落地（#267）**：`EventLog::watch_head()` 在每次提交后发布新的 head，订阅者用 `borrow_and_update` + `scan` 组合即可实现上述循环。`tail` 的 `EventStream` 封装尚未实现，`api` 当前仍用 `scan` + 定时重扫。
+
 ### 7.6 Outbox 实现要点
 
 **认领**（`BEGIN IMMEDIATE` 内，先 `cancel_blocked`，再选一行）：

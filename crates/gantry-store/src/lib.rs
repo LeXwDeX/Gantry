@@ -79,6 +79,8 @@ pub struct Store {
     durable: Option<Arc<durable::Durable>>,
     /// 单个事件 `data` 序列化后的字节上限（store.md §8 第 1 条）。
     max_event_data_bytes: u64,
+    /// 提交后通知新的 head（store.md §7.5 的 `tail` / `watch_head`）。
+    head_tx: tokio::sync::watch::Sender<Seq>,
     /// `open_temp` 的临时目录；排在 `durable` 之后，连接先关再删目录。
     #[cfg(feature = "testing")]
     temp_dir: Option<Arc<TempDir>>,
@@ -116,6 +118,8 @@ impl Store {
             deps.ids.entropy(),
             cas::DEFAULT_MAX_OBJECT_BYTES,
         )?;
+        let head = Seq::from_wire(inner.head).unwrap_or(Seq::ZERO);
+        let (head_tx, _) = tokio::sync::watch::channel(head);
         Ok(Store {
             inner: Arc::new(RwLock::new(inner)),
             gate: Arc::new(WriteGate::new()),
@@ -124,6 +128,7 @@ impl Store {
             cas,
             durable: Some(durable),
             max_event_data_bytes: cfg.max_event_data_bytes,
+            head_tx,
             #[cfg(feature = "testing")]
             temp_dir: None,
         })
@@ -186,6 +191,7 @@ impl Store {
             deps.ids.entropy(),
             cas::DEFAULT_MAX_OBJECT_BYTES,
         );
+        let (head_tx, _) = tokio::sync::watch::channel(Seq::ZERO);
         Ok(Store {
             inner: Arc::new(RwLock::new(Inner {
                 log_id,
@@ -199,6 +205,7 @@ impl Store {
             cas,
             durable: None,
             max_event_data_bytes: durable::DEFAULT_MAX_EVENT_DATA_BYTES,
+            head_tx,
             temp_dir: None,
         })
     }
@@ -1071,6 +1078,8 @@ impl WriteTx {
         };
         *inner = self.snapshot;
         inner.revision = base_revision + 1;
+        let head = Seq::from_wire(inner.head).unwrap_or(Seq::ZERO);
+        let _ = self.store.head_tx.send(head);
         Ok(Committed {
             first_seq: first_new,
             last_seq: inner.head,
@@ -2031,6 +2040,11 @@ impl EventLog {
     pub async fn head(&self) -> Result<Seq, StoreError> {
         let inner = self.store.inner.read().map_err(|_| StoreError::Poisoned)?;
         Ok(Seq::from_wire(inner.head).unwrap_or(Seq::ZERO))
+    }
+
+    /// 订阅 head 变化（store.md §7.5）：先 `borrow_and_update` 取当前值，再 `changed` 等待下一次提交。
+    pub fn watch_head(&self) -> tokio::sync::watch::Receiver<Seq> {
+        self.store.head_tx.subscribe()
     }
 
     pub async fn check_cursor(&self, after: Seq) -> Result<(), StoreError> {
