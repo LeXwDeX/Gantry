@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use gantry_core::canon::{jcs, sha256, GitOid, RepoSlug, Sha256Digest};
