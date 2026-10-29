@@ -130,8 +130,8 @@ pub const USAGE: &str =
 pub struct DoctorContext<'a> {
     /// 引导配置里的公网 webhook 地址；未配置时 `webhook` 区域报 `fail`。
     pub entry: Option<Entry>,
-    /// 安装是否带了 `--test-mode`（`install-state.json`）。
-    pub test_mode: bool,
+    /// 安装是否带了 `--test-mode`（`install-state.json`）；`None` 表示状态不可读，按失败闭合。
+    pub test_mode: Option<bool>,
     pub probe: &'a dyn HttpProbe,
 }
 
@@ -174,16 +174,22 @@ fn not_implemented(area: &'static str) -> Check {
 }
 
 /// `--test-mode` 的安装在 `host` 区域标 `fail`，防止测试开关留在生产（§7.14）。
-pub fn host_test_mode(test_mode: bool) -> Check {
-    if test_mode {
-        Check::new(
+/// 状态文件缺失、损坏或缺字段时不冒充通过。
+pub fn host_test_mode(test_mode: Option<bool>) -> Check {
+    match test_mode {
+        Some(true) => Check::new(
             "host",
             "test_mode",
             Status::Fail,
             "安装带 --test-mode，不能用于生产",
-        )
-    } else {
-        Check::new("host", "test_mode", Status::Ok, "未启用 --test-mode")
+        ),
+        Some(false) => Check::new("host", "test_mode", Status::Ok, "未启用 --test-mode"),
+        None => Check::new(
+            "host",
+            "test_mode",
+            Status::Fail,
+            "install-state.json 缺失或不可读，无法确认 --test-mode 状态",
+        ),
     }
 }
 

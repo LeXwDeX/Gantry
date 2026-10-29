@@ -36,7 +36,7 @@ fn entry() -> Option<Entry> {
 fn exit_codes_follow_worst_status() {
     let ctx = DoctorContext {
         entry: entry(),
-        test_mode: false,
+        test_mode: Some(false),
         probe: &GoodEntry,
     };
     let webhook = doctor::run(Some("webhook"), &ctx).unwrap();
@@ -66,7 +66,7 @@ fn exit_codes_follow_worst_status() {
 fn test_mode_install_is_red_in_host_area() {
     let ctx = DoctorContext {
         entry: entry(),
-        test_mode: true,
+        test_mode: Some(true),
         probe: &GoodEntry,
     };
     let report = doctor::run(Some("host"), &ctx).unwrap();
@@ -75,10 +75,24 @@ fn test_mode_install_is_red_in_host_area() {
 }
 
 #[test]
+fn unreadable_install_state_is_red_in_host_area() {
+    let ctx = DoctorContext {
+        entry: entry(),
+        test_mode: None,
+        probe: &GoodEntry,
+    };
+    let report = doctor::run(Some("host"), &ctx).unwrap();
+    assert_eq!(report.exit_code(), 2);
+    assert_eq!(report.checks[0].status, Status::Fail);
+    assert_eq!(report.checks[0].name, "test_mode");
+    assert!(report.checks[0].detail.contains("install-state.json"));
+}
+
+#[test]
 fn missing_webhook_url_fails_and_unknown_area_is_rejected() {
     let ctx = DoctorContext {
         entry: None,
-        test_mode: false,
+        test_mode: Some(false),
         probe: &GoodEntry,
     };
     assert_eq!(doctor::run(Some("webhook"), &ctx).unwrap().exit_code(), 2);
@@ -94,7 +108,7 @@ fn missing_webhook_url_fails_and_unknown_area_is_rejected() {
 fn json_shape() {
     let ctx = DoctorContext {
         entry: entry(),
-        test_mode: false,
+        test_mode: Some(false),
         probe: &GoodEntry,
     };
     let json = doctor::run(Some("webhook"), &ctx).unwrap().to_json();

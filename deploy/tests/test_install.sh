@@ -131,6 +131,26 @@ test_next_subid_start() {
   rm -f "$f"
 }
 
+test_single_area_doctor_warns_do_not_abort() {
+  local stub rc=0
+  stub="$(mktemp -d)"
+  printf '#!/bin/sh\nexit 1\n' >"$stub/gantry"
+  chmod +x "$stub/gantry"
+  PATH="$stub:$PATH" doctor_area webhook 40 "不应中止" || rc=$?
+  assert_eq "$rc" 0
+  rm -rf "$stub"
+}
+
+test_single_area_doctor_failure_aborts() {
+  local stub rc=0
+  stub="$(mktemp -d)"
+  printf '#!/bin/sh\nexit 2\n' >"$stub/gantry"
+  chmod +x "$stub/gantry"
+  ( PATH="$stub:$PATH" doctor_area webhook 40 "应中止" ) 2>/dev/null || rc=$?
+  assert_eq "$rc" 40
+  rm -rf "$stub"
+}
+
 test_install_help_lists_steps() {
   local out
   out="$(bash "$DEPLOY_DIR/install.sh" --help)"

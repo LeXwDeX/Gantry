@@ -267,7 +267,7 @@
    - `hook_attributes: {url: https://<入口主机>/webhook, active: true}`；`redirect_url: https://<入口主机>/setup/github/callback`；
    - `default_permissions` / `default_events` **取自 [forge-actions §9.6](../interfaces/forge-actions.md#96-app-manifest-片段供-deploy-使用)**，M1 只带 `metadata:read`、`contents:write`、`pull_requests:write`、`issues:write`、`checks:read` 及对应事件；`actions:write`、`merge_queues:read` 与 `merge_group` 事件留到 M2 经"接受新权限"升级。**不得**出现 `workflows`（P-48）、`administration`；
    - 不请求 OAuth（`request_oauth_on_install: false`）。
-3. 命令把一个自动提交的 HTML 页（把 Manifest 以字段 `manifest` POST 到 `https://github.com/settings/apps/new?state=<state>`，组织拥有者为 `/organizations/<org>/settings/apps/new`）写到终端指定的文件，或打印其内容；管理员在任意一台有浏览器的电脑上打开并提交。页面本身不含任何秘密（`state` 只在与回调配对时有意义）。
+3. 命令把一个自动提交的 HTML 页（把 Manifest 以字段 `manifest` POST 到 `https://github.com/settings/apps/new?state=<state>`，组织拥有者为 `/organizations/<org>/settings/apps/new`）写到终端指定的文件，或打印其内容；管理员在任意一台有浏览器的电脑上打开并提交。页面本身不含密钥；`state` 是一次性回调凭据，只在与回调配对时有意义，不得外传。页面文件按 0600 创建；已存在同名文件或符号链接时拒绝写入，避免覆盖或跟随链接。
 4. 用户在 GitHub 上确认创建；GitHub 重定向浏览器到 `https://<入口主机>/setup/github/callback?code=…&state=…`，经反向代理 / 隧道到达 `forge`。`forge` 校验 `state`（常量时间、单次），用 `code` 调转换端点，把 `pem`、`webhook_secret` 写入 `secrets/`（引导期写入路径）、把 `github.app.*` 与 `github.commit_identity`（App 机器人的提交身份，P-69）以 `actor = {kind:"system"}` 写入并追加审计事件（P-66），会话作废，回应一个不含密钥的完成页。`client_secret` 不使用、不保存。
 5. 命令轮询会话结果并打印 App ID、slug、获批权限；用 App 私钥签 JWT 调 `GET /app` 确认获批权限与 Manifest **完全一致**（对应 forge-actions §9.5 的启动自检）。
 6. 引导安装：输出 `https://github.com/apps/<slug>/installations/new`，提醒**只选需要的仓库**。安装完成后 `forge` 收到 `installation` 事件得到 `installation_id`。项目如何据此绑定（`project.added` 由谁触发）骨架未定（api.md OQ-8，OPS-13）。
