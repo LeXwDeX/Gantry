@@ -63,7 +63,7 @@ gantry [--config <path>] [--socket <path>] <command>
 ### 6.2 控制通道（OPS-07）
 
 - **传输**：Unix 流套接字，文件权限 0600。进程在整个生命周期内持有 `<socket>.lock` 上的排他 `flock`：检查、清理残留、绑定都在锁内，并发启动时恰好一个实例成功，退出时只删自己的套接字（锁文件保留）。路径存在但不是套接字时拒绝启动。
-- **鉴权**：每个连接取对端 uid（`SO_PEERCRED` / `getpeereid`），生产只放行 0。不符时第一行即应答 `forbidden` 并断开，不读任何命令。
+- **鉴权**：每个连接取对端 uid（`SO_PEERCRED` / `getpeereid`），生产只放行 0。不符时第一行即应答 `forbidden` 并断开，不读任何命令。客户端（`gantry` CLI，经 `UnixControlClient`）在连接后、发送任何请求前也校验对端 uid：必须等于 `gantry` 用户；解析失败或 uid 不符都拒绝连接（#368，防止请求发给 `gantry-egress` 或冒名套接字）。
 - **协议**：每行一个 JSON。请求 `{"cmd": "…", "args": {…}}`（未知字段拒绝）；应答 `{"ok": true, "result": …}` 或 `{"ok": false, "error": {"code", "message"}}`。单行上限 64 KiB，超出应答 `too_large` 并断开；非 JSON 应答 `bad_request` 后连接保持；未知命令应答 `unknown_command`。
 - **命令**：内置只有 `status`（`profile`、`head_seq`、各模块的提供方 real / fake / absent、`engine.degraded`）。其余命令组经 `CommandSet` 注册：
 
