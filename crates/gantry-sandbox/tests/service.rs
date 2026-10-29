@@ -924,6 +924,50 @@ async fn repeated_recover_requeries_a_pending_slot() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn unknown_verdict_keeps_the_old_wait_for_resubmission() {
+    for subscribe_first in [true, false] {
+        let h = harness(1);
+        let n = if subscribe_first { 567 } else { 568 };
+        h.driver.fail_next(FailPoint::List);
+        assert_eq!(
+            h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+            vec![RecoveredJob::Running(handle(n))]
+        );
+        let job = att(n);
+        let wait = h.service.wait(&job);
+        tokio::pin!(wait);
+        if subscribe_first {
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                .await
+                .is_err());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // 后台已确认 Unknown：旧等待不能被 ShuttingDown / NotFound 打断。
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
+            .await
+            .is_err());
+        h.driver.script(
+            sbx(n),
+            FakeScript {
+                behavior: FakeBehavior::ExitAfter {
+                    after: Duration::from_secs(1),
+                    code: 0,
+                    honor_term: true,
+                },
+                ..FakeScript::default()
+            },
+        );
+        h.service.submit(&ctx(), spec(n)).await.unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), &mut wait)
+            .await
+            .expect("old wait must survive the Unknown handoff")
+            .unwrap();
+        assert_eq!(outcome.job_id, job);
+        assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancel_during_unverified_recovery_survives_an_unknown_verdict() {
     let h = harness(1);
     let n = 561;
@@ -4299,6 +4343,46 @@ async fn recovery_list_failure_resumes_the_original_wait_automatically() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn recovery_does_not_leak_capacity_after_retry_takes_over() {
+    let mut h = harness(1);
+    let n = 566;
+    h.driver.script(sbx(n), long_running());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let container = container_id(&h);
+    h.restart();
+    h.driver.fail_next(FailPoint::List);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    h.driver.complete(&container, vec![]).unwrap();
+    assert_eq!(
+        h.service.wait(&att(n)).await.unwrap().terminal.cause,
+        TerminalCause::Exited
+    );
+    // 待核实槽位转交监督时不能多记一笔欠账：后续任务仍须拿到许可。
+    h.driver.script(
+        sbx(n + 1),
+        FakeScript {
+            behavior: FakeBehavior::ExitAfter {
+                after: Duration::from_secs(1),
+                code: 0,
+                honor_term: true,
+            },
+            ..FakeScript::default()
+        },
+    );
+    h.service.submit(&ctx(), spec(n + 1)).await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), h.service.wait(&att(n + 1)))
+        .await
+        .expect("capacity must be released after recovery")
+        .unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+}
+
+#[tokio::test(start_paused = true)]
 async fn recovery_checks_foreign_rejection_records_and_damaged_digest() {
     for guard_only in [false, true] {
         let mut h = harness(1);
@@ -4419,10 +4503,12 @@ async fn retry_does_not_claim_a_sandbox_acquired_by_another_job() {
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert!(h.driver.signals(&container).is_empty());
     assert!(!h.egress.log().contains(&format!("revoke {}", att(522))));
-    assert!(matches!(
-        h.service.wait(&att(520)).await,
-        Err(SandboxError::NotFound)
-    ));
+    // Unknown 后槽位保留给旧等待：不能在重提前误报 NotFound。
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), h.service.wait(&att(520)))
+            .await
+            .is_err()
+    );
     h.driver.complete(&container, vec![]).unwrap();
     let outcome = h.service.wait(&att(522)).await.unwrap();
     assert_eq!(outcome.job_id, att(522));

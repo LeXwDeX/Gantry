@@ -115,6 +115,8 @@ struct Blocked {
     wake: bool,
     /// 已到达但尚未兑现的取消：确认未受理后仍须完成启动前取消，不能随槽位丢弃。
     cancel_pending: bool,
+    /// 已确认没有受理痕迹，等待调用方重提；槽位保留给旧 `wait`。
+    unknown: bool,
     /// 待核实期间保守占用一个并发许可：不完整快照不能当作已确认空闲容量。
     permit: Option<OwnedSemaphorePermit>,
     /// 无可用许可时的欠账；槽位移除时核销。
@@ -309,8 +311,23 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         if std::fs::create_dir_all(layout.dir()).is_err() {
             return BlockedCancel::Deferred;
         }
-        let mut meta = Meta::new(attempt.job_id, attempt.sandbox_id);
-        meta.project_id = Some(attempt.project_id);
+        // 准备重入后的 Accepted 记录保留原令牌事实；不能重建空 Meta 丢掉吊销与计量。
+        let meta = match Meta::load(&layout.meta_json()) {
+            Ok(Some(meta))
+                if meta.matches_identity(
+                    attempt.job_id,
+                    attempt.sandbox_id,
+                    attempt.project_id,
+                ) =>
+            {
+                meta
+            }
+            _ => {
+                let mut meta = Meta::new(attempt.job_id, attempt.sandbox_id);
+                meta.project_id = Some(attempt.project_id);
+                meta
+            }
+        };
         self.spawn_recovered(
             ctx,
             attempt.project_id,
@@ -323,20 +340,24 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         BlockedCancel::Fulfilled
     }
 
-    /// 释放待核实槽位的容量预留并移除它；返回是否确有槽位。
-    fn remove_blocked(&self, job_id: &AttemptId) -> bool {
-        let blocked = {
+    /// 已确认没有受理痕迹：保留槽位给旧等待，同时释放不再需要的容量预留。
+    fn mark_blocked_unknown(&self, job_id: &AttemptId) {
+        let (permit, overdraft) = {
             let mut jobs = self.jobs();
-            match jobs.get(job_id) {
-                Some(slot) if slot.blocked.is_some() => {
-                    jobs.remove(job_id).and_then(|slot| slot.blocked)
-                }
-                _ => None,
-            }
+            let Some(blocked) = jobs.get_mut(job_id).and_then(|slot| slot.blocked.as_mut()) else {
+                return;
+            };
+            blocked.unknown = true;
+            blocked.retrying = false;
+            (
+                blocked.permit.take(),
+                std::mem::take(&mut blocked.overdraft),
+            )
         };
-        let removed = blocked.is_some();
-        self.settle_blocked(blocked);
-        removed
+        drop(permit);
+        if overdraft {
+            self.inner.settle_overdraft();
+        }
     }
 
     fn settle_blocked(&self, blocked: Option<Blocked>) {
@@ -427,6 +448,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     retrying: false,
                     wake: false,
                     cancel_pending: false,
+                    unknown: false,
                     permit,
                     overdraft,
                 }),
@@ -465,6 +487,10 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     (job::RecoverMode::Supervise { permit, .. }, Some(reserved), _) => {
                         if permit.is_none() {
                             *permit = Some(reserved);
+                            // 调用方为这次占用记过欠账；转交许可后核销。
+                            settle_overdraft = true;
+                        } else {
+                            drop(reserved);
                         }
                     }
                     (job::RecoverMode::Reject { permit, .. }, Some(reserved), _) => {
@@ -639,7 +665,8 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                             BlockedCancel::Fulfilled => return,
                             BlockedCancel::Deferred => {}
                             BlockedCancel::None => {
-                                manager.remove_blocked(&attempt.job_id);
+                                // 保留槽位给旧 `wait`：重提前的 NotFound / ShuttingDown 会破坏交接。
+                                manager.mark_blocked_unknown(&attempt.job_id);
                                 return;
                             }
                         }
@@ -1524,22 +1551,39 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             sandbox_id: spec.sandbox_id,
         };
         let _submitting = self.inner.submit_lock.lock().await;
-        if let Some(slot) = self.jobs().get(&spec.job_id) {
-            if slot.blocked.is_some() {
+        let existing = {
+            let jobs = self.jobs();
+            jobs.get(&spec.job_id).map(|slot| {
+                (
+                    slot.blocked.is_some(),
+                    slot.blocked.as_ref().is_some_and(|blocked| blocked.unknown),
+                    slot.handle,
+                    slot.project_id,
+                    slot.spec.as_ref().is_some_and(|known| *known != spec),
+                )
+            })
+        };
+        let resuming = existing.is_some_and(|(blocked, unknown, ..)| blocked && unknown);
+        if let Some((blocked, unknown, handle, project_id, different_spec)) = existing {
+            if blocked && !unknown {
                 // 待核实槽位不是受理记录，submit 不能虚报 Ok 或提前启动。
                 return Err(SandboxError::InvalidSpec(
                     "job recovery is still unverified".into(),
                 ));
             }
-            if slot.handle.sandbox_id != spec.sandbox_id
-                || slot.project_id != spec.project_id
-                || slot.spec.as_ref().is_some_and(|known| *known != spec)
-            {
+            if handle.sandbox_id != spec.sandbox_id || project_id != spec.project_id {
                 return Err(SandboxError::InvalidSpec(
                     "a different sandbox spec was already submitted for this job".into(),
                 ));
             }
-            return Ok(slot.handle);
+            if !blocked {
+                if different_spec {
+                    return Err(SandboxError::InvalidSpec(
+                        "a different sandbox spec was already submitted for this job".into(),
+                    ));
+                }
+                return Ok(handle);
+            }
         }
         if self.jobs().iter().any(|(job_id, slot)| {
             *job_id != spec.job_id && slot.handle.sandbox_id == spec.sandbox_id
@@ -1584,25 +1628,53 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             .and_then(|()| accepted.save(&layout.meta_json()))
             .map_err(|err| infra(InfraDetail::WorkspacePrep, format!("accept: {err}")))?;
 
-        let (result_tx, result_rx) = watch::channel(None);
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let (progress_tx, _) = broadcast::channel(256);
-        let (permit_tx, permit_rx) = oneshot::channel();
-        let occupancy = Arc::new(Mutex::new(Occupancy::Queued));
-        self.jobs().insert(
-            spec.job_id,
-            Slot {
-                spec: Some(spec.clone()),
-                handle,
-                project_id: spec.project_id,
-                result: result_rx,
-                commands: command_tx,
-                progress: progress_tx.clone(),
-                occupancy: Arc::clone(&occupancy),
-                released: Arc::default(),
-                blocked: None,
-            },
-        );
+        let (result_tx, command_rx, progress_tx, occupancy, permit_tx, permit_rx);
+        if resuming {
+            // 可信 Unknown 后的重提复用旧槽位：旧 `wait` 继续等待新结果。
+            let mut jobs = self.jobs();
+            let slot = jobs.get_mut(&spec.job_id).expect("checked above");
+            let blocked = slot.blocked.take().expect("checked above");
+            drop(blocked.permit);
+            if blocked.overdraft {
+                self.inner.settle_overdraft();
+            }
+            let occ = Arc::clone(&slot.occupancy);
+            *occ.lock().unwrap_or_else(|p| p.into_inner()) = Occupancy::Queued;
+            slot.spec = Some(spec.clone());
+            result_tx = blocked.result;
+            command_rx = blocked.commands;
+            progress_tx = slot.progress.clone();
+            occupancy = occ;
+            let (tx, rx) = oneshot::channel();
+            permit_tx = tx;
+            permit_rx = rx;
+        } else {
+            let (rtx, rrx) = watch::channel(None);
+            let (ctx_tx, crx) = mpsc::unbounded_channel();
+            let (ptx, _) = broadcast::channel(256);
+            let (perm_tx, perm_rx) = oneshot::channel();
+            let occ = Arc::new(Mutex::new(Occupancy::Queued));
+            self.jobs().insert(
+                spec.job_id,
+                Slot {
+                    spec: Some(spec.clone()),
+                    handle,
+                    project_id: spec.project_id,
+                    result: rrx,
+                    commands: ctx_tx,
+                    progress: ptx.clone(),
+                    occupancy: Arc::clone(&occ),
+                    released: Arc::default(),
+                    blocked: None,
+                },
+            );
+            result_tx = rtx;
+            command_rx = crx;
+            progress_tx = ptx;
+            occupancy = occ;
+            permit_tx = perm_tx;
+            permit_rx = perm_rx;
+        }
         // 分派任务没了，接收端会立刻报错，actor 以 ShuttingDown 结束。
         let _ = self.inner.dispatcher().send(permit_tx);
         let actor = job::JobActor::new(
@@ -1830,7 +1902,8 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                         });
                     }
                     BlockedCancel::None => {
-                        self.remove_blocked(&attempt.job_id);
+                        // 保留槽位给旧 `wait`；可信 Unknown 只表示可以重提。
+                        self.mark_blocked_unknown(&attempt.job_id);
                     }
                 }
             }
