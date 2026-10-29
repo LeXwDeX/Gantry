@@ -566,6 +566,39 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
     assert!(daemon.terminate().success());
 }
 
+/// 默认 `EqualShareReservation` 在预算耗尽（预留为零）时不派发。
+///
+/// 事件与上报归 #309；本用例只锁定「不派发」，不把未实现的耗尽事件当作已实现。
+#[test]
+fn exhausted_reservation_does_not_dispatch() {
+    let scratch = Scratch::new();
+    let daemon = Daemon::spawn(&scratch, scratch.uid());
+    let mut client = Client::connect(&scratch);
+    let delivery = client.ok(json!({
+        "cmd": "fake.create_delivery",
+        "args": {"project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login",
+                 "user_text": "修复登录超时", "budget_worker_tokens": 0},
+    }))["delivery_id"]
+        .clone();
+
+    for _ in 0..10 {
+        let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
+        assert_eq!(step["done"], false, "{step}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (_, events) = read_log(&mut client);
+    assert!(
+        events.iter().any(|e| e["type"] == "delivery.created"),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().all(|e| e["type"] != "attempt.started"),
+        "预留为零时不应派发：{events:?}"
+    );
+    assert!(daemon.terminate().success());
+}
+
 #[test]
 fn real_policy_verifies_signed_approval_before_merge_enqueue() {
     real_policy_approval(false);
