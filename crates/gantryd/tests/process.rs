@@ -1424,14 +1424,65 @@ fn cli_reads_the_socket_path_from_the_boot_config() {
     let _daemon = Daemon::spawn(&scratch, scratch.uid());
     let output = gantry(
         &scratch,
-        &["settings", "bootstrap-set", "github", "app_owner=org:acme"],
+        &[
+            "settings",
+            "bootstrap-set",
+            "sandbox",
+            "base_image=registry.example/x@sha256:00",
+        ],
     );
     assert!(output.status.success(), "{output:?}");
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         result,
-        json!({"resource": "github", "applied": ["app_owner"]})
+        json!({"resource": "sandbox", "applied": ["base_image"]})
     );
+}
+
+#[cfg(feature = "testing")]
+#[test]
+fn bootstrap_set_validates_whitelist_and_types() {
+    let scratch = Scratch::new();
+    let _daemon = Daemon::spawn(&scratch, scratch.uid());
+    let mut client = Client::connect(&scratch);
+
+    let ok = client.ok(json!({
+        "cmd": "settings.bootstrap_set",
+        "args": {"resource": "sandbox", "values": {"base_image": "registry.example/x@sha256:00"}},
+    }));
+    assert_eq!(ok["applied"], json!(["base_image"]));
+
+    for (args, code) in [
+        (
+            json!({"resource": "sandbox", "values": {"base_image": 1}}),
+            "bad_request",
+        ),
+        (
+            json!({"resource": "sandbox", "values": {"bad key": "x"}}),
+            "bad_request",
+        ),
+        (
+            json!({"resource": "nope", "values": {"base_image": "x"}}),
+            "bad_request",
+        ),
+        (json!({"resource": "sandbox", "values": {}}), "bad_request"),
+        (
+            json!({"resource": "github", "values": {"app_owner": "x"}}),
+            "not_writable",
+        ),
+        (
+            json!({"resource": "github", "values": {"app.app_id": "123"}}),
+            "not_writable",
+        ),
+        (
+            json!({"resource": "github", "values": {"commit_identity": "x"}}),
+            "not_writable",
+        ),
+    ] {
+        let response = client.call(json!({"cmd": "settings.bootstrap_set", "args": args}));
+        assert_eq!(response["ok"], false, "{args} -> {response}");
+        assert_eq!(response["error"]["code"], code, "{args} -> {response}");
+    }
 }
 
 #[cfg(feature = "testing")]
