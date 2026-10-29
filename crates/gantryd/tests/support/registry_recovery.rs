@@ -505,9 +505,11 @@ async fn registry_release_recovery(legacy_outcome: bool) {
             Err(ControlError::NotFound)
         ));
         assert_eq!(store.events().head().await.unwrap(), before_events);
+        // foreign 待核实槽位属于旧进程；重启后 owner 才能按持久证据恢复。
+        collision.crash();
         let recovered_owner = tokio::time::timeout(
             Duration::from_secs(10),
-            run(collision.clone()).run(&plan, &cx, &ctx),
+            run(manager()).run(&plan, &cx, &ctx),
         )
         .await
         .unwrap()

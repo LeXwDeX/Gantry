@@ -113,6 +113,8 @@ struct Blocked {
     commands: mpsc::UnboundedReceiver<Command>,
     retrying: bool,
     wake: bool,
+    /// 已到达但尚未兑现的取消：确认未受理后仍须完成启动前取消，不能随槽位丢弃。
+    cancel_pending: bool,
     /// 待核实期间保守占用一个并发许可：不完整快照不能当作已确认空闲容量。
     permit: Option<OwnedSemaphorePermit>,
     /// 无可用许可时的欠账；槽位移除时核销。
@@ -120,6 +122,16 @@ struct Blocked {
 }
 
 type PermitWaiter = oneshot::Sender<OwnedSemaphorePermit>;
+
+/// 待核实槽位对已到达取消的处置结果。
+enum BlockedCancel {
+    /// 没有待处理取消。
+    None,
+    /// 已转交启动前取消 actor。
+    Fulfilled,
+    /// 取消已记录，但持久依据还写不出来；保持待核实并重试。
+    Deferred,
+}
 
 // 最低支持的 Rust 1.85 尚无 `try_update`；提高最低版本后改用 `try_update`。
 #[allow(deprecated)]
@@ -273,6 +285,44 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         Ok(Some((data.attempt_id, project)))
     }
 
+    /// 待核实槽位收到的取消：确认未受理后兑现为启动前取消，持久化失败则留待重试。
+    fn fulfil_blocked_cancel(&self, ctx: &ActorCtx, attempt: &UnfinishedAttempt) -> BlockedCancel {
+        let layout = match self.layout(attempt.sandbox_id) {
+            Ok(layout) => layout,
+            Err(_) => return BlockedCancel::Deferred,
+        };
+        {
+            let mut jobs = self.jobs();
+            let Some(blocked) = jobs
+                .get_mut(&attempt.job_id)
+                .and_then(|slot| slot.blocked.as_mut())
+            else {
+                return BlockedCancel::None;
+            };
+            blocked.cancel_pending |= blocked.commands.try_recv().is_ok();
+            if !blocked.cancel_pending {
+                return BlockedCancel::None;
+            }
+            blocked.wake = false;
+        }
+        // 取消完成前必须有可信持久依据；目录都建不出来时保持待核实。
+        if std::fs::create_dir_all(layout.dir()).is_err() {
+            return BlockedCancel::Deferred;
+        }
+        let mut meta = Meta::new(attempt.job_id, attempt.sandbox_id);
+        meta.project_id = Some(attempt.project_id);
+        self.spawn_recovered(
+            ctx,
+            attempt.project_id,
+            layout,
+            meta,
+            None,
+            false,
+            job::RecoverMode::CancelledBeforeStart,
+        );
+        BlockedCancel::Fulfilled
+    }
+
     /// 释放待核实槽位的容量预留并移除它；返回是否确有槽位。
     fn remove_blocked(&self, job_id: &AttemptId) -> bool {
         let blocked = {
@@ -304,10 +354,13 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         let Some(slot) = jobs.get(&attempt.job_id) else {
             return Ok(None);
         };
-        if slot.blocked.is_some() && slot.result.borrow().is_some() {
-            let blocked = jobs.remove(&attempt.job_id).and_then(|slot| slot.blocked);
-            drop(jobs);
-            self.settle_blocked(blocked);
+        if slot.blocked.is_some() {
+            if slot.result.borrow().is_some() {
+                let blocked = jobs.remove(&attempt.job_id).and_then(|slot| slot.blocked);
+                drop(jobs);
+                self.settle_blocked(blocked);
+            }
+            // 待核实槽位不是结果缓存：后续 recover 必须继续查询（§14.2）。
             return Ok(None);
         }
         if slot.handle.sandbox_id != attempt.sandbox_id || slot.project_id != attempt.project_id {
@@ -373,6 +426,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     commands: command_rx,
                     retrying: false,
                     wake: false,
+                    cancel_pending: false,
                     permit,
                     overdraft,
                 }),
@@ -581,8 +635,14 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 }
                 match manager.recover_one(&ctx, &attempt, true).await {
                     Ok(RecoveredJob::Unknown { .. }) => {
-                        manager.remove_blocked(&attempt.job_id);
-                        return;
+                        match manager.fulfil_blocked_cancel(&ctx, &attempt) {
+                            BlockedCancel::Fulfilled => return,
+                            BlockedCancel::Deferred => {}
+                            BlockedCancel::None => {
+                                manager.remove_blocked(&attempt.job_id);
+                                return;
+                            }
+                        }
                     }
                     Ok(_) => {
                         let wake = {
@@ -764,7 +824,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 ));
             }
             return self
-                .finish_reentry(ctx, unfinished, layout, container, created, record)
+                .finish_reentry(ctx, unfinished, layout, container, record)
                 .await;
         }
         let mut meta = match meta {
@@ -948,7 +1008,7 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 ));
             }
             return self
-                .finish_reentry(ctx, unfinished, layout, container, created, record)
+                .finish_reentry(ctx, unfinished, layout, container, record)
                 .await;
         }
         let legacy = meta.job_sha256.is_none();
@@ -1059,7 +1119,6 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         unfinished: &UnfinishedAttempt,
         layout: StagingLayout,
         container: Option<ContainerSummary>,
-        created: bool,
         record: RecoveryRecord,
     ) -> Result<RecoveredJob, SandboxError> {
         let RecoveryKind::Reenter { token_issued } = record.kind else {
@@ -1087,37 +1146,10 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 });
             }
         }
-        let record = RecoveryRecord {
-            job_id: unfinished.job_id,
-            sandbox_id: unfinished.sandbox_id,
-            project_id: unfinished.project_id,
-            kind: RecoveryKind::Reject {
-                message: "preparation cleanup failed".into(),
-                no_usage: !token_issued,
-                delivered: false,
-            },
-        };
-        let _ = record.save(&recovery_path(&layout));
-        let meta = Meta::new(unfinished.job_id, unfinished.sandbox_id);
-        let permit = if container.is_some() {
-            let permit = Arc::clone(&self.inner.permits).try_acquire_owned().ok();
-            if permit.is_none() {
-                self.inner.debt.fetch_add(1, Ordering::SeqCst);
-            }
-            Some(permit)
-        } else {
-            None
-        };
-        let handle = self.spawn_recovered(
-            ctx,
-            unfinished.project_id,
-            layout,
-            meta,
-            None,
-            created,
-            job::RecoverMode::Reject { record, permit },
-        );
-        Ok(RecoveredJob::Running(handle))
+        // 清理短暂失败不是永久拒绝依据：保留待核实与取消能力，按 D-23 退避重试。
+        let recovered = self.block_recovery(unfinished, "preparation cleanup failed");
+        self.retry_recovery(ctx.clone(), unfinished.clone());
+        Ok(recovered)
     }
 
     /// 已提交终结后的重启可能没有内存槽位；只认持久化的可释放依据。
@@ -1218,7 +1250,10 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 && meta.exit.is_none();
             let outcome_recorded = match meta.job_sha256 {
                 Some(Some(_)) => {
-                    (meta.timings.started.is_some() || prestart_cancel)
+                    // 启动前普通失败也保留了已签发令牌，与 `Some(None)` 同样可释放。
+                    (meta.timings.started.is_some()
+                        || prestart_cancel
+                        || (meta.phase == Phase::Failed && meta.token_issued))
                         && (meta.identity_diagnostic.is_none() || meta.identity_finalized)
                 }
                 Some(None) => {
@@ -1403,6 +1438,10 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
             ));
         }
         if forget {
+            // collect / cleanup 时的吊销可能短暂失败；forget 要求已吊销，先幂等补上。
+            revoke(self.inner.deps.egress.as_ref(), job_id, ctx)
+                .await
+                .map_err(|err| infra(InfraDetail::Egress, format!("revoke: {err}")))?;
             self.inner
                 .deps
                 .egress
@@ -1758,7 +1797,7 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                 recovered.push(*item);
                 continue;
             }
-            let item = match self.recover_one(ctx, attempt, false).await {
+            let mut item = match self.recover_one(ctx, attempt, false).await {
                 Ok(item) => item,
                 Err(err @ SandboxError::InvalidSpec(_)) => return Err(err),
                 Err(_) => {
@@ -1767,9 +1806,33 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                     item
                 }
             };
-            // 可信 Unknown 已裁决：撤掉待核实槽位，让同 ID submit 重新受理。
+            // 可信 Unknown 已裁决：待处理取消仍须兑现；否则撤掉槽位让同 ID submit 重新受理。
             if matches!(item, RecoveredJob::Unknown { .. }) {
-                self.remove_blocked(&attempt.job_id);
+                match self.fulfil_blocked_cancel(ctx, attempt) {
+                    BlockedCancel::Fulfilled => {
+                        item = RecoveredJob::Running(JobHandle {
+                            job_id: attempt.job_id,
+                            sandbox_id: attempt.sandbox_id,
+                        });
+                    }
+                    BlockedCancel::Deferred => {
+                        if let Some(blocked) = self
+                            .jobs()
+                            .get_mut(&attempt.job_id)
+                            .and_then(|slot| slot.blocked.as_mut())
+                        {
+                            blocked.retrying = false;
+                        }
+                        self.retry_recovery(ctx.clone(), attempt.clone());
+                        item = RecoveredJob::Running(JobHandle {
+                            job_id: attempt.job_id,
+                            sandbox_id: attempt.sandbox_id,
+                        });
+                    }
+                    BlockedCancel::None => {
+                        self.remove_blocked(&attempt.job_id);
+                    }
+                }
             }
             seen.insert(attempt.job_id, item);
             recovered.push(item);

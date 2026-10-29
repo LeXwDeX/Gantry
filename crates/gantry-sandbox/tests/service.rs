@@ -906,6 +906,95 @@ async fn queue_is_fifo_and_never_fails() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn repeated_recover_requeries_a_pending_slot() {
+    let h = harness(1);
+    let n = 564;
+    h.driver.fail_next(FailPoint::List);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    // 待核实不是结果缓存：下一次 recover 继续查询并确认没有受理痕迹。
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Unknown { job_id: att(n) }]
+    );
+    assert!(!meta_path(&h, n).exists());
+    assert_eq!(starts(&h), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_during_unverified_recovery_survives_an_unknown_verdict() {
+    let h = harness(1);
+    let n = 561;
+    h.driver.fail_next(FailPoint::List);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    let job = att(n);
+    let wait = h.service.wait(&job);
+    tokio::pin!(wait);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    h.service.cancel(&ctx(), &job).await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), &mut wait)
+        .await
+        .expect("cancellation must not be lost when absence is confirmed")
+        .unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+    assert!(outcome.terminal.cancel_requested);
+    assert_eq!(starts(&h), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn start_failure_after_staging_releases_after_restart() {
+    use gantry_sandbox::service::meta::{Meta, Phase};
+    let mut h = harness(1);
+    let n = 562;
+    h.driver.script(sbx(n), golden_script());
+    h.driver.fail_next(FailPoint::Start);
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::Infra {
+            detail: InfraDetail::SandboxCreate,
+            ..
+        })
+    ));
+    let meta = Meta::load(&meta_path(&h, n)).unwrap().unwrap();
+    assert_eq!(meta.phase, Phase::Failed);
+    assert!(meta.job_sha256.flatten().is_some(), "staging digest absent");
+    assert!(meta.timings.started.is_none());
+    h.restart();
+    h.service.release(&ctx(), &att(n)).await.unwrap();
+    assert!(!meta_path(&h, n).exists());
+    assert!(matches!(
+        h.egress.job_usage(&att(n)).await,
+        Err(EgressError::NotFound)
+    ));
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn release_revokes_before_forgetting_after_an_earlier_failure() {
+    use std::sync::atomic::Ordering;
+    let h = harness(1);
+    let n = 563;
+    h.driver.script(sbx(n), golden_script());
+    h.egress.fail_revoke.store(true, Ordering::SeqCst);
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    let outcome = h.service.wait(&att(n)).await.unwrap();
+    assert!(outcome.egress.incomplete);
+    assert!(h.egress.job_usage(&att(n)).await.is_ok());
+    h.egress.fail_revoke.store(false, Ordering::SeqCst);
+    h.service.release(&ctx(), &att(n)).await.unwrap();
+    assert!(matches!(
+        h.egress.job_usage(&att(n)).await,
+        Err(EgressError::NotFound)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn submit_is_idempotent() {
     let h = harness(2);
     h.driver.script(sbx(14), golden_script());
@@ -2213,6 +2302,9 @@ async fn failed_collect_preserves_prior_cas_object_and_cleans_up() {
         h.egress.log(),
         vec![
             format!("issue {}", att(73)),
+            // collect 失败后的清理
+            format!("revoke {}", att(73)),
+            // release 在 forget 前幂等补吊销
             format!("revoke {}", att(73)),
             format!("forget {}", att(73)),
         ]
@@ -3916,7 +4008,7 @@ async fn concurrent_recovery_and_submit_reenter_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn failed_reentry_cleanup_is_retried_as_rejection_without_starting() {
+async fn failed_reentry_cleanup_is_retried_instead_of_rejected() {
     use gantry_sandbox::driver::SandboxDriver as _;
     use gantry_sandbox::service::meta::Phase;
     let h = harness(1);
@@ -3937,13 +4029,15 @@ async fn failed_reentry_cleanup_is_retried_as_rejection_without_starting() {
         h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
         vec![RecoveredJob::Running(handle(n))]
     );
-    assert!(matches!(
-        h.service.wait(&att(n)).await,
-        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
-    ));
+    // 清理短暂失败：保持待核实并退避重试，而不是永久拒绝。
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(h.driver.container_count(), 0);
     assert_eq!(starts(&h), 0);
-    assert!(h
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Unknown { job_id: att(n) }]
+    );
+    assert!(!h
         .root
         .path()
         .join(format!("{}.recovery.json", sbx(n)))
