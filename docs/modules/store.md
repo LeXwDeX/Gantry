@@ -438,6 +438,8 @@ CREATE TABLE settings_docs (                                -- 投影：settings
 | `devices` | Device（事件可得的列） | `device.paired` / `updated` / `revoked` | `UNIQUE(cert_serial)`；`last_seen` 等非事件列归 `pki` 的表（OQ-4） |
 | `settings_secret_changes` | `(ref, version) → seq` 反查 | `settings.updated` 的 `secret_changes[]` | `PK(ref, version)`；只存名字与版本，无值无哈希 |
 
+**当前项目投影（#280 前置切片）**：内存按事件 `data.id` 保存完整 Project，`project.added` 和 `project.updated` 都全量覆盖；时间字段来自事件 `data`。同一事件也更新既有 GitHub 项目仓库索引。读取与 `head_seq` 属于同一快照；列表按项目 ID 键集分页。SQLite 打开时重放事件重建投影，`verify(Full)` 比较重建结果。上表 `UNIQUE(repo)` 与既有 GitHub 快照允许多个项目绑定同一仓库的行为存在争议；当前不新增唯一性拒绝，按仓库查询在绑定不唯一时返回 `None`，等待后续契约澄清。
+
 **GitHub 快照投影（#150，M1 已落地于内存实现）**：
 
 - 快照列**只由 `forge.synced` 折叠**，`forge.<kind>` 不写快照列（forge 的约定见 #150 评论），避免两条派生路径不一致。信封必须是 `actor.kind = forge`、`subject = project_id`，否则整条事件拒绝（core 只校验 `data`）。

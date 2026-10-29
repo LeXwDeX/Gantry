@@ -114,3 +114,10 @@ npm run build --prefix apps/desktop
 ### 扩展性预留
 
 agent 的 skill、MCP、hooks、上下文管理都要留出扩展空间，但扩展只能来自服务端的可信配置，不能来自仓库内容。落地节奏照搬 `ConfigView.injection`：先在契约里定义类型，M1 拒绝非空，后续里程碑逐类启用。设计前先调研前身项目 GraphAgent 与 SpecGit 的边界设计与教训。详见 NEXT-STEPS.md「后续规划 · 阶段 6」。
+
+
+<!-- specgit:project:v2:start -->
+## SpecGit 2
+
+Read project-root `.agents/skills/specgit-native/SKILL.md` before work; if missing, initialize with the shared `specgit init` CLI or restore an existing integration with `specgit setup` ([installation](https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md)).
+<!-- specgit:project:v2:end -->

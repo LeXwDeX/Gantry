@@ -29,12 +29,12 @@ use std::time::Duration;
 use gantry_core::canon::{IdempotencyKey, RepoSlug};
 use gantry_core::entities::{
     Actor, ActorKind, Device, ForgeActionKind, GithubRef, InboxItem, InboxKind, InboxStatus,
-    IssueRef, OutboxAction, OutboxError, OutboxStatus, Priority, PullRequestRef, Seq,
+    IssueRef, OutboxAction, OutboxError, OutboxStatus, Priority, Project, PullRequestRef, Seq,
     SettingsResource, SettingsScope, Severity,
 };
 use gantry_core::events::{
     Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NewEvent,
-    SchemaError, SchemaErrorCode, SettingsUpdatedData, Subject,
+    ProjectEventData, SchemaError, SchemaErrorCode, SettingsUpdatedData, Subject,
 };
 use gantry_core::forge::ActionPayload;
 use gantry_core::ids::{
@@ -45,6 +45,7 @@ use gantry_core::time::Timestamp;
 use serde_json::Value;
 
 mod devices;
+mod projects;
 use module::{ModuleRegistry, ModuleTables};
 
 pub mod cas;
@@ -572,6 +573,7 @@ struct Inner {
     secret_changes: BTreeMap<(String, u64), Seq>,
     next_enqueue_seq: u64,
     deliveries: BTreeMap<DeliveryId, DeliveryRow>,
+    projects: BTreeMap<ProjectId, Project>,
     /// 内置 `inbox_items` 投影（store.md §7.2）；收件箱状态的唯一来源。
     inbox: BTreeMap<InboxId, InboxItem>,
     /// 内置 `devices` 投影（store.md §7.2）。
@@ -603,6 +605,7 @@ impl Clone for Inner {
             secret_changes: self.secret_changes.clone(),
             next_enqueue_seq: self.next_enqueue_seq,
             deliveries: self.deliveries.clone(),
+            projects: self.projects.clone(),
             inbox: self.inbox.clone(),
             devices: self.devices.clone(),
             github: self.github.clone(),
@@ -1110,6 +1113,7 @@ impl Inner {
             self.secret_changes == other.secret_changes,
         );
         check("deliveries", self.deliveries == other.deliveries);
+        check("projects", self.projects == other.projects);
         check("inbox", self.inbox == other.inbox);
         check("devices", self.devices == other.devices);
         check("github snapshots", self.github == other.github);
@@ -1193,6 +1197,13 @@ impl Inner {
                 });
                 row.action.lease_until = None;
                 row.action.updated_at = event.ts;
+            }
+            EventType::ProjectAdded | EventType::ProjectUpdated => {
+                let data: ProjectEventData =
+                    decode_data(event).map_err(StoreError::InvalidEvent)?;
+                let row = projects::from_event(data);
+                self.github.apply(event).map_err(fold_error)?;
+                self.projects.insert(row.id, row);
             }
             ty if GithubSnapshots::folds(ty) => {
                 // `apply` 失败时不改动自身，因此直接在快照上折叠。
@@ -1409,6 +1420,26 @@ pub struct TxReader<'a> {
 impl TxReader<'_> {
     pub fn head_seq(&self) -> Seq {
         Seq::from_wire(self.inner.head).unwrap_or(Seq::ZERO)
+    }
+
+    pub async fn project(&mut self, id: &ProjectId) -> Result<Option<Project>, StoreError> {
+        Ok(self.inner.projects.get(id).cloned())
+    }
+
+    pub async fn project_by_repo(
+        &mut self,
+        repo: &RepoSlug,
+    ) -> Result<Option<Project>, StoreError> {
+        Ok(self
+            .inner
+            .github
+            .project_by_repo(repo)
+            .and_then(|id| self.inner.projects.get(&id))
+            .cloned())
+    }
+
+    pub async fn projects(&mut self, p: &Page) -> Result<Paged<Project>, StoreError> {
+        projects::list(&self.inner.projects, p)
     }
 
     pub fn settings_current(
@@ -1631,6 +1662,21 @@ impl ReadSnapshot {
 
     pub fn head_seq(&self) -> Seq {
         Seq::from_wire(self.inner.head).unwrap_or(Seq::ZERO)
+    }
+
+    pub async fn project(&mut self, id: &ProjectId) -> Result<Option<Project>, StoreError> {
+        TxReader { inner: &self.inner }.project(id).await
+    }
+
+    pub async fn project_by_repo(
+        &mut self,
+        repo: &RepoSlug,
+    ) -> Result<Option<Project>, StoreError> {
+        TxReader { inner: &self.inner }.project_by_repo(repo).await
+    }
+
+    pub async fn projects(&mut self, p: &Page) -> Result<Paged<Project>, StoreError> {
+        projects::list(&self.inner.projects, p)
     }
 
     /// 扫描本快照中的事件，语义与 `EventLog::scan` 相同。
@@ -2929,6 +2975,23 @@ impl StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_difference_is_reported() {
+        let mut inner = Inner::default();
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA",
+            "repo": "acme/web", "installation_id": 1, "bot_user_id": 2,
+            "default_branch": "main", "allowed_merge_methods": ["squash"],
+            "merge_queue_enabled": false, "created_at": "2026-10-24T12:00:00.000Z",
+            "updated_at": "2026-10-24T12:00:00.000Z"
+        }))
+        .unwrap();
+        inner.projects.insert(project.id, project);
+        assert!(inner
+            .differences(&Inner::default())
+            .contains(&"projects differs from a rebuild".to_owned()));
+    }
 
     #[test]
     fn failure_codes_roundtrip() {
