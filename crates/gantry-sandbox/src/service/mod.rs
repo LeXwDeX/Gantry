@@ -500,7 +500,11 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     }
                     (job::RecoverMode::Reject { permit, .. }, None, true) => {
                         if permit.is_none() {
+                            // 把这个旧欠账交给 Reject actor 核销。
                             *permit = Some(None);
+                        } else {
+                            // Reject 已有自己的占用记录，旧欠账必须单独核销，不能叠加。
+                            settle_overdraft = true;
                         }
                     }
                     (_, Some(reserved), _) => drop(reserved),
@@ -1557,6 +1561,9 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                 (
                     slot.blocked.is_some(),
                     slot.blocked.as_ref().is_some_and(|blocked| blocked.unknown),
+                    slot.blocked
+                        .as_ref()
+                        .is_some_and(|blocked| blocked.cancel_pending),
                     slot.handle,
                     slot.project_id,
                     slot.spec.as_ref().is_some_and(|known| *known != spec),
@@ -1564,8 +1571,10 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             })
         };
         let resuming = existing.is_some_and(|(blocked, unknown, ..)| blocked && unknown);
-        if let Some((blocked, unknown, handle, project_id, different_spec)) = existing {
-            if blocked && !unknown {
+        if let Some((blocked, unknown, cancel_pending, handle, project_id, different_spec)) =
+            existing
+        {
+            if blocked && !unknown && !cancel_pending {
                 // 待核实槽位不是受理记录，submit 不能虚报 Ok 或提前启动。
                 return Err(SandboxError::InvalidSpec(
                     "job recovery is still unverified".into(),
@@ -1627,6 +1636,26 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         std::fs::create_dir_all(layout.dir())
             .and_then(|()| accepted.save(&layout.meta_json()))
             .map_err(|err| infra(InfraDetail::WorkspacePrep, format!("accept: {err}")))?;
+
+        if existing.is_some_and(|(blocked, _, cancel_pending, ..)| blocked && cancel_pending) {
+            // 取消已从命令队列取走但尚未落盘；重提必须兑现它，不能启动。
+            let attempt = UnfinishedAttempt {
+                job_id: spec.job_id,
+                sandbox_id: spec.sandbox_id,
+                project_id: spec.project_id,
+            };
+            return match self.fulfil_blocked_cancel(ctx, &attempt) {
+                BlockedCancel::Fulfilled => Ok(handle),
+                BlockedCancel::Deferred => Err(infra(
+                    InfraDetail::WorkspacePrep,
+                    "cancellation is pending for recovery",
+                )),
+                BlockedCancel::None => Err(infra(
+                    InfraDetail::WorkspacePrep,
+                    "pending cancellation state is missing",
+                )),
+            };
+        }
 
         let (result_tx, command_rx, progress_tx, occupancy, permit_tx, permit_rx);
         if resuming {

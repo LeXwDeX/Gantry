@@ -968,6 +968,46 @@ async fn unknown_verdict_keeps_the_old_wait_for_resubmission() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn deferred_cancel_survives_resubmission_after_unknown() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = harness(1);
+    let n = 572;
+    h.driver.fail_next(FailPoint::List);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    let job = att(n);
+    let wait = h.service.wait(&job);
+    tokio::pin!(wait);
+    h.service.cancel(&ctx(), &job).await.unwrap();
+    // 让取消依据暂时无法落盘：重试确认 Unknown 后进入 Deferred。
+    std::fs::set_permissions(h.root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    std::fs::set_permissions(h.root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    // 重提必须兑现已记录但尚未落盘的取消，不能启动。
+    h.driver.script(
+        sbx(n),
+        FakeScript {
+            behavior: FakeBehavior::ExitAfter {
+                after: Duration::from_secs(1),
+                code: 0,
+                honor_term: true,
+            },
+            ..FakeScript::default()
+        },
+    );
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), &mut wait)
+        .await
+        .expect("deferred cancellation must survive resubmission")
+        .unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::KilledCancel);
+    assert_eq!(starts(&h), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancel_during_unverified_recovery_survives_an_unknown_verdict() {
     let h = harness(1);
     let n = 561;
@@ -4380,6 +4420,66 @@ async fn recovery_does_not_leak_capacity_after_retry_takes_over() {
         .expect("capacity must be released after recovery")
         .unwrap();
     assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejected_recovery_settles_the_pending_overdraft() {
+    use gantry_sandbox::driver::SandboxDriver as _;
+    use gantry_sandbox::service::meta::Phase;
+
+    let h = harness(1);
+    let n = 569;
+    // 先占住唯一容量，让待核实槽位只能记欠账。
+    h.driver.script(sbx(570), long_running());
+    h.service.submit(&ctx(), spec(570)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let blocker = container_id(&h);
+
+    issue_test_token(&h, &spec(n)).await;
+    let layout = gantry_sandbox::spec::StagingLayout::new(h.root.path(), sbx(n)).unwrap();
+    h.driver.prepare_dirs(&layout).await.unwrap();
+    let id = h
+        .driver
+        .create(&common::valid_spec(&layout, att(n)))
+        .await
+        .unwrap();
+    let mut meta = preparation_meta(n, Phase::Failed);
+    meta.container_id = Some(id.to_string());
+    meta.token_issued = true;
+    meta.save(&layout.meta_json()).unwrap();
+
+    h.driver.fail_next(FailPoint::List);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    // 重试后按不可信相位 Reject；blocked 欠账与 Reject 自己的占用必须分别结清。
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::JobIdentityUnavailable { usage: Some(_), .. })
+    ));
+
+    h.driver.complete(&blocker, vec![]).unwrap();
+    h.service.wait(&att(570)).await.unwrap();
+    h.driver.script(
+        sbx(571),
+        FakeScript {
+            behavior: FakeBehavior::ExitAfter {
+                after: Duration::from_secs(1),
+                code: 0,
+                honor_term: true,
+            },
+            ..FakeScript::default()
+        },
+    );
+    h.service.submit(&ctx(), spec(571)).await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), h.service.wait(&att(571)))
+        .await
+        .expect("capacity must be released after a rejected recovery")
+        .unwrap();
+    assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
+    assert_eq!(starts(&h), 2);
 }
 
 #[tokio::test(start_paused = true)]
