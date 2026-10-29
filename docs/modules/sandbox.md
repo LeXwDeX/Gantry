@@ -102,9 +102,10 @@
 pub trait SandboxService: Send + Sync {
     /// 受理一个 job（JobSpec 的可信部分 + 待包装材料）。按 job_id 幂等：重复提交返回同一个 JobHandle。
     /// 返回即"已受理（可能仍在排队）"，不表示容器已创建。返回 Ok 之前受理记录（相位 Accepted 的 meta.json）已原子写盘，
-    /// 重启后仅新格式且证明从未启动时可按准备重入例外返回 Unknown（E4）。
+    /// 待核实槽位不证明受理，不能仅因槽位存在而返回 Ok；准备重入须满足 E4。
     async fn submit(&self, ctx: &Ctx, spec: SandboxSpec) -> Result<JobHandle, SandboxError>;
     /// 等待终态。可重复调用、可在 recover 之后调用；同一 job 恒返回同一结果。
+    /// 待核实且无可信结果时保持等待，不得误报 NotFound 或终态；等待不阻塞同绑定再次 recover。
     /// Err 包括启动前失败及已受理但无法可信恢复的 JobIdentityUnavailable。
     async fn wait(&self, job_id: &AttemptId) -> Result<JobOutcome, SandboxError>;
     /// 采样节流后的展示数据；丢包无影响；订阅晚了只拿到之后的样本。
@@ -114,7 +115,7 @@ pub trait SandboxService: Send + Sync {
     /// engine 结算与 attempt.finished 提交后调用：删除 meta.json，并让 egress 忘记该 job 的最终用量（forget_job）。
     async fn release(&self, ctx: &Ctx, job_id: &AttemptId) -> Result<(), SandboxError>;
     /// gantryd 重启：对每个没有 attempt.finished 的 Attempt 查运行时并接管（§7.10）。
-    /// 请求先按任务身份契约整批预验证；有效请求按输入顺序每项返回一项 RecoveredJob（E4）。
+    /// 每次请求先按任务身份契约整批预验证；有效请求按输入顺序每项返回一项 RecoveredJob（E4）。
     async fn recover(&self, ctx: &Ctx, unfinished: &[UnfinishedAttempt]) -> Result<Vec<RecoveredJob>, SandboxError>;
     /// 销毁没有对应未终结 Attempt 的沙盒与残留 staging。
     async fn sweep_orphans(&self, live: &BTreeSet<AttemptId>) -> Result<SweepReport, SandboxError>;
@@ -126,10 +127,10 @@ pub struct JobHandle { pub job_id: AttemptId, pub sandbox_id: SandboxId }
 
 /// recover 对单个未终结尝试的判定（engine.md §7.14.6 E4），分类规则见 §7.10。
 pub enum RecoveredJob {
-    Running(JobHandle),            // 已受理且仍在推进，包括拒绝收尾 → engine 继续 wait
+    Running(JobHandle),            // 已受理仍在推进，或恢复查询待核实（不证明已受理）→ wait 并有界再次 recover
     Exited(JobHandle),             // 已停止 → wait 稳定返回 JobOutcome 或 JobIdentityUnavailable
     Lost(JobHandle),               // 受理后丢失：容器不在且产物不可提取 → wait 返回 Infra{Lost}，engine 终结为 infra.lost
-    Unknown { job_id: AttemptId }, // 从未受理，或新格式证明从未启动并持久重置 Accepted → 以相同 ID 重新 submit 完整 SandboxSpec
+    Unknown { job_id: AttemptId }, // 可信证明从未受理，或新格式证明从未启动并持久重置 Accepted → 同 ID 重提完整 SandboxSpec
 }
 
 pub struct SandboxSpec {
@@ -179,7 +180,7 @@ pub enum SandboxError {
 }
 ```
 
-`submit` 之后 `wait(job_id)` 返回 `Result<JobOutcome, SandboxError>`；普通启动前失败返回 `Err`，超时、被杀、产物缺失通常返回 `Ok(JobOutcome)`。已受理任务无法可信恢复且无可靠 outcome 时，返回 `JobIdentityUnavailable`；其计量、终结和禁止重试规则见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。
+`submit` 之后 `wait(job_id)` 返回 `Result<JobOutcome, SandboxError>`；普通启动前失败返回 `Err`，超时、被杀、产物缺失通常返回 `Ok(JobOutcome)`。待核实时 `wait` 与重提交接、有效取消和同绑定再次查询遵守 [任务身份契约](../interfaces/worker-protocol.md#job-identity)；只有成功绑定后才可按 `job_id` 调用内部端口。已受理任务无法可信恢复且无可靠 outcome 时，返回 `JobIdentityUnavailable`；其计量、终结和禁止重试规则也见该契约。
 
 ### 6.2 容器面（本模块内部，不对 `engine` 暴露，P-52）
 
@@ -234,7 +235,7 @@ Accepted → Queued → Creating → Created → Staging → Staged → Starting
 任一前置阶段失败 → Failed(InfraDetail) → Destroying（若容器已建）
 ```
 
-与 data-model `Sandbox.status` 的对应：`Created` / `Staging` / `Staged` / `Starting`（已建、已注入、未启动）→ `created`；`Running` / `Stopping` → `running`；`Stopped` / `Collecting` / `Collected` → `stopped`；`Destroyed` → `destroyed`；恢复时查无此沙盒 → `lost`。`running` / `stopped` / `lost` 没有对应事件（数据模型只有 `sandbox.created` 与 `sandbox.destroyed`），见 OQ-S9。
+与 data-model `Sandbox.status` 的对应：`Created` / `Staging` / `Staged` / `Starting` → `created`，但 `Starting` 相位本身不证明尚未启动；`Running` / `Stopping` → `running`；`Stopped` / `Collecting` / `Collected` → `stopped`；`Destroyed` → `destroyed`。恢复时只有可信事实确认符合普通受理后丢失的情况才判 `lost`，查询失败或不完整不能推断状态；待核实任务不能展示为已确认运行。`running` / `stopped` / `lost` 没有对应事件（数据模型只有 `sandbox.created` 与 `sandbox.destroyed`），见 OQ-S9。
 
 每次相位迁移先把 `meta.json` 原子写盘（临时文件 + `fsync` + `rename`）再执行动作，使进程重启后能知道"做到了哪一步"。`Staged` 与可信摘要必须一起保存后才能启动，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)；不承诺父目录同步或掉电保障。
 
@@ -412,18 +413,21 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 
 `recover(unfinished)`（worker-protocol §3.5）：对每个没有 `attempt.finished` 的 Attempt，按标签 `gantry.job_id` 查运行时：
 
-查运行时前在 `submit_lock` 内完成请求绑定预验证；请求冲突整批 `InvalidSpec`，与通过预验证后的逐 job 证据拒绝不同，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。按 `job_id` 的内部操作只在绑定成功后使用。
+每次查运行时前在 `submit_lock` 内对整个批次和既有槽位（包括待核实槽位）完成纯绑定预验证；请求冲突在副作用前整批 `InvalidSpec`，与通过预验证后的逐 job 证据拒绝不同，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。验证通过后可保留只含绑定的内存待核实槽位，但它不是持久受理记录；按 `job_id` 的内部操作只在绑定成功后使用。查询与发布结果期间须防止并发破坏绑定。下表的确认性事实均须有可信查询与身份依据，身份拒绝及启动前生效的取消优先于普通处理。
 
 | 运行时状态 | 处理 |
 | --- | --- |
 | 仍在运行 | 读 `meta.json` 重建 deadline 与终止原因；从头重读日志，按 `seq` 去重并并入 `progress.spool.jsonl`；继续监督 |
 | 已退出 | 直接 `collect`（若 `meta.json` 记录了取消 / 计时器原因则沿用，否则按 `Exited`） |
-| 容器已不存在但 staging 在 | 若 `out/` 完整可读则 `collect`（`cause = Lost`），否则 `Infra{Lost}`；Sandbox `lost` |
-| 容器与 staging 都不在 | `Infra{Lost}` |
+| 有可信受理证据，确认容器不存在但 staging 在，且不属于准备重入 | 若 `out/` 完整可读则 `collect`（`cause = Lost`）；可信确认产物不可提取才返回 `Infra{Lost}`。查询失败或不完整不是确认不可提取 |
+| 有可信受理证据，确认容器与 staging 都不在，且不属于准备重入 | 普通丢失按 `Infra{Lost}` 处理；身份不可验证时按身份拒绝收尾 |
 | 相位在 `Accepted` … `Staged`，或 `Starting` 且能证明从未启动 | 新格式的显式 `null` 或有效摘要，凭相位及运行时事实确认从未启动，可清理残留、持久 `Accepted` 并返回 `Unknown`，由 engine 以相同 ID 重提完整 `SandboxSpec`；重新 stage 并保存新摘要后才启动一次。旧记录缺摘要、损坏、错配或 `Starting` 执行情况不明不得重提。启动前已请求取消的，直接重出取消结果（`Exited`）；完整规则见 [任务身份契约](../interfaces/worker-protocol.md#job-identity) |
-| 没有任何受理痕迹（无 `meta.json`、无带该 `gantry.job_id` 标签的容器、无 staging），且 `store` 中没有该沙盒的 `sandbox.created` | 未知 job（从未受理，例如 `attempt.started` 落库后、`submit` 返回前崩溃）；不建任何东西 |
+| 完整查询确认没有任何受理痕迹（无 `meta.json`、无相关容器、无 staging），且 `store` 中没有该沙盒的 `sandbox.created` | 未知 job（从未受理，例如 `attempt.started` 落库后、`submit` 返回前崩溃）；不建立持久受理记录或启动 |
+| 运行时、元数据或存储查询超时、失败或不完整 | 状态待核实；返回 `Running` 而不是 `Unknown` / `Lost`，不推断受理或零用量。明确的损坏、缺字段、错配等仍按身份拒绝收尾 |
 
-每行对应的 `RecoveredJob`（§6.1，E4）：仍在运行或拒绝收尾推进 → `Running`；已退出或拒绝结果已稳定 → `Exited`；可按普通丢失处理的受理后丢失 → `Lost`；没有任何受理痕迹，或符合上述新格式准备重入例外 → `Unknown`。身份不可验证且有受理迹象时不能用 `Unknown` 或 `Lost`，各 job 独立返回，见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。
+每行对应的 `RecoveredJob`（§6.1，E4）：仍在运行、拒绝收尾推进或查询待核实 → `Running`；已退出或拒绝结果已稳定 → `Exited`；可信确认可按普通丢失处理的受理后丢失 → `Lost`；可信完整查询确认没有任何受理痕迹，或符合上述新格式准备重入例外 → `Unknown`。身份不可验证且有受理迹象时不能用 `Unknown` 或 `Lost`。
+
+单次查询及有效批次均有界，长期待核实项不能使健康项无限等待；结果与输入顺序一致。同一绑定的在途核实须合并或串行化，再次 `recover` 能继续查询而非永久缓存 `Running`；`wait` 不能阻塞再次查询。`Unknown` 后重提与旧等待的交接、取消和崩溃重放必须保持幂等，不重复启动或终结，详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。未核实的运行事实不等于可用容量，不得把不完整快照当作已确认空闲容量；确认停止并销毁的容器可释放计算槽位，不必等身份拒绝路径的最终计量。
 
 `sweep_orphans(live)`：列出带 `gantry.managed=1` 的容器与 `<workspaces_dir>/*`，对不在 `live` 且超过宽限（默认 5 min [建议值，待调优]）的，先 `revoke_job_token` 再 `remove` 与 `purge`。巡检周期默认 10 min [建议值，待调优]。`gantryd` 优雅退出时**不**杀运行中的容器，留给重启后的 `recover` 接管（deadline 已持久化）。
 
@@ -606,11 +610,13 @@ submit → (排队) → egress.issue_job_token(job_id, profile, groups, tokens_t
 
 ### H. 崩溃恢复（M1）
 
-- [ ] 在 `Creating` / `Created` / `Staging` / `Starting` / `Running` / `Stopped` / `Collected` / `Destroying` 每个相位后杀掉并重启 `gantryd`：`recover` 之后——运行中的继续监督且 deadline 不变（`Running`）；已退出的直接 `collect`（`Exited`）；已不存在的得到 `Infra{Lost}`（`Lost`）；从未受理的得到 `Unknown` 且不建任何东西；没有重复沙盒；`collect` 的 CAS 对象哈希不变。
+- [ ] 在 `Creating` / `Created` / `Staging` / `Starting` / `Running` / `Stopped` / `Collected` / `Destroying` 每个相位后杀掉并重启 `gantryd`：`recover` 之后——运行中的继续监督且 deadline 不变（`Running`）；已退出的直接 `collect`（`Exited`）；可信确认的普通受理后丢失得到 `Infra{Lost}`（`Lost`）；可信确认从未受理的得到 `Unknown` 且不建持久受理记录或启动；没有重复沙盒；`collect` 的 CAS 对象哈希不变。
 - [ ] 终止原因已写入 `meta.json` 但信号尚未发出时崩溃，重启后补发信号，不丢原因。
 - [ ] 孤儿：带标签但无对应未终结 Attempt 的容器、无容器的 staging 目录被 `sweep_orphans` 清除（先 `revoke_job_token`）；有对应未终结 Attempt 的不被误杀。
 - [ ] 日志重读不重复计数（`seq` 去重）。
 - [ ] 请求绑定冲突的批次原子拒绝、相同项幂等、原合法槽位及非零计量不受影响；逐项边界与副作用断言见 [任务身份契约 §14.4](../interfaces/worker-protocol.md#job-identity)。
+- [ ] 运行时、元数据或存储查询超时、失败或不完整时为待核实的 `Running`，不得重提或按 `Lost` 处理；同绑定再查询可推进，长期阻塞项不妨碍健康项，批次有界且按输入顺序返回。待核实槽位不证明已受理，也参与 D-22 冲突检查。
+- [ ] 覆盖旧等待与重提、取消、崩溃及身份拒绝计量的交错；断言不重复启动、终结或结算，不丢有效取消，且旧等待不因槽位交接误报错误。完整验收及计量边界见 [任务身份契约 §14.4](../interfaces/worker-protocol.md#job-identity)。
 
 ### I. 预热池（M2）
 
