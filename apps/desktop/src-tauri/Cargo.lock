@@ -1274,6 +1274,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
+ "zeroize",
 ]
 
 [[package]]

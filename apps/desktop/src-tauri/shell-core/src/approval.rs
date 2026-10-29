@@ -82,6 +82,9 @@ pub fn self_check(
         return Err(self_check_failed("approval_id_mismatch"));
     }
     let raw = challenge["payload"].clone();
+    if raw["approval_id"] != requested_id {
+        return Err(self_check_failed("approval_id_mismatch"));
+    }
     if raw["device_id"] != device_id {
         return Err(self_check_failed("device_id_mismatch"));
     }
