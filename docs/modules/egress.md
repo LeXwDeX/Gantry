@@ -533,6 +533,6 @@ struct JobState {
 | OQ-E8 | `*.example.com`（"一层前缀通配"）是否匹配多层子域 | 白名单宽度 | 只匹配恰好多一层标签（更严） |
 | OQ-E9 | 各 provider kind 的上游路径 / 方法白名单、可转发头名单、鉴权头方案，以及 Anthropic 用量字段名（均 **需核实当前 API**）；第二个 provider kind 的接入方式 | G1、G2 | Anthropic 的 §7.3 / §7.4 列表 |
 | OQ-E10 | 审计：保留期（config OQ-21）、哈希链的范围与起始里程碑、写失败时是否真的应该拒绝新请求（可用性 vs 审计完整性） | G6、G9 | 保留期未定；M3 哈希链；写失败即拒绝 |
-| OQ-E11 | **已决：D-22**。最终用量与登记保留至结算、终结提交后显式 `release`；本地删除条件及重启规则见 [egress-control §8](../interfaces/egress-control.md#8-测试与验收)。本项为契约决定，不表示现有代码已修复 | 恢复语义 | 不按 TTL 自动遗忘 |
+| OQ-E11 | **已决：D-22**。最终用量与登记保留至结算、终结提交后显式 `release`；本地删除条件及重启规则见 [egress-control §8](../interfaces/egress-control.md#8-测试与验收)。登记表已实现此保留规则，真实生产装配尚未验证 | 恢复语义 | 不按 TTL 自动遗忘 |
 | OQ-E12 | M3 "沙盒逃逸检测告警"中 `egress` 提供的信号（无效或跨网段使用的 `job_token`、伪造头、对控制面地址的探测）如何上报——`egress` 不写事件，是经 `status()` / 拉取接口，还是别的通道 | M3 | 仅审计 + 指标 |
 | OQ-E13 | `sandbox_ro` 角色是否需要包仓库（config OQ-16）：是否按角色区分出网档案 | 白名单最小化 | 单一档案 |

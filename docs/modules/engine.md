@@ -521,7 +521,7 @@ flowchart LR
 
 ### 7.8 尝试生命周期、终结管线与失败处理
 
-**任务身份例外（#362）**：缺少可信摘要时，不执行 V5 / V6，不生成 bundle；真实运行时分类、禁止自动重试、错误终结和清理顺序按 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。本契约切片只添加端口及编译适配，上述行为尚未实现；`JobIdentityUnavailable` 当前映射为 `Defect` 的 `EffectFailed` 路径不会保证 attempt / node 终结，后续 runner 必须专门拦截并生成 `Finalized`。
+**任务身份例外（#362）**：缺少可信摘要时，不执行 V5 / V6，不生成 bundle；`JobIdentityUnavailable` 由 runner 专门拦截，生成 failed、`infra_error` / `infra.job_identity_unavailable`、`Never` 重试的 `Finalized`，并终结 attempt 与 node。恢复查询短暂失败时 sandbox 返回待核实的 `Running`，并按有界退避对同一绑定再次 `recover`；引擎等待期间不得据此重提、终止或结算。详见 [任务身份契约](../interfaces/worker-protocol.md#job-identity)。本机联测覆盖真实沙盒管理器、真实 Egress 登记表、终结事务和提交后释放；跨重启的持久归属冲突已修复并有本机回归，尚待独立评审；生产 `assemble_real` 仍返回 `NotReady`。
 
 **派发（对应 worker-protocol §3.2 阶段 0）**：
 
@@ -1087,7 +1087,7 @@ M1 尚未启用的命令（`SupplySpec`、`RequestHeal`、`Classify`）在 M1 �
 | E3 | **已落地（#66）**：policy.md §6.1 规定引擎发起的动作 `Deny` 必带 `ReportHint`，`reason_code` 只取 data-model 上报词表已列的码，不新增词表项；`FakePolicy` 对违约脚本直接 panic。原缺口：`PolicyPort::decide_action` 返回 `Deny { report: None }` 时用哪个 `reason_code` 上报。其余 `DenyReason` 的码已由 #133 补齐：`policy.action_denied:<deny_reason>`；`HeadMismatch` 不带 `ReportHint`，引擎 `reconcile_now` 后重判（policy.md §6.1） | 引擎按 `ReportHint` 上报 | M1（`merge_pr` 以外的动作） |
 | E5 | **契约已落地（#68）**：`attempt.finished` 增加可选 `accepted_open_pr`（`proposal_id`），只在该尝试有被 `policy` 接受的 `open_pr` 提议时出现；`core` 校验非空且必须有 `result_ref`。原缺口：`open_pr` 提议文本只在一次性的 `Finalized` 里，不进状态。**`ActionKey` 衔接已定（#125，方案 1）**：执行体开事务前按 `(result_ref, proposal_id)` 从 CAS 预取原文进只读的 `DecideEnv.proposals`（7.14.2、7.14.3），`expected_actions` 用它算 `create_pr` 的完整意图与 `ActionKey`，`decide` 仍纯、不读 CAS；forge-actions §2.2 不改 | 引擎投影读入 `AttemptState.accepted_open_pr`；`DecideEnv` 增加 `proposals`（#69），`create_pr` 路径使用它（#70） | M1（体验；不阻塞） |
 | E6 | **已落地（#67）**：data-model 上报词表给 `escalation(outbox_failed:<code>)` 增加选项 `retry`（primary）/ `abandon`，`payload` 增加 `action_id`（`core` 校验：`outbox_failed:<code>` 时必填、其余不得出现）；`notify` 按词表校验选项。原缺口：Outbox 终态失败后用户重做（`epoch + 1`）没有入口，§9 却写"由用户决定是否重试" | 引擎投影读入 `OpenInbox.action_id` 与 `retried`，`epoch` 规则见 7.14.4 | M1（失败路径；成功路径不受影响） |
-| E4 | **原四种恢复结果已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`）；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`。准备重入、身份拒绝及 `Running` 的待核实语义与再查询仍待实现，见 [任务身份契约](../interfaces/worker-protocol.md#job-identity) | 见 sandbox.md §6.1、§7.10；现有替身按受理集合分类 | M1（"重启一致"） |
+| E4 | **原四种恢复结果已落地**（#65）：`SandboxService::recover` 返回 `Vec<RecoveredJob>`（`Running` / `Exited` / `Lost` / `Unknown`）；`RunAttempt { resume: true }` 遇 `Unknown` 重新 `submit`。准备重入、身份拒绝及 `Running` 的待核实语义与再查询已按 [任务身份契约](../interfaces/worker-protocol.md#job-identity) 实现并有本机回归；尚待独立评审与生产装配 | 见 sandbox.md §6.1、§7.10；现有替身按受理集合分类 | M1（"重启一致"） |
 
 E1 与 E4 原四种结果已落地：本地提交 OID 落盘到 `attempt.finished.result_commit`，测试用 `FakeSandboxService` 的受理集合与 `FakeRuntime` 构造四类恢复结果；这不证明 #362 的恢复扩展已实现。§12.2"重启一致"在引擎投影读入 `result_commit` 前不能宣布通过。
 

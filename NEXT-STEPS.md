@@ -19,6 +19,7 @@
 **本机检查**：`main@64a498b` 有历史本机门槛记录。之后 [#316](https://github.com/LeXwDeX/gantry/pull/316) 和 [#323](https://github.com/LeXwDeX/gantry/pull/323) 的 PR 描述记录了各自合入前候选变更的全工作区本机门槛结果；`main@fc3cd45` 与 #323 当时测试的内容一致。历史门槛的 MSRV 1.85 普通 `cargo check --locked --workspace --all-features` 通过，但 `main@64a498b` 和 `main@fc3cd45` 的 `--all-targets` 检查均因 `settings/clamp.rs` 测试的 E0716 失败。#292 分支修复相关测试后，`cargo +1.85 check --locked --workspace --all-targets --all-features` 已通过；#292 的完成以 PR 和最终门槛为准。
 
 **未实现或未验证**：
+- #362 任务身份：摘要传递、恢复批次预验证、最终计量保留和 D-23 待核实语义已实现；同 job 跨 sandbox 归属、查询失败自动再查询、普通失败保留 release 依据、终结后释放失败保留元数据均有仓库内回归测试。本机联测覆盖替身容器驱动、真实执行体、真实 Egress 登记表及终结提交前后的崩溃重放；真实 Podman 与生产装配未验证，§14 尚待独立评审与最终验收。
 - 真实装配、真实 GitHub App、模型、Podman、目标主机与代码签名；桌面端真实 API 联调。
 - store 的剩余 §12 验收条目（#267）和 api 的读路由 / 共用用例（#280）。
 - 评审确认的问题 #293、#294、#295、#296、#297、#298、#300、#301、#302、#303、#304、#305、#306、#307、#308、#309、#310，以及文档项 #299；逐项见 issue 和本轮评审。
