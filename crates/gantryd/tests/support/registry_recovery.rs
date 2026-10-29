@@ -248,7 +248,7 @@ async fn registry_release_recovery(legacy_outcome: bool) {
     std::fs::create_dir(&workspaces).unwrap();
     let driver = Arc::new(FakeDriver::new(&workspaces));
     const SCHEMA: &[u8] = br#"{"type":"object"}"#;
-    let mut runner_config = engine_cfg::runner_config();
+    let mut runner_config = engine_cfg::runtime_settings().runner;
     runner_config
         .roles
         .get_mut(&Role::Single)
@@ -357,7 +357,7 @@ async fn registry_release_recovery(legacy_outcome: bool) {
             snapshots: Arc::new(NoSnapshots),
             cas: Arc::new(store.cas()),
         },
-        engine_cfg::actor_config(),
+        engine_cfg::runtime_settings().actor,
     );
     actor
         .handle(
@@ -655,7 +655,7 @@ async fn registry_release_recovery(legacy_outcome: bool) {
             snapshots: Arc::new(NoSnapshots),
             cas: Arc::new(store.cas()),
         },
-        engine_cfg::actor_config(),
+        engine_cfg::runtime_settings().actor,
     );
     restarted_actor
         .handle(
@@ -727,7 +727,7 @@ async fn registry_release_recovery(legacy_outcome: bool) {
             snapshots: Arc::new(NoSnapshots),
             cas: Arc::new(store.cas()),
         },
-        engine_cfg::actor_config(),
+        engine_cfg::runtime_settings().actor,
     );
     for tick in [
         TickReason::Recover,

@@ -367,7 +367,7 @@ async fn attempt_real_repo_and_policy_commit_or_deny() {
         let attempt = ids.next().unwrap();
         let sandbox_id = sandbox_id_for(&attempt);
         let sandbox = Arc::new(FakeSandboxService::new());
-        let mut cfg = engine_cfg::runner_config();
+        let mut cfg = engine_cfg::runtime_settings().runner;
         cfg.repo = slug;
         let ports = AttemptPorts {
             repo: repo.clone(),
@@ -929,7 +929,7 @@ async fn staged_job_digest_flows_through_sandbox_and_runner() {
     std::fs::create_dir(&workspaces).unwrap();
     let driver = Arc::new(FakeDriver::new(&workspaces));
     const SCHEMA: &[u8] = br#"{"type":"object"}"#;
-    let mut config = engine_cfg::runner_config();
+    let mut config = engine_cfg::runtime_settings().runner;
     config
         .roles
         .get_mut(&Role::Single)
@@ -1357,7 +1357,7 @@ async fn engine_resolves_real_mirror_branch_without_local_fallback() {
             entropy: Arc::new(SeqEntropy::new(99)),
         },
         forge,
-        engine_cfg::runner_config(),
+        engine_cfg::runtime_settings().runner,
         Duration::from_secs(60),
         Arc::new(|_, _, _| {}),
     );

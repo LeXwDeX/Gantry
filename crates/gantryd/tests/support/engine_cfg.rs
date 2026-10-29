@@ -1,31 +1,21 @@
-//! 替身装配里引擎的固定配置（照搬 engine `tests/runtime.rs` 的夹具）。
+//! 替身装配里引擎的运行时配置（engine.md §12.2、#323 的换算入口）。
 //!
-//! 生产里这些值由 settings 换算（engine 尚未提供换算入口，见 #277 评论）；这里只服务于
-//! §12.2 端到端（替身），单项目 `acme/web`、基线 `BASE`。
+//! 生产里这些值由同一 revision 的设置换算；这里也走 `from_settings`，只覆盖为测试模型
+//! 添加 provider/model。单项目 `acme/web`、基线 `BASE`。
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::time::Duration;
 
-use gantry_core::canon::{sha256, GitOid, RepoSlug};
-use gantry_core::entities::{
-    MergeMethod, PullRequestRef, Role, SandboxLimits as Limits, SandboxTrust, Seq, Tier,
-    TokenWeights,
-};
+use gantry_core::canon::{GitOid, RepoSlug};
+use gantry_core::entities::{MergeMethod, PullRequestRef, Seq, Tier};
 use gantry_core::level::{Effort, Level};
-use gantry_core::ports::sandbox::{GroupName, ProfileName, Timers};
-use gantry_core::settings::resource::{
-    ArtifactIo, MaterialIo, ProgressIo, SandboxDriver, SandboxIo,
+use gantry_core::settings::{
+    builtin_defaults, effective, parse_resolved, ResolvedSettings, SettingsResource,
 };
-use gantry_core::worker::{
-    PatchLimits, PatchMode, ProposalKind, ProposalsMode, ReportMode, StructuredSchema,
-    ToolConstraints,
-};
-use gantry_engine::actor::ActorConfig;
-use gantry_engine::attempt::{RoleOutput, RunnerConfig};
-use gantry_engine::decide::{
-    EngineConsts, EngineSettings, ModelKey, ModelTable, ProjectFacts, ReservationPolicy,
-    ResolvedModel, SandboxLimits, TemplateRegistry,
-};
+use gantry_core::time::Timestamp;
+use gantry_core::worker::output_schema;
+use gantry_engine::decide::{ModelKey, ModelTable, ProjectFacts, ResolvedModel};
+use gantry_engine::runtime::RuntimeSettings;
+use gantry_engine::runtime_settings::from_settings;
 use serde_json::json;
 
 pub const PROJECT: &str = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA";
@@ -37,116 +27,88 @@ pub fn repo_slug() -> RepoSlug {
     RepoSlug::parse("acme/web").expect("fixture")
 }
 
-pub struct FixedReserve;
-impl ReservationPolicy for FixedReserve {
-    fn reserve(&self, _: &gantry_core::entities::BudgetLedger, _: Tier, _: usize) -> u64 {
-        1000
-    }
-}
-
-pub fn actor_config() -> ActorConfig {
-    ActorConfig {
-        settings: EngineSettings {
-            config_rev: Seq::new(1).expect("fixture"),
-            project: ProjectFacts {
-                repo: repo_slug(),
-                default_branch: "main".to_owned(),
-                branch_prefix: "gantry/".to_owned(),
-                allowed_merge_methods: vec![MergeMethod::Squash],
-            },
-            sandbox: SandboxLimits {
-                wall_time_s: 1800,
-                kill_grace_s: 10,
-            },
+/// 替身装配的引擎配置：由内置设置 + 测试模型覆盖经 `from_settings` 换算。
+///
+/// 单项目 `acme/web`、基线 `BASE`。模型覆盖只让替身流程有一个可选的 worker 模型；
+/// 其余值全部来自 core 的设置默认值，进程级 §12.2 用例因此覆盖真实换算（不再是手写配置）。
+pub fn runtime_settings() -> RuntimeSettings {
+    let resolve = |resource, global: serde_json::Value, project: serde_json::Value| {
+        let merged = effective(
+            resource,
+            &builtin_defaults(resource),
+            &global,
+            Some(&project),
+        );
+        parse_resolved(resource, &merged.value).expect("fixture settings")
+    };
+    let ResolvedSettings::Models(models) = resolve(
+        SettingsResource::Models,
+        json!({
+            "providers": {"anthropic": {
+                "kind": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "credential": {"type": "api_key", "secret_ref": "model-key"}
+            }},
+            "worker": {"provider": "anthropic", "model": "claude"}
+        }),
+        json!({}),
+    ) else {
+        unreachable!()
+    };
+    let ResolvedSettings::Levels(levels) = resolve(SettingsResource::Levels, json!({}), json!({}))
+    else {
+        unreachable!()
+    };
+    let ResolvedSettings::Policies(policies) =
+        resolve(SettingsResource::Policies, json!({}), json!({}))
+    else {
+        unreachable!()
+    };
+    let ResolvedSettings::Sandbox(sandbox) =
+        resolve(SettingsResource::Sandbox, json!({}), json!({}))
+    else {
+        unreachable!()
+    };
+    let ResolvedSettings::Egress(egress) = resolve(SettingsResource::Egress, json!({}), json!({}))
+    else {
+        unreachable!()
+    };
+    let table = ModelTable::from([(
+        ModelKey {
+            sandbox: true,
+            level: Level::Low,
+            tier: Tier::Worker,
+            critical: false,
         },
-        models: ModelTable::from([(
-            ModelKey {
-                sandbox: true,
-                level: Level::Low,
-                tier: Tier::Worker,
-                critical: false,
-            },
-            ResolvedModel {
-                provider_id: "anthropic".to_owned(),
-                model: "claude".to_owned(),
-                reasoning_effort: Effort::Medium,
-                attempt_wall_s: 900,
-            },
-        )]),
-        templates: TemplateRegistry,
-        reservation: Arc::new(FixedReserve),
-        sandbox_capacity: 4,
-        consts: EngineConsts::default(),
-    }
-}
-
-pub fn runner_config() -> RunnerConfig {
-    let mut roles = HashMap::new();
-    roles.insert(
-        Role::Single,
-        RoleOutput {
-            structured_schema: StructuredSchema {
-                id: "gantry.worker.output.build/1".into(),
-                path: "/gantry/inputs/output.schema.json".into(),
-                sha256: sha256(b"build-schema"),
-            },
-            patch: PatchMode::Optional,
-            report: ReportMode::Optional,
-            proposals: ProposalsMode::Allowed {
-                allowed_kinds: vec![ProposalKind::OpenPr, ProposalKind::Escalate],
-                max: 5,
-            },
-            tools: ToolConstraints {
-                edit: true,
-                shell: true,
-            },
-            patch_limits: Some(PatchLimits {
-                max_bytes: 5_000_000,
-                max_files: 200,
-            }),
+        ResolvedModel {
+            provider_id: "anthropic".to_owned(),
+            model: "claude".to_owned(),
+            reasoning_effort: Effort::Low,
+            attempt_wall_s: models.worker.attempt_wall_s,
         },
-    );
-    RunnerConfig {
-        config_rev: Seq::new(1).expect("fixture"),
-        repo: repo_slug(),
-        driver: SandboxDriver::Podman,
-        trust: SandboxTrust::Trusted,
-        limits: Limits {
-            cpu_cores: 2.0,
-            mem_mb: 4096,
-            disk_mb: 10240,
-            pids: 512,
-            wall_time_s: 3600,
+    )]);
+    let mut runtime = from_settings(
+        Seq::new(1).expect("fixture"),
+        Timestamp::from_millis(1_700_000_000_000),
+        ProjectFacts {
+            repo: repo_slug(),
+            default_branch: "main".to_owned(),
+            branch_prefix: "gantry/".to_owned(),
+            allowed_merge_methods: vec![MergeMethod::Squash],
         },
-        timers: Timers {
-            idle_timeout_s: 300,
-            kill_grace_s: 10,
-        },
-        io: SandboxIo {
-            progress: ProgressIo {
-                max_line_bytes: 8192,
-                max_lines: 20_000,
-                max_rate_per_s: 20,
-            },
-            artifacts: ArtifactIo {
-                result_max_bytes: 1_048_576,
-                report_max_bytes: 262_144,
-                proposals_max_bytes: 262_144,
-                proposals_max_count: 20,
-            },
-            materials: MaterialIo {
-                max_item_bytes: 65_536,
-                max_total_bytes: 524_288,
-            },
-            logs_tail_bytes: 1_048_576,
-        },
-        egress_profile: ProfileName::new("default"),
-        egress_groups: vec![GroupName::new("model_api")],
-        token_weights: TokenWeights::default(),
-        max_turns: 60,
-        discussion_max_comments: 50,
-        roles,
-    }
+        &models,
+        &levels,
+        &policies,
+        &sandbox,
+        &egress,
+        Seq::new(1).expect("fixture"),
+        table,
+        output_schema("gantry.worker.output.build/1").expect("build schema"),
+    )
+    .expect("runtime settings");
+    // 引擎内部轮询间隔不是设置键；§12.2 进程级用例需要更快的轮询。
+    runtime.poll_interval = Duration::from_millis(5);
+    runtime
 }
 
 pub fn snapshot(state: &str, head: GitOid) -> PullRequestRef {

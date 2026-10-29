@@ -21,7 +21,7 @@ use gantry_core::ports::inbox::InboxPort;
 use gantry_core::ports::{ForgeReader, PolicyPort};
 use gantry_core::secret::SecretString;
 use gantry_engine::actor::PrSnapshots;
-use gantry_engine::runtime::{EnginePorts, EngineRuntime, RuntimeSettings};
+use gantry_engine::runtime::{EnginePorts, EngineRuntime};
 use gantry_fakes::github::FakeGitHub;
 use gantry_fakes::{
     conversation::FakeConversation, egress::EgressStub, evented_repo::EventedRepo,
@@ -223,12 +223,7 @@ async fn assemble_variant(
                 snapshots.clone()
             }),
         },
-        RuntimeSettings {
-            actor: engine_cfg::actor_config(),
-            runner: engine_cfg::runner_config(),
-            poll_interval: Duration::from_millis(5),
-            cleanup_lease: Duration::from_secs(60),
-        },
+        engine_cfg::runtime_settings(),
     )
     .await
     .expect("engine runtime");
@@ -240,7 +235,7 @@ async fn assemble_variant(
         } else {
             ModuleInfo::new("store", Fake, "in-memory log; SQLite store not wired")
         },
-        ModuleInfo::new("engine", Real, "EngineRuntime with fixture settings"),
+        ModuleInfo::new("engine", Real, "EngineRuntime; settings via from_settings"),
         ModuleInfo::new("notify", Real, ""),
         if real_policy {
             ModuleInfo::new(
