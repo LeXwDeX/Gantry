@@ -41,6 +41,8 @@ async fn pairing_begin(
     pairing_string: String,
     device_name: String,
 ) -> CmdResult<Value> {
+    // 完整配对串内含一次性 token：进入命令即接管，函数返回时清零（desktop-shell.md §7.6）。
+    let pairing_string = zeroize::Zeroizing::new(pairing_string);
     let r = shell.pairing_begin(&pairing_string, &device_name).await;
     shell.track("pairing_begin", r)
 }

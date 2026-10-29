@@ -39,6 +39,9 @@ enum Fault {
     WrongPubkeyFpr,
     WrongApprovalFpr,
     ShortChain,
+    WrongApiHost,
+    InsecureApiBaseUrl,
+    ApiHostCase,
 }
 
 struct FakeServer {
@@ -164,10 +167,16 @@ impl PairTransport for FakeServer {
             }
             _ => {}
         }
+        let api_base_url = match self.fault() {
+            Fault::WrongApiHost => "https://evil.test:8443".to_owned(),
+            Fault::InsecureApiBaseUrl => "http://gantry.test:8443".to_owned(),
+            Fault::ApiHostCase => "https://GANTRY.TEST:9000".to_owned(),
+            _ => "https://gantry.test:8443".to_owned(),
+        };
         Ok(PairReply::Created(Box::new(PairResponseBody {
             device,
             certificate_chain: chain,
-            api_base_url: "https://gantry.test:8443".into(),
+            api_base_url,
             ca_fingerprint,
             confirmation_code: "482913".into(),
         })))
@@ -254,6 +263,36 @@ async fn every_rejection_deletes_generated_keys() {
         assert_eq!(err.code, ShellErrorCode::PairingFailed, "{fault:?}");
         assert_eq!(err.reason.as_deref(), Some(reason), "{fault:?}");
         assert_eq!(store.key_count(), 0, "{fault:?}：失败后密钥必须删除");
+    }
+}
+
+#[tokio::test]
+async fn api_base_url_host_must_match_and_port_is_not_compared() {
+    // 端口 8443 vs 8444 不同、主机大小写不同都通过；主机不同或非 https 失败。
+    for (fault, expect_ok) in [
+        (Fault::None, true),
+        (Fault::ApiHostCase, true),
+        (Fault::WrongApiHost, false),
+        (Fault::InsecureApiBaseUrl, false),
+    ] {
+        let server = FakeServer::new();
+        server.set_fault(fault);
+        let store = keys();
+        let result = pairing::begin(
+            &server.pairing_string(),
+            "Susan 的 MacBook",
+            &store,
+            &server,
+            now_s(),
+        )
+        .await;
+        match (result, expect_ok) {
+            (Ok(_), true) => {}
+            (Err(error), false) => {
+                assert_eq!(error.reason.as_deref(), Some("api_base_url_mismatch"))
+            }
+            (other, _) => panic!("{fault:?}: {:?}", other.map(|_| ())),
+        }
     }
 }
 

@@ -143,6 +143,12 @@ fn every_self_check_failure_is_reported_before_any_prompt() {
             "approval_id_mismatch",
         ),
         (
+            // 外层一致、payload 内不一致：签名会绑定到另一审批。
+            with(&|c, _| c["payload"]["approval_id"] = json!("apr_01JB7P4M8T2X6N9R3Q5K1V7WZB")),
+            now(),
+            "approval_id_mismatch",
+        ),
+        (
             with(&|c, _| c["payload"]["device_id"] = json!("dev_01JB6Z3K7R9T2X5N8Q1V4W6YZA")),
             now(),
             "device_id_mismatch",

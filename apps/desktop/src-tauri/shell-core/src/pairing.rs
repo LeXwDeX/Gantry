@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
+use crate::http::Origin;
 use crate::ipc::{ShellError, ShellErrorCode};
 use crate::keys::{DeviceKeys, KeyStore, P256PublicKey};
 use crate::storage::IdentityFile;
@@ -286,6 +287,7 @@ fn pairing_failed(reason: &str) -> ShellError {
 pub fn verify_response(
     resp: &PairResponseBody,
     pinned_fingerprint: &str,
+    expected_host: &str,
     keys: &dyn DeviceKeys,
     now_s: i64,
 ) -> Result<(), ShellError> {
@@ -301,8 +303,13 @@ pub fn verify_response(
     {
         return Err(pairing_failed("approval_pubkey_fpr_mismatch"));
     }
-    if !resp.api_base_url.starts_with("https://") || !resp.device.id.starts_with("dev_") {
+    if !resp.device.id.starts_with("dev_") {
         return Err(pairing_failed("response_shape"));
+    }
+    let base =
+        Origin::parse(&resp.api_base_url).ok_or_else(|| pairing_failed("api_base_url_mismatch"))?;
+    if !base.host.eq_ignore_ascii_case(expected_host) {
+        return Err(pairing_failed("api_base_url_mismatch"));
     }
     if resp.confirmation_code.len() != 6
         || !resp.confirmation_code.bytes().all(|b| b.is_ascii_digit())
@@ -478,7 +485,13 @@ async fn exchange(
         Err(TransportError::Untrusted) => return Err(pairing_failed("ca_fingerprint_mismatch")),
         Err(TransportError::Network) => return Err(pairing_failed("network")),
     };
-    verify_response(&response, &parsed.ca_fingerprint, keys.as_ref(), now_s)?;
+    verify_response(
+        &response,
+        &parsed.ca_fingerprint,
+        &parsed.host,
+        keys.as_ref(),
+        now_s,
+    )?;
     Ok(response)
 }
 
