@@ -2,33 +2,30 @@
 
 本文件是当前迭代的入口：现状、待拍板事项和后续规划。项目总体情况与目录入口见 [AGENTS.md](AGENTS.md)，运行与检查入口见[根目录说明](README.md#本地接入)和[前端说明](apps/desktop/README.md)。
 
-## 现状（2026-10-27）
+## 现状（2026-10-29）
 
-基线 `main@fc3cd45`。#291 的收尾 PR #316 和 #289 的引擎前置 PR #323 已合入。
+代码基线 `main@37c61ef`（#362 的 PR #366 已合入）。M1.3 里程碑已关闭，收尾评审见 [M1.3 收尾评审](docs/reviews/2026-10-29-m13-closeout-review.md)。
 
 - **M0 已合入。** 领域核心、端口、内存存储、测试替身、内存模拟接口和浏览器模拟场景前端都在 `main` 上；M0 契约文本已于 2026-10-27 由用户统一批准。
-- **M1.1 决策器的 issue 与里程碑已关闭。** 18 个 issue 全部关闭：`decide` 六个切片、执行体与运行时、控制面、崩溃点矩阵和失败路径都已合入。已关闭 issue 不等于 engine.md 每条边界都已满足，评审发现见 [本轮评审](docs/reviews/2026-10-27-m1-closeout-review.md)。
-- **M1.2 服务端泳道已完成替身对接，里程碑已关闭。** 16 个 issue 全部关闭。`api`、`forge`、`repo`、`sandbox`、`worker`、`egress`、`models`、`policy`、`notify`、`conversation`、`pki`、`secrets` 和 store 的 SQLite 持久层都有 crate 与测试；证据主要来自替身和模块测试，真实 GitHub、模型、Podman、密钥环境尚未联合验证。
-- **M1.3 仍在进行。** #101、#102、#103、#104、#291 已关闭；#289 的引擎前置 PR #323 已合入，但 issue 仍开放。桌面 UI 和 Tauri 外壳已有代码，前端有三种适配器；真实服务端联调尚未证明。`gantryd` 的 `assemble_real` 仍返回 `NotReady`，测试替身装配在 `tests/support/`。
+- **M1.1、M1.2、M1.3 的 issue 与里程碑均已关闭。** M1.1 18/18、M1.2 16/16、M1.3 6/6。#289 于 2026-10-29 依用户确认关闭：PR #323 提供了 `from_settings`、`EqualShareReservation` 与 `status()`；真实消费路径归 #105，自动热加载归 #318，在途预留归 #317。已关闭 issue 不等于每条规格边界都已满足，评审发现见 [M1.1–M1.3 评审](docs/reviews/2026-10-27-m1-closeout-review.md) 与 M1.3 收尾评审。
+- **服务端各模块已有 crate 与测试。** 证据主要来自替身、模块测试和 #105 已合入的本机联测切片（SQLite 跨进程重启、真实策略审批、Forge 执行前审批消费、真实 Git 仓库与持久存储、仓库/沙盒与存储 CAS、执行器补丁策略链）；#319 的内置 schema 注册表与 #362 的任务身份已合入。真实 GitHub、模型、Podman、密钥环境尚未联合验证。
+- **生产装配**：`assemble_real` 仍总是返回 `NotReady`（`crates/gantryd/src/assembly.rs:93-99`），生产二进制没有替身回退。替身装配在 `crates/gantryd/tests/support/`，仍用手写引擎配置；#323 的三个入口在 engine 之外尚无调用方，控制通道 `status` 未用 `status()`，生产命令组为空。切入点已写入 [#105 评论](https://github.com/LeXwDeX/gantry/issues/105#issuecomment-6487468346)。
+- **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock、仅 mock 可联网等边界已静态核对；Tauri 适配器没有自动化测试（#370），真实服务端联调尚未证明。
 - **工作区**：20 个 package，即 19 个 `crates/*` 加 `apps/desktop/src-tauri/shell-core`（package `gantry-desktop-shell`）。Tauri 应用本身在 `apps/desktop/src-tauri`，因系统 WebView 依赖不在根 workspace。
-- **M1.4 仍开放。** #105 是 A 级跨泳道集成（真实模块替换替身）；#106 B 级本机 Ubuntu 虚拟机和 #107 C 级外部资源都需先征求用户确认，C 级还需要真实资源。
-- **生产装配**：SQLite 持久层已实现，但没有接入 `gantryd`；`assemble_real` 总是返回 `NotReady`（`crates/gantryd/src/assembly.rs:93-99`）。#289 的引擎侧前置（settings 换算、默认预留策略、`status()`）已合入，不等于所有真实装配完成；#105 负责跨泳道替换和集成。
 - **验收口径**：A + B 级全绿才记为「M1 本机验收通过」，C 级全绿才记为「M1 退出」（#87）。当前三级证据都未全部取得。
 - **已知外部阻塞**：GitHub Actions 因账户计费问题未启动（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
 
-**本机检查**：`main@64a498b` 有历史本机门槛记录。之后 [#316](https://github.com/LeXwDeX/gantry/pull/316) 和 [#323](https://github.com/LeXwDeX/gantry/pull/323) 的 PR 描述记录了各自合入前候选变更的全工作区本机门槛结果；`main@fc3cd45` 与 #323 当时测试的内容一致。历史门槛的 MSRV 1.85 普通 `cargo check --locked --workspace --all-features` 通过，但 `main@64a498b` 和 `main@fc3cd45` 的 `--all-targets` 检查均因 `settings/clamp.rs` 测试的 E0716 失败。#292 分支修复相关测试后，`cargo +1.85 check --locked --workspace --all-targets --all-features` 已通过；#292 的完成以 PR 和最终门槛为准。
+**本机检查**：各 PR 描述记录了合入前的全工作区本机门槛；M1.3 收尾评审 PR 的描述记录了在合入后的结果上复跑的全部门槛（fmt、clippy、test、MSRV 1.85 两条 check、`xtask schemas --check`、mock-api、desktop lint/typecheck/test/build）。本机门槛不能替代真实环境证据。
 
 **未实现或未验证**：
-- #362 任务身份：摘要传递、恢复批次预验证、最终计量保留和 D-23 待核实语义已实现；同 job 跨 sandbox 归属、查询失败自动再查询、普通失败保留 release 依据、终结后释放失败保留元数据均有仓库内回归测试。本机联测覆盖替身容器驱动、真实执行体、真实 Egress 登记表及终结提交前后的崩溃重放；真实 Podman 与生产装配未验证，§14 尚待独立评审与最终验收。
-- 真实装配、真实 GitHub App、模型、Podman、目标主机与代码签名；桌面端真实 API 联调。
+- 真实装配（#105）、真实 GitHub App、模型、Podman、目标主机与代码签名；桌面端真实 API 联调。
+- #362 任务身份的真实 Podman 与生产装配路径。
 - store 的剩余 §12 验收条目（#267）和 api 的读路由 / 共用用例（#280）。
-- 评审确认的问题 #293、#294、#295、#296、#297、#298、#300、#301、#302、#303、#304、#305、#306、#307、#308、#309、#310，以及文档项 #299；逐项见 issue 和本轮评审。
-- #311–#315 是尚待复核的疑点，不代表已证实缺陷；复核后再决定是修复、并入现有 issue 还是排除。
+- 评审确认的问题 #293–#310（文档项 #299）、#317–#322，以及 M1.3 收尾评审新登记的 #367–#371；逐项见 issue 与评审记录。
+- #311–#315 是尚待复核的疑点，不代表已证实缺陷。
+- 远端 CI 诊断项 #346、#347、#352。
 
-**M0 遗留**（#82–#85 已关闭；仍开放项）：
-
-- #86：恢复远端 CI 并在 `main` 上补一次全绿。
-- #292：修复 MSRV 1.85 下的测试编译错误，并让 CI 的 MSRV 任务覆盖测试目标。
+**M0 遗留**：#292 已由 PR #324 修复并关闭；仍开放 #86（恢复远端 CI 并在 `main` 上补一次全绿）。
 
 ## 待拍板
 
@@ -61,20 +58,21 @@ M0 契约文本已由用户在 2026-10-27 统一批准，状态标注已在 #85 
 | [M1.4 M1 验收（B / C 级）](https://github.com/LeXwDeX/gantry/milestone/5) | 阶段 4、5 | #105–#107 |
 | [M2-prep Agent 扩展性预留](https://github.com/LeXwDeX/gantry/milestone/6) | 阶段 6 | #108–#110 |
 
-M0.9 只剩 #86、#292；#82–#85、#122、#135、#179 已关闭。M1.1（18/18）和 M1.2（16/16）的 issue 与里程碑均已关闭。M1.3 的 #101–#104、#291 已关闭；#289 的引擎前置已合入，issue 仍开放。
+M0.9 只剩 #86；#82–#85、#122、#135、#179、#292 已关闭。M1.1（18/18）、M1.2（16/16）、M1.3（6/6）的 issue 与里程碑均已关闭。
 
-### 当前优先级（2026-10-27 起）
+### 当前优先级（2026-10-29 起）
 
-1. **#291**：收尾 PR #316 已合入，M1.1、M1.2 里程碑已关闭。
-2. **#289**：engine 侧真实装配前置 PR #323 已合入；issue 仍开放。
-3. **#105**：A 级跨泳道集成，用真实模块替换替身；#280、#267 可与其并行。
+1. **#105**：A 级跨泳道集成与真实装配，当前主线。第一步建议让替身装配改走 `from_settings` 与 `EqualShareReservation`，使进程级 §12.2 用例覆盖真实换算，再逐个替换替身；接线时一并核对 #317–#322，`settings.bootstrap_set` 的参数契约先按 #371 单独提契约 PR。
+2. **#280、#267**：可与 #105 并行。
+3. **M1.3 收尾评审的独立小项**：#367（deploy doctor 衔接）、#369（shell-core token 清零）、#370（前端适配器对账测试）无前置，可穿插；#368 需先改规格。
 4. **#106 → #107**：B 级本机 Ubuntu 虚拟机、C 级外部资源。两项都要先征求用户确认，C 级还需要真实资源。
-5. **#292**：可随时插入；修 MSRV 1.85 的测试编译错误，并扩大 CI 的 MSRV 覆盖。
-6. **M2-prep**：#108 → #109 → #110 按顺序推进；这条工作线可与 M1 并行，不阻塞 M1.4。
+5. **M2-prep**：#108 → #109 → #110 按顺序推进；可与 M1 并行，不阻塞 M1.4。
 
 ### 本轮新发现
 
-本轮评审确认的问题已分别登记，不并入 #291 的实现范围：engine 见 #293、#302、#306、#309、#310；store 见 #300；forge / repo 见 #298、#301、#303、#305、#308；api / notify / conversation 见 #296、#297、#307；sandbox / worker / egress / models 见 #294、#295、#304；其他入口文档见 #299。`#311`–`#315` 仍是待复核疑点，只有复核后才决定修复、并入现有 issue 或排除。`#267`、`#280` 是既有验收缺口，继续按各自 issue 跟踪。
+M1.3 收尾评审（2026-10-29）新登记：#367 deploy doctor 未检查区域与安装脚本退出码衔接、`install-state.json` 不可读时失败闭合、`--page` 文件权限；#368 控制通道客户端对端校验（需先改规格）；#369 shell-core 配对 token 清零与审批/地址绑定澄清；#370 前端 Tauri 适配器与路由表对账测试；#371 `settings.bootstrap_set` 参数契约与替身白名单。另在 #105 写入接线切入点，在 #315 补充已授权审批恢复路径的待复核点。
+
+上一轮（2026-10-27）确认的问题仍按 #293–#310 跟踪，#311–#315 仍是待复核疑点。
 
 ### 阶段 0：合并上一轮 PR（已完成）
 
@@ -86,11 +84,11 @@ M1.1 的 18 个 issue（#58、#64–#75、#80、#125、#129、#133、#277）已�
 
 已关闭 issue 不表示每条规格边界都没有缺陷；本轮评审确认的运行时缺口由 #293、#302、#306、#309、#310 跟踪，#313 是待复核疑点，不能把 M1.1 的关闭状态当成 engine.md §12.2 全部通过。
 
-### 阶段 3：M1.2 issue 全关，M1.3 仍开放（真实装配未完成）
+### 阶段 3：M1.2、M1.3 已关闭（真实装配未完成）
 
-服务端泳道见 [M1.2](https://github.com/LeXwDeX/gantry/milestone/3)（#87–#100、#150、#220，16 个 issue 与里程碑均已关闭），组装、桌面与部署见 [M1.3](https://github.com/LeXwDeX/gantry/milestone/4)（#101–#104、#291 已关闭，#289 仍开放）。
+服务端泳道见 [M1.2](https://github.com/LeXwDeX/gantry/milestone/3)（#87–#100、#150、#220，16 个 issue 与里程碑均已关闭），组装、桌面与部署见 [M1.3](https://github.com/LeXwDeX/gantry/milestone/4)（#101–#104、#289、#291 均已关闭，里程碑已关闭）。
 
-这些泳道已有 crate、模块测试和替身对接。**测试替身通过不等于真实模块已在生产装配中协同运行**：`gantryd::assemble_real` 仍返回 `NotReady`，SQLite 存储尚未接入生产装配；真实 GitHub、Podman、模型、密钥环境和桌面真实 API 联调都未验证。#289 引擎前置已合入，真实装配由 #105 推进，不能把已关闭的泳道 issue 当成端到端完成。
+这些泳道已有 crate、模块测试和替身对接。**测试替身通过不等于真实模块已在生产装配中协同运行**：`gantryd::assemble_real` 仍返回 `NotReady`，SQLite 存储尚未接入生产装配；真实 GitHub、Podman、模型、密钥环境和桌面真实 API 联调都未验证。#289 引擎前置已合入但尚无调用方，真实装配由 #105 推进，不能把已关闭的泳道 issue 当成端到端完成。
 
 #104 已关闭，但实机两次幂等执行、`systemd-analyze verify`、`nft -c` 及依赖 root、systemd 或沙盒的 doctor 检查延期到 #106；见 [#104 评论](https://github.com/LeXwDeX/gantry/issues/104#issuecomment-6433339355)和 [PR #207](https://github.com/LeXwDeX/gantry/pull/207)。#106 需先征求用户确认本机虚拟机环境。
 
