@@ -75,7 +75,7 @@ pub trait CommandSet: Send + Sync {
 }
 ```
 
-  已约定、待对应模块接入的命令：`github.setup.begin` / `github.setup.status`（`forge`）、`settings.bootstrap_set`（设置模块），形状见 deploy/README.md；`PkiControl`（pki.md §7.8）。
+  已约定、待对应模块接入的命令：`github.setup.begin` / `github.setup.status`（`forge`，形状见 deploy/README.md）、`settings.bootstrap_set`（设置模块，参数与错误码见 deploy.md §7.9）；`PkiControl`（pki.md §7.8）。
 
 ## 7. 内部设计
 
