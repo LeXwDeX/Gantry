@@ -20,7 +20,9 @@ gantry-store = { path = "../gantry-store" }
 gantry-engine = { path = "../gantry-engine" }
 gantry-deploy = { path = "../gantry-deploy" }
 gantry-notify = { path = "../gantry-notify" }
+gantry-pki = { path = "../gantry-pki" }
 gantry-policy = { path = "../gantry-policy" }
+gantry-secrets = { path = "../gantry-secrets" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +44,7 @@ gantry-sandbox = { path = "../gantry-sandbox", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }
 base64 = "0.22"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
 
 [features]
