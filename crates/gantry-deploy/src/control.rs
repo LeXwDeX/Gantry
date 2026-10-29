@@ -28,6 +28,14 @@ pub enum ControlError {
     Unavailable { path: String, message: String },
     #[error("控制通道应答无法解析：{0}")]
     Protocol(String),
+    /// 无法从用户数据库解析期望 uid；失败闭合，不连接。
+    #[error("无法解析用户 {user} 的 uid，拒绝连接控制通道")]
+    UnknownUser { user: String },
+    /// 对端 uid 与期望不符：请求可能发给了 `gantry-egress` 或冒名套接字。
+    #[error("控制通道对端 uid 不符：期望 {expected}，实际 {actual}")]
+    PeerUid { expected: u32, actual: u32 },
+    #[error("无法读取控制通道对端凭据：{0}")]
+    PeerCredentials(String),
     /// 服务端拒绝：`code` 是机器可读的错误码。
     #[error("{code}：{message}")]
     Rejected { code: String, message: String },
@@ -42,6 +50,10 @@ pub trait ControlClient {
 pub struct UnixControlClient {
     pub path: PathBuf,
     pub timeout: Duration,
+    /// 期望的对端用户名；生产是 `gantry`（deploy.md §6.3）。
+    pub user: String,
+    /// 期望 uid 的显式覆盖（测试注入）；`None` 时用 `getpwnam` 解析 `user`。
+    pub expected_uid: Option<u32>,
 }
 
 #[cfg(unix)]
@@ -50,6 +62,8 @@ impl UnixControlClient {
         Self {
             path: path.into(),
             timeout: Duration::from_secs(30),
+            user: "gantry".into(),
+            expected_uid: None,
         }
     }
 
@@ -111,13 +125,54 @@ impl UnixControlClient {
 #[cfg(unix)]
 impl ControlClient for UnixControlClient {
     fn call(&self, cmd: &str, args: Value) -> Result<Value, ControlError> {
+        let expected = match self.expected_uid {
+            Some(uid) => uid,
+            None => resolve_uid(&self.user)?,
+        };
         let stream =
             UnixStream::connect(&self.path).map_err(|error| ControlError::Unavailable {
                 path: self.path.display().to_string(),
                 message: error.to_string(),
             })?;
+        // #368：连接后、发送任何请求前校验对端 uid，防止请求发给 gantry-egress 或冒名套接字。
+        let actual =
+            peer_uid(&stream).map_err(|error| ControlError::PeerCredentials(error.to_string()))?;
+        if actual != expected {
+            return Err(ControlError::PeerUid { expected, actual });
+        }
         self.exchange(stream, cmd, args)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    stream.peer_cred().map(|cred| cred.uid())
+}
+
+#[cfg(target_vendor = "apple")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    nix::unistd::getpeereid(stream)
+        .map(|(uid, _)| uid.as_raw())
+        .map_err(std::io::Error::from)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_vendor = "apple"))))]
+fn peer_uid(_: &UnixStream) -> std::io::Result<u32> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "对端凭据读取未在此平台实现",
+    ))
+}
+
+/// `getpwnam` 解析 `user` 的 uid；解析失败或出错都按拒绝处理（失败闭合）。
+fn resolve_uid(user: &str) -> Result<u32, ControlError> {
+    nix::unistd::User::from_name(user)
+        .ok()
+        .flatten()
+        .map(|user| user.uid.as_raw())
+        .ok_or_else(|| ControlError::UnknownUser {
+            user: user.to_owned(),
+        })
 }
 
 pub fn parse_response(line: &str) -> Result<Value, ControlError> {

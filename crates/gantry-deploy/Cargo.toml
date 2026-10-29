@@ -10,3 +10,7 @@ description = "Gantry 部署的 Rust 子命令（M1：gantry github setup、gant
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# macOS 的 `getpeereid` 与 Linux/macOS 的 `getpwnam` 安全封装（crate 禁止 unsafe）。
+nix = { version = "0.31", default-features = false, features = ["socket", "user"] }
