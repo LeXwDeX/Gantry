@@ -1366,11 +1366,13 @@ fn gantry(scratch: &Scratch, args: &[&str]) -> Output {
     Command::new(CLI)
         .arg("--config")
         .arg(scratch.config())
+        .env("GANTRY_CONTROL_UID", scratch.uid().to_string())
         .args(args)
         .output()
         .unwrap()
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn cli_reads_the_socket_path_from_the_boot_config() {
     let scratch = Scratch::new();
@@ -1387,6 +1389,7 @@ fn cli_reads_the_socket_path_from_the_boot_config() {
     );
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn cli_bootstrap_set_is_refused_after_the_bootstrap_period() {
     let scratch = Scratch::new();
@@ -1400,6 +1403,7 @@ fn cli_bootstrap_set_is_refused_after_the_bootstrap_period() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("not_bootstrap_period"));
 }
 
+#[cfg(feature = "testing")]
 #[test]
 fn cli_reports_a_refused_peer_and_a_missing_daemon() {
     let scratch = Scratch::new();

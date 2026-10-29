@@ -91,7 +91,7 @@ fn github(global: &Global, args: Vec<String>, out: &mut dyn Write, err: &mut dyn
             return error.exit_code();
         }
     };
-    let control = UnixControlClient::new(socket(global));
+    let control = control_client(socket(global));
     let probe = CurlProbe::default();
     let mut sleep = std::thread::sleep;
     let env = github_setup::Env {
@@ -146,6 +146,16 @@ pub fn install_test_mode(path: &Path) -> Option<bool> {
         .and_then(|state| state.get("test_mode").and_then(serde_json::Value::as_bool))
 }
 
+/// 控制通道客户端；`testing` feature 下允许测试注入期望 uid（发布构建不读环境变量）。
+fn control_client(socket: PathBuf) -> UnixControlClient {
+    let mut client = UnixControlClient::new(socket);
+    #[cfg(feature = "testing")]
+    if let Some(uid) = std::env::var_os("GANTRY_CONTROL_UID") {
+        client.expected_uid = uid.to_str().and_then(|value| value.parse().ok());
+    }
+    client
+}
+
 fn settings(global: &Global, args: Vec<String>, out: &mut dyn Write, err: &mut dyn Write) -> u8 {
     let args = match bootstrap_set::BootstrapSetArgs::parse(args) {
         Ok(args) => args,
@@ -154,7 +164,7 @@ fn settings(global: &Global, args: Vec<String>, out: &mut dyn Write, err: &mut d
             return EXIT_USAGE;
         }
     };
-    let control = UnixControlClient::new(socket(global));
+    let control = control_client(socket(global));
     match bootstrap_set::run(&args, &control) {
         Ok(result) => {
             let _ = writeln!(out, "{result}");
