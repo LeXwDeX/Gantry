@@ -115,7 +115,7 @@ impl PairTransport for FakeServer {
             Fault::TokenInvalid => return Ok(PairReply::TokenInvalid),
             _ => {}
         }
-        if body.token != self.token {
+        if body.token.as_str() != self.token {
             return Ok(PairReply::TokenInvalid);
         }
         // 服务端实现的校验：CSR（pki.md §7.4.4）与 approval_pubkey（§7.4.3 第 3 步）。

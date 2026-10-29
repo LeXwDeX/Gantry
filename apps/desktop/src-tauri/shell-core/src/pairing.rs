@@ -18,6 +18,7 @@ use std::sync::Arc;
 use gantry_core::canon::sha256;
 use serde::{Deserialize, Serialize};
 use x509_parser::prelude::{FromDer, X509Certificate};
+use zeroize::Zeroizing;
 
 use crate::ipc::{ShellError, ShellErrorCode};
 use crate::keys::{DeviceKeys, KeyStore, P256PublicKey};
@@ -35,7 +36,7 @@ pub struct PairingString {
     pub port: u16,
     /// 离线根 CA 证书 DER 的 SHA-256（P-64）。
     pub ca_fingerprint: String,
-    token: String,
+    token: Zeroizing<String>,
 }
 
 impl std::fmt::Debug for PairingString {
@@ -87,7 +88,7 @@ impl PairingString {
             host: host.to_string(),
             port,
             ca_fingerprint: fp,
-            token,
+            token: Zeroizing::new(token),
         })
     }
 
@@ -145,12 +146,25 @@ pub struct PairDevice {
 }
 
 /// `POST /v1/pair` 的请求体。`Debug` 不打印 token。
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 pub struct PairRequestBody {
-    pub token: String,
+    pub token: Zeroizing<String>,
     pub csr: String,
     pub approval_pubkey: String,
     pub device: PairDevice,
+}
+
+// `Zeroizing` 不实现 `Serialize`；线上形状仍是普通字符串 `token` 字段。
+impl Serialize for PairRequestBody {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("PairRequestBody", 4)?;
+        s.serialize_field("token", self.token.as_str())?;
+        s.serialize_field("csr", &self.csr)?;
+        s.serialize_field("approval_pubkey", &self.approval_pubkey)?;
+        s.serialize_field("device", &self.device)?;
+        s.end()
+    }
 }
 
 impl std::fmt::Debug for PairRequestBody {
@@ -443,7 +457,7 @@ async fn exchange(
     now_s: i64,
 ) -> Result<PairResponseBody, ShellError> {
     let body = PairRequestBody {
-        token: parsed.token().to_string(),
+        token: Zeroizing::new(parsed.token().to_string()),
         csr: build_csr(keys.clone())?,
         approval_pubkey: keys.approval_public_key().to_base64url(),
         device: PairDevice {
@@ -487,6 +501,7 @@ pub fn decode_approval_pubkey(value: &str) -> Option<P256PublicKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroize;
 
     const FP: &str = "sha256:3b7e0c52a91d6f48e2b05c7a9d1f3e64b8a20c5d7e91f3a6b4c8d0e2f1a39b57";
 
@@ -501,6 +516,41 @@ mod tests {
         assert!(!format!("{p:?}").contains("gp1_"));
         // 粘贴时带的首尾空白可容忍。
         assert!(PairingString::parse(&format!("  {s}\n")).is_ok());
+    }
+
+    #[test]
+    fn pairing_token_is_stored_in_a_zeroizing_string() {
+        // §7.6「内存」：配对 token 以 `SecretString` / `zeroize` 保存。
+        let p = PairingString::parse(&format!(
+            "gantry+pair://gantry.example.com:8444/?v=1&fp={FP}&t=gp1_secret_token"
+        ))
+        .unwrap();
+        // 编译期断言：字段类型是 `Zeroizing<String>`，不是普通 `String`。
+        let token: &Zeroizing<String> = &p.token;
+        assert_eq!(token.as_str(), "gp1_secret_token");
+
+        // 显式清零覆盖 token 的缓冲区；`Zeroizing` 在 Drop 时做同一件事。
+        let mut token = p.token;
+        token.zeroize();
+        assert!(token.as_bytes().iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn pair_request_serializes_the_token_field_unchanged() {
+        // 不改变 IPC / 线上形状：手写 `Serialize` 仍输出普通 `token` 字符串字段。
+        let body = PairRequestBody {
+            token: Zeroizing::new("gp1_secret_token".into()),
+            csr: "csr".into(),
+            approval_pubkey: "pk".into(),
+            device: PairDevice {
+                name: "laptop".into(),
+                platform: Platform::Macos,
+            },
+        };
+        let value = serde_json::to_value(&body).unwrap();
+        assert_eq!(value["token"], "gp1_secret_token");
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert!(!format!("{body:?}").contains("gp1_secret_token"));
     }
 
     #[test]
