@@ -104,6 +104,8 @@ struct State {
     jobs: BTreeMap<AttemptId, JobEntry>,
     calls: Vec<SandboxCall>,
     recover_reply: Option<Result<Vec<RecoveredJob>, SandboxError>>,
+    recover_replies: std::collections::VecDeque<Result<Vec<RecoveredJob>, SandboxError>>,
+    next_wait_error: Option<SandboxError>,
 }
 
 struct VecStream {
@@ -185,6 +187,23 @@ impl FakeSandboxService {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .recover_reply = Some(Err(error));
+    }
+
+    /// 按调用顺序注入多次 `recover` 回复；用完后回退到 `script_recover_reply` / 默认。
+    pub fn script_recover_replies(
+        &self,
+        replies: impl IntoIterator<Item = Result<Vec<RecoveredJob>, SandboxError>>,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.recover_replies = replies.into_iter().collect();
+    }
+
+    /// 下一次 `wait` 返回一次指定错误，之后恢复正常。
+    pub fn fail_next_wait(&self, error: SandboxError) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .next_wait_error = Some(error);
     }
 
     pub fn script(&self, spec: SandboxSpec, outcome: JobOutcome) {
@@ -305,6 +324,9 @@ impl SandboxService for FakeSandboxService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.calls.push(SandboxCall::Wait { job_id: *job_id });
+        if let Some(error) = state.next_wait_error.take() {
+            return Err(error);
+        }
         let entry = state.jobs.get(job_id).ok_or(SandboxError::NotFound)?;
         if entry.accepted && (entry.runtime == FakeRuntime::Lost || entry.swept) {
             return Err(SandboxError::Infra {
@@ -378,6 +400,9 @@ impl SandboxService for FakeSandboxService {
             ctx: ctx.clone(),
             unfinished: unfinished.to_vec(),
         });
+        if let Some(reply) = state.recover_replies.pop_front() {
+            return reply;
+        }
         if let Some(reply) = &state.recover_reply {
             return reply.clone();
         }

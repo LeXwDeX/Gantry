@@ -4333,7 +4333,7 @@ async fn retry_does_not_claim_a_sandbox_acquired_by_another_job() {
     ));
     h.driver.complete(&container, vec![]).unwrap();
     let outcome = h.service.wait(&att(522)).await.unwrap();
-    assert_eq!(outcome.job_id, att(521));
+    assert_eq!(outcome.job_id, att(522));
     assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
     assert!(!outcome.terminal.cancel_requested);
     assert_eq!(starts(&h), 1);
@@ -4533,7 +4533,8 @@ async fn cancel_after_transient_failure_finishes_verified_prestart_job() {
     let job = att(n);
     let wait = h.service.wait(&job);
     tokio::pin!(wait);
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // 内部再查询从 250ms 开始；先确认等待仍是待核实状态，再注入取消。
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut wait)
         .await
         .is_err());

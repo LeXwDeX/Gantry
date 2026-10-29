@@ -1380,6 +1380,44 @@ async fn resume_resubmits_only_unknown_jobs() {
     assert_eq!(detail(&lost), Some("infra.lost"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn running_recovery_requeries_and_resubmits_after_shutdown() {
+    let h = H::new().await;
+    let attempt: AttemptId = id(121);
+    h.script(attempt, OutcomeSpec::default()).await;
+    // 首轮恢复返回待核实 Running；再查询确认从未受理后返回 Unknown。
+    h.sandbox.script_recover_replies([
+        Ok(vec![RecoveredJob::Running(JobHandle {
+            job_id: attempt,
+            sandbox_id: sandbox_id_for(&attempt),
+        })]),
+        Ok(vec![RecoveredJob::Unknown { job_id: attempt }]),
+    ]);
+    // 旧槽位被裁决移除时 wait 可能返回 ShuttingDown；这不是终态。
+    h.sandbox.fail_next_wait(SandboxError::ShuttingDown);
+    let mut plan = h.plan(attempt);
+    plan.resume = true;
+    let finalized = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+    assert_eq!(finalized.status, AttemptStatus::Succeeded);
+    assert_eq!(h.submitted().len(), 1);
+    assert_eq!(h.submitted()[0].sandbox_id, sandbox_id_for(&attempt));
+    let calls = h.sandbox.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, SandboxCall::Recover { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| matches!(call, SandboxCall::Wait { .. }))
+            .count(),
+        2
+    );
+}
+
 #[tokio::test]
 async fn recovery_port_mismatch_never_resubmits_or_settles() {
     let h = H::new().await;
