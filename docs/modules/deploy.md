@@ -159,6 +159,8 @@
 | `/run/gantry-ca-bootstrap/` | root:root | 0700（tmpfs） | **仅安装期**：根私钥只存在于此，结束即清空 | 绝不 |
 | 日志 | — | — | journald；不另写明文日志文件（Egress 审计除外） | 否 |
 
+`control.sock` 的客户端（`gantry` CLI）连接后先校验对端 uid 等于 `gantry` 用户；解析失败或 uid 不符即拒绝，不发送任何请求（#368）。
+
 **读取矩阵（验收依据）**：`gantry` 读不到 `/var/lib/gantry-egress/**`；`gantry-egress` 读不到 `/var/lib/gantry/**`；`gantry-sbx` 读不到 `/var/lib/gantry/{gantry.db,secrets,cas,mirrors,worktrees}`、`/var/lib/gantry-egress/**`、`/etc/gantry*`；任何非 root 用户读不到 `/run/gantry-ca-bootstrap`；全机不存在其他用户可读的私钥文件。
 
 ### 6.4 端口规划 [提议，端口号未在骨架中定死]
@@ -339,6 +341,8 @@ ReadWritePaths=/var/lib/gantry /run/gantry
 [Install]
 WantedBy=gantry.target
 ```
+
+客户端校验对端 uid 为 `gantry`，与 `gantryd.service` 的 `User=gantry` 对应（#368）；`gantry-egress.service` 使用独立用户，因此这条校验能区分两个控制通道。
 
 `gantry-egress.service` 同形，`User=gantry-egress`，`StateDirectory=gantry-egress`，`Group=gantry-egress` 且 `SupplementaryGroups=gantry-link`，`ReadWritePaths=/var/lib/gantry-egress /run/gantry`（只在其中创建 `egress.sock`）。`deploy/tmpfiles.d/gantry.conf`：`d /run/gantry 0770 gantry gantry-link -`。
 
