@@ -229,3 +229,65 @@ fn reverse_keys(value: &Value) -> Value {
         other => other.clone(),
     }
 }
+
+#[tokio::test]
+async fn verify_sample_zero_full_and_beyond_total() {
+    let store = store().await;
+    let cas = store.cas();
+    for bytes in [b"one".as_slice(), b"two", b"three"] {
+        cas.put(bytes, CasKind::Artifact).await.unwrap();
+    }
+
+    let empty = cas.verify_sample(0).await.unwrap();
+    assert_eq!(empty.files, 0);
+    assert!(empty.corrupt.is_empty());
+
+    let all = cas.verify().await.unwrap();
+    assert_eq!(all.files, 3);
+    for max in [3, 10] {
+        let sample = cas.verify_sample(max).await.unwrap();
+        assert_eq!(sample.files, all.files, "max={max}");
+        assert_eq!(sample.corrupt, all.corrupt, "max={max}");
+    }
+}
+
+#[tokio::test]
+async fn verify_sample_reports_a_tampered_object() {
+    let dir = std::env::temp_dir().join(format!("gantry-cas-sample-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let clock = Arc::new(FakeClock::new(NOW_MS));
+    let ids = Arc::new(gantry_core::ids::IdGen::new(
+        clock.clone(),
+        Arc::new(SeqEntropy::new(3)),
+    ));
+    let store = Store::open(
+        gantry_store::StoreConfig::new(&dir),
+        StoreDeps { clock, ids },
+        &[],
+    )
+    .await
+    .unwrap();
+    let cas = store.cas();
+    let mut digests = Vec::new();
+    for bytes in [b"alpha".as_slice(), b"beta", b"gamma"] {
+        digests.push((cas.put(bytes, CasKind::Artifact).await.unwrap(), bytes));
+    }
+
+    // 篡改其中一个对象文件，再加 1 字节。
+    let (digest, bytes) = &digests[0];
+    let hex = digest.to_hex();
+    let path = dir
+        .join("cas")
+        .join("sha256")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    let mut tampered = bytes.to_vec();
+    tampered.push(b'!');
+    std::fs::write(&path, tampered).unwrap();
+
+    let sample = cas.verify_sample(digests.len()).await.unwrap();
+    assert_eq!(sample.files, digests.len() as u64);
+    assert!(sample.corrupt.contains(digest), "{sample:?}");
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}

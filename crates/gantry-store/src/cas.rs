@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gantry_core::canon::{jcs, sha256, Sha256Digest};
-use gantry_core::ids::Clock;
+use gantry_core::ids::{Clock, Entropy};
 use gantry_core::time::Timestamp;
 use gantry_core::worker::ResultBundle;
 use sha2::{Digest, Sha256};
@@ -136,15 +136,21 @@ enum Backend {
 pub struct Cas {
     backend: Backend,
     clock: Arc<dyn Clock>,
+    entropy: Arc<dyn Entropy>,
     max_object_bytes: u64,
     verify_below: u64,
 }
 
 impl Cas {
-    pub(crate) fn in_memory(clock: Arc<dyn Clock>, max_object_bytes: u64) -> Self {
+    pub(crate) fn in_memory(
+        clock: Arc<dyn Clock>,
+        entropy: Arc<dyn Entropy>,
+        max_object_bytes: u64,
+    ) -> Self {
         Self {
             backend: Backend::Memory(Arc::new(Mutex::new(BTreeMap::new()))),
             clock,
+            entropy,
             max_object_bytes,
             verify_below: DEFAULT_VERIFY_ON_READ_BELOW_BYTES,
         }
@@ -154,6 +160,7 @@ impl Cas {
         root: PathBuf,
         durable: Arc<Durable>,
         clock: Arc<dyn Clock>,
+        entropy: Arc<dyn Entropy>,
         max_object_bytes: u64,
     ) -> Result<Self, StoreError> {
         create_dir(&root.join("sha256"))?;
@@ -165,6 +172,7 @@ impl Cas {
         Ok(Self {
             backend: Backend::Disk { root, durable },
             clock,
+            entropy,
             max_object_bytes,
             verify_below: DEFAULT_VERIFY_ON_READ_BELOW_BYTES,
         })
@@ -370,18 +378,39 @@ impl Cas {
     /// （类别记为 `Artifact`，创建时间取当前时钟）。不删除也不修复损坏对象，只报告。
     /// 内存后端没有孤儿，只重算摘要。
     pub async fn verify(&self) -> Result<CasVerifyReport, StoreError> {
-        let mut report = CasVerifyReport::default();
+        let digests = self.digests()?;
+        self.verify_digests(&digests).await
+    }
+
+    /// 抽样完整性检查（#267）：按摘要排序后，从熵源给出的随机起点取至多 `max_objects`
+    /// 个连续对象（环绕）。`max_objects >= 总数` 时覆盖全部对象。
+    pub async fn verify_sample(&self, max_objects: usize) -> Result<CasVerifyReport, StoreError> {
+        if max_objects == 0 {
+            return Ok(CasVerifyReport::default());
+        }
+        let digests = self.digests()?;
+        if digests.is_empty() {
+            return Ok(CasVerifyReport::default());
+        }
+        let mut bytes = [0u8; 8];
+        self.entropy.fill(&mut bytes);
+        let start = (u64::from_le_bytes(bytes) % digests.len() as u64) as usize;
+        let take = max_objects.min(digests.len());
+        let sample: Vec<Sha256Digest> = (0..take)
+            .map(|offset| digests[(start + offset) % digests.len()])
+            .collect();
+        self.verify_digests(&sample).await
+    }
+
+    /// 排序后的对象摘要；磁盘后端跳过文件名不是合法摘要的文件。
+    fn digests(&self) -> Result<Vec<Sha256Digest>, StoreError> {
         match &self.backend {
             Backend::Memory(objects) => {
                 let objects = objects.lock().map_err(|_| StoreError::Poisoned)?;
-                for (digest, object) in objects.iter() {
-                    report.files += 1;
-                    if sha256(&object.bytes) != *digest {
-                        report.corrupt.push(*digest);
-                    }
-                }
+                Ok(objects.keys().copied().collect())
             }
-            Backend::Disk { root, durable } => {
+            Backend::Disk { root, .. } => {
+                let mut digests = Vec::new();
                 for prefix in read_dir_sorted(&root.join("sha256"))? {
                     for file in read_dir_sorted(&prefix)? {
                         let name = format!(
@@ -389,22 +418,49 @@ impl Cas {
                             prefix.file_name().unwrap_or_default().to_string_lossy(),
                             file.file_name().unwrap_or_default().to_string_lossy()
                         );
-                        // 名字不是合法摘要的文件不是 store 写的，跳过不碰。
-                        let Ok(digest) = Sha256Digest::parse(&name) else {
-                            continue;
-                        };
-                        report.files += 1;
-                        let mut source = File::open(&file).map_err(io_error)?;
-                        let (actual, len) =
-                            stream_into(&mut source, &mut std::io::sink(), u64::MAX)?;
-                        if actual != digest {
-                            report.corrupt.push(digest);
-                            continue;
+                        if let Ok(digest) = Sha256Digest::parse(&name) {
+                            digests.push(digest);
                         }
-                        if durable.cas_stat(&digest)?.is_none() {
-                            durable.cas_record(&digest, &self.new_stat(len, CasKind::Artifact))?;
-                            report.rows_added += 1;
-                        }
+                    }
+                }
+                digests.sort();
+                Ok(digests)
+            }
+        }
+    }
+
+    async fn verify_digests(
+        &self,
+        digests: &[Sha256Digest],
+    ) -> Result<CasVerifyReport, StoreError> {
+        let mut report = CasVerifyReport::default();
+        for digest in digests {
+            match &self.backend {
+                Backend::Memory(objects) => {
+                    let objects = objects.lock().map_err(|_| StoreError::Poisoned)?;
+                    let Some(object) = objects.get(digest) else {
+                        continue;
+                    };
+                    report.files += 1;
+                    if sha256(&object.bytes) != *digest {
+                        report.corrupt.push(*digest);
+                    }
+                }
+                Backend::Disk { root, durable } => {
+                    let file = object_path(root, digest);
+                    if !file.exists() {
+                        continue;
+                    }
+                    report.files += 1;
+                    let mut source = File::open(&file).map_err(io_error)?;
+                    let (actual, len) = stream_into(&mut source, &mut std::io::sink(), u64::MAX)?;
+                    if actual != *digest {
+                        report.corrupt.push(*digest);
+                        continue;
+                    }
+                    if durable.cas_stat(digest)?.is_none() {
+                        durable.cas_record(digest, &self.new_stat(len, CasKind::Artifact))?;
+                        report.rows_added += 1;
                     }
                 }
             }

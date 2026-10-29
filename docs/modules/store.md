@@ -536,12 +536,12 @@ LIMIT 1;
 
 ### 7.8 备份、恢复、完整性
 
-- `backup_to(dir)`：`VACUUM INTO '<dir>/gantry-<ts>.db'`（一致性快照，写者可继续写），随后对副本执行 `PRAGMA integrity_check`，写一份清单（`head_seq`、`log_id`、各表行数摘要、CAS 对象数）。CAS 目录是内容寻址的，`deploy` 可用增量复制；`store` 提供 `cas().verify_sample()` 校验副本。**不备份 `secrets/`**（它有自己的加密备份）。
+- `backup_to(dir)`：`VACUUM INTO '<dir>/gantry-<ts>.db'`（一致性快照，写者可继续写），随后对副本执行 `PRAGMA integrity_check`，写一份清单（`head_seq`、`log_id`、各表行数摘要、CAS 对象数）。CAS 目录是内容寻址的，`deploy` 可用增量复制；`store` 提供 `cas().verify_sample(max_objects)` 校验副本：按摘要排序后从随机起点取至多 `max_objects` 个连续对象（随机源来自 `StoreDeps` 的熵）；`max_objects ≥ 总数` 时等同于 `verify()`。**不备份 `secrets/`**（它有自己的加密备份）。
 - 恢复是离线操作（`Store::restore_from(dir)`，由运维命令调用）：校验副本 → 替换数据库文件 → `log_epoch += 1`（P-67），`log_id` 保持。恢复后 `head` 可能小于恢复前客户端见过的 `seq`：`api` 在事件流与快照响应中携带 `log_epoch`，客户端发现变化就全量重同步。随后由 `pki` 重放 `revocations.journal` 中晚于备份的吊销（`deploy` 的恢复命令按此顺序调用）。
 - `verify(Quick)`：`PRAGMA quick_check`；`meta.projected_seq == head`；`outbox` 与 `events` 的 ID 前缀 / 枚举合法。`verify(Full)`：在临时库里全量折叠事件，与现有投影表逐表比较哈希；CAS 抽样重算摘要。
 - 发现 `SQLITE_CORRUPT`：拒绝启动并输出"从备份恢复"的指引；**不自动修复**。
 
-**M1 已落地（#88）**：`Store::backup_to(dest_dir) -> BackupReport` 写 `gantry-<ts>.db`（`VACUUM INTO`，与提交共用连接锁，副本恰为某次提交后的前缀）与清单 `gantry-<ts>.json`（`schema_version`、`log_id`、`log_epoch`、`head_seq`、`events`、`outbox_rows`、`cas_objects`、`created_at`），并对副本做 `integrity_check`、确认日志从 1 起无空洞。`Store::restore_from(backup_db, data_dir) -> LogIdentity` 是离线操作：校验副本 → 取数据目录锁 `gantry.lock`（与 `Store::open` 共用，持有到替换结束；被占用则 `AlreadyRunning`，不依赖旧库可读）→ 复制到临时名 → `log_epoch = max(副本, 现有库) + 1`、`log_id` 保持 → 删除旧 WAL → 原子替换。`Store::verify(VerifyLevel)`：`Quick` 为 `quick_check` 与 `projected_seq == head`；`Full` 为 `integrity_check`，从磁盘（内存版从日志）重建全部状态与当前内存状态逐项比较，再跑 `Cas::verify()`。outbox 的"ID 前缀 / 枚举合法"由类型化载入保证（载入失败即 `Corrupt`）。尚未做：`verify_sample()` 抽样校验 CAS 副本、`pki` 吊销日志重放的编排（归 `deploy`）。
+**M1 已落地（#88）**：`Store::backup_to(dest_dir) -> BackupReport` 写 `gantry-<ts>.db`（`VACUUM INTO`，与提交共用连接锁，副本恰为某次提交后的前缀）与清单 `gantry-<ts>.json`（`schema_version`、`log_id`、`log_epoch`、`head_seq`、`events`、`outbox_rows`、`cas_objects`、`created_at`），并对副本做 `integrity_check`、确认日志从 1 起无空洞。`Store::restore_from(backup_db, data_dir) -> LogIdentity` 是离线操作：校验副本 → 取数据目录锁 `gantry.lock`（与 `Store::open` 共用，持有到替换结束；被占用则 `AlreadyRunning`，不依赖旧库可读）→ 复制到临时名 → `log_epoch = max(副本, 现有库) + 1`、`log_id` 保持 → 删除旧 WAL → 原子替换。`Store::verify(VerifyLevel)`：`Quick` 为 `quick_check` 与 `projected_seq == head`；`Full` 为 `integrity_check`，从磁盘（内存版从日志）重建全部状态与当前内存状态逐项比较，再跑 `Cas::verify()`。outbox 的"ID 前缀 / 枚举合法"由类型化载入保证（载入失败即 `Corrupt`）。尚未做：`pki` 吊销日志重放的编排（归 `deploy`）。
 
 ### 7.9 迁移与投影重建
 
