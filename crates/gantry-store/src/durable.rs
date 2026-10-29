@@ -83,11 +83,24 @@ CREATE TABLE cas_objects (
 pub struct StoreConfig {
     /// 数据目录；不存在时创建。
     pub dir: PathBuf,
+    /// 单个事件 `data` 序列化后的字节上限（store.md §8 第 1 条）。
+    pub max_event_data_bytes: u64,
 }
+
+/// `store.max_event_data_bytes` 的默认值（store.md §10）。
+pub const DEFAULT_MAX_EVENT_DATA_BYTES: u64 = 1_048_576;
 
 impl StoreConfig {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            max_event_data_bytes: DEFAULT_MAX_EVENT_DATA_BYTES,
+        }
+    }
+
+    pub fn with_max_event_data_bytes(mut self, bytes: u64) -> Self {
+        self.max_event_data_bytes = bytes;
+        self
     }
 }
 
