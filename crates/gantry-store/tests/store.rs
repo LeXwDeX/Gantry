@@ -1973,3 +1973,75 @@ async fn verify_full_matches_a_rebuild() {
         .unwrap()
         .is_ok());
 }
+
+// ---- 事件 data 大小上限（store.md §8 第 1 条、§12.2） ----
+
+const EVENT_LIMIT: usize = 1024;
+
+/// `message.posted` 的 data，序列化后恰好 `limit` 字节；含 NUL、双向控制符、4 字节 Unicode。
+fn message_at_limit(limit: usize) -> (NewEvent, Vec<u8>) {
+    let mut data = cases()["valid"]["message.posted"].clone();
+    let prefix = "\u{0}\u{202E}😀".to_owned();
+    data["text"] = json!("");
+    let size_with_prefix = {
+        data["text"] = json!(prefix);
+        serde_json::to_vec(&data).unwrap().len()
+    };
+    assert!(size_with_prefix <= limit, "limit too small");
+    let pad = limit - size_with_prefix;
+    let text = format!("{prefix}{}", "a".repeat(pad));
+    data["text"] = json!(text);
+    let bytes = serde_json::to_vec(&data).unwrap();
+    assert_eq!(bytes.len(), limit);
+    let event = event("message.posted", "msg_01JBX2E3G5J7K9N1Q3S5T7W9YA", data);
+    (event, bytes)
+}
+
+#[tokio::test]
+async fn event_data_at_the_limit_is_accepted_and_roundtrips() {
+    let (event, bytes) = message_at_limit(EVENT_LIMIT);
+    let dir = std::env::temp_dir().join(format!("gantry-event-limit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let clock = Arc::new(FakeClock::new(1_700_000_000_000));
+    let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(11))));
+    let store = Store::open(
+        gantry_store::StoreConfig::new(&dir).with_max_event_data_bytes(EVENT_LIMIT as u64),
+        StoreDeps { clock, ids },
+        &[],
+    )
+    .await
+    .unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(event).await.unwrap();
+    tx.commit().await.unwrap();
+    let page = store
+        .events()
+        .scan(Seq::ZERO, &EventFilter::default(), 10)
+        .await
+        .unwrap();
+    assert_eq!(serde_json::to_vec(&page.events[0].data).unwrap(), bytes);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn event_data_over_the_limit_is_rejected() {
+    let (event, _) = message_at_limit(EVENT_LIMIT + 1);
+    let dir = std::env::temp_dir().join(format!("gantry-event-over-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let clock = Arc::new(FakeClock::new(1_700_000_000_000));
+    let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(11))));
+    let store = Store::open(
+        gantry_store::StoreConfig::new(&dir).with_max_event_data_bytes(EVENT_LIMIT as u64),
+        StoreDeps { clock, ids },
+        &[],
+    )
+    .await
+    .unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    let error = tx.append(event).await.unwrap_err();
+    assert!(matches!(error, StoreError::InvalidEvent(_)), "{error:?}");
+    tx.rollback().await.unwrap();
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}

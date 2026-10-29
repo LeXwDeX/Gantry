@@ -77,6 +77,8 @@ pub struct Store {
     cas: Cas,
     /// SQLite 持久层；`open_in_memory` 为 `None`。
     durable: Option<Arc<durable::Durable>>,
+    /// 单个事件 `data` 序列化后的字节上限（store.md §8 第 1 条）。
+    max_event_data_bytes: u64,
     /// `open_temp` 的临时目录；排在 `durable` 之后，连接先关再删目录。
     #[cfg(feature = "testing")]
     temp_dir: Option<Arc<TempDir>>,
@@ -120,6 +122,7 @@ impl Store {
             modules: Arc::new(registry),
             cas,
             durable: Some(durable),
+            max_event_data_bytes: cfg.max_event_data_bytes,
             #[cfg(feature = "testing")]
             temp_dir: None,
         })
@@ -190,6 +193,7 @@ impl Store {
             modules: Arc::new(registry),
             cas,
             durable: None,
+            max_event_data_bytes: durable::DEFAULT_MAX_EVENT_DATA_BYTES,
             temp_dir: None,
         })
     }
@@ -924,6 +928,25 @@ impl WriteTx {
         opts: AppendOpts,
     ) -> Result<Appended, StoreError> {
         ev.validate().map_err(StoreError::InvalidEvent)?;
+        let data_bytes = serde_json::to_vec(&ev.data)
+            .map_err(|_| {
+                StoreError::InvalidEvent(gantry_core::events::SchemaError::consistency(
+                    "/data",
+                    "event data is not serializable",
+                ))
+            })?
+            .len() as u64;
+        if data_bytes > self.store.max_event_data_bytes {
+            return Err(StoreError::InvalidEvent(
+                gantry_core::events::SchemaError::consistency(
+                    "/data",
+                    format!(
+                        "event data is {data_bytes} bytes; limit is {}",
+                        self.store.max_event_data_bytes
+                    ),
+                ),
+            ));
+        }
 
         if let Some(key) = &ev.dedup_key {
             if let Some(existing) = self.snapshot.dedup.get(key) {

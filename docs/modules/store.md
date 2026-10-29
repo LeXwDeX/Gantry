@@ -345,7 +345,7 @@ pub enum StoreError {
 
 **连接模型（单写者多读者）**：一个写连接，由 `tokio::sync::Mutex`（FIFO 公平）保护，事务一律 `BEGIN IMMEDIATE`；`read_connections` 个读连接组成池，每个读事务是一个 WAL 快照。写事务持有期间读者照常读旧快照。
 
-**M1 已落地（#88 SQLite 切片）**：`Store::open(StoreConfig::new(dir), deps, modules)` 与 testing 的 `Store::open_temp`。按 #88 评论里的方案，SQLite 只持久化事实源与非投影状态：`meta`、`events`（列与触发器同 §7.2）、`consumer_cursors`、`outbox`、各模块私有表；**投影不落表**，`open` 时按 `seq` 用同一套纯折叠函数重放（`Outbox` 是主表，重放时 `outbox.*` 事件不再改行），之后由 `append` 增量维护。`WriteTx::commit` 先在一个 `BEGIN IMMEDIATE` 事务里写入增量，SQLite 成功后才替换内存状态。与上表的差异：`outbox` 先存 `(id, idempotency_key, status, enqueued_seq, action JSON)`，其余列随投影落表时展开；读连接池、`snapshot_max_age_s`、`write_tx_max_hold_ms` 暂不需要（读走内存快照）。单实例由数据目录锁 `gantry.lock` 保证（一个只用来持锁的小 SQLite 库，`locking_mode = EXCLUSIVE`，跨进程与同进程都互斥，`Store::open` 与 `restore_from` 共用），第二个 `open` 得到 `AlreadyRunning`。`GANTRY_STORE_BACKEND=sqlite` 让 store 的全部用例改用 `open_temp` 再跑一遍（`testing::open_for_tests`）。
+**M1 已落地（#88 SQLite 切片）**：`Store::open(StoreConfig::new(dir), deps, modules)` 与 testing 的 `Store::open_temp`。按 #88 评论里的方案，SQLite 只持久化事实源与非投影状态：`meta`、`events`（列与触发器同 §7.2）、`consumer_cursors`、`outbox`、各模块私有表；**投影不落表**，`open` 时按 `seq` 用同一套纯折叠函数重放（`Outbox` 是主表，重放时 `outbox.*` 事件不再改行），之后由 `append` 增量维护。`WriteTx::commit` 先在一个 `BEGIN IMMEDIATE` 事务里写入增量，SQLite 成功后才替换内存状态。与上表的差异：`outbox` 先存 `(id, idempotency_key, status, enqueued_seq, action JSON)`，其余列随投影落表时展开；读连接池、`snapshot_max_age_s`、`write_tx_max_hold_ms` 暂不需要（读走内存快照）；两项随 WAL 读连接池实现，M1 不验收，见 #388。单实例由数据目录锁 `gantry.lock` 保证（一个只用来持锁的小 SQLite 库，`locking_mode = EXCLUSIVE`，跨进程与同进程都互斥，`Store::open` 与 `restore_from` 共用），第二个 `open` 得到 `AlreadyRunning`。`GANTRY_STORE_BACKEND=sqlite` 让 store 的全部用例改用 `open_temp` 再跑一遍（`testing::open_for_tests`）。
 
 ### 7.2 表结构草案
 
@@ -655,11 +655,11 @@ impl ModuleConn<'_> {   // WriteTx::module_conn(module)：读到本事务未提�
 - [ ] `ts` 在 `seq` 序下非递减：`FakeClock` 回拨后继续追加，`ts` 不倒退。
 - [ ] `scan`：过滤时 `scanned_to` 越过被过滤事件前进；满 `limit` 时等于最后一条命中事件的 `seq`；绝不越过任何一条未返回的命中事件（属性测试，随机事件流与随机过滤器）。
 - [ ] 全局事件（`project_id` 为 NULL）在任何 `project_ids` 过滤下都命中；`include` / `exclude` 的前缀与精确匹配正确；`message.*` 不匹配 `messages.x`。
-- [ ] `snapshot()`：数据与 `head_seq` 同快照——对随机事件流，在随机时刻取快照，再追加后续事件并折叠，结果与最新快照一致（属性测试）；超过 `snapshot_max_age_s` 后返回 `SnapshotExpired`。
+- [ ] `snapshot()`：数据与 `head_seq` 同快照——对随机事件流，在随机时刻取快照，再追加后续事件并折叠，结果与最新快照一致（属性测试）；超过 `snapshot_max_age_s` 后返回 `SnapshotExpired`（随 WAL 读连接池实现，M1 不验收，见 #388）。
 - [ ] `check_cursor(after > head)` 返回 `CursorAhead { head }`；`after == head` 通过。
 - [ ] `PageCursor`：跨资源复用、篡改、方向不符都得到 `InvalidCursor`（含模糊测试）；翻页期间插入新行不重不漏（键集语义）。
 - [ ] `Cursors::advance` 只增不减。
-- [ ] 不可信文本往返：含 NUL、双向控制符、4 字节 Unicode、1 MiB 字符串的 `UntrustedText` 存取后字节相同。
+- [ ] 不可信文本往返：按 `data` 序列化后的字节数计；构造一个序列化后恰好等于 `max_event_data_bytes` 的事件（含 NUL、双向控制符、4 字节 Unicode 的 `UntrustedText`），写入后读回字节相同；再多 1 字节返回 `InvalidEvent`。
 
 ### 12.3 投影
 
@@ -694,7 +694,7 @@ impl ModuleConn<'_> {   // WriteTx::module_conn(module)：读到本事务未提�
 - [ ] 迁移：从 `schema_version = n` 升到 n+1 成功；更高版本 → `SchemaTooNew`；模块迁移表名不带前缀被拒。
 - [ ] 第二个 `open` 同目录得到 `AlreadyRunning`。
 - [ ] 小容量 tmpfs 写满：写返回 `DiskFull`、事务无半成品，读正常，释放空间后恢复。
-- [ ] `write_tx_max_hold_ms` 到期强制回滚并返回 `TxTimeout`。
+- [ ] `write_tx_max_hold_ms` 到期强制回滚并返回 `TxTimeout`（随 WAL 读连接池实现，M1 不验收，见 #388）。
 - [ ] 提交返回后 `SIGKILL`：重启后该事务的事件与投影都在（`synchronous = FULL`）；提交前 `SIGKILL`：都不在，且 `projected_seq == head`。
 - [ ] 性能冒烟（不作为阻断项）：单事务批量追加 ≥ 1000 事件 / 秒；单事件提交 p99 < 50 ms [建议值]；`deliveries` 列表（万级行）p99 < 50 ms。
 
