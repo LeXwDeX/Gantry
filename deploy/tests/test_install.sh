@@ -75,12 +75,54 @@ test_steps_to_run_resume_and_rerun() {
   local f s
   f="$(mktemp -d)/state.json"
   assert_eq "$(steps_to_run "$f" | head -n1)" verify_release
-  for s in verify_release preflight packages users dirs; do state_mark_step "$f" 0.1.0 "$s"; done
+  for s in verify_release preflight packages users dirs; do state_mark_step "$f" 0.1.0 "$s" false; done
   assert_eq "$(steps_to_run "$f" | head -n1)" release "续跑应从第一个未完成步骤开始"
-  for s in $STEPS; do state_mark_step "$f" 0.1.0 "$s"; done
+  for s in $STEPS; do state_mark_step "$f" 0.1.0 "$s" false; done
   assert_eq "$(steps_to_run "$f")" "" "全部完成后重跑不应再执行任何步骤"
   ONLY=firewall
   assert_eq "$(steps_to_run "$f")" firewall "--only 总是执行指定步骤"
+}
+
+test_state_file_records_test_mode() {
+  local dir f
+  dir="$(mktemp -d)"
+  f="$dir/state.json"
+  state_mark_step "$f" 0.1.0 verify_release false
+  assert_eq "$(state_test_mode "$f")" false
+  state_mark_step "$f" 0.1.0 preflight true
+  assert_eq "$(state_test_mode "$f")" true
+  assert_contains "$(cat "$f")" '"test_mode":true'
+  rm -rf "$dir"
+}
+
+test_state_test_mode_check_rejects_mismatch() {
+  local dir f rc=0
+  dir="$(mktemp -d)"
+  f="$dir/state.json"
+  state_mark_step "$f" 0.1.0 verify_release true
+  check_state_test_mode "$f" true || fail "一致的 test_mode 应通过"
+  ( check_state_test_mode "$f" false ) 2>/dev/null || rc=$?
+  assert_eq "$rc" 10 "不一致应以预检退出码中止"
+  rc=0
+  printf '{"schema":1,"version":"0.1.0","completed":[],"updated_at":"x"}' >"$f"
+  ( check_state_test_mode "$f" false ) 2>/dev/null || rc=$?
+  assert_eq "$rc" 10 "缺字段应以预检退出码中止"
+  rm -rf "$dir"
+}
+
+test_state_test_mode_mismatch_is_rejected() {
+  local dir f rc=0
+  dir="$(mktemp -d)"
+  f="$dir/state.json"
+  state_mark_step "$f" 0.1.0 verify_release true
+  state_test_mode_matches "$f" true || fail "相同 test_mode 应通过"
+  state_test_mode_matches "$f" false || rc=$?
+  assert_eq "$rc" 1
+  printf '{"schema":1,"version":"0.1.0","completed":[],"updated_at":"x"}' >"$f"
+  rc=0
+  state_test_mode_matches "$f" false || rc=$?
+  assert_eq "$rc" 2 "缺 test_mode 应按不可读处理"
+  rm -rf "$dir"
 }
 
 test_check_os_release() {

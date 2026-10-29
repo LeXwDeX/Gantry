@@ -673,15 +673,30 @@ run_step() {
   PENDING_STEPS="$PENDING_STEPS $step"
   if [ -d /etc/gantry ]; then
     for s in $PENDING_STEPS; do
-      state_mark_step "$STATE_FILE" "$(current_version)" "$s"
+      state_mark_step "$STATE_FILE" "$(current_version)" "$s" "$STATE_TEST_MODE"
     done
     PENDING_STEPS=""
   fi
 }
 
+# check_state_test_mode <状态文件> <true|false>：旧文件、损坏或不一致都拒绝续跑。
+check_state_test_mode() {
+  local file="$1" want="$2" rc=0
+  [ -f "$file" ] || return 0
+  state_test_mode_matches "$file" "$want" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "$EXIT_PREFLIGHT" "安装状态文件的 test_mode 与本次参数不一致，拒绝续跑" ;;
+    *) die "$EXIT_PREFLIGHT" "安装状态文件缺少 test_mode（旧版本或已损坏），无法安全续跑" ;;
+  esac
+}
+
 main() {
   parse_args "$@"
   validate_args
+  STATE_TEST_MODE=false
+  [ "$TEST_MODE" != 1 ] || STATE_TEST_MODE=true
+  check_state_test_mode "$STATE_FILE" "$STATE_TEST_MODE"
   local step steps
   steps="$(steps_to_run "$STATE_FILE")"
   if [ "$RESUME" = 1 ] && [ ! -f "$STATE_FILE" ]; then

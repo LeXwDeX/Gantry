@@ -83,7 +83,7 @@
 | 引导期写入的审计事件 | 事件日志（`settings.updated`，`actor.kind = system`，P-66） | [config.md §2.3](../interfaces/config.md#23-存储事件版本追溯) |
 | 备份档 | 本地暂存 + 管理员配置的异地目的地 | §7.10 |
 | `doctor` 报告 | 终端 / JSON | §7.14 |
-| 安装状态文件 | `/etc/gantry/install-state.json` | 已完成步骤、版本、时间；不含密钥 |
+| 安装状态文件 | `/etc/gantry/install-state.json` | 已完成步骤、版本、时间、`test_mode`；不含密钥 |
 
 ## 6. 对外接口
 
