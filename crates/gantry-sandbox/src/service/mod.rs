@@ -39,7 +39,7 @@ use gantry_core::ports::sandbox::{
 use gantry_store::Store;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
 
-use crate::driver::{ContainerStatus, ContainerSummary, LabelSelector, SandboxDriver};
+use crate::driver::{ContainerStatus, ContainerSummary, DriverError, LabelSelector, SandboxDriver};
 use crate::spec::{
     ContainerId, NetworkAttach, Runtime, StagingLayout, LABEL_JOB_ID, LABEL_MANAGED,
     LABEL_SANDBOX_ID,
@@ -113,6 +113,10 @@ struct Blocked {
     commands: mpsc::UnboundedReceiver<Command>,
     retrying: bool,
     wake: bool,
+    /// 待核实期间保守占用一个并发许可：不完整快照不能当作已确认空闲容量。
+    permit: Option<OwnedSemaphorePermit>,
+    /// 无可用许可时的欠账；槽位移除时核销。
+    overdraft: bool,
 }
 
 type PermitWaiter = oneshot::Sender<OwnedSemaphorePermit>;
@@ -269,6 +273,31 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         Ok(Some((data.attempt_id, project)))
     }
 
+    /// 释放待核实槽位的容量预留并移除它；返回是否确有槽位。
+    fn remove_blocked(&self, job_id: &AttemptId) -> bool {
+        let blocked = {
+            let mut jobs = self.jobs();
+            match jobs.get(job_id) {
+                Some(slot) if slot.blocked.is_some() => {
+                    jobs.remove(job_id).and_then(|slot| slot.blocked)
+                }
+                _ => None,
+            }
+        };
+        let removed = blocked.is_some();
+        self.settle_blocked(blocked);
+        removed
+    }
+
+    fn settle_blocked(&self, blocked: Option<Blocked>) {
+        if let Some(blocked) = blocked {
+            drop(blocked.permit);
+            if blocked.overdraft {
+                self.inner.settle_overdraft();
+            }
+        }
+    }
+
     /// 本进程里已有该 job（同一服务上重复 `recover`）：按它的状态作答。
     fn known(&self, attempt: &UnfinishedAttempt) -> Result<Option<RecoveredJob>, SandboxError> {
         let mut jobs = self.jobs();
@@ -276,14 +305,13 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
             return Ok(None);
         };
         if slot.blocked.is_some() && slot.result.borrow().is_some() {
-            jobs.remove(&attempt.job_id);
+            let blocked = jobs.remove(&attempt.job_id).and_then(|slot| slot.blocked);
+            drop(jobs);
+            self.settle_blocked(blocked);
             return Ok(None);
         }
         if slot.handle.sandbox_id != attempt.sandbox_id || slot.project_id != attempt.project_id {
-            if slot.blocked.is_some() {
-                jobs.remove(&attempt.job_id);
-                return Ok(None);
-            }
+            // 待核实槽位同样属于既有绑定，冲突必须整批拒绝且不能丢弃等待通道。
             return Err(SandboxError::InvalidSpec(
                 "conflicting identity for an in-process job".into(),
             ));
@@ -322,6 +350,13 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         let (result_tx, result_rx) = watch::channel(None);
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (progress, _) = broadcast::channel(256);
+        let (permit, overdraft) = match Arc::clone(&self.inner.permits).try_acquire_owned() {
+            Ok(permit) => (Some(permit), false),
+            Err(_) => {
+                self.inner.debt.fetch_add(1, Ordering::SeqCst);
+                (None, true)
+            }
+        };
         jobs.insert(
             attempt.job_id,
             Slot {
@@ -338,6 +373,8 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     commands: command_rx,
                     retrying: false,
                     wake: false,
+                    permit,
+                    overdraft,
                 }),
             },
         );
@@ -354,12 +391,13 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         meta: Meta,
         container: Option<ContainerId>,
         created_event: bool,
-        mode: job::RecoverMode,
+        mut mode: job::RecoverMode,
     ) -> JobHandle {
         let handle = JobHandle {
             job_id: meta.job_id,
             sandbox_id: meta.sandbox_id,
         };
+        let mut settle_overdraft = false;
         let (result_tx, command_rx, progress_tx, occupancy) = {
             let mut jobs = self.jobs();
             if let Some(slot) = jobs.get_mut(&meta.job_id) {
@@ -368,6 +406,27 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     .blocked
                     .take()
                     .expect("only blocked slots can be resumed");
+                // 待核实期间的许可转交给新 actor；没有许可则核销欠账。
+                match (&mut mode, blocked.permit, blocked.overdraft) {
+                    (job::RecoverMode::Supervise { permit, .. }, Some(reserved), _) => {
+                        if permit.is_none() {
+                            *permit = Some(reserved);
+                        }
+                    }
+                    (job::RecoverMode::Reject { permit, .. }, Some(reserved), _) => {
+                        if permit.is_none() {
+                            *permit = Some(Some(reserved));
+                        }
+                    }
+                    (job::RecoverMode::Reject { permit, .. }, None, true) => {
+                        if permit.is_none() {
+                            *permit = Some(None);
+                        }
+                    }
+                    (_, Some(reserved), _) => drop(reserved),
+                    (_, None, true) => settle_overdraft = true,
+                    (_, None, false) => {}
+                }
                 *slot.occupancy.lock().unwrap_or_else(|p| p.into_inner()) = Occupancy::Queued;
                 (
                     blocked.result,
@@ -397,6 +456,9 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 (result_tx, command_rx, progress_tx, occupancy)
             }
         };
+        if settle_overdraft {
+            self.inner.settle_overdraft();
+        }
         let actor = job::JobActor::recovered(
             Arc::clone(&self.inner),
             ctx.clone(),
@@ -517,22 +579,29 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 if !still_blocked {
                     return;
                 }
-                if manager.recover_one(&ctx, &attempt, true).await.is_ok() {
-                    let wake = {
-                        let mut jobs = manager.jobs();
-                        jobs.get_mut(&attempt.job_id)
-                            .filter(|slot| Arc::ptr_eq(&slot.occupancy, &generation))
-                            .and_then(|slot| slot.blocked.as_mut())
-                            .is_some_and(|blocked| {
-                                if !blocked.wake {
-                                    blocked.retrying = false;
-                                }
-                                blocked.wake
-                            })
-                    };
-                    if !wake {
+                match manager.recover_one(&ctx, &attempt, true).await {
+                    Ok(RecoveredJob::Unknown { .. }) => {
+                        manager.remove_blocked(&attempt.job_id);
                         return;
                     }
+                    Ok(_) => {
+                        let wake = {
+                            let mut jobs = manager.jobs();
+                            jobs.get_mut(&attempt.job_id)
+                                .filter(|slot| Arc::ptr_eq(&slot.occupancy, &generation))
+                                .and_then(|slot| slot.blocked.as_mut())
+                                .is_some_and(|blocked| {
+                                    if !blocked.wake {
+                                        blocked.retrying = false;
+                                    }
+                                    blocked.wake
+                                })
+                        };
+                        if !wake {
+                            return;
+                        }
+                    }
+                    Err(_) => {}
                 }
                 delay = (delay * 2).min(Duration::from_secs(5));
             }
@@ -694,10 +763,6 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     None,
                 ));
             }
-            // Once Running was returned, wait cannot communicate Unknown to the engine.
-            if retrying {
-                return Ok(self.block_recovery(unfinished, "preparation requires redispatch"));
-            }
             return self
                 .finish_reentry(ctx, unfinished, layout, container, created, record)
                 .await;
@@ -705,9 +770,6 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
         let mut meta = match meta {
             Ok(Some(meta)) => meta,
             Ok(None) if !dir_exists && containers.is_empty() && !created => {
-                if retrying {
-                    return Ok(self.block_recovery(unfinished, "job requires redispatch"));
-                }
                 return Ok(RecoveredJob::Unknown {
                     job_id: unfinished.job_id,
                 });
@@ -871,9 +933,6 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                     Some(meta),
                 ));
             }
-            if retrying {
-                return Ok(self.block_recovery(unfinished, "preparation requires redispatch"));
-            }
             let record = RecoveryRecord {
                 job_id: unfinished.job_id,
                 sandbox_id: unfinished.sandbox_id,
@@ -934,18 +993,24 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                 .map(ContainerId::new)
                 .unwrap_or_else(|| ContainerId::new(layout.container_name()));
             let plan = meta.resume.as_ref().expect("filtered above").intake;
-            let intake = if legacy || retrying {
-                let result = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    driver.read_out(&id, &layout, &plan),
-                )
-                .await;
-                if retrying && result.is_err() {
-                    return Err(infra(InfraDetail::Lost, "recovery intake timed out"));
+            let intake = match tokio::time::timeout(
+                Duration::from_secs(5),
+                driver.read_out(&id, &layout, &plan),
+            )
+            .await
+            {
+                Ok(Ok(intake)) => Some(intake),
+                // 明确的“没有产物”才可继续；暂时读取失败不是不存在证据。
+                Ok(Err(DriverError::NotFound)) => None,
+                Ok(Err(err)) => {
+                    return Err(infra(
+                        InfraDetail::Collect,
+                        format!("recovery intake failed: {err}"),
+                    ))
                 }
-                result.ok().and_then(Result::ok)
-            } else {
-                driver.read_out(&id, &layout, &plan).await.ok()
+                Err(_) => {
+                    return Err(infra(InfraDetail::Collect, "recovery intake timed out"))
+                }
             };
             if let Some(intake) = intake {
                 // 已过 Destroying：容器是本服务删的，终止事实以 meta.json 为准。
@@ -1159,7 +1224,8 @@ impl<D: SandboxDriver + 'static> SandboxManager<D> {
                         && (meta.identity_diagnostic.is_none() || meta.identity_finalized)
                 }
                 Some(None) => {
-                    prestart_cancel
+                    // 启动前普通失败（已签发令牌）也保留了可重放的释放依据。
+                    (prestart_cancel || (meta.phase == Phase::Failed && meta.token_issued))
                         && (meta.identity_diagnostic.is_none() || meta.identity_finalized)
                 }
                 None => meta.identity_finalized || cancelled_without_token,
@@ -1422,6 +1488,12 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
         };
         let _submitting = self.inner.submit_lock.lock().await;
         if let Some(slot) = self.jobs().get(&spec.job_id) {
+            if slot.blocked.is_some() {
+                // 待核实槽位不是受理记录，submit 不能虚报 Ok 或提前启动。
+                return Err(SandboxError::InvalidSpec(
+                    "job recovery is still unverified".into(),
+                ));
+            }
             if slot.handle.sandbox_id != spec.sandbox_id
                 || slot.project_id != spec.project_id
                 || slot.spec.as_ref().is_some_and(|known| *known != spec)
@@ -1431,6 +1503,15 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                 ));
             }
             return Ok(slot.handle);
+        }
+        if self
+            .jobs()
+            .iter()
+            .any(|(job_id, slot)| *job_id != spec.job_id && slot.handle.sandbox_id == spec.sandbox_id)
+        {
+            return Err(SandboxError::InvalidSpec(
+                "sandbox is already bound to a different job".into(),
+            ));
         }
         job::check_spec(&spec)?;
         let layout = StagingLayout::new(&self.inner.config.workspaces_dir, spec.sandbox_id)
@@ -1646,14 +1727,10 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
             let jobs = self.jobs();
             let mut bindings: BTreeMap<_, _> = jobs
                 .iter()
-                .filter(|(_, slot)| slot.blocked.is_none())
                 .map(|(job_id, slot)| (*job_id, (slot.handle.sandbox_id, slot.project_id)))
                 .collect();
             let mut owners = BTreeMap::new();
             for (job_id, slot) in jobs.iter() {
-                if slot.blocked.is_some() {
-                    continue;
-                }
                 let owner = owners
                     .entry(slot.handle.sandbox_id)
                     .or_insert(Some(*job_id));
@@ -1694,6 +1771,10 @@ impl<D: SandboxDriver + 'static> SandboxService for SandboxManager<D> {
                     item
                 }
             };
+            // 可信 Unknown 已裁决：撤掉待核实槽位，让同 ID submit 重新受理。
+            if matches!(item, RecoveredJob::Unknown { .. }) {
+                self.remove_blocked(&attempt.job_id);
+            }
             seen.insert(attempt.job_id, item);
             recovered.push(item);
         }

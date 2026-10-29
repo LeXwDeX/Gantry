@@ -451,6 +451,7 @@ impl AttemptRunner {
         }
         let sandbox_id = sandbox_id_for(&plan.attempt_id);
         let mut need_submit = true;
+        let mut recovered_running = false;
         if plan.resume {
             let unfinished = [UnfinishedAttempt {
                 job_id: plan.attempt_id,
@@ -469,6 +470,7 @@ impl AttemptRunner {
                     if handle.job_id == plan.attempt_id && handle.sandbox_id == sandbox_id =>
                 {
                     need_submit = false;
+                    recovered_running = true;
                 }
                 [RecoveredJob::Lost(handle)]
                     if handle.job_id == plan.attempt_id && handle.sandbox_id == sandbox_id =>
@@ -492,6 +494,11 @@ impl AttemptRunner {
                 Err(error) => return Err(RunnerError::Sandbox(error)),
             }
         }
+        if recovered_running {
+            // D-23：Running 可能是待核实。等待期间按有界退避再查询同一绑定；
+            // 可信 Unknown 先胜出时交接旧等待并以原 ID 重提完整 spec。
+            return self.wait_recovered(plan, cx, ctx, sandbox_id).await;
+        }
         let outcome = match self.ports.sandbox.wait(&plan.attempt_id).await {
             Ok(outcome) => outcome,
             Err(SandboxError::Infra { detail, .. }) => {
@@ -503,6 +510,76 @@ impl AttemptRunner {
             Err(error) => return Err(RunnerError::Sandbox(error)),
         };
         self.finalize(plan, cx, ctx, &outcome).await
+    }
+
+    async fn wait_recovered(
+        &self,
+        plan: &AttemptPlan,
+        cx: &AttemptContext,
+        ctx: &ActorCtx,
+        sandbox_id: SandboxId,
+    ) -> Result<Finalized, RunnerError> {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            let mut wait = Box::pin(self.ports.sandbox.wait(&plan.attempt_id));
+            let requery = tokio::time::sleep(delay);
+            tokio::select! {
+                biased;
+                result = &mut wait => match result {
+                    Ok(outcome) => return self.finalize(plan, cx, ctx, &outcome).await,
+                    // 槽位被再次查询裁决移除：重建等待并继续查询，不能当作终态。
+                    Err(SandboxError::ShuttingDown) => {}
+                    Err(SandboxError::Infra { detail, .. }) => {
+                        return Ok(self.infra_failure(plan, detail));
+                    }
+                    Err(SandboxError::JobIdentityUnavailable { usage, .. }) => {
+                        return self.identity_failure(plan, usage);
+                    }
+                    Err(error) => return Err(RunnerError::Sandbox(error)),
+                },
+                () = requery => {}
+            }
+            let unfinished = [UnfinishedAttempt {
+                job_id: plan.attempt_id,
+                sandbox_id,
+                project_id: cx.project_id,
+            }];
+            match self.ports.sandbox.recover(ctx, &unfinished).await {
+                Ok(recovered) => match recovered.as_slice() {
+                    [RecoveredJob::Running(handle) | RecoveredJob::Exited(handle)]
+                        if handle.job_id == plan.attempt_id && handle.sandbox_id == sandbox_id =>
+                    {
+                        delay = (delay * 2).min(Duration::from_secs(5));
+                    }
+                    [RecoveredJob::Unknown { job_id }] if *job_id == plan.attempt_id => {
+                        // 旧等待与重提交接：取消本地等待 future 不是取消沙盒任务。
+                        drop(wait);
+                        let spec = self.assemble(plan, cx, ctx).await?;
+                        match self.ports.sandbox.submit(ctx, spec).await {
+                            Ok(_) => {}
+                            Err(SandboxError::Infra { detail, .. }) => {
+                                return Ok(self.infra_failure(plan, detail));
+                            }
+                            Err(SandboxError::JobIdentityUnavailable { usage, .. }) => {
+                                return self.identity_failure(plan, usage);
+                            }
+                            Err(error) => return Err(RunnerError::Sandbox(error)),
+                        }
+                        delay = Duration::from_millis(250);
+                    }
+                    [RecoveredJob::Lost(handle)]
+                        if handle.job_id == plan.attempt_id && handle.sandbox_id == sandbox_id =>
+                    {
+                        return Ok(self.infra_failure(plan, InfraDetail::Lost));
+                    }
+                    _ => return Err(RunnerError::Defect("sandbox_recovery_mismatch")),
+                },
+                Err(SandboxError::JobIdentityUnavailable { usage, .. }) => {
+                    return self.identity_failure(plan, usage);
+                }
+                Err(error) => return Err(RunnerError::Sandbox(error)),
+            }
+        }
     }
 
     /// 组装 `SandboxSpec`（§7.8 第 3 步）。公开以便测试断言隔离与配置快照。

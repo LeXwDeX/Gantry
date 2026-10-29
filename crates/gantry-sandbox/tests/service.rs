@@ -2917,8 +2917,13 @@ async fn foreign_recovery_request_preserves_existing_rejection_evidence() {
         after, before,
         "foreign recovery overwrote the owner's evidence; owner retry: {owner_retry:?}"
     );
+    assert!(matches!(owner_retry, Err(SandboxError::InvalidSpec(_))));
+    h.restart();
     assert_eq!(
-        owner_retry.unwrap(),
+        h.service
+            .recover(&ctx(), &[unfinished(owner)])
+            .await
+            .unwrap(),
         vec![RecoveredJob::Running(handle(owner))]
     );
     assert!(
@@ -3016,6 +3021,11 @@ async fn foreign_recovery_does_not_claim_a_live_owners_sandbox() {
     assert_eq!((swept.destroyed, swept.staging_removed), (0, 0));
     assert!(workspace_snapshot(h.root.path()) == before_files);
     assert_eq!(h.egress.log(), before_egress);
+    assert!(matches!(
+        h.service.recover(&ctx(), &[unfinished(owner)]).await,
+        Err(SandboxError::InvalidSpec(_))
+    ));
+    h.restart();
     assert_eq!(
         h.service
             .recover(&ctx(), &[unfinished(owner)])
@@ -3054,7 +3064,6 @@ async fn blocked_project_mismatch_does_not_expose_the_owner_outcome() {
     h.driver.script(sbx(owner), long_running());
     h.service.submit(&ctx(), spec(owner)).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let container = container_id(&h);
     h.restart();
     let before_files = workspace_snapshot(h.root.path());
     let before_egress = h.egress.log();
@@ -3072,26 +3081,23 @@ async fn blocked_project_mismatch_does_not_expose_the_owner_outcome() {
         .is_err());
     assert!(workspace_snapshot(h.root.path()) == before_files);
     assert_eq!(h.egress.log(), before_egress);
-    assert_eq!(
-        h.service
-            .recover(&ctx(), &[unfinished(owner)])
-            .await
-            .unwrap(),
-        vec![RecoveredJob::Running(handle(owner))]
-    );
-    assert!(matches!(wait.await, Err(SandboxError::ShuttingDown)));
-    let calls = h.driver.calls();
-    let egress = h.egress.log();
     assert!(matches!(
-        h.service.recover(&ctx(), &[foreign]).await,
+        h.service.recover(&ctx(), &[unfinished(owner)]).await,
         Err(SandboxError::InvalidSpec(_))
     ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut wait)
+            .await
+            .is_err()
+    );
+    let calls = h.driver.calls();
+    let egress = h.egress.log();
+    assert_eq!(
+        h.service.recover(&ctx(), &[foreign]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(owner))]
+    );
     assert_eq!(h.driver.calls(), calls);
     assert_eq!(h.egress.log(), egress);
-    h.driver.complete(&container, vec![]).unwrap();
-    let outcome = h.service.wait(&att(owner)).await.unwrap();
-    assert_eq!(outcome.job_id, att(owner));
-    assert_eq!(outcome.weighted_tokens, 19);
     h.service.crash();
 }
 
@@ -3127,6 +3133,11 @@ async fn created_event_protects_an_owner_when_container_and_metadata_are_gone() 
         .join(format!("{}.recovery.json", sbx(owner)))
         .exists());
     assert_eq!(h.egress.log(), before_egress);
+    assert!(matches!(
+        h.service.recover(&ctx(), &[unfinished(owner)]).await,
+        Err(SandboxError::InvalidSpec(_))
+    ));
+    h.restart();
     assert_eq!(
         h.service
             .recover(&ctx(), &[unfinished(owner)])
@@ -4264,8 +4275,7 @@ async fn foreign_sandbox_does_not_expose_or_stop_the_real_owner() {
         [RecoveredJob::Running(_)]
     ));
     let job = att(owner);
-    let foreign_wait = h.service.wait(&job);
-    tokio::pin!(foreign_wait);
+    let mut foreign_wait = Box::pin(h.service.wait(&job));
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut foreign_wait)
             .await
@@ -4276,6 +4286,12 @@ async fn foreign_sandbox_does_not_expose_or_stop_the_real_owner() {
     assert_eq!(workspace_snapshot(h.root.path()), before);
     assert_eq!(h.egress.log(), egress);
     assert!(h.driver.signals(&container).is_empty());
+    assert!(matches!(
+        h.service.recover(&ctx(), &[unfinished(owner)]).await,
+        Err(SandboxError::InvalidSpec(_))
+    ));
+    drop(foreign_wait);
+    h.restart();
     assert_eq!(
         h.service
             .recover(&ctx(), &[unfinished(owner)])
@@ -4283,10 +4299,6 @@ async fn foreign_sandbox_does_not_expose_or_stop_the_real_owner() {
             .unwrap(),
         vec![RecoveredJob::Running(handle(owner))]
     );
-    assert!(matches!(
-        foreign_wait.await,
-        Err(SandboxError::ShuttingDown)
-    ));
     h.driver.complete(&container, vec![]).unwrap();
     let outcome = h.service.wait(&job).await.unwrap();
     assert_eq!(outcome.sandbox_id, sbx(owner));
@@ -4308,21 +4320,19 @@ async fn retry_does_not_claim_a_sandbox_acquired_by_another_job() {
             .as_slice(),
         [RecoveredJob::Running(_)]
     ));
-    h.driver.script(sbx(521), long_running());
-    h.service.submit(&ctx(), spec(521)).await.unwrap();
+    h.driver.script(sbx(522), long_running());
+    h.service.submit(&ctx(), spec(522)).await.unwrap();
     tokio::time::sleep(Duration::from_secs(1)).await;
     let container = container_id(&h);
-    h.service.cancel(&ctx(), &att(520)).await.unwrap();
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert!(h.driver.signals(&container).is_empty());
-    assert!(!h.egress.log().contains(&format!("revoke {}", att(521))));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), h.service.wait(&att(520)))
-            .await
-            .is_err()
-    );
+    assert!(!h.egress.log().contains(&format!("revoke {}", att(522))));
+    assert!(matches!(
+        h.service.wait(&att(520)).await,
+        Err(SandboxError::NotFound)
+    ));
     h.driver.complete(&container, vec![]).unwrap();
-    let outcome = h.service.wait(&att(521)).await.unwrap();
+    let outcome = h.service.wait(&att(522)).await.unwrap();
     assert_eq!(outcome.job_id, att(521));
     assert_eq!(outcome.terminal.cause, TerminalCause::Exited);
     assert!(!outcome.terminal.cancel_requested);
@@ -4419,28 +4429,21 @@ async fn retry_does_not_replace_a_corrected_binding_for_the_same_job() {
             .await
             .is_err()
     );
-    assert_eq!(
-        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
-        vec![RecoveredJob::Unknown { job_id: job }]
-    );
+    // 待核实槽位也参与整批预验证：同 job 改绑定必须拒绝，原等待不能被丢弃。
     assert!(matches!(
-        foreign_wait.await,
-        Err(SandboxError::ShuttingDown)
+        h.service.recover(&ctx(), &[unfinished(n)]).await,
+        Err(SandboxError::InvalidSpec(_))
     ));
-    h.driver.script(sbx(n), long_running());
-    h.service.submit(&ctx(), spec(n)).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let container = container_id(&h);
-    assert!(h.driver.signals(&container).is_empty());
-    h.driver.complete(&container, vec![]).unwrap();
-    let outcome = h.service.wait(&job).await.unwrap();
-    assert_eq!(outcome.job_id, job);
-    assert_eq!(outcome.sandbox_id, sbx(n));
-    assert_eq!(starts(&h), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut foreign_wait)
+            .await
+            .is_err()
+    );
+    h.service.crash();
 }
 
 #[tokio::test(start_paused = true)]
-async fn retry_cannot_redispatch_after_reporting_running() {
+async fn retry_reports_unknown_after_verified_absence() {
     let h = harness(1);
     let n = 550;
     h.driver.fail_next(FailPoint::List);
@@ -4448,16 +4451,69 @@ async fn retry_cannot_redispatch_after_reporting_running() {
         h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
         vec![RecoveredJob::Running(handle(n))]
     );
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), h.service.wait(&att(n)))
-            .await
-            .is_err()
-    );
+    // 内部有界再查询确认没有任何受理痕迹：撤掉待核实槽位。
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(!meta_path(&h, n).exists());
     assert!(h.egress.log().is_empty());
     assert_eq!(starts(&h), 0);
+    // 同 ID 重提完整 spec 后只启动一次。
+    h.driver.script(sbx(n), golden_script());
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    let outcome = h.service.wait(&att(n)).await.unwrap();
+    assert_eq!(outcome.job_id, att(n));
+    assert_eq!(outcome.sandbox_id, sbx(n));
+    assert_eq!(starts(&h), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unverified_recovery_does_not_accept_resubmit() {
+    let h = harness(1);
+    let n = 551;
+    h.driver.fail_next(FailPoint::List);
+    assert_eq!(
+        h.service.recover(&ctx(), &[unfinished(n)]).await.unwrap(),
+        vec![RecoveredJob::Running(handle(n))]
+    );
+    // 待核实槽位不是受理记录：submit 不能虚报 Ok。
+    assert!(matches!(
+        h.service.submit(&ctx(), spec(n)).await,
+        Err(SandboxError::InvalidSpec(_))
+    ));
+    assert!(!meta_path(&h, n).exists());
+    assert_eq!(starts(&h), 0);
     h.service.crash();
+}
+
+#[tokio::test(start_paused = true)]
+async fn prestart_failure_releases_after_restart() {
+    let mut h = harness(1);
+    let n = 552;
+    h.driver.script(sbx(n), golden_script());
+    h.driver.fail_next(FailPoint::PrepareDirs);
+    h.service.submit(&ctx(), spec(n)).await.unwrap();
+    assert!(matches!(
+        h.service.wait(&att(n)).await,
+        Err(SandboxError::Infra {
+            detail: InfraDetail::WorkspacePrep,
+            ..
+        })
+    ));
+    assert!(meta_path(&h, n).exists());
+    h.restart();
+    let report = h
+        .service
+        .sweep_orphans(&ctx(), &BTreeSet::new())
+        .await
+        .unwrap();
+    assert_eq!((report.destroyed, report.staging_removed), (0, 0));
+    assert!(meta_path(&h, n).exists());
+    h.service.release(&ctx(), &att(n)).await.unwrap();
+    assert!(!meta_path(&h, n).exists());
+    assert!(matches!(
+        h.egress.job_usage(&att(n)).await,
+        Err(EgressError::NotFound)
+    ));
+    assert_eq!(starts(&h), 0);
 }
 
 #[tokio::test(start_paused = true)]
