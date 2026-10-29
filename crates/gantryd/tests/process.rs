@@ -580,35 +580,71 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
 
 /// 默认 `EqualShareReservation` 在预算耗尽（预留为零）时不派发。
 ///
-/// 事件与上报归 #309；本用例只锁定「不派发」，不把未实现的耗尽事件当作已实现。
+/// 正向对照证明同一个 `fake.drive` 路径在默认预算下会派发；事件与上报归 #309，
+/// 本用例只锁定「不派发」，不把未实现的耗尽事件当作已实现。
 #[test]
 fn exhausted_reservation_does_not_dispatch() {
-    let scratch = Scratch::new();
-    let daemon = Daemon::spawn(&scratch, scratch.uid());
-    let mut client = Client::connect(&scratch);
-    let delivery = client.ok(json!({
-        "cmd": "fake.create_delivery",
-        "args": {"project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login",
-                 "user_text": "修复登录超时", "budget_worker_tokens": 0},
-    }))["delivery_id"]
-        .clone();
+    let create = |client: &mut Client, worker_tokens: Option<u64>| {
+        let mut args = json!({
+            "project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login",
+            "user_text": "修复登录超时",
+        });
+        if let Some(tokens) = worker_tokens {
+            args["budget_worker_tokens"] = json!(tokens);
+        }
+        client.ok(json!({"cmd": "fake.create_delivery", "args": args}))["delivery_id"].clone()
+    };
+    let has_attempt = |events: &[Value], delivery: &Value| {
+        events
+            .iter()
+            .any(|event| event["type"] == "attempt.started" && event["correlation_id"] == *delivery)
+    };
 
-    for _ in 0..10 {
-        let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": delivery}}));
-        assert_eq!(step["done"], false, "{step}");
-        std::thread::sleep(Duration::from_millis(20));
+    // 正向对照：默认预算的交付会派发。独立的进程，避免与负向交付共享 outbox / 沙盒。
+    {
+        let scratch = Scratch::new();
+        let daemon = Daemon::spawn(&scratch, scratch.uid());
+        let mut client = Client::connect(&scratch);
+        let normal = create(&mut client, None);
+        let mut dispatched = false;
+        for _ in 0..30 {
+            let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": normal}}));
+            let (_, events) = read_log(&mut client);
+            if has_attempt(&events, &normal) {
+                dispatched = true;
+                break;
+            }
+            assert_ne!(step["done"], true, "默认预算未派发：{events:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(dispatched, "正向对照：默认预算应派发");
+        assert!(daemon.terminate().success());
     }
 
-    let (_, events) = read_log(&mut client);
-    assert!(
-        events.iter().any(|e| e["type"] == "delivery.created"),
-        "{events:?}"
-    );
-    assert!(
-        events.iter().all(|e| e["type"] != "attempt.started"),
-        "预留为零时不应派发：{events:?}"
-    );
-    assert!(daemon.terminate().success());
+    // 预留为零：同一驱动路径不派发。
+    {
+        let scratch = Scratch::new();
+        let daemon = Daemon::spawn(&scratch, scratch.uid());
+        let mut client = Client::connect(&scratch);
+        let exhausted = create(&mut client, Some(0));
+        for _ in 0..10 {
+            let step = client.ok(json!({"cmd": "fake.drive", "args": {"delivery_id": exhausted}}));
+            assert_eq!(step["done"], false, "{step}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (_, events) = read_log(&mut client);
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "delivery.created" && e["correlation_id"] == exhausted),
+            "{events:?}"
+        );
+        assert!(
+            !has_attempt(&events, &exhausted),
+            "预留为零时不应派发：{events:?}"
+        );
+        assert!(daemon.terminate().success());
+    }
 }
 
 #[test]
