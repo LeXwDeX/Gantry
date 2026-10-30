@@ -90,8 +90,8 @@ cargo --locked xtask schemas --check   # 冒烟：工具链可用
 | 项 | 现状 |
 | --- | --- |
 | 基线 | `main@26107d5`（PR #402 的 merge commit）；此前 PR #399 的 Azure CI 配置与 docs PR 已合入 |
-| 本地分支 / 工作树 | 主检出为干净的 `main`；S0 的诊断和测试客户端修改在 `../gantry-wt/test/401-process-flaky`，信号顺序修复已由 PR #402 合入。另有 Orca 锁定的工作树，不属于本任务；当前状态以 Git 和 §4.S 为准 |
-| 远端分支 | `fix/401-signal-order` 对应已合入的 PR #402，分支尚未删除；另有 4 个诊断 / 备份 / 半成品分支：`backup/362-stash-pre-364`、`diag/346-linux-linker`、`diag/352-windows-events`、`wip/280-project-projection`，保留 |
+| 本地分支 / 工作树 | 主检出为干净的 `main`；S0 的诊断和测试客户端修改在 `../gantry-wt/test/401-process-flaky`。PR #402 的分支和工作树已清理；当前状态以 Git 和 §4.S 为准 |
+| 远端分支 | PR #402 的分支已删除；保留 4 个诊断 / 备份 / 半成品分支：`backup/362-stash-pre-364`、`diag/346-linux-linker`、`diag/352-windows-events`、`wip/280-project-projection` |
 | 里程碑 | M1.1–M1.3 已关闭；**当前是 M1.4**（开放：#105、#106、#107、#280、#401）；M0.9 只剩 #86 |
 | 上一轮成果（已评审） | #369（docs #389 / 实现 #390）、#371（contract #391 / 实现 #392）、#267（#393 / #394 / #395）、#105 C2-a（#396）、#105 C2-c policy / notify（#397）与 pki / secrets（#398）。结论见 §4.0 与 §4 A |
 | **#105 C2-c 已拍板** | **选 B**：`assemble_real` 继续 `NotReady`；在 `gantryd/src/` 写各模块的生产构造函数，替身装配逐片改为调用它们来替换替身。详见 §4 A 与 #105 评论 |
@@ -192,7 +192,10 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
   - 复现并定位：给出失败用例名、失败日志和根因；修复放在同一 PR（测试侧时序问题）或单独 `fix:` PR（`gantryd` 生产代码，例如先注册信号再绑定套接字，须对照 gantryd.md §7.2）。修复后再循环 30 + 30 次全绿。
   - 未复现：只合入"补诊断"PR，issue 保持开放并写明跑了多少轮、哪些条件；**不得写成"已修复"或"已排除"**。
   - 发现是环境问题（如 macOS 临时目录、端口耗尽）：写明证据，改测试的环境依赖，不改生产代码。
-- **状态**：进行中。已建 [#401](https://github.com/LeXwDeX/gantry/issues/401)。循环复现：默认并行 30/30、单线程 30/30 通过；与全工作区测试重叠的负载组 8/10 通过。第 3 轮 `sigterm_shuts_down_and_removes_the_socket` 的子进程以信号 15 退出且套接字残留；源码显示套接字先绑定、SIGTERM 处理器后注册，失败与该竞态吻合。`fix/401-signal-order` 已调整 SIGTERM / SIGINT 注册顺序并增加进程测试，本机门槛和独立评审通过，[PR #402](https://github.com/LeXwDeX/gantry/pull/402) 已合入 `main@26107d5`。第 6 轮 `other_uid_is_refused_before_any_command` 的 `set_read_timeout` 返回系统错误 22；本机实验复现了 macOS 对端关闭后设置套接字选项的失败，`test/401-process-flaky` 工作树已补诊断并把测试客户端的 10 秒超时移到连接之前，该测试诊断切片尚未合入。完成 S0 前还需合入测试诊断切片、跑完其完整门槛和评审，以及修复后的循环复测。不能将 #398 中未留日志的 36/37 直接等同于这两次。复现时全工作区测试本身通过，1,915 项通过、8 项忽略。完整日志在 `/var/folders/jm/w5g1j5td4vl8164rqwl96fn80000gn/T/opencode/gantry-401.wyx7Mv/`，失败日志为 `load-3.log`、`load-6.log`；结果已评论 #401。工具链、`gh` 登录与 schema 冒烟检查通过。
+- **状态**：修复与复测已完成，诊断切片待终审合入；[#401](https://github.com/LeXwDeX/gantry/issues/401) 保持开放直到合入。生产信号顺序修复由 [PR #402](https://github.com/LeXwDeX/gantry/pull/402) 合入 `main@26107d5`；诊断与测试客户端修复在 `test/401-process-flaky@175c64b`，已基于该结果复测。
+- **初次复现**：默认并行 30/30、单线程 30/30 通过；负载组 8/10。`load-3.log` 的 SIGTERM 以信号 15 退出并留下套接字，对应信号注册晚于绑定；`load-6.log` 的读取超时设置返回 EINVAL，本机实验确认 macOS 对端关闭后设置套接字选项会失败。后者通过连接前设置原有 10 秒超时修复，不忽略错误，不放宽鉴权断言。#398 未保留日志的 36/37 仍不能直接归因于这两次。
+- **修复后证据**：默认并行 30/30、单线程 30/30、带负载 10/10 全通过，每轮 43 项。负载组每轮都有与独立工作区编译实际重叠的进程快照，不代表整轮持续重叠。§3 全部门槛通过：Rust 工作区 1,918 项通过、8 项忽略；Mock API 43 项、桌面端 406 项及构建通过。证据针对提交 `175c64b`，之后仅更新交接文本。
+- **证据位置与边界**：本机日志目录 `/var/folders/jm/w5g1j5td4vl8164rqwl96fn80000gn/T/opencode/gantry-401.wyx7Mv/`，修复后使用 `after-*` 前缀，汇总见 `after-final-round-audit.log`。没有覆盖 Ubuntu 实机与真实生产装配；概率性信号测试不能保证每次命中旧窗口。
 
 #### S1 生产凭据配置待决项：只提问，不实现
 
@@ -377,7 +380,7 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
 - **#369 遗留**：硬件密钥与真实桌面外壳未验证。
 - **#371 遗留**：真实 `settings.bootstrap_set` 命令归 C3；替身比契约窄（§4.0）。
 - **#267 遗留**：`tail` 的 `EventStream` 封装未实现，api 仍轮询；`gantryd` 尚未从设置读取 `store.max_event_data_bytes`。
-- **进程测试稳定性**：gantryd 的 SIGTERM 进程测试曾偶发失败；套接字绑定早于信号注册，存在时序窗口，但失败断言未输出退出状态，尚不能确认实际原因（PR #397）。第二片另有一次 36/37 失败，输出未保留、原因未知，之后多轮与最终门槛通过（PR #398）。独立 `registry-recovery` 锁文件缺少 `tokio` 的问题已在 #398 修复。**处理归 §4.S 的 S0**；查清之前，任何 PR 都不要把单次"进程测试全绿"写成稳定证据。
+- **进程测试稳定性**：S0 #401 已复现信号注册顺序和 macOS 连接后设置读取超时两项问题。前者由 PR #402 合入，后者及诊断切片待合入；两项整合后 30+30+10 轮通过（§4.S）。PR #398 未保留输出的 36/37 仍无法归因；重复通过不代表排除了所有偶发失败。独立 `registry-recovery` 锁文件缺少 `tokio` 的问题已在 #398 修复。
 - **Windows 整体编译未验证**：`deferred_cancel_survives_resubmission_after_unknown` 用 `#[cfg(unix)]` 门控；本机已安装 Windows Rust 目标，但缺少 Windows SDK 头文件，#398 的交叉检查未完成。
 - **#362 遗留**（见 PR #366 描述）：`Phase::Failed` 恢复时失败分类被覆盖为 `infra.job_identity_unavailable`；`foreign_job_evidence` 遇到其他 sandbox 的损坏 meta 时跳过；`registry_recovery.rs` 的 `/tmp/g362-*`、`Drop::unwrap`、`.recovery.tmp` 残留没有清理路径。
 - **收尾评审信息项**（`docs/reviews/2026-10-29-m13-closeout-review.md` §3.1）：nftables 的 API 来源限制只匹配 IPv4；`/var/lib/gantry` 与 `workspaces` 权限待 #106 实机处理；`CurlProbe` 继承环境代理；`control.rs` 的 accept 出错无退避（归 #314）。
