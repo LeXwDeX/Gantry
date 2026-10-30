@@ -1,0 +1,7 @@
+# Node 22 安装（step 模板）。
+
+steps:
+  - task: UseNode@1
+    displayName: 安装 Node 22
+    inputs:
+      version: '22.x'

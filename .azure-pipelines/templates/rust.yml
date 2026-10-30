@@ -1,0 +1,52 @@
+# Rust 工具链安装（step 模板）：用托管镜像自带的 rustup 安装指定工具链，
+# 可选组件与 OpenSSL。Linux / macOS / Windows 代理通用。
+
+parameters:
+  - name: toolchain
+    type: string
+    default: stable
+  - name: components
+    type: string
+    default: ''
+  - name: openssl
+    type: boolean
+    default: false
+
+steps:
+  - bash: |
+      set -euo pipefail
+      args=(--profile minimal)
+      if [ -n "${{ parameters.components }}" ]; then
+        args+=(--component "${{ parameters.components }}")
+      fi
+      rustup toolchain install ${{ parameters.toolchain }} "${args[@]}"
+      rustup default ${{ parameters.toolchain }}
+      rustc --version
+      cargo --version
+    displayName: 安装 Rust ${{ parameters.toolchain }}
+
+  - ${{ if parameters.openssl }}:
+      - bash: sudo apt-get update && sudo apt-get install -y openssl
+        displayName: 安装 OpenSSL（Linux）
+        condition: eq(variables['Agent.OS'], 'Linux')
+      - bash: |
+          set -euo pipefail
+          brew install openssl@3
+          echo "##vso[task.prependpath]$(brew --prefix openssl@3)/bin"
+        displayName: 安装 OpenSSL（macOS）
+        condition: eq(variables['Agent.OS'], 'Darwin')
+      - pwsh: |
+          $candidates = @(
+            (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin'),
+            (Join-Path $env:ProgramFiles 'OpenSSL-Win32\bin'),
+            (Join-Path $env:ProgramFiles 'OpenSSL\bin'),
+            'C:\Program Files\Git\usr\bin'
+          )
+          $bin = $candidates | Where-Object { Test-Path (Join-Path $_ 'openssl.exe') } | Select-Object -First 1
+          if (-not $bin) { throw "OpenSSL executable not found" }
+          Write-Host "##vso[task.prependpath]$bin"
+          & (Join-Path $bin 'openssl.exe') version
+        displayName: 安装 OpenSSL（Windows）
+        condition: eq(variables['Agent.OS'], 'Windows_NT')
+      - bash: openssl version
+        displayName: 检查 OpenSSL
