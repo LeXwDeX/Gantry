@@ -33,6 +33,7 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 | 里程碑、泳道、替身清单 | [docs/milestones.md](docs/milestones.md) |
 | 评审记录（只读） | [docs/reviews/](docs/reviews/) |
 | 当前迭代状态与后续规划 | [NEXT-STEPS.md](NEXT-STEPS.md) |
+| **接手入口**：交接状态、协作约定、下一步逐步执行清单 | [docs/handoff.md](docs/handoff.md) |
 | 界面原型 | [docs/prototype.md](docs/prototype.md)，源码在 `prototype/` |
 
 文档冲突时的优先级：`decisions.md`（已确定）> `architecture.md` 不变式 > `interfaces/` > `modules/` > 其余。`docs/design.md` 是历史讨论，不作为规格；`docs/m0-contract-proposal.md` 是未批准草案，不是权威契约。
