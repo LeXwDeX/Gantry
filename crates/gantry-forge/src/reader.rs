@@ -1,17 +1,18 @@
 //! `ForgeReader`（forge.md §6）：读 GitHub，不写 GitHub。
 //!
 //! 本切片实现 `discussion`（Issue / PR 正文与评论按需拉取，供 `engine`，P-59）：结果全部是
-//! `UntrustedText`（I5），受 `max_comments` / `max_bytes` 截断，不进快照、不追加任何事件——
-//! 读取器根本不持有 store。截断语义与 `FakeForge` 一致（§12 D 组）：`comments_since` 严格
-//! 晚于；评论按时间序累加，第一条会让累计字节超过 `max_bytes` 的评论及其后全部丢弃；
-//! 标题与正文不计入评论预算，正文单独按 `max_bytes` 截断。
+//! `UntrustedText`（I5），受 `max_comments` / `max_bytes` 截断，不改变 store 快照、不追加任何
+//! 事件。读取器持有 store 只用于本地快照读取（`pull_request` / `issue`），不用于 `discussion`。
+//! 截断语义与 `FakeForge` 一致（§12 D 组）：`comments_since` 严格晚于；评论按时间序累加，
+//! 第一条会让累计字节超过 `max_bytes` 的评论及其后全部丢弃；标题与正文不计入评论预算，
+//! 正文单独按 `max_bytes` 截断。
 //!
-//! `reconcile_now` 交给装配时注入的 [`crate::Dispatcher::reconcile`]。
+//! `reconcile_now` 交给装配时注入的 [`crate::Dispatcher::reconcile`]；`sync_mirror` 与本 crate
+//! 执行器共用 [`crate::mirror::MirrorSync`]（forge.md §7.10）。本地快照（`pull_request` /
+//! `issue` / `project_snapshot`）只读 store 与装配绑定，不访问 GitHub、不写事件。
 //!
-//! shortcut: 快照类读取（`pull_request` / `issue` / `project_snapshot`）由 store 的
-//! `pr_snapshot` / `issue_snapshot` 提供（#210），本读取器不重复；`ci_log` / `changed_files` / `review_thread` / `check_annotations` 是 M2
-//! （forge.md §1.1）；`sync_mirror` 见 [`crate::Executor::sync_mirror`]。它们目前返回
-//! `Unavailable`，不静默返回空结果。
+//! shortcut: `ci_log` / `changed_files` / `review_thread` / `check_annotations` 是 M2
+//! （forge.md §1.1），目前返回 `Unavailable`，不静默返回空结果。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,18 +24,32 @@ use gantry_core::ids::{Clock, ProjectId};
 use gantry_core::ports::{
     ActorCtx, Annotation, ChangedFile, CiLog, CiLogQuery, Discussion, DiscussionComment,
     DiscussionQuery, DiscussionTarget, ForgeError, ForgeReader, MirrorWant, ProjectSnapshot,
-    ReconcileReport, ReconcileTarget, ReviewThreadView, ThreadNodeId,
+    ReconcileReport, ReconcileTarget, RepoService, ReviewThreadView, ThreadNodeId,
 };
 use gantry_core::text::UntrustedText;
 use gantry_core::time::Timestamp;
+use gantry_store::Store;
 use serde_json::Value;
 
 use crate::auth::{AuthError, TokenProvider, TokenPurpose};
-use crate::config::ForgeConfig;
+use crate::config::{ForgeConfig, ProjectBinding};
 use crate::github::{ApiError, GithubClient};
+use crate::mirror::MirrorSync;
+use crate::outbox::port_store_error;
 
 /// GitHub 单页评论上限。
 const PER_PAGE: u32 = 100;
+
+/// `sync_mirror` 的装配依赖：repo 镜像仓、git 远端根地址与 git 子进程超时。
+///
+/// 单独传入 mirror 依赖，避免把完整 `Executor` 注入 `Reader`（后续 S3 会通过
+/// `Reader → Policy → Executor → Reader` 形成构造循环）。
+pub struct MirrorDeps {
+    pub repo: Arc<dyn RepoService>,
+    /// git 远端根地址，拼成 `{git_base}/{owner}/{repo}.git`；生产为 `https://github.com`。
+    pub git_base: String,
+    pub git_timeout: Duration,
+}
 
 pub struct ReaderDeps {
     pub tokens: Arc<dyn TokenProvider>,
@@ -44,25 +59,55 @@ pub struct ReaderDeps {
     pub http_timeout: Duration,
     /// `reconcile_now` 的执行方（forge.md §7.7）；`None` 时返回 `Unavailable`。
     pub reconciler: Option<Arc<crate::normalize::Dispatcher>>,
+    /// `sync_mirror` 的装配；`None` 时返回 `Unavailable`。
+    pub mirror: Option<MirrorDeps>,
 }
 
 pub struct Reader {
+    store: Store,
     config: Arc<ForgeConfig>,
     tokens: Arc<dyn TokenProvider>,
     github: GithubClient,
     clock: Arc<dyn Clock>,
     reconciler: Option<Arc<crate::normalize::Dispatcher>>,
+    mirror: Option<MirrorSync>,
 }
 
 impl Reader {
-    pub(crate) fn new(config: Arc<ForgeConfig>, deps: ReaderDeps) -> Self {
+    pub(crate) fn new(store: Store, config: Arc<ForgeConfig>, deps: ReaderDeps) -> Self {
+        let ReaderDeps {
+            tokens,
+            api_base,
+            clock,
+            http_timeout,
+            reconciler,
+            mirror,
+        } = deps;
+        let mirror = mirror.map(|mirror| {
+            MirrorSync::new(
+                config.clone(),
+                mirror.repo,
+                tokens.clone(),
+                mirror.git_base,
+                mirror.git_timeout,
+            )
+        });
         Self {
+            store,
             config,
-            tokens: deps.tokens,
-            github: GithubClient::new(deps.api_base, deps.http_timeout),
-            clock: deps.clock,
-            reconciler: deps.reconciler,
+            tokens,
+            github: GithubClient::new(api_base, http_timeout),
+            clock,
+            reconciler,
+            mirror,
         }
+    }
+
+    fn binding(&self, project: &ProjectId) -> Result<&ProjectBinding, ForgeError> {
+        self.config
+            .projects
+            .get(project)
+            .ok_or_else(|| invalid("project is not bound to forge"))
     }
 
     /// 读路径用只读令牌；401 时丢弃缓存重试一次（forge.md §7.12）。
@@ -94,22 +139,37 @@ impl Reader {
 impl ForgeReader for Reader {
     async fn pull_request(
         &self,
-        _project: &ProjectId,
-        _number: u64,
+        project: &ProjectId,
+        number: u64,
     ) -> Result<Option<PullRequestRef>, ForgeError> {
-        Err(not_yet("pull_request"))
+        let repo = &self.binding(project)?.project.repo;
+        let mut snapshot = self.store.snapshot().await.map_err(store_error)?;
+        snapshot
+            .pr_snapshot(repo, number)
+            .await
+            .map_err(store_error)
     }
 
     async fn issue(
         &self,
-        _project: &ProjectId,
-        _number: u64,
+        project: &ProjectId,
+        number: u64,
     ) -> Result<Option<IssueRef>, ForgeError> {
-        Err(not_yet("issue"))
+        let repo = &self.binding(project)?.project.repo;
+        let mut snapshot = self.store.snapshot().await.map_err(store_error)?;
+        snapshot
+            .issue_snapshot(repo, number)
+            .await
+            .map_err(store_error)
     }
 
-    async fn project_snapshot(&self, _project: &ProjectId) -> Result<ProjectSnapshot, ForgeError> {
-        Err(not_yet("project_snapshot"))
+    async fn project_snapshot(&self, project: &ProjectId) -> Result<ProjectSnapshot, ForgeError> {
+        // store 当前没有 project 投影入口；装配绑定就是已知的项目快照，取它的更新时间。
+        let binding = self.binding(project)?;
+        Ok(ProjectSnapshot {
+            project: binding.project.clone(),
+            synced_at: binding.project.updated_at,
+        })
     }
 
     async fn discussion(
@@ -118,11 +178,7 @@ impl ForgeReader for Reader {
         target: DiscussionTarget,
         query: DiscussionQuery,
     ) -> Result<Discussion, ForgeError> {
-        let binding = self
-            .config
-            .projects
-            .get(project)
-            .ok_or_else(|| invalid("project not bound"))?;
+        let binding = self.binding(project)?;
         let repo = &binding.project.repo;
         let (number, pull) = match target {
             DiscussionTarget::Issue(number) => (number, false),
@@ -243,11 +299,14 @@ impl ForgeReader for Reader {
 
     async fn sync_mirror(
         &self,
-        _project: &ProjectId,
-        _want: MirrorWant,
-        _ctx: &ActorCtx,
+        project: &ProjectId,
+        want: MirrorWant,
+        ctx: &ActorCtx,
     ) -> Result<(), ForgeError> {
-        Err(not_yet("sync_mirror"))
+        let Some(mirror) = &self.mirror else {
+            return Err(not_yet("sync_mirror"));
+        };
+        mirror.sync(project, &want, ctx).await
     }
 }
 
@@ -317,6 +376,10 @@ fn forge_error(error: ApiError) -> ForgeError {
 
 fn unavailable(message: String) -> ForgeError {
     ForgeError::Unavailable { message }
+}
+
+fn store_error(error: gantry_store::StoreError) -> ForgeError {
+    ForgeError::Store(port_store_error(error))
 }
 
 fn invalid(message: &str) -> ForgeError {
