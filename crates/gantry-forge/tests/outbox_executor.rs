@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gantry_core::canon::{sha256, GitOid, RepoSlug, SubjectDigest};
@@ -14,15 +14,20 @@ use gantry_core::entities::{
     Actor, ActorKind, ApprovalAction, ApprovalStatus, ApprovalTarget, ForgeActionKind, MergeMethod,
     OutboxAction, OutboxStatus, Priority, Project,
 };
+use gantry_core::entities::{LockHolder, Worktree};
 use gantry_core::events::{EventType, Subject};
 use gantry_core::forge::{
     ActionPayload, CloseIssuePayload, CreatePrPayload, IssueStateReason, MergeMode, MergePrPayload,
     PushBranchPayload, PushTransport, UpdatePrPayload,
 };
-use gantry_core::ids::{ActionId, ApprovalId, Id, IdGen, IdKind, Prj, ProjectId, Ulid};
+use gantry_core::ids::{
+    ActionId, ApprovalId, DeliveryId, Id, IdGen, IdKind, Prj, ProjectId, Ulid, WorktreeId,
+};
 use gantry_core::ports::{
-    ActorCtx, ApprovalSpec, CommitRecord, EnqueueRequest, EnqueuedBy, EnqueuedByModule, ForgeError,
-    MirrorWant, OutboxPort, PolicyPort,
+    ActorCtx, ApprovalSpec, CommitInfo, CommitPatch, CommitRecord, CreateWorktree, EnqueueRequest,
+    EnqueuedBy, EnqueuedByModule, ForgeError, ForgeReader, LockToken, MirrorGuard, MirrorHealth,
+    MirrorInfo, MirrorMode, MirrorWant, OutboxPort, PatchOutcome, PolicyPort, PrepareWorkspace,
+    PreparedWorkspace, RepoError, RepoService, RevSpec, ValidatePatch,
 };
 use gantry_core::secret::SecretString;
 use gantry_core::testing::{FakeClock, SeqEntropy};
@@ -32,8 +37,8 @@ use gantry_fakes::policy::FakePolicy;
 use gantry_fakes::repo::FakeRepo;
 use gantry_forge::{
     module_spec, AuthError, CrashPoint, ExecError, Executor, ExecutorDeps, ExecutorOptions,
-    FaultInjector, Forge, ForgeConfig, Permission, ProjectBinding, StaticTokenProvider,
-    StepOutcome, TokenProvider, TokenPurpose,
+    FaultInjector, Forge, ForgeConfig, MirrorDeps, Permission, ProjectBinding, Reader, ReaderDeps,
+    StaticTokenProvider, StepOutcome, TokenProvider, TokenPurpose,
 };
 use gantry_store::{Store, StoreDeps};
 
@@ -203,6 +208,34 @@ impl Harness {
             point,
             fired: AtomicBool::new(false),
         })))
+    }
+
+    fn reader(
+        &self,
+        tokens: Arc<dyn TokenProvider>,
+        repo: Arc<dyn RepoService>,
+        git_base: String,
+    ) -> Reader {
+        self.forge.reader(ReaderDeps {
+            tokens,
+            api_base: self.github.base_url(),
+            clock: self.clock.clone(),
+            http_timeout: Duration::from_secs(5),
+            reconciler: None,
+            mirror: Some(MirrorDeps {
+                repo,
+                git_base,
+                git_timeout: Duration::from_secs(30),
+            }),
+        })
+    }
+
+    fn reader_with_read_token(&self) -> Reader {
+        self.reader(
+            Arc::new(StaticTokenProvider::new(SecretString::new(TOKEN.into()))),
+            self.repo.clone(),
+            format!("file://{}", self.root.0.display()),
+        )
     }
 
     async fn enqueue(&self, payload: ActionPayload, approval: Option<ApprovalId>) -> ActionId {
@@ -1152,6 +1185,17 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+fn git_succeeds(dir: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("run git")
+        .status
+        .success()
+}
+
 struct PushFixture {
     work: PathBuf,
     remote: PathBuf,
@@ -1422,6 +1466,386 @@ async fn sync_mirror_fetches_upstream_into_mirror_refs() {
             .unwrap_err(),
         ForgeError::NotFound
     );
+}
+
+/// forge.md §6/§7.10：`Reader::sync_mirror` 走同一条受保护 fetch，All 完成后镜像仓
+/// 真正包含远端 heads。
+#[tokio::test]
+async fn reader_sync_mirror_fetches_all_through_the_port() {
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    fx.push_remote(fx.local, "main");
+    let reader = h.reader_with_read_token();
+    let reader: &dyn ForgeReader = &reader;
+    let project = id::<Prj>(1);
+    let before = h.store.snapshot_sync().unwrap().head_seq();
+
+    reader
+        .sync_mirror(&project, MirrorWant::All, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        git(&fx.mirror, &["rev-parse", "refs/mirror/heads/main"]),
+        fx.local.to_string()
+    );
+    assert_eq!(
+        h.store.snapshot_sync().unwrap().head_seq(),
+        before,
+        "mirror sync writes no events"
+    );
+    assert_eq!(h.github.recorded_calls().len(), 0, "no GitHub API access");
+}
+
+/// `Branch` 单独触发 fetch：调用前本地没有 `refs/mirror/heads/main`，远端 main 已前移。
+#[tokio::test]
+async fn reader_sync_mirror_branch_fetches_a_fresh_mirror_ref() {
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    fx.push_remote(fx.local, "main");
+    let project = id::<Prj>(1);
+    let mirror_ref = ["rev-parse", "--verify", "--quiet", "refs/mirror/heads/main"];
+    assert!(
+        !git_succeeds(&fx.mirror, &mirror_ref),
+        "fixture starts without a mirror ref"
+    );
+    // FakeRepo 的预置 ref 只用于满足端口目标检查，不能替代下面真实 git 的断言。
+    assert_eq!(
+        h.repo
+            .resolve(&project, &RevSpec::new("refs/mirror/heads/main"))
+            .await
+            .unwrap(),
+        fx.base
+    );
+
+    let reader = h.reader_with_read_token();
+    let reader: &dyn ForgeReader = &reader;
+    reader
+        .sync_mirror(&project, MirrorWant::Branch("main".into()), &ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        git(&fx.mirror, &["rev-parse", "refs/mirror/heads/main"]),
+        fx.local.to_string()
+    );
+
+    assert_eq!(
+        reader
+            .sync_mirror(&project, MirrorWant::Branch("absent".into()), &ctx())
+            .await
+            .unwrap_err(),
+        ForgeError::NotFound
+    );
+}
+
+/// `Oid` 单独触发 fetch：调用前目标提交不在本地镜像仓，远端 main 已前移到该提交。
+#[tokio::test]
+async fn reader_sync_mirror_oid_fetches_the_target_commit() {
+    let h = Harness::new();
+    let fx = PushFixture::new(&h, "src/lib.rs");
+    std::fs::write(fx.work.join("oid.txt"), "new\n").unwrap();
+    git(&fx.work, &["add", "."]);
+    git(&fx.work, &["commit", "-q", "-m", "new target"]);
+    let target = GitOid::parse(&git(&fx.work, &["rev-parse", "HEAD"])).unwrap();
+    let tree = GitOid::parse(&git(&fx.work, &["rev-parse", "HEAD^{tree}"])).unwrap();
+    fx.push_remote(target, "main");
+    let project = id::<Prj>(1);
+    let target_commit = format!("{target}^{{commit}}");
+    assert!(
+        !git_succeeds(&fx.mirror, &["cat-file", "-e", target_commit.as_str()]),
+        "target commit is not in the mirror before fetch"
+    );
+    // FakeRepo 的 has_commit 是端口侧脚本状态，只用于让目标检查通过；
+    // 是否真的 fetch 了由上面的本地对象与下面的 mirror ref 断言。
+    h.repo.insert_commit(
+        project,
+        target,
+        CommitInfo {
+            parents: vec![fx.local],
+            tree,
+            trailers: vec![],
+        },
+    );
+
+    let reader = h.reader_with_read_token();
+    let reader: &dyn ForgeReader = &reader;
+    reader
+        .sync_mirror(&project, MirrorWant::Oid(target), &ctx())
+        .await
+        .unwrap();
+    assert!(git_succeeds(
+        &fx.mirror,
+        &["cat-file", "-e", target_commit.as_str()]
+    ));
+    assert_eq!(
+        git(&fx.mirror, &["rev-parse", "refs/mirror/heads/main"]),
+        target.to_string()
+    );
+
+    assert_eq!(
+        reader
+            .sync_mirror(&project, MirrorWant::Oid(oid("absent")), &ctx())
+            .await
+            .unwrap_err(),
+        ForgeError::NotFound
+    );
+}
+
+/// fetch 的远端不存在（错误仓路径）时 Reader 传播错误，不伪造成功。
+#[tokio::test]
+async fn reader_sync_mirror_propagates_fetch_failures() {
+    let h = Harness::new();
+    let _fx = PushFixture::new(&h, "src/lib.rs");
+    let reader = h.reader(
+        Arc::new(StaticTokenProvider::new(SecretString::new(TOKEN.into()))),
+        h.repo.clone(),
+        format!("file://{}/missing", h.root.0.display()),
+    );
+    let reader: &dyn ForgeReader = &reader;
+    let error = reader
+        .sync_mirror(&id::<Prj>(1), MirrorWant::All, &ctx())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ForgeError::Unavailable { .. }), "{error:?}");
+    assert!(!error.to_string().contains(TOKEN));
+}
+
+/// 绑定仓库路径错误（git_base 正确）时同样传播 fetch 失败。
+#[tokio::test]
+async fn reader_sync_mirror_propagates_wrong_repo_fetch_failures() {
+    let h = Harness::with_project(|project| {
+        project.repo = RepoSlug::parse("acme/wrong").unwrap();
+    });
+    let _fx = PushFixture::new(&h, "src/lib.rs");
+    let reader = h.reader_with_read_token();
+    let reader: &dyn ForgeReader = &reader;
+    let error = reader
+        .sync_mirror(&id::<Prj>(1), MirrorWant::All, &ctx())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ForgeError::Unavailable { .. }), "{error:?}");
+}
+
+/// 守卫和 `ActorCtx` 原样传到 repo：ensure 与 fetch access 使用调用方的上下文，
+/// 且 access 模式是 `Fetch`。
+struct CtxSpy {
+    inner: Arc<FakeRepo>,
+    ensures: Mutex<Vec<String>>,
+    accesses: Mutex<Vec<(String, MirrorMode)>>,
+}
+
+#[async_trait::async_trait]
+impl RepoService for CtxSpy {
+    async fn ensure_mirror(
+        &self,
+        ctx: &ActorCtx,
+        project: &ProjectId,
+        remote: &RepoSlug,
+    ) -> Result<MirrorInfo, RepoError> {
+        self.ensures
+            .lock()
+            .unwrap()
+            .push(ctx.request_id.to_string());
+        self.inner.ensure_mirror(ctx, project, remote).await
+    }
+
+    async fn mirror_access(
+        &self,
+        ctx: &ActorCtx,
+        project: &ProjectId,
+        mode: MirrorMode,
+    ) -> Result<MirrorGuard, RepoError> {
+        self.accesses
+            .lock()
+            .unwrap()
+            .push((ctx.request_id.to_string(), mode));
+        self.inner.mirror_access(ctx, project, mode).await
+    }
+
+    async fn commit_info(
+        &self,
+        project: &ProjectId,
+        oid: &GitOid,
+    ) -> Result<Option<CommitInfo>, RepoError> {
+        self.inner.commit_info(project, oid).await
+    }
+
+    async fn resolve(&self, project: &ProjectId, rev: &RevSpec) -> Result<GitOid, RepoError> {
+        self.inner.resolve(project, rev).await
+    }
+
+    async fn has_commit(&self, project: &ProjectId, oid: &GitOid) -> Result<bool, RepoError> {
+        self.inner.has_commit(project, oid).await
+    }
+
+    async fn check_mirror(
+        &self,
+        ctx: &ActorCtx,
+        project: &ProjectId,
+    ) -> Result<MirrorHealth, RepoError> {
+        self.inner.check_mirror(ctx, project).await
+    }
+
+    async fn create_worktree(
+        &self,
+        ctx: &ActorCtx,
+        req: CreateWorktree,
+    ) -> Result<Worktree, RepoError> {
+        self.inner.create_worktree(ctx, req).await
+    }
+
+    async fn get_worktree(&self, id: &WorktreeId) -> Result<Option<Worktree>, RepoError> {
+        self.inner.get_worktree(id).await
+    }
+
+    async fn branch_head(&self, id: &WorktreeId) -> Result<GitOid, RepoError> {
+        self.inner.branch_head(id).await
+    }
+
+    async fn remove_worktree(
+        &self,
+        ctx: &ActorCtx,
+        id: &WorktreeId,
+        lock: &LockToken,
+    ) -> Result<(), RepoError> {
+        self.inner.remove_worktree(ctx, id, lock).await
+    }
+
+    async fn advance_head(
+        &self,
+        ctx: &ActorCtx,
+        id: &WorktreeId,
+        new_head: &GitOid,
+        lock: &LockToken,
+    ) -> Result<GitOid, RepoError> {
+        self.inner.advance_head(ctx, id, new_head, lock).await
+    }
+
+    async fn acquire_lock(
+        &self,
+        ctx: &ActorCtx,
+        id: &WorktreeId,
+        holder: LockHolder,
+        delivery: &DeliveryId,
+        lease: Duration,
+    ) -> Result<LockToken, RepoError> {
+        self.inner
+            .acquire_lock(ctx, id, holder, delivery, lease)
+            .await
+    }
+
+    async fn renew_lock(
+        &self,
+        ctx: &ActorCtx,
+        token: &LockToken,
+        lease: Duration,
+    ) -> Result<LockToken, RepoError> {
+        self.inner.renew_lock(ctx, token, lease).await
+    }
+
+    async fn release_lock(&self, ctx: &ActorCtx, token: &LockToken) -> Result<(), RepoError> {
+        self.inner.release_lock(ctx, token).await
+    }
+
+    async fn prepare_workspace(
+        &self,
+        ctx: &ActorCtx,
+        req: PrepareWorkspace,
+    ) -> Result<PreparedWorkspace, RepoError> {
+        self.inner.prepare_workspace(ctx, req).await
+    }
+
+    async fn validate_patch(
+        &self,
+        ctx: &ActorCtx,
+        req: ValidatePatch,
+    ) -> Result<PatchOutcome, RepoError> {
+        self.inner.validate_patch(ctx, req).await
+    }
+
+    async fn commit_patch(
+        &self,
+        ctx: &ActorCtx,
+        req: CommitPatch,
+    ) -> Result<CommitRecord, RepoError> {
+        self.inner.commit_patch(ctx, req).await
+    }
+
+    async fn provenance(
+        &self,
+        project: &ProjectId,
+        oid: &GitOid,
+    ) -> Result<Option<CommitRecord>, RepoError> {
+        self.inner.provenance(project, oid).await
+    }
+}
+
+#[tokio::test]
+async fn reader_sync_mirror_passes_the_guard_and_caller_ctx() {
+    let h = Harness::new();
+    let _fx = PushFixture::new(&h, "src/lib.rs");
+    let spy = Arc::new(CtxSpy {
+        inner: h.repo.clone(),
+        ensures: Mutex::new(Vec::new()),
+        accesses: Mutex::new(Vec::new()),
+    });
+    let reader = h.reader(
+        Arc::new(StaticTokenProvider::new(SecretString::new(TOKEN.into()))),
+        spy.clone(),
+        format!("file://{}", h.root.0.display()),
+    );
+    let caller = ctx();
+    let reader: &dyn ForgeReader = &reader;
+    reader
+        .sync_mirror(&id::<Prj>(1), MirrorWant::All, &caller)
+        .await
+        .unwrap();
+    assert_eq!(
+        *spy.ensures.lock().unwrap(),
+        vec![caller.request_id.to_string()]
+    );
+    assert_eq!(
+        *spy.accesses.lock().unwrap(),
+        vec![(caller.request_id.to_string(), MirrorMode::Fetch)]
+    );
+}
+
+/// 镜像 fetch 只用只读令牌。
+struct RecordingTokens {
+    calls: Mutex<Vec<TokenPurpose>>,
+}
+
+#[async_trait::async_trait]
+impl TokenProvider for RecordingTokens {
+    async fn token(
+        &self,
+        _project: &ProjectId,
+        purpose: TokenPurpose,
+    ) -> Result<Arc<SecretString>, AuthError> {
+        self.calls.lock().unwrap().push(purpose);
+        Ok(Arc::new(SecretString::new(TOKEN.into())))
+    }
+
+    fn invalidate(&self, _project: &ProjectId) {}
+}
+
+#[tokio::test]
+async fn reader_sync_mirror_uses_a_read_only_token() {
+    let h = Harness::new();
+    let _fx = PushFixture::new(&h, "src/lib.rs");
+    let tokens = Arc::new(RecordingTokens {
+        calls: Mutex::new(Vec::new()),
+    });
+    let reader = h.reader(
+        tokens.clone(),
+        h.repo.clone(),
+        format!("file://{}", h.root.0.display()),
+    );
+    let reader: &dyn ForgeReader = &reader;
+    reader
+        .sync_mirror(&id::<Prj>(1), MirrorWant::All, &ctx())
+        .await
+        .unwrap();
+    assert_eq!(*tokens.calls.lock().unwrap(), vec![TokenPurpose::Read]);
 }
 
 #[tokio::test]

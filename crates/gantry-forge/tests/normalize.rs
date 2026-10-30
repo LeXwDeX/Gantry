@@ -870,6 +870,7 @@ async fn reconcile_now_runs_through_the_reader() {
         clock: h.clock.clone(),
         http_timeout: Duration::from_secs(5),
         reconciler: Some(Arc::new(h.dispatcher())),
+        mirror: None,
     });
     let report = reader
         .reconcile_now(

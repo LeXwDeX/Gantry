@@ -58,9 +58,9 @@ impl Forge {
         crate::normalize::Dispatcher::new(self.store.clone(), self.config.clone(), deps)
     }
 
-    /// 共享本实例配置的 `ForgeReader`。读取器不持有 store：读 GitHub 不产生事件、不改快照。
+    /// 共享本实例 store 与配置的 `ForgeReader`：快照读只读 store；GitHub 读不产生事件、不改快照。
     pub fn reader(&self, deps: crate::reader::ReaderDeps) -> crate::reader::Reader {
-        crate::reader::Reader::new(self.config.clone(), deps)
+        crate::reader::Reader::new(self.store.clone(), self.config.clone(), deps)
     }
 
     /// 入队时的机械校验 + 落行。不读 `policies.*`（P-62）：是否需要审批由入队方决定，

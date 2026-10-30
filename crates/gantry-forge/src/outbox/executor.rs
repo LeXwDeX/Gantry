@@ -42,6 +42,7 @@ use crate::auth::{AuthError, TokenProvider, TokenPurpose};
 use crate::config::{ForgeConfig, Permission, ProjectBinding};
 use crate::git::{ls_remote_sha, GitRunner};
 use crate::github::{ApiError, GithubClient, PullView};
+use crate::mirror::MirrorSync;
 
 /// 执行器参数（forge.md §10 `forge.outbox.*`、`forge.http.timeout`）。
 #[derive(Clone, Debug)]
@@ -152,6 +153,7 @@ pub struct Executor {
     repo: Arc<dyn RepoService>,
     git: GitRunner,
     git_base: String,
+    mirror: MirrorSync,
 }
 
 /// 一次执行的结论，由 `finish` 在一个事务里落库。
@@ -192,6 +194,13 @@ impl Executor {
         deps: ExecutorDeps,
     ) -> std::io::Result<Self> {
         let git = GitRunner::new(deps.options.git_timeout)?;
+        let mirror = MirrorSync::new(
+            config.clone(),
+            deps.repo.clone(),
+            deps.tokens.clone(),
+            deps.git_base.clone(),
+            deps.options.git_timeout,
+        );
         Ok(Self {
             store,
             config,
@@ -204,6 +213,7 @@ impl Executor {
             git,
             repo: deps.repo,
             git_base: deps.git_base.trim_end_matches('/').to_owned(),
+            mirror,
         })
     }
 
@@ -220,55 +230,7 @@ impl Executor {
         project: &gantry_core::ids::ProjectId,
         want: &MirrorWant,
     ) -> Result<(), ForgeError> {
-        let binding =
-            self.config
-                .projects
-                .get(project)
-                .ok_or_else(|| ForgeError::InvalidTarget {
-                    message: "project is not bound to forge".into(),
-                })?;
-        let ctx = self.ctx();
-        let unavailable = |message: String| ForgeError::Unavailable { message };
-        self.repo
-            .ensure_mirror(&ctx, project, &binding.project.repo)
-            .await
-            .map_err(|error| unavailable(format!("ensure_mirror: {error}")))?;
-        // 守卫持有镜像仓共享锁（#193），活到本函数结束：fetch 全程挡住 gc / 重建。
-        let guard = self
-            .repo
-            .mirror_access(&ctx, project, MirrorMode::Fetch)
-            .await
-            .map_err(|error| unavailable(format!("mirror_access: {error}")))?;
-        let token = self
-            .tokens
-            .token(project, TokenPurpose::Read)
-            .await
-            .map_err(|error| unavailable(format!("token: {error}")))?;
-        let url = self.remote_url(&binding.project.repo);
-        let mut args = vec!["fetch", "--prune", "--no-tags", url.as_str()];
-        args.extend(guard.fetch_refspecs.iter().map(String::as_str));
-        let output = self
-            .git
-            .run(&guard.git_dir, &args, Some(&token))
-            .await
-            .map_err(|error| unavailable(error.to_string()))?;
-        if !output.success {
-            return Err(unavailable(format!(
-                "git fetch failed: {}",
-                first_line(&output.stderr)
-            )));
-        }
-        if let MirrorWant::Oid(oid) = want {
-            let present = self
-                .repo
-                .has_commit(project, oid)
-                .await
-                .map_err(|error| unavailable(error.to_string()))?;
-            if !present {
-                return Err(ForgeError::NotFound);
-            }
-        }
-        Ok(())
+        self.mirror.sync(project, want, &self.ctx()).await
     }
 
     /// 领取并执行一行；没有可执行的行时返回 `None`。

@@ -90,7 +90,7 @@ cargo --locked xtask schemas --check   # 冒烟：工具链可用
 | 项 | 现状 |
 | --- | --- |
 | 基线 | 代码基线 `main@e062502`（PR #403）；S0 收尾 PR #404 合入 `main@a568efb`。PR #402 的 merge commit 为 `26107d5` |
-| 本地分支 / 工作树 | S0 实施及收尾分支、工作树均已清理；S1 只有交接回写分支 `docs/405-s1-handoff`，合入后清理。主检出保持干净，当前基线和工作树以 Git 为准 |
+| 本地分支 / 工作树 | S0 / S1 实施及收尾分支、工作树均已清理；S2 在独立 `../gantry-wt/fix/305-forge-reader`，基于 `main@43b3e06`。主检出保持干净，当前基线和工作树以 Git 为准 |
 | 远端分支 | PR #402 / #403 的分支均已删除；保留 4 个历史分支：`backup/362-stash-pre-364`、`diag/346-linux-linker`、`diag/352-windows-events`、`wip/280-project-projection`。临时收尾分支合入后删除 |
 | 里程碑 | M1.1–M1.3 已关闭；**当前是 M1.4**（开放：#105、#106、#107、#280、#405）；M0.9 只剩 #86。#401 已随 PR #403 合入自动关闭 |
 | 上一轮成果（已评审） | #369（docs #389 / 实现 #390）、#371（contract #391 / 实现 #392）、#267（#393 / #394 / #395）、#105 C2-a（#396）、#105 C2-c policy / notify（#397）与 pki / secrets（#398）。结论见 §4.0 与 §4 A |
@@ -230,7 +230,8 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
 - `ci_log`、`changed_files`、`review_thread`、`check_annotations`、`reconcile_now` 不在 #305 验收范围内：先查 forge.md 和调用方，M1 路径用不到的保持 `not_yet`，在 PR 里列明去向，不要顺手扩大范围。
 - **测试**：用真实 forge + `FakeGitHub` / 本机临时仓库，**经 `ForgeReader` 端口测试**，不调内部方法；覆盖：存在、不存在（`Ok(None)`）、未绑定项目、镜像拉取失败、401 重试一次（已有 `with_token` 路径）。
 - **分支 / PR**：`fix/305-forge-reader`，`Closes #305`，`Refs #105`。
-- **状态**：未开始。
+- **状态**：实施与本机门槛已完成，待独立终审合入。工作树 `fix/305-forge-reader` 已接入 PR/Issue 的 store 快照、本地绑定的 Project 快照及共享受保护镜像拉取；通过 `ForgeReader` 端口覆盖存在/缺失、项目隔离、真实本机 fetch、目标检查、错误传播和只读令牌。Project 快照目前取 `ForgeConfig` 里的已有绑定，`synced_at` 为其 `updated_at`，不代表远端实时状态。没有实现 M2 读取方法，也没有扩展 `reconcile_now` 范围。
+- **本机验证**：forge 102 项通过；全工作区 Rust 1,931 项通过、8 项忽略，§3 的 fmt/clippy/MSRV 两项/schema 与 Node 门槛通过（Mock API 43、桌面端 406 和构建）。gantryd 进程测试连续 5 轮、每轮 43 项通过。移除实际 fetch 的变异验证会使 All/Branch/Oid 等测试失败，原逻辑恢复后全绿。日志在 `/var/folders/jm/w5g1j5td4vl8164rqwl96fn80000gn/T/opencode/305/`，完整门槛前缀 `gate-verify-20261030T055441Z-`。本机镜像对象/ref 检查不是外部 HTTPS 或真实 GitHub 证据，repo 查询端口仍使用测试替身；真实 repo 组合归 S3b。
 
 #### S3 #105 C2-c 第三片：forge / repo（拆成 S3a、S3b 两个 PR）
 

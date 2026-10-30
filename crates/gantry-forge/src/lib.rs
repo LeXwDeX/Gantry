@@ -8,12 +8,13 @@
 //! - Outbox 执行器：[`Executor`] 按 FA §2.3"先查后做"执行 M1 的 5 个动作（`push_branch`
 //!   走 git 传输），执行前经 `PolicyPort` 消费审批（P-54），临时错误留在 `queued` 退避
 //!   （P-53）。GitHub 客户端是 crate 私有的（I2）。
-//! - 镜像仓拉取：[`Executor::sync_mirror`]（forge.md §7.10）。
+//! - 镜像仓拉取：[`Executor::sync_mirror`] 与 [`Reader`] 共用同一受保护 fetch（forge.md §7.10）。
 //!
 //! - App 鉴权：[`AppTokenProvider`]（App JWT、安装令牌缓存与 single-flight 刷新、权限自检，
 //!   forge.md §7.12）。
 //!
-//! - 读取：[`Reader`] 实现 `ForgeReader::discussion`（P-59）；快照类读取见 store 的 `pr_snapshot`。
+//! - 读取：[`Reader`] 实现 `ForgeReader` 的本地快照（读 store）、`discussion`（P-59）与
+//!   `sync_mirror`（与执行器共用受保护 fetch）。
 //!
 //! - webhook 接收：[`WebhookReceiver`]（回环监听、HMAC 双 secret、`delivery_id` 去重、先落盘再 2xx，
 //!   forge.md §7.4）。
@@ -36,6 +37,7 @@ mod config;
 mod effects;
 mod git;
 mod github;
+mod mirror;
 pub mod normalize;
 mod outbox;
 mod reader;
@@ -52,7 +54,7 @@ pub use outbox::executor::{
 };
 pub use outbox::key::{derive_target_intent, KeyError, TargetIntent};
 pub use outbox::{Forge, M1_ACTIONS};
-pub use reader::{Reader, ReaderDeps};
+pub use reader::{MirrorDeps, Reader, ReaderDeps};
 pub use webhook::{
     InboxRow, InboxStatus, WebhookDeps, WebhookError, WebhookOptions, WebhookReceiver, WebhookStats,
 };
