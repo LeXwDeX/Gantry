@@ -47,6 +47,10 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"]
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem", "crypto"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "signal"] }
 
+# 进程级测试在 connect 前为 Unix socket 设置 SO_RCVTIMEO；只给测试目标启用 net。
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", features = ["net"] }
+
 [features]
 # 仅测试：允许 `gantry` CLI 通过 `GANTRY_CONTROL_UID` 注入期望的对端 uid。
 # 发布构建不带此 feature。

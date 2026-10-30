@@ -7,9 +7,10 @@
 
 mod support;
 
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::os::unix::net::UnixStream;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsFd;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -22,6 +23,12 @@ use p256::ecdsa::signature::Signer as _;
 use serde_json::{json, Value};
 
 const BIN: &str = env!("CARGO_BIN_EXE_gantryd");
+
+const CONTROL_SOCKET: &str = "control.sock";
+/// 失败诊断保留的 stderr 尾部上限。
+const STDERR_TAIL: usize = 8 * 1024;
+/// 单次诊断最多读取的 stderr 字节数，避免子进程持续输出时占用过久。
+const STDERR_READ: usize = 64 * 1024;
 
 /// 替身装配的 gantryd 子进程入口；不带 `CHILD_ENV` 时什么也不做。
 #[test]
@@ -61,6 +68,12 @@ struct Scratch {
 
 struct ScratchOwner(PathBuf);
 
+impl ScratchOwner {
+    fn socket(&self) -> PathBuf {
+        self.0.join(CONTROL_SOCKET)
+    }
+}
+
 impl Scratch {
     fn new() -> Self {
         let dir = loop {
@@ -93,7 +106,7 @@ public_url = "https://hooks.gantry.test/github"
 recipients = ["age1test"]
 journal_target = "{}"
 "#,
-            dir.join("control.sock").display(),
+            dir.join(CONTROL_SOCKET).display(),
             dir.join("data").display(),
             dir.join("secrets").display(),
             dir.join("journal-backup/revocations.journal").display()
@@ -111,7 +124,7 @@ journal_target = "{}"
     }
 
     fn socket(&self) -> PathBuf {
-        self.dir.join("control.sock")
+        self.dir.join(CONTROL_SOCKET)
     }
 
     fn sqlite(&self) -> PathBuf {
@@ -182,31 +195,43 @@ impl Daemon {
 
     fn start(mut command: Command, scratch: &Scratch) -> Self {
         let child = command.spawn().unwrap();
+        let started = Instant::now();
         let mut daemon = Self {
             child,
             owner: Some(scratch.owner.clone()),
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = started + Duration::from_secs(30);
         loop {
             if let Some(status) = daemon.child.try_wait().unwrap() {
-                let mut stderr = String::new();
-                std::io::Read::read_to_string(daemon.child.stderr.as_mut().unwrap(), &mut stderr)
-                    .unwrap();
-                panic!("gantryd exited before binding: {status:?}: {stderr}");
+                wait_failure(
+                    &mut daemon.child,
+                    Some(status),
+                    &scratch.socket(),
+                    started,
+                    "gantryd exited before binding",
+                );
             }
             if UnixStream::connect(scratch.socket()).is_ok() {
                 if let Some(status) = daemon.child.try_wait().unwrap() {
-                    let mut stderr = String::new();
-                    std::io::Read::read_to_string(
-                        daemon.child.stderr.as_mut().unwrap(),
-                        &mut stderr,
-                    )
-                    .unwrap();
-                    panic!("gantryd exited during startup: {status:?}: {stderr}");
+                    wait_failure(
+                        &mut daemon.child,
+                        Some(status),
+                        &scratch.socket(),
+                        started,
+                        "gantryd exited during startup",
+                    );
                 }
                 break;
             }
-            assert!(Instant::now() < deadline, "control socket never came up");
+            if Instant::now() >= deadline {
+                wait_failure(
+                    &mut daemon.child,
+                    None,
+                    &scratch.socket(),
+                    started,
+                    "control socket never came up",
+                );
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         daemon
@@ -214,10 +239,11 @@ impl Daemon {
 
     fn crash(mut self) -> std::process::ExitStatus {
         if let Some(status) = self.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            std::io::Read::read_to_string(self.child.stderr.as_mut().unwrap(), &mut stderr)
-                .unwrap();
-            panic!("gantryd exited before SIGKILL: {status:?}: {stderr}");
+            let snapshot = child_snapshot(&mut self.child, Some(status));
+            panic!(
+                "gantryd exited before SIGKILL; socket: {}; {snapshot}",
+                self.socket_state()
+            );
         }
         if let Err(error) = self.child.kill() {
             let deadline = Instant::now() + Duration::from_secs(1);
@@ -229,19 +255,30 @@ impl Daemon {
                     result => break result,
                 }
             };
+            // 非阻塞读取：子进程已退出但后代可能仍持有 stderr 写端。
             let mut stderr = String::new();
             if matches!(status, Ok(Some(_))) {
-                let _ =
-                    std::io::Read::read_to_string(self.child.stderr.as_mut().unwrap(), &mut stderr);
+                stderr = stderr_tail(self.child.stderr.as_mut().unwrap());
             }
-            panic!("failed to send SIGKILL: {error}; status: {status:?}; stderr: {stderr}");
+            panic!(
+                "failed to send SIGKILL: {error}; socket: {}; status: {status:?}; stderr tail:\n{stderr}",
+                self.socket_state()
+            );
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(10);
         loop {
             if self.child.try_wait().unwrap().is_some() {
                 return self.child.wait().unwrap();
             }
-            assert!(Instant::now() < deadline, "gantryd ignored SIGKILL");
+            if Instant::now() >= deadline {
+                let snapshot = child_snapshot(&mut self.child, None);
+                panic!(
+                    "gantryd ignored SIGKILL after {:?}; socket: {}; {snapshot}",
+                    started.elapsed(),
+                    self.socket_state()
+                );
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -254,19 +291,57 @@ impl Daemon {
     /// 不等待 ready 行，只能尽快落在绑定之后、信号接收之前的窗口里；多轮只提高
     /// 命中机会，不保证一定命中（#401）。
     fn terminate_with(mut self, signal: &str) -> std::process::ExitStatus {
-        let status = Command::new("kill")
+        let started = Instant::now();
+        let kill_status = Command::new("kill")
             .args([signal, &self.child.id().to_string()])
             .status()
             .unwrap();
-        assert!(status.success());
-        let deadline = Instant::now() + Duration::from_secs(10);
+        if !kill_status.success() {
+            let snapshot = child_snapshot(&mut self.child, None);
+            panic!(
+                "failed to send {signal} after {:?}: {kill_status:?}; socket: {}; {snapshot}",
+                started.elapsed(),
+                self.socket_state()
+            );
+        }
+        // 10 秒等待从 kill 命令成功之后起算，与改动前一致。
+        let signalled = Instant::now();
+        let deadline = signalled + Duration::from_secs(10);
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
+                if !status.success() {
+                    // 调用方仍用 `.success()` 断言；先输出诊断，断言失败时可见。
+                    eprintln!(
+                        "{}",
+                        failure_text(
+                            &format!("gantryd exited after {signal}"),
+                            signalled.elapsed(),
+                            &self.socket_state(),
+                            &mut self.child,
+                            Some(status)
+                        )
+                    );
+                }
                 return status;
             }
-            assert!(Instant::now() < deadline, "gantryd ignored {signal}");
+            if Instant::now() >= deadline {
+                let snapshot = child_snapshot(&mut self.child, None);
+                panic!(
+                    "gantryd ignored {signal}: no exit for {:?} after signal ({:?} total); socket: {}; {snapshot}",
+                    signalled.elapsed(),
+                    started.elapsed(),
+                    self.socket_state()
+                );
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn socket_state(&self) -> String {
+        self.owner.as_ref().map_or_else(
+            || "<scratch owner released>".to_owned(),
+            |owner| socket_state(&owner.socket()),
+        )
     }
 }
 
@@ -292,26 +367,309 @@ impl Drop for Daemon {
     }
 }
 
-fn wait_for_socket(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while UnixStream::connect(path).is_err() {
-        assert!(Instant::now() < deadline, "control socket never came up");
+fn wait_for_socket(path: &Path, children: &mut [&mut Child]) {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(30);
+    loop {
+        if let Err(error) = UnixStream::connect(path) {
+            if Instant::now() >= deadline {
+                let details: Vec<String> = children
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(index, child)| {
+                        format!("child[{index}]: {}", child_snapshot(child, None))
+                    })
+                    .collect();
+                panic!(
+                    "control socket never came up after {:?}: {}; last connect error: {error:?}; children: {}",
+                    started.elapsed(),
+                    socket_state(path),
+                    details.join("; ")
+                );
+            }
+        } else {
+            return;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// 等待失败时报告实际退出码或信号、stderr 尾部、套接字状态与耗时。
+fn wait_failure(
+    child: &mut Child,
+    status: Option<std::process::ExitStatus>,
+    socket: &Path,
+    started: Instant,
+    what: &str,
+) -> ! {
+    panic!(
+        "{}",
+        failure_text(
+            what,
+            started.elapsed(),
+            &socket_state(socket),
+            child,
+            status
+        )
+    );
+}
+
+/// 统一的失败诊断文本：耗时、套接字状态、退出码或信号与 stderr 视图。
+fn failure_text(
+    what: &str,
+    elapsed: Duration,
+    socket: &str,
+    child: &mut Child,
+    status: Option<std::process::ExitStatus>,
+) -> String {
+    format!(
+        "{what} after {elapsed:?}; socket: {socket}; {}",
+        child_snapshot(child, status)
+    )
+}
+
+fn child_snapshot(child: &mut Child, status: Option<std::process::ExitStatus>) -> String {
+    let state = match status {
+        Some(status) => exit_status_text(status),
+        None => match child.try_wait() {
+            Ok(Some(status)) => exit_status_text(status),
+            Ok(None) => format!("still running (pid {})", child.id()),
+            Err(error) => format!("try_wait failed (pid {}): {error}", child.id()),
+        },
+    };
+    let stderr = child
+        .stderr
+        .as_mut()
+        .map_or_else(|| "<stderr not captured>".to_owned(), stderr_tail);
+    format!("{state}; stderr tail:\n{stderr}")
+}
+
+fn exit_status_text(status: std::process::ExitStatus) -> String {
+    match status.signal() {
+        Some(signal) => format!("signal {signal} ({status:?})"),
+        None => format!("exit code {} ({status:?})", status.code().unwrap_or(-1)),
+    }
+}
+
+fn socket_state(path: &Path) -> String {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let file_type = meta.file_type();
+            let kind = if file_type.is_socket() {
+                "socket"
+            } else if file_type.is_symlink() {
+                "symlink"
+            } else if file_type.is_dir() {
+                "directory"
+            } else {
+                "file"
+            };
+            format!("{path:?} exists as {kind}")
+        }
+        Err(error) => format!("{path:?} cannot be inspected: {error}"),
+    }
+}
+
+/// 以非阻塞方式读取 stderr 尾部：写端仍打开时立即返回，不等待 EOF。
+fn stderr_tail(reader: &mut (impl Read + AsFd)) -> String {
+    let flags = match rustix::fs::fcntl_getfl(reader.as_fd()) {
+        Ok(flags) => flags,
+        Err(error) => return format!("<cannot read stderr flags: {error}>"),
+    };
+    if let Err(error) =
+        rustix::fs::fcntl_setfl(reader.as_fd(), flags | rustix::fs::OFlags::NONBLOCK)
+    {
+        return format!("<cannot set stderr nonblocking: {error}>");
+    }
+    let mut bytes = Vec::new();
+    let mut notes = String::new();
+    let mut hit_limit = false;
+    let mut chunk = [0u8; 4096];
+    while bytes.len() < STDERR_READ {
+        let take = (STDERR_READ - bytes.len()).min(chunk.len());
+        match reader.read(&mut chunk[..take]) {
+            Ok(0) => break,
+            Ok(read) => {
+                bytes.extend_from_slice(&chunk[..read]);
+                hit_limit = bytes.len() == STDERR_READ;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                notes.push_str("write end still open; ");
+                break;
+            }
+            Err(error) => {
+                notes.push_str(&format!("read failed: {error}; "));
+                break;
+            }
+        }
+    }
+    // 恢复失败只影响后续诊断读取，不改变测试结果。
+    let _ = rustix::fs::fcntl_setfl(reader.as_fd(), flags);
+    if hit_limit {
+        notes.push_str(&format!("read limit {STDERR_READ} bytes reached; "));
+    }
+    let start = bytes.len().saturating_sub(STDERR_TAIL);
+    if start > 0 {
+        notes.push_str(&format!(
+            "showing last {} of {} bytes; ",
+            bytes.len() - start,
+            bytes.len()
+        ));
+    }
+    let tail = String::from_utf8_lossy(&bytes[start..]).into_owned();
+    if notes.is_empty() {
+        tail
+    } else {
+        format!("<stderr may be incomplete: {notes}>\n{tail}")
+    }
+}
+
+/// 自检：写端保持打开时，诊断读取仍能立即返回已有输出。
+#[test]
+fn diagnostic_stderr_read_does_not_wait_for_eof() {
+    let (mut writer, reader) = UnixStream::pair().unwrap();
+    writer.write_all(b"ready\n").unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut reader = reader;
+        let _ = sender.send(stderr_tail(&mut reader));
+    });
+    let text = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("stderr diagnostic blocked on the open write end");
+    assert!(text.contains("ready\n"), "{text}");
+    assert!(text.contains("write end still open"), "{text}");
+    drop(writer);
+    reader.join().unwrap();
+}
+
+/// 自检：超过 64KiB 输入时只读上限，并明确标注截断而非完整尾部。
+#[test]
+fn stderr_tail_marks_read_limit_on_a_large_file() {
+    let scratch = Scratch::new();
+    let path = scratch.dir.join("stderr.log");
+    let mut contents = b"start-marker".to_vec();
+    contents.resize(STDERR_READ - b"within-limit".len(), b'x');
+    contents.extend_from_slice(b"within-limit");
+    contents.extend_from_slice(b"beyond-limit");
+    std::fs::write(&path, &contents).unwrap();
+
+    let mut file = std::fs::File::open(&path).unwrap();
+    let text = stderr_tail(&mut file);
+    assert!(text.contains("read limit 65536 bytes reached"), "{text}");
+    assert!(text.contains("showing last 8192 of 65536 bytes"), "{text}");
+    assert!(text.contains("within-limit"), "{text}");
+    assert!(!text.contains("beyond-limit"), "{text}");
+    assert!(!text.contains("start-marker"), "{text}");
+}
+
+/// 自检：直接构造异常退出的子进程与普通文件占用的套接字路径，验证诊断文本包含
+/// 信号、stderr、套接字状态与耗时；同时验证 `terminate` 在子进程被 SIGTERM
+/// 终止时仍返回原状态，不阻塞、不改断言语义。
+#[test]
+fn failure_report_includes_status_stderr_socket_and_elapsed() {
+    let scratch = Scratch::new();
+    std::fs::write(scratch.socket(), b"not a socket").unwrap();
+
+    let mut child = Command::new("sh")
+        .args(["-c", "cat >&2; kill -TERM $$"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        stdin.write_all(b"diagnostic-marker\n").unwrap();
+    }
+    drop(child.stdin.take());
+    let started = Instant::now();
+    let status = child.wait().unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+
+    let text = failure_text(
+        "probe exited",
+        elapsed,
+        &socket_state(&scratch.socket()),
+        &mut child,
+        Some(status),
+    );
+    for expected in [
+        "signal 15",
+        "diagnostic-marker",
+        "exists as file",
+        &format!("{elapsed:?}"),
+    ] {
+        assert!(text.contains(expected), "missing {expected:?}: {text}");
+    }
+
+    let daemon = Daemon {
+        // `exec` 让 SIGTERM 直接落到 sleep，不留孤儿继续持有 stderr 写端。
+        child: Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+        owner: Some(scratch.owner.clone()),
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    let status = daemon.terminate();
+    assert_eq!(status.signal(), Some(15), "{status:?}");
 }
 
 struct Client {
     reader: BufReader<UnixStream>,
 }
 
+/// 在 connect 前创建控制通道客户端 socket，并装好原有 10 秒读超时。
+/// Linux 用原子 `SOCK_CLOEXEC`；其余 Unix 创建后补 `FD_CLOEXEC`
+/// （Apple 没有该 socket 标志），避免把客户端 fd 泄漏给子进程。
+#[cfg(target_os = "linux")]
+fn control_socket() -> std::os::fd::OwnedFd {
+    let fd = rustix::net::socket_with(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::STREAM,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    set_read_timeout(&fd);
+    fd
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn control_socket() -> std::os::fd::OwnedFd {
+    let fd = rustix::net::socket(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::STREAM,
+        None,
+    )
+    .unwrap();
+    rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC).unwrap();
+    set_read_timeout(&fd);
+    fd
+}
+
+fn set_read_timeout(fd: &std::os::fd::OwnedFd) {
+    rustix::net::sockopt::set_socket_timeout(
+        fd,
+        rustix::net::sockopt::Timeout::Recv,
+        Some(Duration::from_secs(10)),
+    )
+    .unwrap();
+}
+
 impl Client {
     fn connect(scratch: &Scratch) -> Self {
-        let stream = UnixStream::connect(scratch.socket()).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
+        // 对端可能在 accept 后立即回复并关闭；macOS 上此时再 set_read_timeout
+        // 会返回 EINVAL，所以超时由 control_socket 在 connect 前装好。
+        let fd = control_socket();
+        let address = rustix::net::SocketAddrUnix::new(scratch.socket()).unwrap();
+        rustix::net::connect(&fd, &address).unwrap();
         Self {
-            reader: BufReader::new(stream),
+            reader: BufReader::new(UnixStream::from(fd)),
         }
     }
 
@@ -333,6 +691,59 @@ impl Client {
         assert_eq!(response["ok"], true, "{request} -> {response}");
         response["result"].clone()
     }
+}
+
+/// 自检：connect 前设置读超时。对端回复后立即关闭时 forbidden 仍完整可读；
+/// 对端存活时 `read_timeout()` 仍为原来的 10 秒（不真的等待超时）。
+#[test]
+fn client_connects_with_the_original_read_timeout() {
+    // connect 前：未连接的 fd 已带 CLOEXEC 和 10 秒读超时。
+    let unconnected = control_socket();
+    let flags = rustix::io::fcntl_getfd(&unconnected).unwrap();
+    assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "{flags:?}");
+    assert_eq!(
+        rustix::net::sockopt::socket_timeout(&unconnected, rustix::net::sockopt::Timeout::Recv)
+            .unwrap(),
+        Some(Duration::from_secs(10))
+    );
+    drop(unconnected);
+
+    let scratch = Scratch::new();
+
+    // 对端写完回复后立即关闭；关闭先于读取完成，读取仍必须拿到完整行。
+    let listener = UnixListener::bind(scratch.socket()).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .write_all(b"{\"ok\":false,\"error\":{\"code\":\"forbidden\"}}\n")
+            .unwrap();
+    });
+    let mut client = Client::connect(&scratch);
+    server.join().unwrap();
+    let response = client.read();
+    assert_eq!(response["error"]["code"], "forbidden");
+
+    // 对端仍存活时检查超时值；不把 10 秒等待放进测试。
+    std::fs::remove_file(scratch.socket()).unwrap();
+    let listener = UnixListener::bind(scratch.socket()).unwrap();
+    let (accepted, accepted_rx) = std::sync::mpsc::channel();
+    let (release, release_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        accepted.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(stream);
+    });
+    let client = Client::connect(&scratch);
+    accepted_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("listener did not accept");
+    assert_eq!(
+        client.reader.get_ref().read_timeout().unwrap(),
+        Some(Duration::from_secs(10))
+    );
+    release.send(()).unwrap();
+    server.join().unwrap();
 }
 
 fn run_to_exit(args: &[&str]) -> Output {
@@ -442,8 +853,39 @@ fn create_delivery_appends_one_event_and_dedupes_by_message() {
 fn sigterm_shuts_down_and_removes_the_socket() {
     let scratch = Scratch::new();
     let daemon = Daemon::spawn(&scratch, scratch.uid());
-    assert!(daemon.terminate().success());
-    assert!(!scratch.socket().exists());
+    // terminate 消费 self；原 stderr 句柄留给它读取，断言侧用 dup 的独立管道读端。
+    // 副本带 CLOEXEC，避免它泄漏给 kill 和并发测试的 exec。
+    let mut duplicate = daemon.child.stderr.as_ref().map(|stderr| {
+        let duplicate =
+            rustix::io::fcntl_dupfd_cloexec(stderr, 0).expect("duplicate stderr with CLOEXEC");
+        let flags = rustix::io::fcntl_getfd(&duplicate).expect("read duplicated stderr flags");
+        assert!(
+            flags.contains(rustix::io::FdFlags::CLOEXEC),
+            "duplicated stderr must be close-on-exec: {flags:?}"
+        );
+        std::fs::File::from(duplicate)
+    });
+    let started = Instant::now();
+    let status = daemon.terminate();
+    let elapsed = started.elapsed();
+    let mut stderr_text = || match duplicate.as_mut() {
+        Some(file) => stderr_tail(file),
+        None => "<stderr not captured>".to_owned(),
+    };
+    assert!(
+        status.success(),
+        "SIGTERM exit was abnormal: {}; {}; elapsed: {elapsed:?}; stderr tail:\n{}",
+        exit_status_text(status),
+        socket_state(&scratch.socket()),
+        stderr_text()
+    );
+    assert!(
+        !scratch.socket().exists(),
+        "control socket was not removed: {}; {}; elapsed: {elapsed:?}; stderr tail:\n{}",
+        exit_status_text(status),
+        socket_state(&scratch.socket()),
+        stderr_text()
+    );
 }
 
 /// 套接字一旦可连接就尽快送 SIGTERM。修复后信号订阅先于 `ControlSocket::bind`，
@@ -526,7 +968,8 @@ fn concurrent_starts_leave_exactly_one_owner() {
             owner: Some(scratch.owner.clone()),
         },
     );
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(30);
     let loser = loop {
         if let Some(status) = a.child.try_wait().unwrap() {
             break (status, &mut a);
@@ -534,14 +977,26 @@ fn concurrent_starts_leave_exactly_one_owner() {
         if let Some(status) = b.child.try_wait().unwrap() {
             break (status, &mut b);
         }
-        assert!(Instant::now() < deadline, "neither instance gave up");
+        if Instant::now() >= deadline {
+            panic!(
+                "neither instance gave up after {:?}; socket: {}; a: {}; b: {}",
+                started.elapsed(),
+                socket_state(&scratch.socket()),
+                child_snapshot(&mut a.child, None),
+                child_snapshot(&mut b.child, None),
+            );
+        }
         std::thread::sleep(Duration::from_millis(20));
     };
-    assert!(!loser.0.success());
+    assert!(
+        !loser.0.success(),
+        "losing instance exited successfully: {}",
+        exit_status_text(loser.0)
+    );
     let mut stderr = String::new();
     std::io::Read::read_to_string(loser.1.child.stderr.as_mut().unwrap(), &mut stderr).unwrap();
     assert!(stderr.contains("another gantryd"), "{stderr}");
-    wait_for_socket(&scratch.socket());
+    wait_for_socket(&scratch.socket(), &mut [&mut a.child, &mut b.child]);
     Client::connect(&scratch).ok(json!({"cmd": "status"}));
     let alive = [a.child.try_wait().unwrap(), b.child.try_wait().unwrap()];
     assert_eq!(alive.iter().filter(|status| status.is_none()).count(), 1);
