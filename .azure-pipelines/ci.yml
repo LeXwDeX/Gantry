@@ -1,0 +1,127 @@
+# ============================================================================
+# CI（Azure Pipelines）
+# ----------------------------------------------------------------------------
+# 触发：push 到 main、目标为 main 的 PR、手动运行。
+# 作业：Rust（三平台 fmt/clippy/test）、Rust 1.85（MSRV）、契约与 Mock API、
+#       前端检查。由原 .github/workflows/m0.yml 迁移而来（#375）。
+# 机器：默认 Microsoft-hosted（2 核）；heavyPool=managed 把 Linux 上的 Rust
+#       与 MSRV 作业换到 yc-ci-linux 托管池。
+# 发布：仓库暂无发布流程，因此没有 release.yml。
+# ============================================================================
+
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  batch: false
+  branches:
+    include:
+      - main
+
+pr:
+  autoCancel: true
+  drafts: true
+  branches:
+    include:
+      - main
+
+parameters:
+  - name: heavyPool
+    displayName: Linux Rust 作业使用的机器池
+    type: string
+    default: microsoft-hosted
+    values:
+      - microsoft-hosted
+      - managed
+
+variables:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  - ${{ each os in split('ubuntu-latest,macos-latest,windows-latest', ',') }}:
+      - job: rust_${{ replace(os, '-', '_') }}
+        displayName: Rust (${{ os }})
+        timeoutInMinutes: 120
+        ${{ if and(eq(os, 'ubuntu-latest'), eq(parameters.heavyPool, 'managed')) }}:
+          pool:
+            name: yc-ci-linux
+        ${{ else }}:
+          pool:
+            vmImage: ${{ os }}
+        steps:
+          - checkout: self
+            fetchDepth: 1
+          - template: templates/rust.yml
+            parameters:
+              components: rustfmt,clippy
+              openssl: true
+          - bash: cargo fmt --all -- --check
+            displayName: cargo fmt
+          - bash: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+            displayName: cargo clippy
+          - bash: cargo test --locked --workspace --all-features
+            displayName: cargo test
+
+  - job: msrv
+    displayName: Rust 1.85 (MSRV)
+    timeoutInMinutes: 60
+    ${{ if eq(parameters.heavyPool, 'managed') }}:
+      pool:
+        name: yc-ci-linux
+    ${{ else }}:
+      pool:
+        vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+      - template: templates/rust.yml
+        parameters:
+          toolchain: '1.85'
+      - bash: cargo check --locked --workspace --all-targets --all-features
+        displayName: cargo check
+
+  - job: contracts
+    displayName: 契约与 Mock API
+    timeoutInMinutes: 60
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+      - template: templates/rust.yml
+      - template: templates/node.yml
+      - bash: npm ci --prefix tools/mock-api --no-audit --no-fund
+        displayName: 安装 Mock API 依赖
+      - bash: cargo xtask schemas --check
+        displayName: 契约检查
+      - bash: npm test --prefix tools/mock-api
+        displayName: Mock API 测试
+      - bash: git diff --exit-code -- schemas fixtures
+        displayName: 检查生成物漂移
+
+  - job: frontend
+    displayName: 前端检查
+    timeoutInMinutes: 30
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+      - template: templates/node.yml
+      - bash: npm install -g npm@11
+        displayName: 升级 npm（规避 npm 10 的 Exit handler 故障）
+      - bash: npm ci --no-audit --no-fund
+        displayName: 安装前端依赖
+        workingDirectory: apps/desktop
+      - bash: npm run lint
+        displayName: 前端边界检查
+        workingDirectory: apps/desktop
+      - bash: npm run typecheck
+        displayName: 前端类型检查
+        workingDirectory: apps/desktop
+      - bash: npm test
+        displayName: 前端测试
+        workingDirectory: apps/desktop
+      - bash: npm run build
+        displayName: 前端构建
+        workingDirectory: apps/desktop

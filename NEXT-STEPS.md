@@ -13,7 +13,7 @@
 - **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock、仅 mock 可联网等边界已静态核对；Tauri 适配器的参数形状与前端路由表已有对账测试（#370，PR #374），但不覆盖真实 IPC 与服务端联调，真实服务端联调仍未证明。
 - **工作区**：20 个 package，即 19 个 `crates/*` 加 `apps/desktop/src-tauri/shell-core`（package `gantry-desktop-shell`）。Tauri 应用本身在 `apps/desktop/src-tauri`，因系统 WebView 依赖不在根 workspace。
 - **验收口径**：A + B 级全绿才记为「M1 本机验收通过」，C 级全绿才记为「M1 退出」（#87）。当前三级证据都未全部取得。
-- **已知外部阻塞**：GitHub Actions 因账户计费问题未启动（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
+- **已知外部阻塞**：开发 CI 配置已迁到 Azure Pipelines（`.azure-pipelines/ci.yml`，#375），但尚未在 Azure 上实际跑通，合并依据仍是本机门槛；GitHub Actions 仍因账户计费问题不可用（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
 
 **本机检查**：各 PR 描述记录了合入前的全工作区本机门槛；M1.3 收尾评审 PR 的描述记录了在合入后的结果上复跑的全部门槛（fmt、clippy、test、MSRV 1.85 两条 check、`xtask schemas --check`、mock-api、desktop lint/typecheck/test/build）。本机门槛不能替代真实环境证据。
 
