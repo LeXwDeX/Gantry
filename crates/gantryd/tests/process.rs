@@ -246,9 +246,16 @@ impl Daemon {
         }
     }
 
-    fn terminate(mut self) -> std::process::ExitStatus {
+    fn terminate(self) -> std::process::ExitStatus {
+        self.terminate_with("-TERM")
+    }
+
+    /// 尽快发送 `signal` 并等进程退出；`start` 返回时套接字已可连接，所以这里
+    /// 不等待 ready 行，只能尽快落在绑定之后、信号接收之前的窗口里；多轮只提高
+    /// 命中机会，不保证一定命中（#401）。
+    fn terminate_with(mut self, signal: &str) -> std::process::ExitStatus {
         let status = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
+            .args([signal, &self.child.id().to_string()])
             .status()
             .unwrap();
         assert!(status.success());
@@ -257,7 +264,7 @@ impl Daemon {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
-            assert!(Instant::now() < deadline, "gantryd ignored SIGTERM");
+            assert!(Instant::now() < deadline, "gantryd ignored {signal}");
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -437,6 +444,47 @@ fn sigterm_shuts_down_and_removes_the_socket() {
     let daemon = Daemon::spawn(&scratch, scratch.uid());
     assert!(daemon.terminate().success());
     assert!(!scratch.socket().exists());
+}
+
+/// 套接字一旦可连接就尽快送 SIGTERM。修复后信号订阅先于 `ControlSocket::bind`，
+/// 窗口内送达也只会走正常停机；未订阅该信号的实现里，若 SIGTERM 落在绑定之后、
+/// 首次 poll 之前，可能按进程原有处置终止并留下套接字（#401）。多轮只提高命中
+/// 机会，不保证一定命中旧实现的窗口；每轮用新目录，失败残留的实例不会影响下一轮。
+#[test]
+fn sigterm_right_after_connect_shuts_down_and_removes_the_socket() {
+    for round in 0..8 {
+        let scratch = Scratch::new();
+        let daemon = Daemon::spawn(&scratch, scratch.uid());
+        let status = daemon.terminate();
+        assert!(
+            status.success(),
+            "round {round}: SIGTERM exit was abnormal: {status:?}"
+        );
+        assert!(
+            !scratch.socket().exists(),
+            "round {round}: socket left behind"
+        );
+    }
+}
+
+/// SIGINT 与 SIGTERM 同路径；`ctrl_c()` 在首次 poll 前不注册，覆盖不了这个窗口。
+/// 未订阅该信号的实现窗口内的 SIGINT 按进程原有处置，可能是忽略；多轮只提高
+/// 命中机会，不保证一定命中旧实现的窗口。
+#[test]
+fn sigint_right_after_connect_shuts_down_and_removes_the_socket() {
+    for round in 0..8 {
+        let scratch = Scratch::new();
+        let daemon = Daemon::spawn(&scratch, scratch.uid());
+        let status = daemon.terminate_with("-INT");
+        assert!(
+            status.success(),
+            "round {round}: SIGINT exit was abnormal: {status:?}"
+        );
+        assert!(
+            !scratch.socket().exists(),
+            "round {round}: socket left behind"
+        );
+    }
 }
 
 #[test]
