@@ -4,8 +4,9 @@
 
 //! `gantryd`：服务端单进程（architecture §3）。
 //!
-//! 启动顺序：读引导配置 → 装配模块 → 绑定控制通道 → 等 SIGTERM / SIGINT。
-//! 装配见 [`assembly`]；控制通道见 [`control`]。
+//! 启动顺序：读引导配置 → 装配模块 → 注册 SIGTERM / SIGINT 接收器 → 绑定
+//! 控制通道 → 等信号或引擎退出。注册先于绑定，套接字可连接之后送达的信号不会
+//! 按默认动作杀死进程（#401）。装配见 [`assembly`]；控制通道见 [`control`]。
 
 pub mod assembly;
 pub mod cli;
@@ -73,17 +74,22 @@ pub async fn run(options: Options) -> Result<(), StartError> {
     serve(&config, assembly, Vec::new(), ControlAuth::ROOT).await
 }
 
-/// 绑定控制通道并服务到收到 SIGTERM / SIGINT。装配由调用方给出：服务端用
-/// [`assemble_real`]，进程级测试用替身装配。
+/// 注册信号接收器，再绑定控制通道并服务到收到 SIGTERM / SIGINT。装配由调用方
+/// 给出：服务端用 [`assemble_real`]，进程级测试用替身装配。
 pub async fn serve(
     config: &BootConfig,
     assembly: Arc<Assembly>,
     commands: Vec<Arc<dyn CommandSet>>,
     auth: ControlAuth,
 ) -> Result<(), StartError> {
-    let socket = ControlSocket::bind(&config.server.control_socket)?;
+    // 订阅必须先于 bind：`signal` 在此安装进程级处理器并建立接收器，绑定之后、
+    // select 首次 poll 之前送达的信号会被缓冲，不会按默认动作终止进程。
+    // `ctrl_c()` 要等首次 poll 才注册，不能覆盖这个窗口。
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(StartError::Signal)?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(StartError::Signal)?;
+    let socket = ControlSocket::bind(&config.server.control_socket)?;
     eprintln!(
         "gantryd: profile={:?} control={:?} ready",
         assembly.profile,
@@ -100,7 +106,7 @@ pub async fn serve(
     tokio::select! {
         _ = &mut serve => {}
         _ = sigterm.recv() => {}
-        _ = tokio::signal::ctrl_c() => {}
+        _ = sigint.recv() => {}
         result = &mut engine => engine_done = Some(result),
     }
     let _ = stop.send(true);

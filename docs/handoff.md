@@ -14,6 +14,8 @@
 - 旧机器上的未提交改动已全部入库：#375 的 Azure CI 配置由 PR #399 合入 `main@3a2fc9e`；本文件由随后的 docs PR 入库。
 - 远端只剩 4 个有意保留的未合并分支（见 §0），其余已合并分支全部删除。
 
+2026-10-30 新机器接手：工具链和 `gh` 登录已核对，schema 冒烟检查通过；S0 已建 #401 并建立独立工作树，诊断与复现进行中。上面三条是交接时的历史快照，当前状态以 §0 和 §4.S 为准。
+
 ### 新机器准备（第一次 clone 后做一次）
 
 ```bash
@@ -88,12 +90,12 @@ cargo --locked xtask schemas --check   # 冒烟：工具链可用
 | 项 | 现状 |
 | --- | --- |
 | 基线 | `main@3a2fc9e`（PR #399 的 merge commit）之后再加本文件入库的 docs PR；代码基线同 `b545553`（PR #398）+ #399 的 CI 配置 |
-| 本地分支 / 工作树 | 新机器重新 clone，无遗留；每一步从最新 `origin/main` 新建独立工作树（`../gantry-wt/<分支名>`） |
+| 本地分支 / 工作树 | 主检出为干净的 `main`；S0 的诊断和测试客户端修改在 `../gantry-wt/test/401-process-flaky`，信号顺序修复在 `../gantry-wt/fix/401-signal-order`，两者最初基于 `main@c041941`，当前状态以 Git 和 §4.S 为准。另有 Orca 锁定的工作树，不属于本任务 |
 | 远端分支 | 已合并分支已全部删除；只剩 4 个未合并分支：`backup/362-stash-pre-364`、`diag/346-linux-linker`、`diag/352-windows-events`、`wip/280-project-projection`，是诊断 / 备份 / 半成品，保留 |
-| 里程碑 | M1.1–M1.3 已关闭；**当前是 M1.4**（开放：#105、#106、#107、#280）；M0.9 只剩 #86 |
+| 里程碑 | M1.1–M1.3 已关闭；**当前是 M1.4**（开放：#105、#106、#107、#280、#401）；M0.9 只剩 #86 |
 | 上一轮成果（已评审） | #369（docs #389 / 实现 #390）、#371（contract #391 / 实现 #392）、#267（#393 / #394 / #395）、#105 C2-a（#396）、#105 C2-c policy / notify（#397）与 pki / secrets（#398）。结论见 §4.0 与 §4 A |
 | **#105 C2-c 已拍板** | **选 B**：`assemble_real` 继续 `NotReady`；在 `gantryd/src/` 写各模块的生产构造函数，替身装配逐片改为调用它们来替换替身。详见 §4 A 与 #105 评论 |
-| **下一步（按 §4「S」编号执行）** | **S0** 先复现并定位进程测试偶发失败（36/37）→ **S1** 把生产主密钥来源与 `pki.ca_dir` 映射提为 `needs-decision` → **S2** #305 补齐 `ForgeReader`（forge 片的前置）→ **S3** #105 forge / repo 片。**S4** #280 契约片可与 S0–S3 并行。详见 §4.S |
+| **下一步（按 §4「S」编号执行）** | **S0 #401 进行中**：先补诊断，再复现进程测试偶发失败（36/37）→ **S1** 把生产主密钥来源与 `pki.ca_dir` 映射提为 `needs-decision` → **S2** #305 补齐 `ForgeReader`（forge 片的前置）→ **S3** #105 forge / repo 片。**S4** #280 契约片可与 S0–S3 并行。详见 §4.S |
 | 2026-10-30 协调核对 | 已核实：#397 / #398 已合入，#105 开放。**新发现**：policy 调用 `ForgeReader::pull_request`（`gantry-policy/src/engine.rs:167`、`service.rs:360`）与 `project_snapshot`（`engine.rs:862`），而真实 `gantry_forge::Reader` 这两个方法仍返回 `not_yet`（`gantry-forge/src/reader.rs:95-112`）——直接换真实 forge 会让审批失败，所以 S2 必须先于 S3 |
 | 远端 CI | GitHub Actions 不可用（#86）。Azure Pipelines 配置已由 PR #399 入库（`.azure-pipelines/`，`.github/workflows` 已删），但**尚未在 Azure 上建管道、跑通**；#375 保持开放，完成标准是"迁移 PR 上 Azure 全绿、合并后 main 自动触发"，需要用户在 Azure DevOps 侧建管道。**合并依据仍是本机门槛** |
 | 生产装配 | `gantryd::assemble_real` 已打开 SQLite store、注册 policy / pki 私有表并构造 notify，仍返回 `NotReady`（有意的失败闭合）；policy 构造尚待 forge 调用，pki / secrets 构造尚未在生产路径调用。所有"通过"都是替身与模块测试证据 |
@@ -190,7 +192,7 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
   - 复现并定位：给出失败用例名、失败日志和根因；修复放在同一 PR（测试侧时序问题）或单独 `fix:` PR（`gantryd` 生产代码，例如先注册信号再绑定套接字，须对照 gantryd.md §7.2）。修复后再循环 30 + 30 次全绿。
   - 未复现：只合入"补诊断"PR，issue 保持开放并写明跑了多少轮、哪些条件；**不得写成"已修复"或"已排除"**。
   - 发现是环境问题（如 macOS 临时目录、端口耗尽）：写明证据，改测试的环境依赖，不改生产代码。
-- **状态**：未开始。
+- **状态**：进行中。已建 [#401](https://github.com/LeXwDeX/gantry/issues/401)。循环复现：默认并行 30/30、单线程 30/30 通过；与全工作区测试重叠的负载组 8/10 通过。第 3 轮 `sigterm_shuts_down_and_removes_the_socket` 的子进程以信号 15 退出且套接字残留；源码显示套接字先绑定、SIGTERM 处理器后注册，失败与该竞态吻合。独立 `fix/401-signal-order` 工作树已调整 SIGTERM / SIGINT 注册顺序并增加进程测试，本机门槛和独立评审通过。第 6 轮 `other_uid_is_refused_before_any_command` 的 `set_read_timeout` 返回系统错误 22；本机实验复现了 macOS 对端关闭后设置套接字选项的失败，`test/401-process-flaky` 工作树已补诊断并把测试客户端的 10 秒超时移到连接之前。完成 S0 前还需处理两处修改的合入、测试客户端的完整门槛和评审，以及修复后的循环复测。不能将 #398 中未留日志的 36/37 直接等同于这两次。复现时全工作区测试本身通过，1,915 项通过、8 项忽略。完整日志在 `/var/folders/jm/w5g1j5td4vl8164rqwl96fn80000gn/T/opencode/gantry-401.wyx7Mv/`，失败日志为 `load-3.log`、`load-6.log`；结果已评论 #401。工具链、`gh` 登录与 schema 冒烟检查通过。
 
 #### S1 生产凭据配置待决项：只提问，不实现
 
