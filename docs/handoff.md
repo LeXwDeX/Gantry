@@ -14,7 +14,7 @@
 - 旧机器上的未提交改动已全部入库：#375 的 Azure CI 配置由 PR #399 合入 `main@3a2fc9e`；本文件由随后的 docs PR 入库。
 - 远端只剩 4 个有意保留的未合并分支（见 §0），其余已合并分支全部删除。
 
-2026-10-30 新机器接手：工具链和 `gh` 登录已核对，schema 冒烟检查通过；S0 已建 #401 并建立独立工作树，诊断与复现进行中。上面三条是交接时的历史快照，当前状态以 §0 和 §4.S 为准。
+2026-10-30 新机器接手：工具链和 `gh` 登录已核对，schema 冒烟检查通过；S0 的诊断、修复与复测已完成，#401 已关闭，下一步是尚未开始的 S1。上面三条是交接时的历史快照，当前状态以 §0 和 §4.S 为准。
 
 ### 新机器准备（第一次 clone 后做一次）
 
@@ -48,7 +48,7 @@ cargo --locked xtask schemas --check   # 冒烟：工具链可用
 
 ### 最短开工路径
 
-1. 看 §0 确认基线，看「协作约定」确认权限，看 §4.S 确定领哪一步（单会话就从 **S0** 开始；多会话按 §4「推荐并行分配」）。
+1. 看 §0 确认基线，看「协作约定」确认权限，看 §4.S 确定领哪一步（S0 已完成，单会话从 **S1** 开始；多会话按 §4「推荐并行分配」）。
 2. 若该步需要新 issue（S0、S1），先用 §4.S 该步里的 `gh issue create` 命令开 issue，记下编号 `<N>`。
 3. 建独立工作树，主检出始终停在干净的 `main`：
 
@@ -89,13 +89,13 @@ cargo --locked xtask schemas --check   # 冒烟：工具链可用
 
 | 项 | 现状 |
 | --- | --- |
-| 基线 | `main@26107d5`（PR #402 的 merge commit）；此前 PR #399 的 Azure CI 配置与 docs PR 已合入 |
-| 本地分支 / 工作树 | 主检出为干净的 `main`；S0 的诊断和测试客户端修改在 `../gantry-wt/test/401-process-flaky`。PR #402 的分支和工作树已清理；当前状态以 Git 和 §4.S 为准 |
-| 远端分支 | PR #402 的分支已删除；保留 4 个诊断 / 备份 / 半成品分支：`backup/362-stash-pre-364`、`diag/346-linux-linker`、`diag/352-windows-events`、`wip/280-project-projection` |
-| 里程碑 | M1.1–M1.3 已关闭；**当前是 M1.4**（开放：#105、#106、#107、#280、#401）；M0.9 只剩 #86 |
+| 基线 | `main@e062502`（PR #403 的 merge commit）；PR #402 的 merge commit 为 `26107d5`，此前 PR #399 的 Azure CI 配置与 docs PR 已合入 |
+| 本地分支 / 工作树 | 两个 S0 实施分支及工作树已清理；收尾状态通过 `docs/401-s0-closeout` 单独提交，合入后清理。主检出保持干净，当前基线和工作树以 Git 为准 |
+| 远端分支 | PR #402 / #403 的分支均已删除；保留 4 个历史分支：`backup/362-stash-pre-364`、`diag/346-linux-linker`、`diag/352-windows-events`、`wip/280-project-projection`。临时收尾分支合入后删除 |
+| 里程碑 | M1.1–M1.3 已关闭；**当前是 M1.4**（开放：#105、#106、#107、#280）；M0.9 只剩 #86。#401 已随 PR #403 合入自动关闭 |
 | 上一轮成果（已评审） | #369（docs #389 / 实现 #390）、#371（contract #391 / 实现 #392）、#267（#393 / #394 / #395）、#105 C2-a（#396）、#105 C2-c policy / notify（#397）与 pki / secrets（#398）。结论见 §4.0 与 §4 A |
 | **#105 C2-c 已拍板** | **选 B**：`assemble_real` 继续 `NotReady`；在 `gantryd/src/` 写各模块的生产构造函数，替身装配逐片改为调用它们来替换替身。详见 §4 A 与 #105 评论 |
-| **下一步（按 §4「S」编号执行）** | **S0 #401 进行中**：先补诊断，再复现进程测试偶发失败（36/37）→ **S1** 把生产主密钥来源与 `pki.ca_dir` 映射提为 `needs-decision` → **S2** #305 补齐 `ForgeReader`（forge 片的前置）→ **S3** #105 forge / repo 片。**S4** #280 契约片可与 S0–S3 并行。详见 §4.S |
+| **下一步（按 §4「S」编号执行）** | **S0 已完成**：#401 已由 PR #402 / #403 修复并关闭 → **S1** 把生产主密钥来源与 `pki.ca_dir` 映射提为 `needs-decision` → **S2** #305 补齐 `ForgeReader`（forge 片的前置）→ **S3** #105 forge / repo 片。**S4** #280 契约片可与 S1–S3 并行。详见 §4.S |
 | 2026-10-30 协调核对 | 已核实：#397 / #398 已合入，#105 开放。**新发现**：policy 调用 `ForgeReader::pull_request`（`gantry-policy/src/engine.rs:167`、`service.rs:360`）与 `project_snapshot`（`engine.rs:862`），而真实 `gantry_forge::Reader` 这两个方法仍返回 `not_yet`（`gantry-forge/src/reader.rs:95-112`）——直接换真实 forge 会让审批失败，所以 S2 必须先于 S3 |
 | 远端 CI | GitHub Actions 不可用（#86）。Azure Pipelines 配置已由 PR #399 入库（`.azure-pipelines/`，`.github/workflows` 已删），PR #402 上已出现 Azure 实际检查：MSRV 检查失败，其余检查未确认。#375 保持开放，完成标准是"迁移 PR 上 Azure 全绿、合并后 main 自动触发"。**合并依据仍是本机门槛** |
 | 生产装配 | `gantryd::assemble_real` 已打开 SQLite store、注册 policy / pki 私有表并构造 notify，仍返回 `NotReady`（有意的失败闭合）；policy 构造尚待 forge 调用，pki / secrets 构造尚未在生产路径调用。所有"通过"都是替身与模块测试证据 |
@@ -163,9 +163,9 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
 
 ### 4.S 下一步全量清单（2026-10-30 协调会话重写，**以本节为准**）
 
-总顺序：**S0 → S1 → S2 → S3a → S3b → S5…**；S4 与 S0–S3 并行；S0 与 S2 碰的文件不重叠，也可以并行。每一步一个分支、一个 PR，从最新 `origin/main` 新建独立工作树，主检出保持干净的 `main`。每步完成后回写本节对应条目的「状态」一行，并更新 §0。
+总顺序：**S0 → S1 → S2 → S3a → S3b → S5…**（S0 已完成）；S4 与 S1–S3 并行。每一步一个分支、一个 PR，从最新 `origin/main` 新建独立工作树，主检出保持干净的 `main`。每步完成后回写本节对应条目的「状态」一行，并更新 §0。
 
-#### S0 进程测试偶发失败：复现、补诊断、定位（先做）
+#### S0 进程测试偶发失败：复现、补诊断、定位（已完成）
 
 - **为什么先做**：#398 的门槛里出现过一次 gantryd 进程测试 36/37，完整输出丢失，失败用例与原因都不知道；#397 也报过 SIGTERM 进程测试偶发失败。S3 会往进程测试里加真实 forge / repo 路径，偶发失败不先查清，后面无法区分"新回归"和"老毛病"，"37 项通过"也不能完全当合并依据。
 - **issue**：新开，挂 M1.4。若定位到生命周期问题且属于 #314 的范围，在 #314 评论关联。
@@ -192,9 +192,9 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
   - 复现并定位：给出失败用例名、失败日志和根因；修复放在同一 PR（测试侧时序问题）或单独 `fix:` PR（`gantryd` 生产代码，例如先注册信号再绑定套接字，须对照 gantryd.md §7.2）。修复后再循环 30 + 30 次全绿。
   - 未复现：只合入"补诊断"PR，issue 保持开放并写明跑了多少轮、哪些条件；**不得写成"已修复"或"已排除"**。
   - 发现是环境问题（如 macOS 临时目录、端口耗尽）：写明证据，改测试的环境依赖，不改生产代码。
-- **状态**：修复与复测已完成，诊断切片待终审合入；[#401](https://github.com/LeXwDeX/gantry/issues/401) 保持开放直到合入。生产信号顺序修复由 [PR #402](https://github.com/LeXwDeX/gantry/pull/402) 合入 `main@26107d5`；诊断与测试客户端修复在 `test/401-process-flaky@175c64b`，已基于该结果复测。
+- **状态**：**已完成**。[#401](https://github.com/LeXwDeX/gantry/issues/401) 已随 PR #403 合入自动关闭。生产信号顺序修复由 [PR #402](https://github.com/LeXwDeX/gantry/pull/402) 合入 `main@26107d5`；诊断与测试客户端修复由 [PR #403](https://github.com/LeXwDeX/gantry/pull/403) 合入 `main@e062502`（代码 head `175c64b`）。S0 变更通过独立终审；两个 PR 的远端 Codex bot 评审均无发现。实施分支与工作树已清理。S0 到此结束，M1.4 未结束，后续从 S1 继续。
 - **初次复现**：默认并行 30/30、单线程 30/30 通过；负载组 8/10。`load-3.log` 的 SIGTERM 以信号 15 退出并留下套接字，对应信号注册晚于绑定；`load-6.log` 的读取超时设置返回 EINVAL，本机实验确认 macOS 对端关闭后设置套接字选项会失败。后者通过连接前设置原有 10 秒超时修复，不忽略错误，不放宽鉴权断言。#398 未保留日志的 36/37 仍不能直接归因于这两次。
-- **修复后证据**：默认并行 30/30、单线程 30/30、带负载 10/10 全通过，每轮 43 项。负载组每轮都有与独立工作区编译实际重叠的进程快照，不代表整轮持续重叠。§3 全部门槛通过：Rust 工作区 1,918 项通过、8 项忽略；Mock API 43 项、桌面端 406 项及构建通过。证据针对提交 `175c64b`，之后仅更新交接文本。
+- **修复后证据**：默认并行 30/30、单线程 30/30、带负载 10/10 全通过，每轮 43 项。负载组每轮都有与独立工作区编译实际重叠的进程快照，不代表整轮持续重叠。§3 全部门槛通过：Rust 工作区 1,918 项通过、8 项忽略；Mock API 43 项、桌面端 406 项及构建通过。证据针对提交 `175c64b`（PR #403 代码 head）；`main@e062502` 与该提交之间只差 `docs/handoff.md`，无代码差异。
 - **证据位置与边界**：本机日志目录 `/var/folders/jm/w5g1j5td4vl8164rqwl96fn80000gn/T/opencode/gantry-401.wyx7Mv/`，修复后使用 `after-*` 前缀，汇总见 `after-final-round-audit.log`。没有覆盖 Ubuntu 实机与真实生产装配；概率性信号测试不能保证每次命中旧窗口。
 
 #### S1 生产凭据配置待决项：只提问，不实现
@@ -365,7 +365,7 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
 
 | 会话 | 任务 | 触碰范围 |
 | --- | --- | --- |
-| 1 | S0 → S1 → S3a → S3b → S5（#105 主线与 gantryd 测试） | `crates/gantryd/`（src 与 tests）、`docs/modules/gantryd.md` §7、`NEXT-STEPS.md` |
+| 1 | S1 → S3a → S3b → S5（#105 主线与 gantryd 测试） | `crates/gantryd/`（src 与 tests）、`docs/modules/gantryd.md` §7、`NEXT-STEPS.md` |
 | 2 | S2（#305） | `crates/gantry-forge/`；合入后会话 1 才开 S3a |
 | 3 | S4（#280：contract → 实现） | `docs/interfaces/`、`schemas/`、`crates/gantry-core`（契约片）、`crates/gantry-api/`、`crates/gantry-store/` 投影读、`tools/mock-api`、`fixtures/api/` |
 | 4（可选） | C 里与上面都不碰的修复，如 engine #320 / #322 | 对应模块目录；forge 的 #298 / #303 / #308 留给 S2、S3a 一并核对，不要另开会话改 forge |
@@ -380,7 +380,7 @@ PR #398 补齐了独立锁文件中 `gantry-store` 的 `tokio` 依赖；原命�
 - **#369 遗留**：硬件密钥与真实桌面外壳未验证。
 - **#371 遗留**：真实 `settings.bootstrap_set` 命令归 C3；替身比契约窄（§4.0）。
 - **#267 遗留**：`tail` 的 `EventStream` 封装未实现，api 仍轮询；`gantryd` 尚未从设置读取 `store.max_event_data_bytes`。
-- **进程测试稳定性**：S0 #401 已复现信号注册顺序和 macOS 连接后设置读取超时两项问题。前者由 PR #402 合入，后者及诊断切片待合入；两项整合后 30+30+10 轮通过（§4.S）。PR #398 未保留输出的 36/37 仍无法归因；重复通过不代表排除了所有偶发失败。独立 `registry-recovery` 锁文件缺少 `tokio` 的问题已在 #398 修复。
+- **进程测试稳定性**：S0 #401 已复现信号注册顺序和 macOS 连接后设置读取超时两项问题，分别由 PR #402、#403 合入，#401 随 #403 自动关闭；两项整合后 30 并行 + 30 单线程 + 10 带负载、每轮 43 项全通过（§4.S）。PR #398 未保留输出的 36/37 仍无法归因于这两项；重复通过不代表已排除所有偶发失败。独立 `registry-recovery` 锁文件缺少 `tokio` 的问题已在 #398 修复。
 - **Windows 整体编译未验证**：`deferred_cancel_survives_resubmission_after_unknown` 用 `#[cfg(unix)]` 门控；本机已安装 Windows Rust 目标，但缺少 Windows SDK 头文件，#398 的交叉检查未完成。
 - **#362 遗留**（见 PR #366 描述）：`Phase::Failed` 恢复时失败分类被覆盖为 `infra.job_identity_unavailable`；`foreign_job_evidence` 遇到其他 sandbox 的损坏 meta 时跳过；`registry_recovery.rs` 的 `/tmp/g362-*`、`Drop::unwrap`、`.recovery.tmp` 残留没有清理路径。
 - **收尾评审信息项**（`docs/reviews/2026-10-29-m13-closeout-review.md` §3.1）：nftables 的 API 来源限制只匹配 IPv4；`/var/lib/gantry` 与 `workspaces` 权限待 #106 实机处理；`CurlProbe` 继承环境代理；`control.rs` 的 accept 出错无退避（归 #314）。
