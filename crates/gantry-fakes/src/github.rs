@@ -72,9 +72,14 @@ impl std::fmt::Display for GithubError {
 
 impl std::error::Error for GithubError {}
 
+type PageKey = (String, String, String, usize);
+type CheckRunPage = (u64, Vec<Value>);
+
 struct GithubState {
     calls: Vec<GithubCall>,
     failures: VecDeque<ScriptedFailure>,
+    /// 按请求路径子串匹配的一次性失败；优先于 `failures`。
+    failures_matching: VecDeque<(String, ScriptedFailure)>,
     pulls: HashMap<(String, u64), Value>,
     issues: HashMap<(String, u64), Value>,
     next_number: u64,
@@ -105,6 +110,24 @@ struct GithubState {
     users: HashMap<String, i64>,
     /// `(repo, PR number) -> reviews`（REST 形状，`state` 大写）。
     reviews: HashMap<(String, u64), Vec<Value>>,
+    /// `(repo, head sha) -> check runs`（REST 形状）。
+    check_runs: HashMap<(String, String), Vec<Value>>,
+    /// `(repo, head sha) -> 传统 commit statuses`（REST 形状，最新在前）。
+    commit_statuses: HashMap<(String, String), Vec<Value>>,
+    /// 脚本化 check-runs 分页：`(repo, sha, filter, page) -> (total_count, check_runs)`。
+    check_run_pages: HashMap<PageKey, CheckRunPage>,
+    /// 脚本化 Link 分页：`(repo, sha, endpoint, page) -> next URL`；`Some(None)` 显式无 next。
+    pagination_links: HashMap<PageKey, Option<String>>,
+    /// 下一个 check-runs 请求返回后对 PR 做的变化（模拟读检查期间状态前进）。
+    after_check_runs: Option<(String, u64, AfterCheckRuns)>,
+    /// 替身自己的 URL，用于生成 Link。
+    base: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AfterCheckRuns {
+    Head(String),
+    Merged,
 }
 
 /// M0 的 GitHub 替身。
@@ -124,6 +147,7 @@ impl FakeGitHub {
         let state = Arc::new(Mutex::new(GithubState {
             calls: Vec::new(),
             failures: VecDeque::new(),
+            failures_matching: VecDeque::new(),
             pulls: HashMap::new(),
             issues: HashMap::new(),
             next_number: 1,
@@ -144,6 +168,12 @@ impl FakeGitHub {
             manifests: HashMap::new(),
             users: HashMap::new(),
             reviews: HashMap::new(),
+            check_runs: HashMap::new(),
+            commit_statuses: HashMap::new(),
+            check_run_pages: HashMap::new(),
+            pagination_links: HashMap::new(),
+            after_check_runs: None,
+            base: format!("http://127.0.0.1:{}", addr.port()),
         }));
         let server = GithubServer::start(listener, state.clone());
         Self {
@@ -176,6 +206,91 @@ impl FakeGitHub {
             body: format!(r#"{{"message":"scripted {status}"}}"#),
             retry_after_s: (status == 429).then_some(1),
         });
+    }
+
+    /// 下一次路径包含 `path_contains` 的请求返回脚本失败（只消费一次）。
+    pub fn fail_next_request_matching(&self, path_contains: impl Into<String>, status: u16) {
+        self.lock().failures_matching.push_back((
+            path_contains.into(),
+            ScriptedFailure {
+                status,
+                body: format!(r#"{{"message":"scripted {status}"}}"#),
+                retry_after_s: None,
+            },
+        ));
+    }
+
+    /// 追加一个 check run（REST 形状；同 `head_sha` 下可有多条，同名重跑由测试自行给不同 id）。
+    pub fn add_check_run(&self, repo: &str, head_sha: &str, run: Value) {
+        self.lock()
+            .check_runs
+            .entry((repo.to_owned(), head_sha.to_owned()))
+            .or_default()
+            .push(run);
+    }
+
+    /// 追加一条传统 commit status（REST 形状）；测试按"最新在前"顺序传入。
+    pub fn add_commit_status(&self, repo: &str, head_sha: &str, status: Value) {
+        self.lock()
+            .commit_statuses
+            .entry((repo.to_owned(), head_sha.to_owned()))
+            .or_default()
+            .push(status);
+    }
+
+    /// 下一次 check-runs 请求返回后把 PR 的 head 改成 `sha`（一次性，模拟读检查期间 head 前进）。
+    pub fn set_pull_head_after_next_check_runs(&self, repo: &str, number: u64, sha: &str) {
+        self.lock().after_check_runs = Some((
+            repo.to_owned(),
+            number,
+            AfterCheckRuns::Head(sha.to_owned()),
+        ));
+    }
+
+    /// 下一次 check-runs 请求返回后把 PR 置为已合并（同 head 期间状态变化）。
+    pub fn set_pull_merged_after_next_check_runs(&self, repo: &str, number: u64) {
+        self.lock().after_check_runs = Some((repo.to_owned(), number, AfterCheckRuns::Merged));
+    }
+
+    /// 覆盖某页 check-runs 的完整响应形状（不经过存储的 run 列表）。
+    pub fn set_check_run_page(
+        &self,
+        repo: &str,
+        head_sha: &str,
+        filter: &str,
+        page: usize,
+        total: u64,
+        runs: Vec<Value>,
+    ) {
+        self.lock().check_run_pages.insert(
+            (
+                repo.to_owned(),
+                head_sha.to_owned(),
+                filter.to_owned(),
+                page,
+            ),
+            (total, runs),
+        );
+    }
+
+    /// 覆盖某页的 `Link` 头；`None` 表示显式无 next（便于测试短页）。
+    pub fn set_pagination_link(
+        &self,
+        repo: &str,
+        head_sha: &str,
+        endpoint: &str,
+        page: usize,
+        link: Option<&str>,
+    ) {
+        self.lock().pagination_links.insert(
+            (
+                repo.to_owned(),
+                head_sha.to_owned(),
+                endpoint.to_owned(),
+                page,
+            ),
+            link.map(str::to_owned),
+        );
     }
 
     /// 下一条**变更类**请求（非 GET）照常处理（含状态变更），但不写回响应、直接关闭连接。
@@ -574,10 +689,12 @@ pub(crate) enum ReadOutcome {
 const MAX_HEAD_BYTES: usize = 1024 * 1024;
 const MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 
+#[derive(Default)]
 struct Response {
     status: u16,
     body: String,
     retry_after_s: Option<u64>,
+    link: Option<String>,
 }
 
 fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<GithubState>>) -> std::io::Result<()> {
@@ -609,6 +726,7 @@ fn bad_request() -> Response {
         status: 400,
         body: json!({"message":"Bad Request"}).to_string(),
         retry_after_s: None,
+        ..Response::default()
     }
 }
 
@@ -750,6 +868,9 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Resul
     if let Some(seconds) = response.retry_after_s {
         head.push_str(&format!("retry-after: {seconds}\r\n"));
     }
+    if let Some(link) = &response.link {
+        head.push_str(&format!("link: {link}\r\n"));
+    }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(response.body.as_bytes())?;
@@ -766,11 +887,20 @@ fn route(request: &HttpRequest, shared: &Arc<Mutex<GithubState>>) -> (Response, 
     let mut state = shared
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut response = if let Some(failure) = state.failures.pop_front() {
+    let matching = state
+        .failures_matching
+        .iter()
+        .position(|(needle, _)| request.path.contains(needle));
+    let failure = matching
+        .and_then(|index| state.failures_matching.remove(index))
+        .map(|(_, failure)| failure)
+        .or_else(|| state.failures.pop_front());
+    let mut response = if let Some(failure) = failure {
         Response {
             status: failure.status,
             body: failure.body,
             retry_after_s: failure.retry_after_s,
+            ..Response::default()
         }
     } else {
         dispatch(request, &path, &mut state)
@@ -799,6 +929,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
             status: 200,
             body: json!({"status":"ok"}).to_string(),
             retry_after_s: None,
+            ..Response::default()
         },
         ("GET", ["repos", owner, repo]) => {
             let full = format!("{owner}/{repo}");
@@ -806,6 +937,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 200,
                 body: repo_json(&full).to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("GET", ["repos", owner, repo, "pulls", number]) => {
@@ -818,6 +950,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     status: 200,
                     body: pull.to_string(),
                     retry_after_s: None,
+                    ..Response::default()
                 },
                 None => not_found(),
             }
@@ -851,6 +984,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 200,
                 body: Value::Array(list).to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("POST", ["repos", owner, repo, "pulls"]) => {
@@ -897,6 +1031,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 201,
                 body: pull.to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("PATCH", ["repos", owner, repo, "pulls", number]) => {
@@ -922,6 +1057,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 200,
                 body: pull.to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("PUT", ["repos", owner, repo, "pulls", number, "merge"]) => {
@@ -938,6 +1074,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     status: 405,
                     body: json!({"message": "Pull Request is not mergeable"}).to_string(),
                     retry_after_s: None,
+                    ..Response::default()
                 };
             }
             if let Some(sha) = body.get("sha") {
@@ -946,6 +1083,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                         status: 409,
                         body: json!({"message": "Head branch was modified"}).to_string(),
                         retry_after_s: None,
+                        ..Response::default()
                     };
                 }
             }
@@ -964,6 +1102,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 })
                 .to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("PATCH", ["repos", owner, repo, "issues", number]) => {
@@ -984,6 +1123,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 200,
                 body: issue.to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("GET", ["repos", owner, repo, "git", "ref", "heads", branch @ ..]) => {
@@ -998,6 +1138,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     })
                     .to_string(),
                     retry_after_s: None,
+                    ..Response::default()
                 },
                 None => not_found(),
             }
@@ -1021,6 +1162,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 201,
                 body: issue.to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("GET", ["repos", owner, repo, "issues", number]) => {
@@ -1033,6 +1175,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     status: 200,
                     body: issue.to_string(),
                     retry_after_s: None,
+                    ..Response::default()
                 },
                 None => not_found(),
             }
@@ -1065,7 +1208,8 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                         body: json!({"message": "The permissions requested are not granted to this installation."})
                             .to_string(),
                         retry_after_s: None,
-                    };
+                        ..Response::default()
+};
                 }
             }
             state.issued_tokens += 1;
@@ -1079,6 +1223,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 })
                 .to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("GET", ["app", "installations", id]) => {
@@ -1094,6 +1239,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     status: 200,
                     body: json!({"id": id, "permissions": permissions}).to_string(),
                     retry_after_s: None,
+                    ..Response::default()
                 },
                 None => not_found(),
             }
@@ -1138,6 +1284,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 200,
                 body: Value::Array(comments).to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         ("GET", ["repos", owner, repo, "pulls", number, "reviews"]) => {
@@ -1153,6 +1300,125 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 body: Value::Array(state.reviews.get(&key).cloned().unwrap_or_default())
                     .to_string(),
                 retry_after_s: None,
+                ..Response::default()
+            }
+        }
+        ("GET", ["repos", owner, repo, "commits", sha, "check-runs"]) => {
+            let full = format!("{owner}/{repo}");
+            let query = parse_query(&request.path);
+            let filter = query.get("filter").map(String::as_str).unwrap_or("latest");
+            let (page_no, per_page) = page_params(&query);
+            let endpoint = format!("/repos/{full}/commits/{sha}/check-runs");
+            let (total_count, page_runs) = match state.check_run_pages.get(&(
+                full.clone(),
+                (*sha).to_owned(),
+                filter.to_owned(),
+                page_no,
+            )) {
+                Some((total, runs)) => (*total, runs.clone()),
+                None => {
+                    let mut runs = state
+                        .check_runs
+                        .get(&(full.clone(), (*sha).to_owned()))
+                        .cloned()
+                        .unwrap_or_default();
+                    // 替身默认返回全部存储的 run；latest 的“只保留最新”由测试显式脚本化，
+                    // 不把客户端的去重假设写成 API 保证。
+                    runs.sort_by_key(|run| {
+                        run.get("id").and_then(Value::as_u64).unwrap_or_default()
+                    });
+                    let total = u64::try_from(runs.len()).unwrap_or(u64::MAX);
+                    let start = (page_no - 1) * per_page;
+                    (total, runs.into_iter().skip(start).take(per_page).collect())
+                }
+            };
+            let body = json!({"total_count": total_count, "check_runs": page_runs}).to_string();
+            let link_key = (
+                full.clone(),
+                (*sha).to_owned(),
+                "check-runs".to_owned(),
+                page_no,
+            );
+            let auto_next = page_no * per_page < usize::try_from(total_count).unwrap_or(usize::MAX);
+            let link = match state.pagination_links.get(&link_key) {
+                Some(link) => link.clone(),
+                None => auto_next.then(|| {
+                    format!(
+                        "<{}{endpoint}?filter={filter}&per_page={per_page}&page={}>; rel=\"next\"",
+                        state.base,
+                        page_no + 1
+                    )
+                }),
+            };
+            let after = state
+                .after_check_runs
+                .clone()
+                .filter(|(repo, _, _)| *repo == full);
+            if let Some((_, number, change)) = after {
+                state.after_check_runs = None;
+                let at = stamp(state);
+                if let Some(pull) = state.pulls.get_mut(&(full.clone(), number)) {
+                    match change {
+                        AfterCheckRuns::Head(next) => {
+                            pull["head"]["sha"] = json!(next);
+                            let branch =
+                                pull["head"]["ref"].as_str().unwrap_or_default().to_owned();
+                            touch(pull, &at);
+                            state.refs.insert((full, branch), next);
+                        }
+                        AfterCheckRuns::Merged => {
+                            pull["merged"] = json!(true);
+                            pull["state"] = json!("closed");
+                            pull["merge_commit_sha"] =
+                                json!(format!("{:040x}", 0xfeed_0000_u64 + number));
+                            pull["merged_at"] = json!(at);
+                            touch(pull, &at);
+                        }
+                    }
+                }
+            }
+            Response {
+                status: 200,
+                body,
+                retry_after_s: None,
+                link,
+            }
+        }
+        ("GET", ["repos", owner, repo, "commits", sha, "statuses"]) => {
+            let full = format!("{owner}/{repo}");
+            let query = parse_query(&request.path);
+            let (page_no, per_page) = page_params(&query);
+            let endpoint = format!("/repos/{full}/commits/{sha}/statuses");
+            let all = state
+                .commit_statuses
+                .get(&(full.clone(), (*sha).to_owned()))
+                .cloned()
+                .unwrap_or_default();
+            let total = all.len();
+            let start = (page_no - 1) * per_page;
+            let page_statuses: Vec<Value> = all.into_iter().skip(start).take(per_page).collect();
+            let link_key = (
+                full.clone(),
+                (*sha).to_owned(),
+                "statuses".to_owned(),
+                page_no,
+            );
+            let auto_next = page_no * per_page < total;
+            let link = match state.pagination_links.get(&link_key) {
+                Some(link) => link.clone(),
+                None => auto_next.then(|| {
+                    format!(
+                        "<{}{endpoint}?per_page={per_page}&page={}>; rel=\"next\"",
+                        state.base,
+                        page_no + 1
+                    )
+                }),
+            };
+            Response {
+                status: 200,
+                body: Value::Array(page_statuses).to_string(),
+                retry_after_s: None,
+                link,
             }
         }
         ("POST", ["app-manifests", code, "conversions"]) => match state.manifests.remove(*code) {
@@ -1160,6 +1426,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 201,
                 body: body.to_string(),
                 retry_after_s: None,
+                ..Response::default()
             },
             None => not_found(),
         },
@@ -1170,6 +1437,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                     status: 200,
                     body: json!({"login": login, "id": id, "type": "Bot"}).to_string(),
                     retry_after_s: None,
+                    ..Response::default()
                 },
                 None => not_found(),
             }
@@ -1199,6 +1467,7 @@ fn dispatch(request: &HttpRequest, path: &str, state: &mut GithubState) -> Respo
                 status: 200,
                 body: json!({"data": data}).to_string(),
                 retry_after_s: None,
+                ..Response::default()
             }
         }
         _ => not_found(),
@@ -1292,6 +1561,7 @@ fn unprocessable(message: &str) -> Response {
         status: 422,
         body: json!({ "message": message }).to_string(),
         retry_after_s: None,
+        ..Response::default()
     }
 }
 
@@ -1305,6 +1575,20 @@ fn parse_query(path: &str) -> BTreeMap<String, String> {
         .filter_map(|pair| pair.split_once('='))
         .map(|(key, value)| (percent_decode(key), percent_decode(value)))
         .collect()
+}
+
+fn page_params(query: &BTreeMap<String, String>) -> (usize, usize) {
+    let per_page = query
+        .get("per_page")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(30)
+        .clamp(1, 100);
+    let page = query
+        .get("page")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    (page, per_page)
 }
 
 fn percent_decode(value: &str) -> String {
@@ -1360,6 +1644,7 @@ fn unauthorized() -> Response {
         status: 401,
         body: json!({"message":"A JSON web token could not be decoded"}).to_string(),
         retry_after_s: None,
+        ..Response::default()
     }
 }
 
@@ -1368,6 +1653,7 @@ fn not_found() -> Response {
         status: 404,
         body: json!({"message":"Not Found"}).to_string(),
         retry_after_s: None,
+        ..Response::default()
     }
 }
 
