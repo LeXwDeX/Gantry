@@ -38,6 +38,9 @@ use gantry_forge::{
     Dispatcher, DispatcherDeps, DispatcherOptions, Executor, ExecutorDeps, ExecutorOptions,
     FaultInjector, Forge, ForgeConfig, ReaderDeps, TokenProvider,
 };
+use gantry_models::{
+    AnthropicProvider, EffortTable, ModelRouter, RouterClock, RouterDeps, StoreSettings, ViewCache,
+};
 use gantry_notify::Notify;
 use gantry_pki::{Pki, PkiConfig, PkiError};
 use gantry_policy::{PolicyApprovals, PolicyDeps, PolicyEngine};
@@ -183,6 +186,31 @@ pub fn build_policy(
 /// notify 的生产构造；状态在 store 的内置投影里，不注册私有表。
 pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
     Arc::new(Notify::new(store.clone(), ids))
+}
+
+/// models 的生产构造：模型配置与推理深度来自共享 store 的设置投影（`StoreSettings`
+/// 按修订缓存视图）；提供方凭据由注入的 Egress 持有，调用只经其回环。本函数接入
+/// Egress 端口、ID / 熵 / 时钟和调用方给出的推理深度能力表（`EffortTable`），不
+/// 内置模型能力数据（models.md OQ-1 / OQ-8）。
+///
+/// `assemble_real` 尚未调用本函数；测试装配仍使用 `FakeModelProvider`。
+pub fn build_models(
+    store: &Store,
+    egress: Arc<dyn EgressControl>,
+    ids: Arc<IdGen>,
+    entropy: Arc<dyn Entropy>,
+    clock: Arc<dyn RouterClock>,
+    efforts: EffortTable,
+) -> ModelRouter {
+    ModelRouter::new(RouterDeps {
+        views: ViewCache::new(Arc::new(StoreSettings::new(store.clone()))),
+        providers: vec![Arc::new(AnthropicProvider::new(efforts))],
+        egress,
+        store: store.clone(),
+        entropy,
+        ids,
+        clock,
+    })
 }
 
 /// repo 的生产构造：`RepoDeps` 的时钟必须与 store 共用，`policy` 与 `cas` 由调用方注入。

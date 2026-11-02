@@ -83,23 +83,23 @@ pub trait CommandSet: Send + Sync {
 
 | 装配 | 在哪里 | 用途 |
 | --- | --- | --- |
-| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store 与 notify 生产构造函数；forge / policy / repo 的构造函数（`build_forge`、`build_policy`、`build_repo`）已就绪，但 `assemble_real` 尚未调用；secrets / pki 的生产构造入口（`build_secrets`、`build_pki`）已就绪，但生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定，`pki.ca_dir` 也尚无 BootConfig 字段映射；因此尚未打开。其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
+| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store 与 notify 生产构造函数；forge / policy / repo / models 的构造函数（`build_forge`、`build_policy`、`build_repo`、`build_models`）已就绪，但 `assemble_real` 尚未调用；secrets / pki 的生产构造入口（`build_secrets`、`build_pki`）已就绪，但生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定，`pki.ca_dir` 也尚无 BootConfig 字段映射；因此尚未打开。其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
 | 替身装配 `assemble_fakes` | `tests/support/`（只用 dev-dependency） | 进程级测试。测试二进制带 `GANTRYD_FAKES_CHILD` 重新执行自身，作为"用替身装配的 gantryd"子进程 |
 
 替身装配的当前构成（`status` 原样报告）：
 
 | 模块 | 提供方 | 说明 |
 | --- | --- | --- |
-| engine | 真实 | `EngineRuntime`；配置经 `from_settings` 换算，模型表由 `gantry-models` 的 `ModelsView` 从设置推导 |
+| engine | 真实 | `EngineRuntime`；配置经 `from_settings` 换算；模型表由测试 helper 用硬编码设置经 `ModelsView` 推导，不是生产接线 |
 | notify | 真实 | `assembly::build_notify`（`Notify`） |
 | store | 替身 / 真实 | 默认内存日志 + CAS；设置 SQLite 目录时用真实 store |
 | policy | 真实 | `assembly::build_policy`（`PolicyEngine` + `PolicyApprovals`）；审批由测试设备签名 |
 | secrets | 真实 | `assembly::build_secrets`：测试临时目录里的 `FileSecrets`，M1 只承载 Forge / Pki；Notify 自 M4 才加入，**不含 Egress**；测试代码显式 `init`，生产构造函数只 `open` |
 | pki | 真实 | `assembly::build_pki`：测试 CA（`bootstrap::run_with` + 可替换内存盘探测）与真实 `Pki::open`；测试设备经公开 `pairing().open_session` / `redeem` 登记，私钥只留在测试进程内存；吊销经真实 `StoreAdmin::revoke` 写本地与备份吊销日志（都在 scratch 内） |
 | forge | 真实 | `assembly::build_forge` 两阶段构造：同一 `Forge` 先给 policy 无 mirror 的 reader，再接 repo/policy 构造执行器与完整 reader；GitHub 用回环 `FakeGitHub`，由父测试进程持有 |
-| repo | 替身（测试侧真实 Git） | 测试装配用真实 `GitRepo` + 测试裸远端；生产 `build_repo` 仍归 S3b，`status` 报 fake |
+| repo | 替身（测试侧真实 Git） | 测试装配经 `assembly::build_repo` 构造真实 `GitRepo` + 测试裸远端；`assemble_real` 尚未调用 `build_repo`，`status` 仍报 fake |
 | sandbox | 替身 | `GoldenSandbox`（显式注入可应用到 base 的完整补丁） |
-| worker / models / egress / conversation | 替身 | `gantry-fakes` 对应替身 |
+| worker / models / egress / conversation | 替身 | `gantry-fakes` 对应替身；models 另有 `assembly::build_models` 独立构造与回环测试，测试装配未切换 |
 | api | 未装配 | 不计入 `Assembly` 字段：api 是 `serve` 的服务任务；M1.4 接线时补齐 |
 
 某个模块换成真实实现时，生产构造函数写进 `src/assembly.rs`，测试装配与
@@ -108,7 +108,9 @@ pub trait CommandSet: Send + Sync {
 空列表打开、再以完整列表重开必须可用（本片用例）。
 
 **测试里的 `real` 不等于生产已在运行。** `assemble_real` 仍返回 `NotReady`；测试装配
-在同一进程/子进程里构造真实的 secrets、pki、policy 与 notify，并用它们跑完整路径，但
+在同一进程/子进程里构造真实的 secrets、pki、policy 与 notify，并用它们跑完整路径。
+`build_models` 目前只有独立构造与 `ModelRouter` 本机回环测试：测试装配仍用
+`FakeModelProvider`，`assemble_real` 未调用它，因此不代表真实模型 / Egress 验收。
 生产凭据来源（主密钥来源与名称，secrets.md OQ-2 / deploy OPS-08）、`pki.ca_dir` 的
 引导配置映射与 `Pki::tick` 的周期调度都还没有接到 `serve`。吊销日志在 `revoke` 内同步
 追加并 fsync 本地与备份目标，没有另外的周期备份调度。生产接线前必须先确定上面两组
@@ -160,6 +162,7 @@ pub trait CommandSet: Send + Sync {
 - [x] `github.setup.*` 替身命令符合 deploy 接线约定，应答不含密钥（进程级）。
 - [x] engine.md §12.2「端到端（替身）」主路径在独立 gantryd 进程里跑通：阶段序列恰为 `spec → implement → propose → review → merge → closed`，`spec → implement` 的 `reason = admission_skipped`，无 degraded（进程级）。
 - [x] SQLite store 先以空模块列表打开、再以生产模块列表重开，policy 私有表可读写（组件测试）。
+- [x] models 生产构造（`build_models`）独立接入真实内存 store 与 `EgressStub` 回环：utility / planner 调用各产生一次 svc 数据面调用并写入真实 `budget.charged`；未知 effort / 模型与未配置模型在发请求前失败闭合，且没有 `budget.charged`（组件测试）。测试装配仍用 `FakeModelProvider`，不代表真实模型 / Egress 验收。
 - [x] 真实 policy / notify 经生产构造函数装配；合并审批由测试设备密钥签名，正负签名对照通过（进程级）。
 - [x] 真实 secrets / pki 经生产构造函数（`build_secrets` / `build_pki`）装配；设备经公开配对服务登记并使用真实 CA 材料；已配对设备完成 challenge / 签名 / grant，审批 ID、设备公钥指纹、PR head 与时序绑定正确，交付到 `closed`（进程级）。
 - [x] 被真实 `StoreAdmin::revoke` 吊销的设备与未登记设备均被拒；断言没有 grant、没有 merge 入队，审批保持 pending；错误签名同样被拒（进程级）。还覆盖“challenge 已发出、提交前吊销”：提交时重新读取设备，拒绝该签名（测试驱动的请求边界，不代表真实 API 或并发竞态）。
@@ -171,8 +174,9 @@ pub trait CommandSet: Send + Sync {
 
 ## 13. 开放问题
 
-- **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供。测试装配已改为经 `from_settings` 换算，`fake.runtime_status` 读取运行时 `status()`；模型表已由 `gantry-models` 从 models 设置推导。生产 `assemble_real` 尚未调用这些入口，控制通道 `status` 仍只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
-- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_forge` / `build_policy` / `build_repo` / `build_notify`，`status` 报 real；`assemble_real` 目前只调用 `build_notify`，policy 依赖 `ForgeReader`，待 forge 片接入。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
+- **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供。测试装配已改为经 `from_settings` 换算，`fake.runtime_status` 读取运行时 `status()`；模型表由测试 helper 用硬编码设置经 `gantry-models::ModelsView` 推导，不是从生产设置自动推导。生产 `assemble_real` 尚未调用这些入口，控制通道 `status` 仍只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
+- **models 生产构造**：`build_models` 已把 `StoreSettings` / `ViewCache`、`AnthropicProvider`、注入的 Egress / ID / 熵 / 时钟 / 能力表接到真实 `ModelRouter`；本机回环测试覆盖 utility / planner 调用与失败闭合。`assemble_real` 未调用，测试装配仍是 `FakeModelProvider`。模型配置值（provider / model）来自 models 设置且没有内置默认；推理深度能力表由调用方注入（models.md OQ-1 / OQ-8），提供方凭据由 Egress 持有。以上不代表真实模型 / Egress 验收。
+- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_forge` / `build_policy` / `build_repo` / `build_notify`，其中 policy / notify 的 `status` 报 real，repo 仍报 fake；`assemble_real` 目前只调用 `build_notify`，policy 依赖 `ForgeReader`，待 forge 片接入。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
 - **secrets / pki 的生产配置**：`build_secrets` 已按 `server.secrets_dir` 打开实例，`build_pki` 接受显式 `PkiConfig` 与按 `Consumer::Pki` 限定的 `SecretSink`；两者均由调用方注入，gantryd 不猜主密钥来源、CA 目录或 Egress 实例。`assemble_real` 尚未打开它们：生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定；`pki.ca_dir` 是另一项缺口，尚无 BootConfig 字段映射。两者接线前还需解决配置与 `harden_process` 的顺序。
 - **pki 后台生命周期**：`Pki::tick()`（关闭过期配对窗口、按需续签服务端证书）尚未由 `serve` 周期调用；吊销日志在 `revoke` 内同步追加并 fsync 本地与备份目标，不需要额外调度。测试只覆盖同步构造、配对、授权、吊销与崩溃重启，不代表周期任务已在运行。
 - **测试 `real` 的边界**：测试装配里的 secrets / pki 使用测试临时目录、静态主密钥与软件设备密钥。它证明的是生产构造路径与跨模块语义，不证明操作系统用户隔离、真实设备配对或 Ubuntu 部署；这些证据归 B / C 级验收。
