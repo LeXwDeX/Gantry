@@ -16,16 +16,11 @@ use serde_json::{json, Value};
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use gantry_core::canon::GitOid;
-use gantry_core::entities::{
-    Approval, ApprovalStatus, ForgeActionKind, GithubPrRef, GithubRef, Seq, Stage,
-};
+use gantry_core::entities::{Approval, ApprovalStatus, ForgeActionKind, Seq, Stage};
 use gantry_core::ids::ApprovalId;
 use gantry_engine::decide::{Input, InputIdentity, TickReason};
 use gantry_engine::engine::load_delivery_state;
-use gantry_store::ClaimOpts;
 
 use super::engine_cfg;
 
@@ -369,14 +364,15 @@ async fn events(assembly: &Assembly, args: Value) -> Response {
 /// 跨多次 `fake.drive` 调用保留的驱动状态（单个交付单元）。
 #[derive(Default)]
 struct DriveState {
-    merged: bool,
     granted: Option<ApprovalId>,
+    /// 已为哪些 head 注入过成功的 CI 检查（测试 GitHub 的完成事件）。
+    ci: BTreeSet<String>,
 }
 
 impl FakeCommands {
     /// 推进一步，返回当前阶段：
-    /// 1. 认领并完成排队的 Outbox 动作（`create_pr` 绑定 PR [`PR_NUMBER`]）；
-    /// 2. 有 PR 后写入 PR 快照（合并后为 `merged`）；真实 policy 的授权检查读它；
+    /// 1. 真实 forge 执行器处理排队的 Outbox 动作（含真实 git push 与 GitHub REST）；
+    /// 2. 有 PR 后由真实 Dispatcher 回读 FakeGitHub：写入快照并发布 `forge.synced`；
     /// 3. `auto_approve` 时以测试设备密钥授予待决审批（challenge + 签名 + grant）；
     /// 4. 给执行体一个 `Tick(Settle)`。
     ///
@@ -390,22 +386,28 @@ impl FakeCommands {
             Some(Ok(id)) => id,
             _ => return Response::err("bad_request", "expected {delivery_id}"),
         };
-        let store = &self.fakes.store;
-        let head = self
-            .fakes
-            .sandbox
-            .jobs()
-            .iter()
-            .find_map(|job| self.fakes.repo.commit_record(job))
-            .map(|record| record.commit_oid);
-        let done = match execute_outbox(store, head, self.fakes.real_executor.is_some()).await {
-            Ok(done) => done,
-            Err(error) => return Response::err("store", error),
-        };
-        if done.contains(&ForgeActionKind::MergePr) {
-            self.drive_state().merged = true;
+        // 手动审批模式下把 merge_pr 留给测试显式驱动（`fake.real_execute`），
+        // 这样可以在执行前改变 live head 验证 precondition。
+        // 真实执行器一次处理一个动作；遇到重试 / 失败 / 取消就停下，等下一次驱动。
+        loop {
+            if !self.fakes.auto_approve && self.merge_pending(&delivery).await {
+                break;
+            }
+            // Git 与 REST 夹具只从裸远端的实际 ref 同步（S3a 决定）。
+            self.sync_bare_refs();
+            match self.fakes.executor.run_once().await {
+                Ok(Some(step)) => match step.outcome {
+                    gantry_forge::StepOutcome::Succeeded => continue,
+                    gantry_forge::StepOutcome::Requeued
+                    | gantry_forge::StepOutcome::Failed { .. }
+                    | gantry_forge::StepOutcome::Cancelled => break,
+                },
+                Ok(None) => break,
+                Err(error) => return Response::err("forge", error.to_string()),
+            }
         }
-        let state = match load_delivery_state(store, &delivery).await {
+        self.ensure_ci_green();
+        let state = match load_delivery_state(&self.fakes.store, &delivery).await {
             Ok(Some(state)) => state,
             Ok(None) => return Response::err("not_found", "no such delivery"),
             Err(error) => return Response::err("engine", error.to_string()),
@@ -413,33 +415,20 @@ impl FakeCommands {
         if state.delivery.stage == Stage::Closed && state.worktree.is_none() {
             return Response::ok(json!({ "stage": state.delivery.stage, "done": true }));
         }
-        if let (Some(_), Some(head)) = (&state.pr, head) {
-            let merged = self.drive_state().merged;
-            let pr = engine_cfg::snapshot(if merged { "merged" } else { "open" }, head);
-            // 先写快照，再授予审批：真实 policy 的 grant 会核对同一 PR head。
-            if let Err(error) = upsert_pr(store, &self.fakes.forge, pr).await {
-                return Response::err("store", error.to_string());
-            }
-            if let Some((_, github)) = &self.fakes.real_executor {
-                // FakeForge 和 HTTP FakeGitHub 是独立事实源；create_pr 仍由替身完成，
-                // 显式同步同一个 PR 号和 head，真实执行器只处理 merge_pr。
-                if github.pull("acme/web", engine_cfg::PR_NUMBER).is_none() {
-                    for _ in 1..engine_cfg::PR_NUMBER {
-                        github.insert_issue("acme/web", "number placeholder");
-                    }
-                    github.set_branch("acme/web", "gantry/test", &head.to_string());
-                    let (login, id) = github.bot();
-                    assert_eq!(
-                        github.insert_pull(
-                            "acme/web",
-                            "gantry/test",
-                            "main",
-                            (&login, id),
-                            "fixture"
-                        ),
-                        engine_cfg::PR_NUMBER
-                    );
-                }
+        if let Some(pr) = &state.pr {
+            let report = self
+                .fakes
+                .dispatcher
+                .reconcile(
+                    gantry_core::ports::ReconcileTarget::Pr {
+                        project: super::project_id(),
+                        number: pr.number,
+                    },
+                    gantry_core::forge::DriftDetectedBy::OnDemand,
+                )
+                .await;
+            if let Err(error) = report {
+                return Response::err("forge", error.to_string());
             }
             let granted = self.drive_state().granted;
             if self.fakes.auto_approve && granted.is_none() {
@@ -471,21 +460,130 @@ impl FakeCommands {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// 是否有待执行的 `merge_pr`（手动审批模式下留给显式驱动）。
+    async fn merge_pending(&self, delivery: &DeliveryId) -> bool {
+        load_delivery_state(&self.fakes.store, delivery)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|state| {
+                let queued = state.outbox.values().any(|row| {
+                    row.kind == ForgeActionKind::MergePr
+                        && row.status == gantry_core::entities::OutboxStatus::Queued
+                });
+                // 审批已授予但引擎尚未入队 merge：也先不执行，避免抢占后续 merge。
+                let granted = state.approvals.values().any(|approval| {
+                    approval.action
+                        == gantry_core::entities::ApprovalAction::Forge(ForgeActionKind::MergePr)
+                        && approval.status == gantry_core::entities::ApprovalStatus::Granted
+                });
+                queued || granted
+            })
+    }
+
+    /// 模拟 CI 完成：每个非默认分支的 head 注入一条成功的 check run（一次）。
+    fn ensure_ci_green(&self) {
+        let bare = self.fakes.bare.to_str().expect("bare path");
+        let output = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                bare,
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads",
+            ])
+            .output()
+            .expect("read bare remote refs");
+        assert!(output.status.success(), "git for-each-ref failed");
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let Some((branch, sha)) = line.split_once(' ') else {
+                continue;
+            };
+            if branch == "main" {
+                continue;
+            }
+            if !self.drive_state().ci.insert(sha.to_owned()) {
+                continue;
+            }
+            self.fakes.github.add_check_run(
+                "acme/web",
+                sha,
+                json!({
+                    "id": 1,
+                    "name": "ci",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_sha": sha,
+                    "check_suite": {"id": 1},
+                    "app": {"id": 1, "slug": "ci"},
+                }),
+            );
+        }
+    }
+
+    /// 把裸远端的实际分支 ref 同步到 FakeGitHub；不按 Outbox 期望 payload 伪造成功。
+    fn sync_bare_refs(&self) {
+        let bare = self.fakes.bare.to_str().expect("bare path");
+        let output = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                bare,
+                "for-each-ref",
+                "--format=%(refname:short) %(objectname)",
+                "refs/heads",
+            ])
+            .output()
+            .expect("read bare remote refs");
+        assert!(
+            output.status.success(),
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some((branch, sha)) = line.split_once(' ') {
+                self.fakes.github.set_branch("acme/web", branch, sha);
+            }
+        }
+    }
+
     async fn real_execute(&self, args: Value) -> Response {
-        let Some((executor, github)) = &self.fakes.real_executor else {
-            return Response::err("forge", "real executor is not enabled");
+        self.sync_bare_refs();
+        let number = match args
+            .get("delivery_id")
+            .and_then(Value::as_str)
+            .map(str::parse::<DeliveryId>)
+        {
+            Some(Ok(delivery)) => match load_delivery_state(&self.fakes.store, &delivery)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|state| state.pr)
+            {
+                Some(pr) => pr.number,
+                None => return Response::err("forge", "PR is not bound"),
+            },
+            _ => engine_cfg::PR_NUMBER,
         };
         if args.get("move_head").and_then(Value::as_bool) == Some(true) {
-            github.set_pull_head("acme/web", engine_cfg::PR_NUMBER, engine_cfg::BASE);
+            self.fakes
+                .github
+                .set_pull_head("acme/web", number, &engine_cfg::base().to_string());
         }
-        let result = executor.run_once().await;
-        let calls = github
+        let result = self.fakes.executor.run_once().await;
+        let calls = self
+            .fakes
+            .github
             .recorded_calls()
             .iter()
-            .filter(|call| call.method == "PUT" && call.path.ends_with("/merge"))
+            .filter(|call| {
+                call["method"] == "PUT"
+                    && call["path"]
+                        .as_str()
+                        .is_some_and(|path| path.ends_with("/merge"))
+            })
             .count();
         Response::ok(
-            json!({"result": format!("{result:?}"), "merge_calls": calls, "pull": github.pull("acme/web", engine_cfg::PR_NUMBER)}),
+            json!({"result": format!("{result:?}"), "merge_calls": calls, "pull": self.fakes.github.pull("acme/web", number)}),
         )
     }
 
@@ -493,9 +591,6 @@ impl FakeCommands {
         use gantry_core::entities::{MergeMethod, Priority};
         use gantry_core::forge::{ActionPayload, MergeMode, MergePrPayload};
         use gantry_core::ports::{EnqueueRequest, EnqueuedBy, EnqueuedByModule, OutboxPort};
-        if self.fakes.real_executor.is_none() {
-            return Response::err("forge", "real executor is not enabled");
-        }
         let Some(id) = args
             .get("id")
             .and_then(Value::as_str)
@@ -503,15 +598,45 @@ impl FakeCommands {
         else {
             return Response::err("bad_request", "expected approval id");
         };
-        let Some(head) = self
-            .fakes
-            .sandbox
-            .jobs()
-            .iter()
-            .find_map(|job| self.fakes.repo.commit_record(job))
-            .map(|record| record.commit_oid)
+        let Some(Ok(delivery)) = args
+            .get("delivery_id")
+            .and_then(Value::as_str)
+            .map(str::parse::<DeliveryId>)
         else {
-            return Response::err("forge", "head not ready");
+            return Response::err("bad_request", "expected delivery_id");
+        };
+        let state = match load_delivery_state(&self.fakes.store, &delivery).await {
+            Ok(Some(state)) => state,
+            Ok(None) => return Response::err("not_found", "no such delivery"),
+            Err(error) => return Response::err("engine", error.to_string()),
+        };
+        let Some(pr) = state.pr else {
+            return Response::err("forge", "PR is not bound");
+        };
+        // 探针前强制回读一次：不依赖引擎是否已经驱动过这一轮快照。
+        if let Err(error) = self
+            .fakes
+            .dispatcher
+            .reconcile(
+                gantry_core::ports::ReconcileTarget::Pr {
+                    project: super::project_id(),
+                    number: pr.number,
+                },
+                gantry_core::forge::DriftDetectedBy::OnDemand,
+            )
+            .await
+        {
+            return Response::err("forge", error.to_string());
+        }
+        let snapshot = match self
+            .assembly
+            .forge
+            .pull_request(&super::project_id(), pr.number)
+            .await
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return Response::err("forge", "PR snapshot not ready"),
+            Err(error) => return Response::err("forge", error.to_string()),
         };
         let ctx = ActorCtx {
             actor: Actor::new(ActorKind::Engine, "test-probe"),
@@ -528,8 +653,8 @@ impl FakeCommands {
             delivery_id: "dlv_01JB6Z3K7R9T2X5N8Q1V4W6YZM".parse().unwrap(),
             payload: ActionPayload::MergePr(MergePrPayload {
                 repo: engine_cfg::repo_slug(),
-                pull_number: engine_cfg::PR_NUMBER,
-                expected_head_sha: head,
+                pull_number: snapshot.number,
+                expected_head_sha: snapshot.head_sha,
                 merge_method: MergeMethod::Squash,
                 mode: MergeMode::Auto,
                 commit_title: None,
@@ -788,66 +913,5 @@ impl FakeCommands {
                 Response::err("pki", error.to_string())
             }
         }
-    }
-}
-
-/// FakeForge 的直接写绕过 Store 写门；持租约期间不得开始另一个写事务。
-pub(crate) async fn upsert_pr(
-    store: &gantry_store::Store,
-    forge: &gantry_fakes::forge::FakeForge,
-    pr: gantry_core::entities::PullRequestRef,
-) -> Result<(), gantry_store::StoreError> {
-    let gate = store.begin_write().await?;
-    forge.upsert_pr(super::project_id(), "gantry/test", pr);
-    gate.rollback().await
-}
-
-/// 扮演 forge 执行器：认领并完成全部排队动作，返回完成的动作种类。
-async fn execute_outbox(
-    store: &gantry_store::Store,
-    head: Option<GitOid>,
-    leave_merge: bool,
-) -> Result<Vec<ForgeActionKind>, String> {
-    let text = |error: gantry_store::StoreError| error.to_string();
-    let mut done = Vec::new();
-    loop {
-        let mut tx = store.begin_write().await.map_err(text)?;
-        let claimed = tx
-            .outbox()
-            .claim(ClaimOpts {
-                lease: Duration::from_secs(60),
-                exclude_deliveries: BTreeSet::new(),
-            })
-            .await
-            .map_err(text)?;
-        let Some(claimed) = claimed else {
-            tx.rollback().await.map_err(text)?;
-            return Ok(done);
-        };
-        let action = claimed.action;
-        if leave_merge && action.kind == ForgeActionKind::MergePr {
-            tx.rollback().await.map_err(text)?;
-            return Ok(done);
-        }
-        let pr = match (action.kind, head) {
-            (ForgeActionKind::CreatePr, Some(head)) => Some(GithubPrRef {
-                number: engine_cfg::PR_NUMBER,
-                node_id: "PR_x".into(),
-                head_sha: head,
-            }),
-            _ => None,
-        };
-        let github_ref = GithubRef {
-            bot: None,
-            pr,
-            marker: None,
-            recorded_at: None,
-        };
-        tx.outbox()
-            .complete(&action.id, github_ref)
-            .await
-            .map_err(text)?;
-        tx.commit().await.map_err(text)?;
-        done.push(action.kind);
     }
 }

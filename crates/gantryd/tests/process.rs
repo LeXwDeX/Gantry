@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use gantry_core::canon::ApprovalPayload;
+use gantry_core::canon::GitOid;
+use gantry_fakes::github::FakeGitHub;
 use p256::ecdsa::signature::Signer as _;
 use serde_json::{json, Value};
 
@@ -52,6 +54,17 @@ fn fake_gantryd(scratch: &Scratch, control_uid: u32) -> Command {
             support::CHILD_ENV,
             format!("{}\n{control_uid}", scratch.config().display()),
         )
+        .env(
+            support::CHILD_FORGE_ENV,
+            format!(
+                "{}\n{}\n{}\n{}\n{}",
+                scratch.control.base_url(),
+                scratch.github.base_url(),
+                scratch.git_base.display(),
+                scratch.base,
+                scratch.bare.display()
+            ),
+        )
         .env_remove(support::CHILD_SQLITE_ENV)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -64,6 +77,12 @@ const MESSAGE: &str = "msg_01JB7N3R5T8X2V6M9Q4K1W7YZD";
 struct Scratch {
     dir: PathBuf,
     owner: Arc<ScratchOwner>,
+    /// 父测试进程持有的外部事实；跨 daemon 重启复用同一份。
+    github: Arc<FakeGitHub>,
+    control: support::TestForgeControl,
+    git_base: PathBuf,
+    bare: PathBuf,
+    base: GitOid,
 }
 
 struct ScratchOwner(PathBuf);
@@ -116,7 +135,19 @@ journal_target = "{}"
             gantryd::config::BootConfig::load(&dir.join("gantry.toml")).expect("scratch config");
         // 测试的显式初始化：真实 secrets 实例、测试 CA 与设备材料都落在本 scratch 内。
         support::provision_test_pki(&config, &dir);
-        Self { dir, owner }
+        let github = Arc::new(FakeGitHub::start());
+        let control = support::TestForgeControl::start(github.clone());
+        let (git_base, base, _) = support::init_bare_remote(&dir);
+        let bare = git_base.join("acme/web.git");
+        Self {
+            dir,
+            owner,
+            github,
+            control,
+            git_base,
+            bare,
+            base,
+        }
     }
 
     fn config(&self) -> PathBuf {
@@ -146,6 +177,8 @@ impl Drop for ScratchOwner {
 struct Daemon {
     child: Child,
     owner: Option<Arc<ScratchOwner>>,
+    stderr: Arc<std::sync::Mutex<String>>,
+    stderr_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Daemon {
@@ -159,19 +192,6 @@ impl Daemon {
         command.env(
             support::CHILD_ENV,
             format!("{}\n{}\nmanual", scratch.config().display(), scratch.uid()),
-        );
-        Self::start(command, scratch)
-    }
-
-    fn spawn_real_executor(scratch: &Scratch) -> Self {
-        let mut command = fake_gantryd(scratch, scratch.uid());
-        command.env(
-            support::CHILD_ENV,
-            format!(
-                "{}\n{}\nreal-executor",
-                scratch.config().display(),
-                scratch.uid()
-            ),
         );
         Self::start(command, scratch)
     }
@@ -194,11 +214,24 @@ impl Daemon {
     }
 
     fn start(mut command: Command, scratch: &Scratch) -> Self {
-        let child = command.spawn().unwrap();
+        let mut child = command.spawn().unwrap();
+        let stderr = Arc::new(std::sync::Mutex::new(String::new()));
+        let stderr_thread = if let Some(mut pipe) = child.stderr.take() {
+            let buffer = stderr.clone();
+            Some(std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
+                *buffer.lock().unwrap_or_else(|p| p.into_inner()) = text;
+            }))
+        } else {
+            None
+        };
         let started = Instant::now();
         let mut daemon = Self {
             child,
             owner: Some(scratch.owner.clone()),
+            stderr,
+            stderr_thread,
         };
         let deadline = started + Duration::from_secs(30);
         loop {
@@ -348,6 +381,17 @@ impl Daemon {
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        if let Some(thread) = self.stderr_thread.take() {
+            let _ = thread.join();
+        }
+        let text = self
+            .stderr
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if !text.is_empty() && std::thread::panicking() {
+            eprintln!("daemon stderr:\n{text}");
+        }
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             match self.child.try_wait() {
@@ -613,6 +657,8 @@ fn failure_report_includes_status_stderr_socket_and_elapsed() {
             .spawn()
             .unwrap(),
         owner: Some(scratch.owner.clone()),
+        stderr: Arc::new(std::sync::Mutex::new(String::new())),
+        stderr_thread: None,
     };
     std::thread::sleep(Duration::from_millis(100));
     let status = daemon.terminate();
@@ -768,10 +814,10 @@ fn status_reports_profile_and_module_providers() {
             .unwrap_or_else(|| panic!("{module} missing from {status}"))["provider"]
             .clone()
     };
-    for module in ["engine", "notify", "policy", "secrets", "pki"] {
+    for module in ["engine", "notify", "policy", "secrets", "pki", "forge"] {
         assert_eq!(provider(module), "real", "{module}");
     }
-    for module in ["store", "forge", "repo", "sandbox", "models", "egress"] {
+    for module in ["store", "repo", "sandbox", "models", "egress"] {
         assert_eq!(provider(module), "fake", "{module}");
     }
 }
@@ -842,9 +888,11 @@ fn create_delivery_appends_one_event_and_dedupes_by_message() {
         .filter(|event| event["type"] == "delivery.created")
         .collect();
     assert_eq!(created.len(), 1, "{events:?}");
-    // 装配期先登记测试设备；建单事件紧随其后。
-    assert_eq!(events[0]["type"], "device.paired");
-    assert_eq!(events[1]["type"], "delivery.created");
+    // 装配期先写 settings / project / 登记测试设备；建单事件紧随其后。
+    assert_eq!(events[0]["type"], "settings.updated");
+    assert_eq!(events[1]["type"], "project.added");
+    assert_eq!(events[2]["type"], "device.paired");
+    assert_eq!(events[3]["type"], "delivery.created");
     assert_eq!(created[0]["subject"], first);
     assert_eq!(created[0]["data"]["budget"]["template"], "low.single");
 }
@@ -962,10 +1010,14 @@ fn concurrent_starts_leave_exactly_one_owner() {
         Daemon {
             child: a,
             owner: Some(scratch.owner.clone()),
+            stderr: Arc::new(std::sync::Mutex::new(String::new())),
+            stderr_thread: None,
         },
         Daemon {
             child: b,
             owner: Some(scratch.owner.clone()),
+            stderr: Arc::new(std::sync::Mutex::new(String::new())),
+            stderr_thread: None,
         },
     );
     let started = Instant::now();
@@ -1073,7 +1125,7 @@ fn end_to_end_low_delivery_reaches_closed_with_fakes() {
             Instant::now() < deadline,
             "stuck at {}: {:?}",
             step["stage"],
-            stages(&mut client, &delivery)
+            read_log(&mut client).1
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -1232,7 +1284,7 @@ fn real_executor_rejects_changed_live_head_without_merge() {
 
 fn real_executor_merge(move_head: bool) {
     let scratch = Scratch::new();
-    let daemon = Daemon::spawn_real_executor(&scratch);
+    let daemon = Daemon::spawn_manual(&scratch);
     let mut client = Client::connect(&scratch);
     let status = client.ok(json!({"cmd":"status"}));
     assert!(status["modules"]
@@ -1240,10 +1292,10 @@ fn real_executor_merge(move_head: bool) {
         .unwrap()
         .iter()
         .any(|m| m["module"] == "forge"
-            && m["provider"] == "fake"
+            && m["provider"] == "real"
             && m["note"]
                 .as_str()
-                .is_some_and(|d| d.contains("real merge executor"))));
+                .is_some_and(|d| d.contains("production constructor"))));
     let delivery = client.ok(json!({"cmd": "fake.create_delivery", "args": {
         "project_id": PROJECT, "source_message_id": MESSAGE, "title": "fix login", "user_text": "修复登录超时"
     }}))["delivery_id"].clone();
@@ -1267,7 +1319,7 @@ fn real_executor_merge(move_head: bool) {
         assert_eq!(invalid["ok"], false);
         assert_eq!(invalid["error"]["message"], "signature invalid");
         // 非引擎构造的额外动作仅用于验证执行器拒绝尚未授予的真实审批。
-        let probe = client.ok(json!({"cmd":"fake.enqueue_merge_probe", "args":{"id":approval}}))
+        let probe = client.ok(json!({"cmd":"fake.enqueue_merge_probe", "args":{"id":approval, "delivery_id":delivery}}))
             ["id"]
             .clone();
         let result = client.ok(json!({"cmd":"fake.real_execute"}));
@@ -1303,8 +1355,9 @@ fn real_executor_merge(move_head: bool) {
         assert!(Instant::now() < deadline, "no merge: {events:?}");
         std::thread::sleep(Duration::from_millis(20));
     };
-    let first = client.ok(json!({"cmd":"fake.real_execute", "args":{"move_head":move_head}}));
-    assert_eq!(first["merge_calls"], 0, "{first}");
+    let first = client.ok(
+        json!({"cmd":"fake.real_execute", "args":{"move_head":move_head, "delivery_id":delivery}}),
+    );
     let state = client.ok(json!({"cmd":"fake.real_approval", "args":{"id":approval}}));
     let (_, events) = read_log(&mut client);
     let consumed: Vec<_> = events
@@ -1312,6 +1365,7 @@ fn real_executor_merge(move_head: bool) {
         .filter(|e| e["type"] == "approval.consumed" && e["subject"] == approval)
         .collect();
     if move_head {
+        assert_eq!(first["merge_calls"], 0, "{first}");
         assert!(
             first["result"]
                 .as_str()
@@ -1323,24 +1377,16 @@ fn real_executor_merge(move_head: bool) {
         assert!(consumed.is_empty());
     } else {
         assert!(
-            first["result"]
-                .as_str()
-                .unwrap()
-                .contains("Crashed(AfterConsume)"),
+            first["result"].as_str().unwrap().contains("Succeeded"),
             "{first}"
         );
+        assert_eq!(first["merge_calls"], 1);
+        assert_eq!(first["pull"]["merged"], true);
         assert_eq!(state["status"], "consumed");
         assert_eq!(state["consumed_by"], action);
         assert_eq!(consumed.len(), 1);
         assert_eq!(consumed[0]["data"]["consumed_by"], action);
-        std::thread::sleep(Duration::from_millis(30));
-        let second = client.ok(json!({"cmd":"fake.real_execute"}));
-        assert!(
-            second["result"].as_str().unwrap().contains("Succeeded"),
-            "{second}"
-        );
-        assert_eq!(second["merge_calls"], 1);
-        assert_eq!(second["pull"]["merged"], true);
+        // 再跑一次不应重复 merge。
         let third = client.ok(json!({"cmd":"fake.real_execute"}));
         assert_eq!(third["merge_calls"], 1);
         let (_, events) = read_log(&mut client);
@@ -1359,7 +1405,7 @@ fn real_executor_merge(move_head: bool) {
             1
         );
         let probe = client
-            .ok(json!({"cmd":"fake.enqueue_merge_probe", "args":{"id":approval, "second":true}}))
+            .ok(json!({"cmd":"fake.enqueue_merge_probe", "args":{"id":approval, "delivery_id":delivery, "second":true}}))
             ["id"]
             .clone();
         let rejected = client.ok(json!({"cmd":"fake.real_execute"}));
@@ -1376,59 +1422,6 @@ fn real_executor_merge(move_head: bool) {
     assert!(daemon.terminate().success());
 }
 
-#[tokio::test]
-async fn fake_forge_snapshot_update_waits_for_store_transaction() {
-    use gantry_core::canon::GitOid;
-    use gantry_core::ports::ForgeReader;
-
-    let scratch = Scratch::new();
-    let config = gantryd::config::BootConfig::load(&scratch.config()).expect("scratch config");
-    let (_assembly, handles) = support::assemble_fakes(&config, &scratch.dir, None, true).await;
-    let store = handles.store.clone();
-    let forge = handles.forge.clone();
-    let transaction = store.begin_write().await.unwrap();
-    let head = GitOid::parse(support::engine_cfg::BASE).unwrap();
-    let pr = support::engine_cfg::snapshot("open", head);
-    let (started, entered) = tokio::sync::oneshot::channel();
-    let update_store = store.clone();
-    let update_forge = forge.clone();
-    let mut update = tokio::spawn(async move {
-        started.send(()).unwrap();
-        support::fake_cmds::upsert_pr(&update_store, &update_forge, pr).await
-    });
-    entered.await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut update)
-            .await
-            .is_err(),
-        "snapshot update bypassed the write lease"
-    );
-    assert!(forge
-        .pull_request(&support::project_id(), support::engine_cfg::PR_NUMBER)
-        .await
-        .unwrap()
-        .is_none());
-    // 同一写门保证已有事务在直接写更新版本前成功提交。
-    transaction
-        .commit()
-        .await
-        .expect("transaction must not conflict with snapshot update");
-    tokio::time::timeout(Duration::from_secs(5), update)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        forge
-            .pull_request(&support::project_id(), support::engine_cfg::PR_NUMBER)
-            .await
-            .unwrap()
-            .unwrap()
-            .head_sha,
-        head
-    );
-}
-
 fn real_policy_approval(invalid: bool) {
     let scratch = Scratch::new();
     let daemon = Daemon::spawn_manual(&scratch);
@@ -1442,7 +1435,7 @@ fn real_policy_approval(invalid: bool) {
         ("secrets", "real"),
         ("pki", "real"),
         ("store", "fake"),
-        ("forge", "fake"),
+        ("forge", "real"),
         ("repo", "fake"),
         ("sandbox", "fake"),
         ("worker", "fake"),
@@ -1483,7 +1476,7 @@ fn real_policy_approval(invalid: bool) {
     assert_eq!(requested["data"]["action"], "merge_pr");
     assert_eq!(
         requested["data"]["target"],
-        json!({"kind": "pr", "repo": "acme/web", "number": 12})
+        json!({"kind": "pr", "repo": "acme/web", "number": 1})
     );
     let approval = &requested["subject"];
     let device = client.ok(json!({"cmd": "fake.device_info"}));
@@ -1831,6 +1824,8 @@ fn sqlite_child_rejects_a_directory_outside_its_scratch() {
         let mut daemon = Daemon {
             child: command.spawn().unwrap(),
             owner: Some(scratch.owner.clone()),
+            stderr: Arc::new(std::sync::Mutex::new(String::new())),
+            stderr_thread: None,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
@@ -1865,6 +1860,8 @@ fn sqlite_child_rejects_a_mismatched_parent_handle() {
     let mut daemon = Daemon {
         child: command.spawn().unwrap(),
         owner: Some(scratch.owner.clone()),
+        stderr: Arc::new(std::sync::Mutex::new(String::new())),
+        stderr_thread: None,
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
@@ -1908,6 +1905,8 @@ fn sqlite_child_rejects_symlinks_in_the_store() {
         let mut daemon = Daemon {
             child: command.spawn().unwrap(),
             owner: Some(scratch.owner.clone()),
+            stderr: Arc::new(std::sync::Mutex::new(String::new())),
+            stderr_thread: None,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
@@ -1948,6 +1947,8 @@ fn sqlite_child_rejects_hard_links_in_the_store() {
         let mut daemon = Daemon {
             child: command.spawn().unwrap(),
             owner: Some(scratch.owner.clone()),
+            stderr: Arc::new(std::sync::Mutex::new(String::new())),
+            stderr_thread: None,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
@@ -1976,8 +1977,8 @@ fn sqlite_child_rejects_hard_links_in_the_store() {
     }
 }
 
-/// SQLite 先以空模块列表打开，再以生产模块列表重开：policy 私有表按生产注册
-/// 建表并持久化，重开后仍可读回。
+/// SQLite 先以空模块列表打开，再以生产模块列表重开：policy 与 forge 的私有表
+/// 按生产注册建表并持久化，重开后仍可读回。
 #[tokio::test]
 async fn sqlite_store_opens_empty_then_with_production_modules() {
     use gantry_core::ids::{Clock, IdGen};
@@ -2007,6 +2008,9 @@ async fn sqlite_store_opens_empty_then_with_production_modules() {
     tx.module_conn("policy")
         .insert("policy_challenges", "probe", &json!({"nonce": "n"}))
         .expect("policy table is registered");
+    tx.module_conn("forge")
+        .insert("forge_effect_index", "probe", &json!({"action": "probe"}))
+        .expect("forge table is registered");
     tx.commit().await.expect("commit probe");
     drop(store);
 
@@ -2019,6 +2023,11 @@ async fn sqlite_store_opens_empty_then_with_production_modules() {
         .get("policy_challenges", "probe")
         .expect("read policy table");
     assert_eq!(row, Some(json!({"nonce": "n"})));
+    let row: Option<Value> = snapshot
+        .module_conn("forge")
+        .get("forge_effect_index", "probe")
+        .expect("read forge table");
+    assert_eq!(row, Some(json!({"action": "probe"})));
     let rows: Vec<(String, Value)> = snapshot
         .module_conn("pki")
         .scan("pki_ca", "", None, 10)
@@ -2041,7 +2050,7 @@ fn sqlite_store_survives_process_crash_and_restart() {
         ("store", "real"),
         ("engine", "real"),
         ("notify", "real"),
-        ("forge", "fake"),
+        ("forge", "real"),
         ("repo", "fake"),
         ("policy", "real"),
         ("secrets", "real"),
@@ -2110,12 +2119,17 @@ fn sqlite_store_survives_process_crash_and_restart() {
         ]
     );
     assert_eq!(transitions[0]["data"]["reason"], "admission_skipped");
+    let worktree = before
+        .iter()
+        .find(|event| {
+            event["type"] == "worktree.created" && event["data"]["delivery_id"] == delivery
+        })
+        .expect("worktree.created");
     assert_eq!(
         before
             .iter()
-            .filter(
-                |event| event["type"] == "worktree.removed" && event["correlation_id"] == delivery
-            )
+            .filter(|event| event["type"] == "worktree.removed"
+                && event["subject"] == worktree["subject"])
             .count(),
         1
     );
@@ -2228,9 +2242,8 @@ fn sqlite_store_survives_process_crash_and_restart() {
     assert_eq!(
         after
             .iter()
-            .filter(
-                |event| event["type"] == "worktree.removed" && event["correlation_id"] == delivery
-            )
+            .filter(|event| event["type"] == "worktree.removed"
+                && event["subject"] == worktree["subject"])
             .count(),
         1
     );

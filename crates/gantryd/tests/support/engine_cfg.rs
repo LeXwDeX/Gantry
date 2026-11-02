@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use gantry_core::canon::{GitOid, RepoSlug};
-use gantry_core::entities::{MergeMethod, PullRequestRef, Seq, Tier};
+use gantry_core::entities::{MergeMethod, Seq, Tier};
 use gantry_core::level::{Effort, Level};
 use gantry_core::settings::{
     builtin_defaults, effective, parse_resolved, ResolvedSettings, SettingsResource,
@@ -17,11 +17,29 @@ use gantry_engine::decide::{ModelKey, ModelTable, ProjectFacts, ResolvedModel};
 use gantry_engine::runtime::RuntimeSettings;
 use gantry_engine::runtime_settings::from_settings;
 use serde_json::json;
+use std::sync::OnceLock;
 
 pub const PROJECT: &str = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA";
+/// 不使用真实仓库的测试继续用这条假基线；真实仓库装配在打开前经 [`set_base`] 覆盖。
 pub const BASE: &str = "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345";
 /// 替身 forge 为 create_pr 绑定的 PR 号。
-pub const PR_NUMBER: u64 = 12;
+pub const PR_NUMBER: u64 = 1;
+
+static BASE_OID: OnceLock<GitOid> = OnceLock::new();
+
+/// 当前测试装配的基线。未设置时回退到 [`BASE`]（不经过真实 Git 仓库的测试）。
+pub fn base() -> GitOid {
+    BASE_OID
+        .get()
+        .copied()
+        .unwrap_or_else(|| GitOid::parse(BASE).expect("legacy fixture"))
+}
+
+/// 真实仓库装配在创建 base 提交后覆盖基线；同一测试进程内只设置一次。
+/// 测试装配每个进程只打开一次 store；若将来复用装配，需把 base 改为显式参数。
+pub fn set_base(oid: GitOid) {
+    let _ = BASE_OID.set(oid);
+}
 
 pub fn repo_slug() -> RepoSlug {
     RepoSlug::parse("acme/web").expect("fixture")
@@ -111,16 +129,4 @@ pub fn runtime_settings() -> RuntimeSettings {
     // 引擎内部轮询间隔不是设置键；§12.2 进程级用例需要更快的轮询。
     runtime.poll_interval = Duration::from_millis(5);
     runtime
-}
-
-pub fn snapshot(state: &str, head: GitOid) -> PullRequestRef {
-    serde_json::from_value(json!({
-        "repo": "acme/web", "number": 12, "node_id": "PR_x",
-        "title": {"text": "t", "source": "github", "truncated": false},
-        "state": state, "head_sha": head, "base_ref": "main", "base_sha": BASE,
-        "draft": false, "mergeable_state": "clean", "in_merge_queue": false,
-        "checks": {"passed": 1, "failed": 0, "pending": 0, "required_ok": true},
-        "review_state": "none", "synced_at": "2026-10-24T12:41:03.120Z"
-    }))
-    .expect("fixture")
 }
