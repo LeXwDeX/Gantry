@@ -104,7 +104,7 @@ A 级先按 [M1 验收证据分级](docs/m1-acceptance.md) §3 的 A 列，用�
 | 模块 | 测试装配状态 | 说明 |
 | --- | --- | --- |
 | store | 内存 / SQLite 两种 | 默认内存；设置 SQLite 目录时真实 `Store`，崩溃重启联测复用同一设备与日志 |
-| engine | 真实 | `EngineRuntime` 与 `from_settings`；模型表仍是测试夹具 |
+| engine | 真实 | `EngineRuntime` 与 `from_settings`；模型表由 `gantry-models` 从设置推导 |
 | policy | 真实 | `assembly::build_policy`；审批用真实设备登记公钥验签 |
 | notify | 真实 | `assembly::build_notify` |
 | pki | 测试中真实构造 | `assembly::build_pki`；测试 CA、公开 pairing 登记设备、真实吊销与 journal |
