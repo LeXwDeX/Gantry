@@ -63,7 +63,7 @@ M0.9 只剩 #86；#82–#85、#122、#135、#179、#292 已关闭。M1.1（18/18
 
 ### 当前优先级（2026-10-29 起）
 
-1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（手写 `ModelTable` 保留）；下一步逐个替换 forge、repo、models、sandbox、worker、egress、conversation 与 api；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。S3 分片：S0 控制通道（#401）、S1 配置决策登记（#405）、S2 真实 `ForgeReader` 快照与镜像拉取（#305，PR #407）已合入；S3a 前置 #409（当前 PR head 检查汇总回读，PR #413）已合入并关闭，S3a forge 装配继续。
+1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（手写 `ModelTable` 保留）；下一步逐个替换 forge、repo、models、sandbox、worker、egress、conversation 与 api；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。S3 分片：S0 控制通道（#401）、S1 配置决策登记（#405）、S2 真实 `ForgeReader` 快照与镜像拉取（#305，PR #407）、S3a 前置 #409（PR #413）与 S3a forge 装配（PR #414）已合入；下一项 S3b repo 片。
 2. **#280**：api 读路由 / 共用用例，可与 #105 并行。#267 已关闭（PR #393–#395）。
 3. **M1.3 收尾评审的小项**：#367、#368、#369、#370、#371 均已关闭（PR #374、#376、#390、#391/#392 等）；真实主机检查归 #106。
 4. **#106 → #107**：B 级本机 Ubuntu 虚拟机、C 级外部资源。两项都要先征求用户确认，C 级还需要真实资源。
