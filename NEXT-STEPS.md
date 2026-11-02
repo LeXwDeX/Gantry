@@ -110,7 +110,7 @@ A 级先按 [M1 验收证据分级](docs/m1-acceptance.md) §3 的 A 列，用�
 | pki | 测试中真实构造 | `assembly::build_pki`；测试 CA、公开 pairing 登记设备、真实吊销与 journal |
 | secrets | 测试中真实构造 | `assembly::build_secrets`；M1 仅 Forge/Pki，不含 Egress，显式测试初始化 |
 | forge | 测试装配真实 | `assembly::build_forge` 两阶段构造：同一 `Forge` 先给 policy 无 mirror 的 reader，再接 repo/policy 构造执行器与完整 reader；GitHub 用父测试进程持有的回环 `FakeGitHub` |
-| repo | 替身（测试侧真实 Git） | 测试装配用真实 `GitRepo` + 裸远端；`status` 仍报 fake，生产 `build_repo` 归 S3b |
+| repo | 替身（测试侧真实 Git） | 测试装配用真实 `GitRepo` + 裸远端；`status` 仍报 fake，生产 `build_repo` 已就绪但尚未接线 |
 | models / sandbox / worker / egress / conversation | 替身 | 仍使用 `gantry-fakes` 对应替身 |
 | api | 未装配 | 尚未接入 `serve` |
 | 后台任务 | 未接线 | policy invalidation、notify AutoClose、`Pki::tick` 均未由 `serve` 启动；sandbox 的 `BuiltinSchemas` 留到 sandbox 片 |
