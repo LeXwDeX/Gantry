@@ -356,7 +356,7 @@ CREATE TABLE forge_project_state (
 
 每个邮箱循环：取一批（`coalesce_ms` 内同目标的事件）→ 标 `processing` → **回读** → 差异 → 归因 → 一个事务提交 → 标 `done`。
 
-1. **回读**：PR 用一次 GraphQL 取 PR 本体、reviews、review threads、当前 head 的 check 汇总与合并状态（带 `If-None-Match`，304 不更新）；Issue 用 REST；`push` 到默认分支只比较分支 head。具体字段（`mergeStateStatus`、`reviewDecision`、`isRequired`、`closingIssuesReferences`）在 installation token 下是否可用需核实（FA OQ-9）；不可用时的降级：`mergeable_state` 取 REST `mergeable_state` 原值，`required_ok` 在 required 信息缺失时**按全部 check 都必需**计算（保守，F-OQ-16）。
+1. **回读**：PR 用一次 GraphQL 取 PR 本体、reviews、review threads、当前 head 的 check 汇总与合并状态（带 `If-None-Match`，304 不更新）；Issue 用 REST；`push` 到默认分支只比较分支 head。具体字段（`mergeStateStatus`、`reviewDecision`、`isRequired`、`closingIssuesReferences`）在 installation token 下是否可用需核实（FA OQ-9）；不可用时的降级：`mergeable_state` 取 REST `mergeable_state` 原值，`required_ok` 在 required 信息缺失时**按全部 check 都必需**计算（保守，F-OQ-16）。M1 的 REST 回退从 check runs（`filter=latest`）与传统 commit statuses（同 `context` 取最新）合并计数；任一来源读取不完整、结论未知或 ref 与当前 head 不一致时整体失败，不更新快照。
 2. **差异 → 事件**：
 
    | 快照变化 | 产生的 `kind` | `dedup_key`（FA §6.3 模板） |

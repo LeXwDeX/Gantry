@@ -51,6 +51,9 @@ pub struct PrSnap {
     /// §7.5 第 7 点的口径（REST reviews 推出）；旧行没有该字段时取 `none`。
     #[serde(default = "no_review")]
     pub review_state: ReviewState,
+    /// 当前 head 的检查汇总。旧持久行没有该字段时按保守值（0/0/0，未通过）读。
+    #[serde(default = "conservative_checks")]
+    pub checks: CheckSummary,
 }
 
 fn no_review() -> ReviewState {
@@ -81,8 +84,8 @@ fn title_text(title: &str, kind: &str) -> UntrustedText {
     UntrustedText::new(title.to_owned(), format!("github:{kind}.title"), false)
 }
 
-/// M1 还没有回读 checks 汇总（需要 GraphQL / check-runs 回读）：快照用保守值。
-fn pending_checks() -> CheckSummary {
+/// 没有可用检查事实时的保守值：空结果不算通过。
+pub(crate) fn conservative_checks() -> CheckSummary {
     CheckSummary {
         passed: 0,
         failed: 0,
@@ -102,7 +105,7 @@ impl PrSnap {
             draft: self.draft,
             mergeable_state: self.mergeable_state.clone(),
             in_merge_queue: false,
-            checks: pending_checks(),
+            checks: self.checks.clone(),
             review_state: self.review_state.clone(),
         }
     }
@@ -150,6 +153,12 @@ impl PrSnap {
             out.push(ForgeSyncedChange::MergeableState {
                 from: self.mergeable_state.clone(),
                 to: next.mergeable_state.clone(),
+            });
+        }
+        if self.checks != next.checks {
+            out.push(ForgeSyncedChange::Checks {
+                from: self.checks.clone(),
+                to: next.checks.clone(),
             });
         }
         if self.review_state != next.review_state {

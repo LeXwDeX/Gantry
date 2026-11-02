@@ -27,6 +27,7 @@
 //!   `installation_unreachable`）与投递恢复（`GET /app/hook/deliveries`）留给 M1.4 的真实环境
 //!   取证前补。
 
+mod checks;
 pub mod snapshot;
 
 use std::sync::Arc;
@@ -220,7 +221,7 @@ impl Dispatcher {
                 continue;
             };
             let fetched = if pull {
-                self.fetch_pr(&token, &binding.project.repo, number)
+                self.fetch_pr(&project, &token, &binding.project.repo, number)
                     .await
                     .map(Readback::Pr)
             } else {
@@ -498,7 +499,9 @@ impl Dispatcher {
             return Ok(Readback::Nothing);
         };
         let fetched = if pull {
-            self.fetch_pr(&token, repo, number).await.map(Readback::Pr)
+            self.fetch_pr(project, &token, repo, number)
+                .await
+                .map(Readback::Pr)
         } else {
             self.github
                 .issue_or_pull(&token, repo, number, false)
@@ -512,17 +515,80 @@ impl Dispatcher {
         }
     }
 
-    /// PR 本体 + reviews（REST；GraphQL 的一次回读随后续切片）。
+    /// PR 本体 + reviews + 当前 head 的检查汇总（REST；GraphQL 的一次回读随后续切片）。
+    ///
+    /// 401 时丢弃缓存令牌重读一次。检查读取不区分 404：把 404 变成 decode 错误，避免
+    /// "权限不足 / ref 不存在"被上层当成 PR 不存在或 empty success。
     async fn fetch_pr(
+        &self,
+        project: &ProjectId,
+        token: &gantry_core::secret::SecretString,
+        repo: &RepoSlug,
+        number: u64,
+    ) -> Result<Value, crate::github::ApiError> {
+        match self.fetch_pr_once(token, repo, number).await {
+            Err(crate::github::ApiError::Status { status: 401, .. }) => {
+                self.tokens.invalidate(project);
+                let token = self
+                    .tokens
+                    .token(project, TokenPurpose::Read)
+                    .await
+                    .map_err(|error| {
+                        crate::github::ApiError::Decode(format!("token after 401: {error}"))
+                    })?;
+                self.fetch_pr_once(&token, repo, number).await
+            }
+            other => other,
+        }
+    }
+
+    async fn fetch_pr_once(
         &self,
         token: &gantry_core::secret::SecretString,
         repo: &RepoSlug,
         number: u64,
     ) -> Result<Value, crate::github::ApiError> {
-        let mut pr = self.github.issue_or_pull(token, repo, number, true).await?;
+        use crate::github::ApiError;
+        let first = self.github.issue_or_pull(token, repo, number, true).await?;
+        let head_raw = first
+            .pointer("/head/sha")
+            .and_then(Value::as_str)
+            .filter(|sha| !sha.is_empty())
+            .ok_or_else(|| ApiError::Decode("pull request lacks head.sha".into()))?;
+        // 先校验 OID 再拼 URL；非法 head 不进入任何请求路径。
+        let head = GitOid::parse(head_raw)
+            .map_err(|_| ApiError::Decode("pull request head.sha is not a valid GitOid".into()))?;
+        let head_text = head.to_string();
         let reviews = self.github.list_reviews(token, repo, number).await?;
-        pr["_reviews"] = Value::Array(reviews);
-        Ok(pr)
+        let runs = self
+            .github
+            .list_check_runs(token, repo, &head_text)
+            .await
+            .map_err(|error| check_error("check-runs", error))?;
+        let statuses = self
+            .github
+            .list_commit_statuses(token, repo, &head_text)
+            .await
+            .map_err(|error| check_error("commit statuses", error))?;
+        // 读 PR 与读检查之间 head 可能前进：确认仍同一 head 才生成快照，避免混合两个 head。
+        // 同 head 期间 state 也可能变化（例如已合并），快照必须使用第二次读取的对象。
+        let mut confirmed = self.github.issue_or_pull(token, repo, number, true).await?;
+        let after_raw = confirmed
+            .pointer("/head/sha")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::Decode("confirmed pull request lacks head.sha".into()))?;
+        let after = GitOid::parse(after_raw)
+            .map_err(|_| ApiError::Decode("confirmed pull request head.sha is invalid".into()))?;
+        if after != head {
+            return Err(ApiError::Decode(format!(
+                "head changed during check readback: {head} -> {after}"
+            )));
+        }
+        confirmed["_reviews"] = Value::Array(reviews);
+        let summary = checks::summary(&runs, &statuses, &head).map_err(ApiError::Decode)?;
+        confirmed["_checks"] = serde_json::to_value(summary)
+            .map_err(|error| ApiError::Decode(format!("checks encode: {error}")))?;
+        Ok(confirmed)
     }
 
     /// 启动时调用（forge.md §7.4 末段）：上次崩溃时停在 `processing` 的行重新入队。
@@ -1818,6 +1884,19 @@ fn review_event(
     }
 }
 
+/// 检查端点 404 在 GitHub 表示 ref 不存在或令牌缺权限；不能降级成 PR 不存在。
+fn check_error(what: &str, error: crate::github::ApiError) -> crate::github::ApiError {
+    use crate::github::ApiError;
+    match error {
+        ApiError::Status {
+            status: 404,
+            message,
+            ..
+        } => ApiError::Decode(format!("{what} 404 (permission or missing ref): {message}")),
+        other => other,
+    }
+}
+
 fn pr_snap(pr: &Value) -> Option<PrSnap> {
     let str_at = |pointer: &str| pr.pointer(pointer).and_then(Value::as_str);
     let state = if pr.get("merged").and_then(Value::as_bool) == Some(true) {
@@ -1858,6 +1937,10 @@ fn pr_snap(pr: &Value) -> Option<PrSnap> {
             .unwrap_or("unknown")
             .to_owned(),
         head_epoch: 0,
+        checks: pr
+            .get("_checks")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_else(snapshot::conservative_checks),
         review_state: review_state(pr.get("_reviews")),
     })
 }

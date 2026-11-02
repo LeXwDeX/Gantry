@@ -5,6 +5,7 @@
 
 pub(crate) mod http;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use gantry_core::canon::RepoSlug;
@@ -119,6 +120,17 @@ impl GithubClient {
     ) -> Result<Value, ApiError> {
         let response = self.call(token, method, path, body).await?;
         serde_json::from_slice(&response.body).map_err(|error| ApiError::Decode(error.to_string()))
+    }
+
+    async fn json_page(
+        &self,
+        token: &SecretString,
+        path: &str,
+    ) -> Result<(Value, BTreeMap<String, String>), ApiError> {
+        let response = self.call(token, "GET", path, None).await?;
+        let value = serde_json::from_slice(&response.body)
+            .map_err(|error| ApiError::Decode(error.to_string()))?;
+        Ok((value, response.headers))
     }
 
     pub async fn get_pull(
@@ -342,6 +354,168 @@ impl GithubClient {
         }
     }
 
+    /// 某 commit ref 的 check runs。使用官方 `filter=latest`：服务端返回的集合即最新的
+    /// check runs；客户端按 id 独立保留，不再按 app + name 合并（官方没有保证 run id 单调，
+    /// 同 app 不同 workflow 也可能同名）。
+    ///
+    /// 分页严格按 GitHub `Link: rel="next"` 走：只接受同源、同 repo、同 head、同端点的
+    /// next URL，检测循环并限制页数。首页的 `total_count` 是固定基准：后续页必须相同，
+    /// 跨页不得重复 run id，唯一条目数必须恰好等于 total，否则整体失败。
+    /// 官方限制是单 ref 最近 1000 个 check suite；命中该上限时无法证明集合完整，保守失败。
+    pub async fn list_check_runs(
+        &self,
+        token: &SecretString,
+        repo: &RepoSlug,
+        sha: &str,
+    ) -> Result<Vec<Value>, ApiError> {
+        const PER_PAGE: usize = 100;
+        const MAX_PAGES: usize = 100;
+        const MAX_SUITES: usize = 1000;
+        let endpoint = format!("/repos/{repo}/commits/{sha}/check-runs");
+        let mut path = format!("{endpoint}?filter=latest&per_page={PER_PAGE}&page=1");
+        let mut visited = BTreeSet::new();
+        let mut seen_ids = BTreeSet::new();
+        let mut runs = Vec::new();
+        let mut total: Option<u64> = None;
+        let mut page = 1;
+        loop {
+            if !visited.insert(path.clone()) {
+                return Err(ApiError::Decode("check-runs pagination loop".into()));
+            }
+            let (value, headers) = self.json_page(token, &path).await?;
+            let page_total = value
+                .get("total_count")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| ApiError::Decode("check-runs lacks total_count".into()))?;
+            match total {
+                None => total = Some(page_total),
+                Some(expected) if expected != page_total => {
+                    return Err(ApiError::Decode(format!(
+                        "check-runs total_count changed: {expected} -> {page_total}"
+                    )))
+                }
+                Some(_) => {}
+            }
+            let page_runs = value
+                .get("check_runs")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ApiError::Decode("check-runs lacks check_runs array".into()))?;
+            if u64::try_from(page_runs.len()).unwrap_or(u64::MAX) > page_total {
+                return Err(ApiError::Decode(
+                    "check-runs page exceeds total_count".into(),
+                ));
+            }
+            if u64::try_from(runs.len().saturating_add(page_runs.len())).unwrap_or(u64::MAX)
+                > page_total
+            {
+                return Err(ApiError::Decode(
+                    "check-runs accumulated entries exceed total_count".into(),
+                ));
+            }
+            for run in page_runs {
+                let id = run
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| ApiError::Decode("check run lacks id".into()))?;
+                if !seen_ids.insert(id) {
+                    return Err(ApiError::Decode(format!(
+                        "check-runs pagination repeated run id {id}"
+                    )));
+                }
+                runs.push(run.clone());
+            }
+            let Some(next) = next_link(&headers, &self.base, &endpoint)? else {
+                break;
+            };
+            if page >= MAX_PAGES {
+                return Err(ApiError::Decode(
+                    "check-runs pagination exceeds bound".into(),
+                ));
+            }
+            path = next
+                .strip_prefix(self.base.trim_end_matches('/'))
+                .unwrap_or(&next)
+                .to_owned();
+            page += 1;
+        }
+        let total = total.unwrap_or(0);
+        if u64::try_from(runs.len()).unwrap_or(u64::MAX) != total {
+            return Err(ApiError::Decode(format!(
+                "check-runs pagination incomplete: {}/{total}",
+                runs.len()
+            )));
+        }
+        let suites: BTreeSet<u64> = runs
+            .iter()
+            .map(|run| {
+                run.pointer("/check_suite/id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| ApiError::Decode("check run lacks check_suite.id".into()))
+            })
+            .collect::<Result<_, _>>()?;
+        if suites.len() >= MAX_SUITES {
+            return Err(ApiError::Decode(
+                "check-runs reached the 1000-suite fetch bound; result may be truncated".into(),
+            ));
+        }
+        Ok(runs)
+    }
+
+    /// 某 commit ref 的传统 commit statuses（`GET /commits/{ref}/statuses`）。
+    ///
+    /// 官方按创建时间倒序返回（最新在前）；调用方按 `context` 只保留最新一条。
+    /// 该端点没有 `total_count`：分页严格按 `Link` 走，跨页重复 id 视为分页错误。
+    pub async fn list_commit_statuses(
+        &self,
+        token: &SecretString,
+        repo: &RepoSlug,
+        sha: &str,
+    ) -> Result<Vec<Value>, ApiError> {
+        const PER_PAGE: usize = 100;
+        const MAX_PAGES: usize = 100;
+        let endpoint = format!("/repos/{repo}/commits/{sha}/statuses");
+        let mut path = format!("{endpoint}?per_page={PER_PAGE}&page=1");
+        let mut visited = BTreeSet::new();
+        let mut seen_ids = BTreeSet::new();
+        let mut statuses = Vec::new();
+        let mut page = 1;
+        loop {
+            if !visited.insert(path.clone()) {
+                return Err(ApiError::Decode("commit statuses pagination loop".into()));
+            }
+            let (value, headers) = self.json_page(token, &path).await?;
+            let items = value
+                .as_array()
+                .ok_or_else(|| ApiError::Decode("commit statuses is not an array".into()))?;
+            for item in items {
+                let id = item
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| ApiError::Decode("commit status lacks id".into()))?;
+                if !seen_ids.insert(id) {
+                    return Err(ApiError::Decode(format!(
+                        "commit statuses pagination repeated id {id}"
+                    )));
+                }
+                statuses.push(item.clone());
+            }
+            let Some(next) = next_link(&headers, &self.base, &endpoint)? else {
+                break;
+            };
+            if page >= MAX_PAGES {
+                return Err(ApiError::Decode(
+                    "commit statuses pagination exceeds bound".into(),
+                ));
+            }
+            path = next
+                .strip_prefix(self.base.trim_end_matches('/'))
+                .unwrap_or(&next)
+                .to_owned();
+            page += 1;
+        }
+        Ok(statuses)
+    }
+
     /// 远端分支 head；分支不存在返回 `None`。
     pub async fn branch_head(
         &self,
@@ -366,6 +540,75 @@ impl GithubClient {
             Err(error) => Err(error),
         }
     }
+}
+
+/// 解析 `Link` 头里的 `rel="next"`，并校验 next 只指向本次请求的同一端点。
+fn next_link(
+    headers: &BTreeMap<String, String>,
+    base: &str,
+    endpoint: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(header) = headers.get("link") else {
+        return Ok(None);
+    };
+    let mut next = None;
+    for (url, params) in parse_links(header) {
+        let is_next = params.split(';').any(|param| {
+            let param = param.trim();
+            param == "rel=next" || param == "rel=\"next\""
+        });
+        if is_next {
+            if next.is_some() {
+                return Err(ApiError::Decode("multiple next links".into()));
+            }
+            next = Some(url);
+        }
+    }
+    if let Some(url) = &next {
+        validate_next_url(base, endpoint, url)?;
+    }
+    Ok(next)
+}
+
+fn parse_links(header: &str) -> Vec<(String, String)> {
+    let mut links = Vec::new();
+    let mut rest = header;
+    while let Some(start) = rest.find('<') {
+        let Some(end) = rest[start + 1..].find('>') else {
+            break;
+        };
+        let url = rest[start + 1..start + 1 + end].to_owned();
+        let after = &rest[start + 1 + end + 1..];
+        let params_end = after.find(',').unwrap_or(after.len());
+        links.push((url, after[..params_end].to_owned()));
+        rest = &after[params_end..];
+        if let Some(stripped) = rest.strip_prefix(',') {
+            rest = stripped;
+        }
+    }
+    links
+}
+
+fn validate_next_url(base: &str, endpoint: &str, url: &str) -> Result<(), ApiError> {
+    if url.contains('#') || url.chars().any(char::is_whitespace) {
+        return Err(ApiError::Decode("pagination link has invalid URL".into()));
+    }
+    let base = base.trim_end_matches('/');
+    let rest = url
+        .strip_prefix(base)
+        .ok_or_else(|| ApiError::Decode("pagination link leaves the API origin".into()))?;
+    if !rest.starts_with('/') {
+        return Err(ApiError::Decode(
+            "pagination link leaves the API origin".into(),
+        ));
+    }
+    let path = rest.split('?').next().unwrap_or(rest);
+    if path != endpoint {
+        return Err(ApiError::Decode(format!(
+            "pagination link points to the wrong endpoint: {path}"
+        )));
+    }
+    Ok(())
 }
 
 fn status_error(response: &HttpResponse) -> ApiError {
@@ -455,4 +698,49 @@ fn encode(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod link_tests {
+    use std::collections::BTreeMap;
+
+    use super::next_link;
+
+    const BASE: &str = "http://127.0.0.1:9";
+    const ENDPOINT: &str = "/repos/acme/shop/commits/abc/check-runs";
+
+    fn headers(link: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([("link".to_owned(), link.to_owned())])
+    }
+
+    #[test]
+    fn next_link_accepts_same_origin_and_endpoint() {
+        let link = format!("<{BASE}{ENDPOINT}?page=2>; rel=\"next\"");
+        assert_eq!(
+            next_link(&headers(&link), BASE, ENDPOINT).unwrap(),
+            Some(format!("{BASE}{ENDPOINT}?page=2"))
+        );
+    }
+
+    #[test]
+    fn next_link_rejects_cross_origin() {
+        let link =
+            "<http://evil.example/repos/acme/shop/commits/abc/check-runs?page=2>; rel=\"next\"";
+        assert!(next_link(&headers(link), BASE, ENDPOINT).is_err());
+    }
+
+    #[test]
+    fn next_link_rejects_cross_endpoint() {
+        let link =
+            format!("<{BASE}/repos/acme/shop/commits/abc/check-suites?page=2>; rel=\"next\"");
+        assert!(next_link(&headers(&link), BASE, ENDPOINT).is_err());
+    }
+
+    #[test]
+    fn next_link_rejects_fragment_and_relative_urls() {
+        let fragment = format!("<{BASE}{ENDPOINT}?page=2#x>; rel=\"next\"");
+        assert!(next_link(&headers(&fragment), BASE, ENDPOINT).is_err());
+        let relative = "<relative?page=2>; rel=\"next\"";
+        assert!(next_link(&headers(relative), BASE, ENDPOINT).is_err());
+    }
 }
