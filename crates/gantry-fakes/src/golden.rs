@@ -32,7 +32,13 @@ pub struct GoldenSandbox {
     base_sha: GitOid,
     clock: Arc<dyn Clock>,
     jobs: Mutex<Vec<AttemptId>>,
+    /// `changes.patch` 的字节；默认是原黄金夹具的占位补丁。
+    patch: Vec<u8>,
 }
+
+/// 原黄金夹具的占位补丁（不可应用到真实仓库）；进程测试用 [`GoldenSandbox::with_patch`]
+/// 换成针对真实 base 提交的完整补丁。
+const DEFAULT_PATCH: &[u8] = b"diff --git a/src/login.rs b/src/login.rs\n";
 
 impl GoldenSandbox {
     /// `base_sha` 是补丁声明的基线，须与工作树的基线一致。
@@ -43,7 +49,14 @@ impl GoldenSandbox {
             base_sha,
             clock,
             jobs: Mutex::new(Vec::new()),
+            patch: DEFAULT_PATCH.to_vec(),
         }
+    }
+
+    /// 使用完整、可应用到 `base_sha` 的补丁。
+    pub fn with_patch(mut self, patch: impl Into<Vec<u8>>) -> Self {
+        self.patch = patch.into();
+        self
     }
 
     /// 按受理顺序列出已派发的 job。
@@ -72,9 +85,13 @@ impl GoldenSandbox {
     async fn golden(&self, spec: &SandboxSpec) -> JobOutcome {
         let job = spec.job_id;
         let now = self.clock.now();
-        let patch = self
-            .put(b"diff --git a/src/login.rs b/src/login.rs\n")
-            .await;
+        let patch_bytes = self.patch.clone();
+        let files_changed = patch_bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| line.starts_with(b"+++ b/"))
+            .count()
+            .max(1);
+        let patch = self.put(&patch_bytes).await;
         let proposals = json!({
             "protocol": "gantry-worker/1",
             "job_id": job,
@@ -95,7 +112,7 @@ impl GoldenSandbox {
             "structured_output": {"kind": "build", "changes_summary": "fixed"},
             "artifacts": {
                 "patch": {"path": "changes.patch", "sha256": patch.sha256, "bytes": patch.bytes,
-                          "base_sha": self.base_sha, "files_changed": 1},
+                          "base_sha": self.base_sha, "files_changed": files_changed},
                 "report": null,
                 "proposals": {"path": "proposals.json", "sha256": proposals.sha256,
                               "bytes": proposals.bytes},

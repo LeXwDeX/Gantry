@@ -18,6 +18,7 @@ path = "src/bin/gantry.rs"
 gantry-core = { path = "../gantry-core" }
 gantry-store = { path = "../gantry-store" }
 gantry-engine = { path = "../gantry-engine" }
+gantry-forge = { path = "../gantry-forge" }
 gantry-deploy = { path = "../gantry-deploy" }
 gantry-notify = { path = "../gantry-notify" }
 gantry-pki = { path = "../gantry-pki" }
@@ -38,7 +39,6 @@ rustix = { version = "1", features = ["fs"] }
 # 替身装配只在进程级测试里（tests/support），不进服务端二进制（AGENTS.md：fakes 只作 dev-dependency）。
 [dev-dependencies]
 gantry-fakes = { path = "../gantry-fakes" }
-gantry-forge = { path = "../gantry-forge" }
 gantry-repo = { path = "../gantry-repo" }
 gantry-sandbox = { path = "../gantry-sandbox", features = ["testing"] }
 gantry-store = { path = "../gantry-store", features = ["testing"] }

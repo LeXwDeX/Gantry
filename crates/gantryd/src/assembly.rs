@@ -18,6 +18,7 @@
 //! 字段映射；接线前必须先确定配置与进程加固顺序。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gantry_core::ids::{Clock, Entropy, IdGen};
 use gantry_core::ports::conversation::ConversationService;
@@ -33,6 +34,10 @@ use gantry_core::ports::{SecretSink, SecretsError};
 use gantry_core::secret::Consumer;
 use gantry_core::time::Timestamp;
 use gantry_engine::runtime::EngineRuntime;
+use gantry_forge::{
+    Dispatcher, DispatcherDeps, DispatcherOptions, Executor, ExecutorDeps, ExecutorOptions,
+    FaultInjector, Forge, ForgeConfig, ReaderDeps, TokenProvider,
+};
 use gantry_notify::Notify;
 use gantry_pki::{Pki, PkiConfig, PkiError};
 use gantry_policy::{PolicyApprovals, PolicyDeps, PolicyEngine};
@@ -114,6 +119,7 @@ pub fn module_specs() -> Vec<ModuleSpec> {
     vec![
         gantry_policy::POLICY_MODULE,
         gantry_pki::store_schema::module_spec(),
+        gantry_forge::module_spec(),
     ]
 }
 
@@ -176,6 +182,105 @@ pub fn build_policy(
 /// notify 的生产构造；状态在 store 的内置投影里，不注册私有表。
 pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
     Arc::new(Notify::new(store.clone(), ids))
+}
+
+/// forge 装配输入：引导配置、共享 store 之外的令牌来源与 GitHub/Git 地址。
+///
+/// `ForgeConfig` 由调用方从项目绑定构造（forge.md §7.12）；本函数不读取设置，
+/// 也不创建 App 凭据（生产 App 私钥来源按 #405 / secrets.md OQ-2 待决）。
+#[derive(Clone)]
+pub struct ForgeDeps {
+    pub config: ForgeConfig,
+    pub tokens: Arc<dyn TokenProvider>,
+    /// GitHub REST 根地址。
+    pub api_base: String,
+    /// Git 远端根地址，拼成 `{git_base}/{owner}/{repo}.git`。
+    pub git_base: String,
+    pub http_timeout: Duration,
+    pub git_timeout: Duration,
+    pub dispatcher_options: DispatcherOptions,
+}
+
+/// forge 的第一阶段产物：同一 [`Forge`] 上的 dispatcher 与无 mirror 的 reader。
+///
+/// `reader` 供 `policy` 使用（它只读 store 快照并可按需对账）；第二阶段再以真实
+/// repo 与 policy 构造 executor 和带 mirror 的完整 reader（#105 S3a 决定）。
+pub struct ForgeStack {
+    pub forge: Arc<Forge>,
+    pub dispatcher: Arc<Dispatcher>,
+    pub reader: Arc<dyn ForgeReader>,
+    clock: Arc<dyn Clock>,
+    deps: ForgeDeps,
+}
+
+/// 第一阶段：构造 Forge、Dispatcher 与无 mirror 的 Reader。所有实例共享同一
+/// store、ForgeConfig 与 dispatcher。
+pub fn build_forge(store: &Store, clock: Arc<dyn Clock>, deps: ForgeDeps) -> ForgeStack {
+    let forge = Arc::new(Forge::new(store.clone(), deps.config.clone()));
+    let dispatcher = Arc::new(forge.dispatcher(DispatcherDeps {
+        tokens: deps.tokens.clone(),
+        clock: clock.clone(),
+        api_base: deps.api_base.clone(),
+        options: deps.dispatcher_options.clone(),
+    }));
+    let reader: Arc<dyn ForgeReader> = Arc::new(forge.reader(ReaderDeps {
+        tokens: deps.tokens.clone(),
+        api_base: deps.api_base.clone(),
+        clock: clock.clone(),
+        http_timeout: deps.http_timeout,
+        reconciler: Some(dispatcher.clone()),
+        mirror: None,
+    }));
+    ForgeStack {
+        forge,
+        dispatcher,
+        reader,
+        clock,
+        deps,
+    }
+}
+
+/// 第二阶段的 executor 输入：审批、真实 repo 与故障注入。
+pub struct ForgeExecutorDeps {
+    pub policy: Arc<dyn PolicyPort>,
+    pub ids: Arc<IdGen>,
+    pub options: ExecutorOptions,
+    pub faults: Option<Arc<dyn FaultInjector>>,
+    pub repo: Arc<dyn RepoService>,
+}
+
+/// 第二阶段：注入 repo 与 policy 构造执行器。失败只来自 git 辅助目录的创建。
+pub fn build_forge_executor(
+    stack: &ForgeStack,
+    deps: ForgeExecutorDeps,
+) -> std::io::Result<Executor> {
+    stack.forge.executor(ExecutorDeps {
+        policy: deps.policy,
+        tokens: stack.deps.tokens.clone(),
+        api_base: stack.deps.api_base.clone(),
+        ids: deps.ids,
+        options: deps.options,
+        faults: deps.faults,
+        repo: deps.repo,
+        git_base: stack.deps.git_base.clone(),
+    })
+}
+
+/// 第二阶段：带 mirror 的完整 reader，供 engine / assembly 使用。它与第一阶段
+/// 的 reader 共享同一 store、ForgeConfig 与 dispatcher。
+pub fn build_forge_reader(stack: &ForgeStack, repo: Arc<dyn RepoService>) -> Arc<dyn ForgeReader> {
+    Arc::new(stack.forge.reader(ReaderDeps {
+        tokens: stack.deps.tokens.clone(),
+        api_base: stack.deps.api_base.clone(),
+        clock: stack.clock.clone(),
+        http_timeout: stack.deps.http_timeout,
+        reconciler: Some(stack.dispatcher.clone()),
+        mirror: Some(gantry_forge::MirrorDeps {
+            repo,
+            git_base: stack.deps.git_base.clone(),
+            git_timeout: stack.deps.git_timeout,
+        }),
+    }))
 }
 
 /// 真实装配。各模块按端口接入的顺序见 `tests/support` 的替身装配。
