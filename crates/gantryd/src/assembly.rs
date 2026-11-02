@@ -41,6 +41,7 @@ use gantry_forge::{
 use gantry_notify::Notify;
 use gantry_pki::{Pki, PkiConfig, PkiError};
 use gantry_policy::{PolicyApprovals, PolicyDeps, PolicyEngine};
+use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
 use gantry_secrets::{MasterKeySource, Secrets, SecretsConfig};
 use gantry_store::{ModuleSpec, Store, StoreConfig, StoreDeps};
 use serde::Serialize;
@@ -182,6 +183,14 @@ pub fn build_policy(
 /// notify 的生产构造；状态在 store 的内置投影里，不注册私有表。
 pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
     Arc::new(Notify::new(store.clone(), ids))
+}
+
+/// repo 的生产构造：`RepoDeps` 的时钟必须与 store 共用，`policy` 与 `cas` 由调用方注入。
+pub async fn build_repo(
+    config: RepoConfig,
+    deps: RepoDeps,
+) -> Result<GitRepo, gantry_core::ports::RepoError> {
+    GitRepo::open(config, deps).await
 }
 
 /// forge 装配输入：引导配置、共享 store 之外的令牌来源与 GitHub/Git 地址。

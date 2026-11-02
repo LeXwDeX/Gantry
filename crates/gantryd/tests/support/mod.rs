@@ -35,13 +35,13 @@ use gantry_pki::open::{INTERMEDIATE_KEY_SECRET, SERVER_KEY_SECRET};
 use gantry_pki::pairing_service::{NewDevice, PairingConfig};
 use gantry_pki::{CertPolicy, P256PublicKey, Pki, PkiConfig};
 use gantry_policy::PolicyApprovals;
-use gantry_repo::{GitRepo, RepoConfig, RepoDeps};
+use gantry_repo::{RepoConfig, RepoDeps};
 use gantry_secrets::{MasterKey, MasterKeySource, Secrets, SecretsConfig, StaticMasterKey};
 use gantry_store::{Page, Store, StoreConfig, StoreDeps};
 use gantryd::assembly::{
     build_forge, build_forge_executor, build_forge_reader, build_notify, build_pki, build_policy,
-    build_secrets, module_specs, secrets_consumers, Assembly, ForgeDeps, ForgeExecutorDeps,
-    ModuleInfo, OsEntropy, Profile, Provider, SystemClock,
+    build_repo, build_secrets, module_specs, secrets_consumers, Assembly, ForgeDeps,
+    ForgeExecutorDeps, ModuleInfo, OsEntropy, Profile, Provider, SystemClock,
 };
 use gantryd::config::BootConfig;
 use gantryd::control::{CommandSet, ControlAuth};
@@ -739,7 +739,7 @@ async fn assemble_variant(
         ids.clone(),
     );
     let repo = Arc::new(
-        GitRepo::open(
+        build_repo(
             RepoConfig::new(test_dir.join("repo")),
             RepoDeps {
                 store: store.clone(),

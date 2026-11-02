@@ -83,7 +83,7 @@ pub trait CommandSet: Send + Sync {
 
 | 装配 | 在哪里 | 用途 |
 | --- | --- | --- |
-| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store 与 notify 生产构造函数；forge / policy 的构造函数（`build_forge`、`build_policy`）已就绪，但 `assemble_real` 尚未调用；secrets / pki 的生产构造入口（`build_secrets`、`build_pki`）已就绪，但生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定，`pki.ca_dir` 也尚无 BootConfig 字段映射；因此尚未打开。其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
+| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store 与 notify 生产构造函数；forge / policy / repo 的构造函数（`build_forge`、`build_policy`、`build_repo`）已就绪，但 `assemble_real` 尚未调用；secrets / pki 的生产构造入口（`build_secrets`、`build_pki`）已就绪，但生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定，`pki.ca_dir` 也尚无 BootConfig 字段映射；因此尚未打开。其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
 | 替身装配 `assemble_fakes` | `tests/support/`（只用 dev-dependency） | 进程级测试。测试二进制带 `GANTRYD_FAKES_CHILD` 重新执行自身，作为"用替身装配的 gantryd"子进程 |
 
 替身装配的当前构成（`status` 原样报告）：
@@ -172,7 +172,7 @@ pub trait CommandSet: Send + Sync {
 ## 13. 开放问题
 
 - **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供。测试装配已改为经 `from_settings` 换算，`fake.runtime_status` 读取运行时 `status()`；模型表仍是测试手写的一条映射（归 models 片）。生产 `assemble_real` 尚未调用这些入口，控制通道 `status` 仍只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
-- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_forge` / `build_policy` / `build_notify`，`status` 报 real；`assemble_real` 目前只调用 `build_notify`，policy 依赖 `ForgeReader`，待 forge 片接入。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
+- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_forge` / `build_policy` / `build_repo` / `build_notify`，`status` 报 real；`assemble_real` 目前只调用 `build_notify`，policy 依赖 `ForgeReader`，待 forge 片接入。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
 - **secrets / pki 的生产配置**：`build_secrets` 已按 `server.secrets_dir` 打开实例，`build_pki` 接受显式 `PkiConfig` 与按 `Consumer::Pki` 限定的 `SecretSink`；两者均由调用方注入，gantryd 不猜主密钥来源、CA 目录或 Egress 实例。`assemble_real` 尚未打开它们：生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定；`pki.ca_dir` 是另一项缺口，尚无 BootConfig 字段映射。两者接线前还需解决配置与 `harden_process` 的顺序。
 - **pki 后台生命周期**：`Pki::tick()`（关闭过期配对窗口、按需续签服务端证书）尚未由 `serve` 周期调用；吊销日志在 `revoke` 内同步追加并 fsync 本地与备份目标，不需要额外调度。测试只覆盖同步构造、配对、授权、吊销与崩溃重启，不代表周期任务已在运行。
 - **测试 `real` 的边界**：测试装配里的 secrets / pki 使用测试临时目录、静态主密钥与软件设备密钥。它证明的是生产构造路径与跨模块语义，不证明操作系统用户隔离、真实设备配对或 Ubuntu 部署；这些证据归 B / C 级验收。
