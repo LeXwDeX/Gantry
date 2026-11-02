@@ -1144,6 +1144,7 @@ dependencies = [
  "gantry-engine",
  "gantry-fakes",
  "gantry-forge",
+ "gantry-models",
  "gantry-notify",
  "gantry-pki",
  "gantry-policy",

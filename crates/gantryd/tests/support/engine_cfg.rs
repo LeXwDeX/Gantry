@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gantry_core::canon::{GitOid, RepoSlug};
 use gantry_core::entities::{MergeMethod, Seq, Tier};
-use gantry_core::level::{Effort, Level};
+use gantry_core::level::Level;
 use gantry_core::settings::{
     builtin_defaults, effective, parse_resolved, ResolvedSettings, SettingsResource,
 };
@@ -16,6 +16,7 @@ use gantry_core::worker::output_schema;
 use gantry_engine::decide::{ModelKey, ModelTable, ProjectFacts, ResolvedModel};
 use gantry_engine::runtime::RuntimeSettings;
 use gantry_engine::runtime_settings::from_settings;
+use gantry_models::{ModelsView, Purpose, ResolveQuery};
 use serde_json::json;
 use std::sync::OnceLock;
 
@@ -91,22 +92,7 @@ pub fn runtime_settings() -> RuntimeSettings {
     else {
         unreachable!()
     };
-    // 模型表是测试手写的一条映射（reasoning_effort 固定 Low）；C2 接 models 后改为由设置推导。
-    // 见 #105 的 B1 评审补记。
-    let table = ModelTable::from([(
-        ModelKey {
-            sandbox: true,
-            level: Level::Low,
-            tier: Tier::Worker,
-            critical: false,
-        },
-        ResolvedModel {
-            provider_id: "anthropic".to_owned(),
-            model: "claude".to_owned(),
-            reasoning_effort: Effort::Low,
-            attempt_wall_s: models.worker.attempt_wall_s,
-        },
-    )]);
+    let table = model_table(&models, &levels);
     let mut runtime = from_settings(
         Seq::new(1).expect("fixture"),
         Timestamp::from_millis(1_700_000_000_000),
@@ -129,4 +115,59 @@ pub fn runtime_settings() -> RuntimeSettings {
     // 引擎内部轮询间隔不是设置键；§12.2 进程级用例需要更快的轮询。
     runtime.poll_interval = Duration::from_millis(5);
     runtime
+}
+
+/// 由 models 设置与 levels 推导 engine 的模型表；未配置的 tier 不进入表。
+fn model_table(
+    models: &gantry_core::settings::resource::Models,
+    levels: &gantry_core::settings::resource::Levels,
+) -> ModelTable {
+    let view = ModelsView::build(models.clone(), levels, Seq::new(1).expect("fixture"))
+        .expect("models view");
+    let project = PROJECT.parse().expect("fixture project");
+    let mut table = ModelTable::new();
+    for sandbox in [false, true] {
+        for level in [
+            Level::Low,
+            Level::Medium,
+            Level::High,
+            Level::Max,
+            Level::Ultimate,
+        ] {
+            for tier in [Tier::Utility, Tier::Planner, Tier::Worker] {
+                for critical in [false, true] {
+                    let Ok(resolved) = view.resolve(&ResolveQuery {
+                        project_id: project,
+                        tier,
+                        level: Some(level),
+                        critical,
+                        purpose: if sandbox {
+                            Purpose::Sandbox
+                        } else {
+                            Purpose::Direct
+                        },
+                    }) else {
+                        continue;
+                    };
+                    // 沙盒内的 planner / utility 沿用 worker 的适配器与上限（models.md §7.2）。
+                    let attempt_wall_s = models.worker.attempt_wall_s;
+                    table.insert(
+                        ModelKey {
+                            sandbox,
+                            level,
+                            tier,
+                            critical,
+                        },
+                        ResolvedModel {
+                            provider_id: resolved.provider_id,
+                            model: resolved.model,
+                            reasoning_effort: resolved.reasoning_effort,
+                            attempt_wall_s,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    table
 }
