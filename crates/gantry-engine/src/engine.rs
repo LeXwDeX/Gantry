@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use gantry_core::entities::{InboxItem, Seq};
 use gantry_core::events::{EventType, SchemaError, Subject};
 use gantry_core::ids::{DeliveryId, IdError, NodeId};
+use gantry_core::level::Level;
 use gantry_core::machines::TransitionError;
 use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::engine::TemplateCatalog;
@@ -21,6 +22,8 @@ use crate::state::{DeliveryState, StateError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("engine is not configured for the requested level")]
+    NotConfigured,
     #[error("contract: {0}")]
     Contract(#[from] SchemaError),
     #[error("store: {0}")]
@@ -83,7 +86,25 @@ impl Engine {
 
     /// 在单个写事务中追加 `delivery.created`；相同 `source_message_id` 不重复追加，
     /// 并返回已存在的那个交付单元（engine.md §6：同一条消息重复调用返回同一个交付单元）。
-    pub async fn create_delivery(&self, delivery: NewDelivery) -> Result<DeliveryId, EngineError> {
+    ///
+    /// `level_cap` 与模板族必须匹配且模板族已在 `template_catalog` 中登记；
+    /// 不匹配时返回 [`EngineError::NotConfigured`]，不写任何事件，也不静默降档。
+    /// M1 只有 Low 模板族，因此 Medium 及以上一律拒绝；有效档位从 Low 起且
+    /// 不超过上限（K7）。
+    pub async fn create_delivery(
+        &self,
+        mut delivery: NewDelivery,
+    ) -> Result<DeliveryId, EngineError> {
+        if delivery.level_cap != Level::Low
+            || !self
+                .template_catalog()
+                .templates
+                .iter()
+                .any(|template| template == &delivery.budget.template)
+        {
+            return Err(EngineError::NotConfigured);
+        }
+        delivery.level_effective = Level::Low.capped_by(delivery.level_cap);
         let event = created_event(delivery)?;
         let mut tx = self.store.begin_write().await?;
         let appended = tx.append(event).await?;

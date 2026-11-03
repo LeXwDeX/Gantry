@@ -115,6 +115,9 @@ pub trait EngineApi: Send + Sync {
     /// 同步完成：写 `delivery.created`（含固化的预算台账与 `config_rev`），
     /// 其余推进（准入、规划、实现）由引擎异步进行。
     /// 所需层级的模型未配置（该档位图用到的 `models.planner` / `worker` 缺 `model`）→ `EngineError::NotConfigured`，不创建。
+    /// 按 `levels.<level_cap>.graph_template` 固化的模板族不在已实现的模板目录中，或与
+    /// `level_cap` 不匹配 → 同样返回 `EngineError::NotConfigured`，不写 `delivery.created`，
+    /// 不静默降档；M1 只有 `low.single`，Medium 及以上一律拒绝。
     async fn create_delivery(&self, cmd: CreateDelivery) -> Result<DeliveryHandle, EngineError>;
 
     /// 定位：给定 refs，返回已绑定且未终结的交付单元（0..n 个）。只读投影，不产生事件。
@@ -484,7 +487,7 @@ flowchart LR
 
 | # | 迁移 | 触发 | 守卫（全部满足） | 动作 |
 | --- | --- | --- | --- | --- |
-| T1 | （创建）→ `spec` | `create_delivery` | `level_cap ≠ None`；模型已配置；`source_message_id` 未建过 | `delivery.created`（按 `level_cap` 固化台账与 `config_rev`，P-57）；`LevelPolicy::initial_effective` 给出 `level_effective` 初值（≤ `level_cap`） |
+| T1 | （创建）→ `spec` | `create_delivery` | `level_cap ≠ None`；模板族已在 `template_catalog` 中登记且与 `level_cap` 匹配（M1 只有 Low）；模型已配置；`source_message_id` 未建过 | `delivery.created`（按 `level_cap` 固化台账与 `config_rev`，P-57）；`LevelPolicy::initial_effective` 给出 `level_effective` 初值（M1 取 Low，且 ≤ `level_cap`） |
 | T2 | `spec → implement`（`AdmissionSkipped`） | 规格确认（`delivery.created` 之后，规格已足够） | `level_effective = Low`（免准入、无计划阶段，P-55） | `stage_changed(reason = admission_skipped)`；不建 Workflow |
 | T2b | `spec → plan`（`AdmissionSkipped`） | 同上 | `level_effective = Medium`（免准入，P-55） | 建 `medium.plan` Workflow |
 | T3 | `spec → plan`（`AdmissionAccept`） | `admission` 节点 `succeeded` | `level_effective ≥ High`；verdict `ACCEPT`；若 `refined_spec` 非空且已绑定 Issue，则 `update_issue` 已 `outbox.succeeded`（失败码 `spec_edited_by_human` → 重新准入） | 建 `<level>.plan` Workflow |

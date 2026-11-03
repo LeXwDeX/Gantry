@@ -10,7 +10,7 @@ use gantry_core::level::Level;
 use gantry_core::settings::resource::{LevelBudget, LevelEntry, TierBudget};
 use gantry_core::time::Timestamp;
 use gantry_engine::create::{budget_from_level, NewDelivery};
-use gantry_engine::engine::Engine;
+use gantry_engine::engine::{Engine, EngineError};
 use gantry_store::testing::{FakeClock, SeqEntropy};
 use gantry_store::{EventFilter, Store, StoreDeps};
 
@@ -113,6 +113,99 @@ async fn invalid_delivery_is_not_appended() {
     delivery.level_cap = Level::None;
     delivery.level_effective = Level::None;
     assert!(engine.create_delivery(delivery).await.is_err());
+    let page = engine
+        .store()
+        .events()
+        .scan(Seq::ZERO, &empty_filter(), 10)
+        .await
+        .unwrap();
+    assert!(page.events.is_empty());
+}
+
+#[tokio::test]
+async fn default_medium_is_not_configured_and_writes_nothing() {
+    let engine = engine().await;
+    let mut delivery = delivery();
+    delivery.level_cap = Level::Medium;
+    delivery.level_effective = Level::Medium;
+    delivery.budget.template = "medium.plan_build_verify".to_owned();
+    assert!(matches!(
+        engine.create_delivery(delivery).await,
+        Err(EngineError::NotConfigured)
+    ));
+    let page = engine
+        .store()
+        .events()
+        .scan(Seq::ZERO, &empty_filter(), 10)
+        .await
+        .unwrap();
+    assert!(page.events.is_empty());
+}
+
+#[tokio::test]
+async fn medium_cap_with_low_template_is_refused() {
+    let engine = engine().await;
+    let mut delivery = delivery();
+    delivery.level_cap = Level::Medium;
+    delivery.level_effective = Level::Medium;
+    // 模板名本身已登记，但档位与模板不匹配；入口不能据此放行。
+    assert!(matches!(
+        engine.create_delivery(delivery).await,
+        Err(EngineError::NotConfigured)
+    ));
+    let page = engine
+        .store()
+        .events()
+        .scan(Seq::ZERO, &empty_filter(), 10)
+        .await
+        .unwrap();
+    assert!(page.events.is_empty());
+}
+
+#[tokio::test]
+async fn low_cap_with_unregistered_template_is_refused() {
+    let engine = engine().await;
+    let mut delivery = delivery();
+    delivery.budget.template = "low.unregistered".to_owned();
+    assert!(matches!(
+        engine.create_delivery(delivery).await,
+        Err(EngineError::NotConfigured)
+    ));
+    let page = engine
+        .store()
+        .events()
+        .scan(Seq::ZERO, &empty_filter(), 10)
+        .await
+        .unwrap();
+    assert!(page.events.is_empty());
+}
+
+#[tokio::test]
+async fn low_delivery_starts_at_low_effective_regardless_of_input() {
+    let engine = engine().await;
+    let mut delivery = delivery();
+    delivery.level_effective = Level::High;
+    engine.create_delivery(delivery).await.unwrap();
+    let page = engine
+        .store()
+        .events()
+        .scan(Seq::ZERO, &empty_filter(), 10)
+        .await
+        .unwrap();
+    assert_eq!(page.events[0].data["level_effective"], "Low");
+}
+
+#[tokio::test]
+async fn unsupported_high_is_not_configured_and_writes_nothing() {
+    let engine = engine().await;
+    let mut delivery = delivery();
+    delivery.level_cap = Level::High;
+    delivery.level_effective = Level::High;
+    delivery.budget.template = "high.multi_review".to_owned();
+    assert!(matches!(
+        engine.create_delivery(delivery).await,
+        Err(EngineError::NotConfigured)
+    ));
     let page = engine
         .store()
         .events()
