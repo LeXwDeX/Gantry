@@ -11,8 +11,9 @@ use common::{ts, BASE_SHA, DELIVERY, PROJECT, T0};
 use gantry_core::canon::{GitOid, SubjectDigest};
 use gantry_core::entities::{
     Actor, ActorKind, ApprovalAction, AttemptStatus, BudgetLedger, DecisionKind, EvidenceKind,
-    EvidenceRef, ForgeActionKind, InboxKind, InboxPayload, MergeMethod, NodeStatus, PolicyActionId,
-    PullRequestRef, Seq, Severity, Stage, StageStatus, Tier, TokenUsage,
+    EvidenceRef, ForgeActionKind, InboxKind, InboxPayload, IssueRef, IssueState, MergeMethod,
+    NodeStatus, PolicyActionId, PullRequestRef, Ref, Seq, Severity, Stage, StageStatus, Tier,
+    TokenUsage,
 };
 use gantry_core::events::{Event, EventType, NewEvent, Subject};
 use gantry_core::forge::ActionPayload;
@@ -20,13 +21,14 @@ use gantry_core::ids::{ApprovalId, EventId};
 use gantry_core::ports::policy::{
     ActionDecision, ApprovalSpec, DenyReason, ProposalDecision, ReportHint,
 };
+use gantry_core::text::UntrustedText;
 use gantry_core::time::Timestamp;
 use gantry_core::worker::{OpenPrParams, Proposal, ProposalKind, ProposalParams};
 use gantry_engine::decide::{
-    DecideEnv, DecideSeed, Decision, Effect, EffectKey, EffectReport, EngineConsts, EngineSettings,
-    Finalized, Input, InputIdentity, ModelKey, ModelTable, OutputSignals, PatchResult,
-    ProjectFacts, ProposalMissing, ProposalOutcome, ProposalRef, ProposalText, ProposalTexts,
-    ReservationPolicy, ResolvedModel, SandboxLimits, TemplateRegistry, TickReason,
+    AttemptPlan, DecideEnv, DecideSeed, Decision, Effect, EffectKey, EffectReport, EngineConsts,
+    EngineSettings, Finalized, Input, InputIdentity, ModelKey, ModelTable, OutputSignals,
+    PatchResult, ProjectFacts, ProposalMissing, ProposalOutcome, ProposalRef, ProposalText,
+    ProposalTexts, ReservationPolicy, ResolvedModel, SandboxLimits, TemplateRegistry, TickReason,
 };
 use gantry_engine::state::{ActionKey, DeliveryState};
 use gantry_engine::{decide, expected_actions};
@@ -125,7 +127,11 @@ struct Sim {
 
 impl Sim {
     fn new() -> Self {
-        let created = common::events(&[common::created(DELIVERY)]);
+        Self::from_created(common::created(DELIVERY))
+    }
+
+    fn from_created(created: common::Spec) -> Self {
+        let created = common::events(&[created]);
         let state = DeliveryState::fold(&created).unwrap().unwrap();
         Self {
             fx: Fixture::new(),
@@ -349,9 +355,8 @@ fn snapshot(head: &str, required_ok: bool, state: &str) -> PullRequestRef {
 }
 
 /// 推进到 `implement` 并走完派发：`EnsureWorktree` → repo 写 `worktree.created`；
-/// `AcquireLock` → repo 写 `worktree.locked`，执行体记下 `lock_owner`；然后派发出 `RunAttempt`。
-fn dispatched() -> Sim {
-    let mut sim = Sim::low();
+/// `AcquireLock` → repo 写 `worktree.locked`，执行体记下 `lock_owner`；然后返回 `RunAttempt` 的 plan。
+fn dispatch_to_plan(sim: &mut Sim) -> AttemptPlan {
     let effects = sim.settle();
     assert_eq!(sim.state.delivery.stage, Stage::Implement);
     let [Decision::Effect(Effect::EnsureWorktree { branch, base_ref })] = effects.as_slice() else {
@@ -395,11 +400,51 @@ fn dispatched() -> Sim {
     assert!(plan.lock.is_some());
     assert!(!plan.resume);
     assert!(plan.instructions.as_str().ends_with("修复登录超时"));
+    plan.as_ref().clone()
+}
+
+/// 推进到 `implement` 并走完派发；返回派发后的模拟器。
+fn dispatched() -> Sim {
+    let mut sim = Sim::low();
+    let plan = dispatch_to_plan(&mut sim);
+    let node_id = plan.node_id;
     let node = sim.state.node(&node_id).unwrap();
     assert_eq!(node.status, NodeStatus::Running);
     assert_eq!(node.attempts.len(), 1);
     assert_eq!(sim.state.ledger.used.attempts, 1);
     sim
+}
+
+#[test]
+fn dispatched_plan_carries_delivery_issue_refs() {
+    let issue = |number: u64| IssueRef {
+        repo: serde_json::from_value(json!("acme/web")).unwrap(),
+        number,
+        node_id: format!("I_{number}"),
+        title: UntrustedText::new("fix login".into(), "github".into(), false),
+        state: IssueState::Open,
+        state_reason: None,
+        synced_at: Timestamp::from_millis(T0),
+    };
+    let mut created = common::created(DELIVERY);
+    // 倒序给出，断言计划按交付引用原顺序传递，不排序。
+    created.data["issues"] = json!([issue(7), issue(5)]);
+    let mut sim = Sim::from_created(created);
+    let plan = dispatch_to_plan(&mut sim);
+    assert_eq!(
+        plan.refs,
+        vec![
+            Ref::Issue {
+                repo: serde_json::from_value(json!("acme/web")).unwrap(),
+                number: 7,
+            },
+            Ref::Issue {
+                repo: serde_json::from_value(json!("acme/web")).unwrap(),
+                number: 5,
+            },
+        ]
+    );
+    assert_eq!(plan.refs.len(), sim.state.delivery.issues.len());
 }
 
 fn finalized(sim: &Sim, proposals: Vec<ProposalOutcome>) -> Finalized {
