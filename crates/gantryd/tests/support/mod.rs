@@ -810,7 +810,7 @@ async fn assemble_variant(
         ModuleInfo::new(
             "engine",
             Real,
-            "EngineRuntime; settings via from_settings; model table is a test fixture",
+            "EngineRuntime; settings via from_settings and ModelsView",
         ),
         ModuleInfo::new("notify", Real, "Notify; production constructor"),
         ModuleInfo::new(
@@ -825,8 +825,8 @@ async fn assemble_variant(
         ),
         ModuleInfo::new(
             "repo",
-            Fake,
-            "test-side GitRepo; production build_repo is S3b",
+            Real,
+            "GitRepo via build_repo; assemble_real not wired",
         ),
         ModuleInfo::new("sandbox", Fake, "GoldenSandbox; real sandbox needs Podman"),
         ModuleInfo::new("worker", Fake, "StubWorkerAdapter"),

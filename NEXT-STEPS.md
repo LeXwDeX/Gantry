@@ -63,7 +63,7 @@ M0.9 只剩 #86；#82–#85、#122、#135、#179、#292 已关闭。M1.1（18/18
 
 ### 当前优先级（2026-10-29 起）
 
-1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（模型表仍是测试 helper 用硬编码设置经 `ModelsView` 推导）；下一步逐个替换 forge、repo、models、sandbox、worker、egress、conversation 与 api；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。S3 分片：S0 控制通道（#401）、S1 配置决策登记（#405）、S2 真实 `ForgeReader` 快照与镜像拉取（#305，PR #407）、S3a 前置 #409（PR #413）与 S3a forge 装配（PR #414）已合入；S3b repo 片（PR #415）也已合入。models 片已有 `build_models` 独立构造与本机回环测试；测试装配仍是 `FakeModelProvider`，`assemble_real` 仍返回 `NotReady`。
+1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（模型表仍是测试 helper 用硬编码设置经 `ModelsView` 推导）；下一步按 #105 的 A 线顺序接线 worker、sandbox、conversation/models、egress 与 api（models 与 conversation 同片）；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。S3 分片：S0 控制通道（#401）、S1 配置决策登记（#405）、S2 真实 `ForgeReader` 快照与镜像拉取（#305，PR #407）、S3a 前置 #409（PR #413）与 S3a forge 装配（PR #414）已合入；S3b repo 片（PR #415）也已合入。models 片已有 `build_models` 独立构造与本机回环测试；测试装配仍是 `FakeModelProvider`，`assemble_real` 仍返回 `NotReady`。
 2. **#280**：api 读路由 / 共用用例，可与 #105 并行。#267 已关闭（PR #393–#395）。
 3. **M1.3 收尾评审的小项**：#367、#368、#369、#370、#371 均已关闭（PR #374、#376、#390、#391/#392 等）；真实主机检查归 #106。
 4. **#106 → #107**：B 级本机 Ubuntu 虚拟机、C 级外部资源。两项都要先征求用户确认，C 级还需要真实资源。
@@ -110,7 +110,7 @@ A 级先按 [M1 验收证据分级](docs/m1-acceptance.md) §3 的 A 列，用�
 | pki | 测试中真实构造 | `assembly::build_pki`；测试 CA、公开 pairing 登记设备、真实吊销与 journal |
 | secrets | 测试中真实构造 | `assembly::build_secrets`；M1 仅 Forge/Pki，不含 Egress，显式测试初始化 |
 | forge | 测试装配真实 | `assembly::build_forge` 两阶段构造：同一 `Forge` 先给 policy 无 mirror 的 reader，再接 repo/policy 构造执行器与完整 reader；GitHub 用父测试进程持有的回环 `FakeGitHub` |
-| repo | 替身（测试侧真实 Git） | 测试装配经 `assembly::build_repo` 构造真实 `GitRepo` + 裸远端；`status` 仍报 fake，`assemble_real` 尚未调用 `build_repo` |
+| repo | 真实 | 测试装配经 `assembly::build_repo` 构造真实 `GitRepo` + 裸远端；`status` 报 real，`assemble_real` 尚未调用 `build_repo` |
 | models / sandbox / worker / egress / conversation | 替身 | 仍使用 `gantry-fakes` 对应替身；models 另有 `assembly::build_models` 独立构造与本机回环测试，测试装配未切换 |
 | api | 未装配 | 尚未接入 `serve` |
 | 后台任务 | 未接线 | policy invalidation、notify AutoClose、`Pki::tick` 均未由 `serve` 启动；sandbox 的 `BuiltinSchemas` 留到 sandbox 片 |

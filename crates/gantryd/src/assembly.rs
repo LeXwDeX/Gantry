@@ -86,7 +86,7 @@ impl ModuleInfo {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssemblyError {
-    #[error("module {module} has no real implementation yet: {why}")]
+    #[error("module {module} is not ready in the real assembly: {why}")]
     NotReady {
         module: &'static str,
         why: &'static str,
@@ -322,11 +322,11 @@ pub fn build_forge_reader(stack: &ForgeStack, repo: Arc<dyn RepoService>) -> Arc
 
 /// 真实装配。各模块按端口接入的顺序见 `tests/support` 的替身装配。
 ///
-/// 当前已接持久化 store 与 notify 生产构造函数；policy 构造函数已就绪，待 forge
-/// 接入后调用。secrets / pki 的构造函数（[`build_secrets`]、[`build_pki`]）也已
-/// 就绪，但主密钥来源未定（secrets.md OQ-2、deploy OPS-08），`pki.ca_dir` 尚无
-/// 引导配置字段映射，因此这里不打开它们。其余模块（repo、sandbox、worker、models、
-/// egress、api、pki、secrets）尚未接线，仍拒绝启动（失败闭合）。
+/// 当前只打开持久化 store；notify 也只保留构造点。forge / policy / repo / models
+/// 的生产构造函数已就绪，但这里尚未按依赖顺序调用；secrets / pki 的构造函数
+/// （[`build_secrets`]、[`build_pki`]）同样未接入，生产主密钥来源未定
+/// （secrets.md OQ-2、deploy OPS-08），`pki.ca_dir` 也尚无引导配置字段映射。
+/// sandbox、worker、egress、conversation 与 api 尚未接线，仍拒绝启动（失败闭合）。
 pub async fn assemble_real(config: &crate::config::BootConfig) -> Result<Assembly, AssemblyError> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(OsEntropy)));
@@ -345,10 +345,11 @@ pub async fn assemble_real(config: &crate::config::BootConfig) -> Result<Assembl
     let _notify = build_notify(&store, ids);
     // 生产凭据来源和 CA 配置尚未接入，不在这里猜测或初始化。
     Err(AssemblyError::NotReady {
-        module: "forge",
-        why: "real forge/engine/api wiring is not complete (gantryd.md §7.1); \
-              persistent store and notify are ready, refusing to run without the \
-              remaining modules",
+        module: "sandbox",
+        why: "real assembly is incomplete (gantryd.md §7.1): persistent store and \
+              notify are ready, forge/policy/repo/models constructors exist but are \
+              not wired here, and sandbox/worker/egress/conversation/api plus the \
+              production secrets/pki configuration are still missing; refusing to run",
     })
 }
 
