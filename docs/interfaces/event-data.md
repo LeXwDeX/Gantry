@@ -42,6 +42,16 @@
 
 > 下面所有 JSON / JSONC 都是**候选草形状**。标 `jsonc` 的块含注释，注释只用于标记未定项，不是合法 JSON，不能直接作为 schema。
 
+**project 事件信封**
+
+`project.added` / `project.updated` 使用同一条信封规则：
+
+- `subject == project_id == data.id`。追加与重放都校验；任一不等即完整性错误，错误带 `seq` 与事件类型。追加整条拒绝；重放拒绝打开实例。不得改写、跳过或删除已有事件。
+- `correlation_id = data.id`（项目内没有更细的 delivery / attempt 归属）；`causation_id` 为触发本次变更的事件 ID，没有直接原因时为 `null`（显式）。
+- 发出模块（`emitter`）：`project.added` 只有 `api`；`project.updated` 为 `forge` 或 `api`（core 事件目录 `events.rs:578-579`），其他模块不得写。信封 `actor` 沿用实际调用上下文，不新增 `api` 类别，也不把模块名当作设备身份。
+- 重复 `project.added` 与未知 `project.updated` 沿用全量覆盖：投影按 `project_id` 以后写覆盖先写，不因重复或未知而拒绝事件。
+- M1 前未装配期的库不受支持：该期间可能存在的错配事件不自动修复；启动重放遇到错配即完整性错误。
+
 #### 2.2.1 `attempt.progress`
 
 **推荐规格，待契约审查。** 服务端按白名单投影 worker §7.1 事件，不原样转发。`data` 只允许 `stage` / `tool` / `usage`；`hello` / `heartbeat` / `warn` / `finish` 不进入事件。字段名复用 `core::worker` 的 `StageEvent` / `ToolEvent` / `UsageEvent`。
