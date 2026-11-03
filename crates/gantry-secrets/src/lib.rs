@@ -134,6 +134,7 @@ impl Secrets {
         if cfg.consumers.is_empty() {
             return Err(invalid("an instance must host at least one consumer"));
         }
+        cfg.master_key.check_location(&cfg.dir)?;
         let master = cfg.master_key.load()?;
         fsx::create_dir(&cfg.dir)?;
         let now = namespace::now_ms();
@@ -176,6 +177,7 @@ impl Secrets {
     }
 
     fn open_as(cfg: SecretsConfig, uid: u32) -> Result<Secrets, SecretsError> {
+        cfg.master_key.check_location(&cfg.dir)?;
         if let Err(error) = fsx::check_tree(&cfg.dir, uid) {
             tracing::error!(dir = %cfg.dir.display(), error = %error, op = "open", result = "insecure");
             return Err(error);

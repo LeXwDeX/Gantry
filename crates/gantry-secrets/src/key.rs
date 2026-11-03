@@ -91,6 +91,11 @@ impl fmt::Debug for Dek {
 /// 主密钥来源。由 `deploy` 选择具体实现（OQ-2）。
 pub trait MasterKeySource: Send + Sync {
     fn load(&self) -> Result<MasterKey, SecretsError>;
+
+    /// 在加载前检查来源位置与实例目录不冲突；默认无位置约束。
+    fn check_location(&self, _secrets_dir: &std::path::Path) -> Result<(), SecretsError> {
+        Ok(())
+    }
 }
 
 /// systemd credential：读 `$CREDENTIALS_DIRECTORY/<name>`，内容为 32 字节原始密钥。
@@ -113,8 +118,8 @@ impl MasterKeySource for SystemdCredential {
     }
 }
 
-/// 本地密钥文件：32 字节原始密钥，属主 = 有效 uid、组与其他用户无任何权限（建议 `0400`），
-/// 必须位于 `secrets.dir` 之外（`Secrets::open` 检查）。
+/// 本地密钥文件：32 字节原始密钥，权限必须恰为 `0400`、属主 = 有效 uid，
+/// 且必须位于 `secrets.dir` 之外（`Secrets::init` / `Secrets::open` 检查）。
 #[derive(Clone, Debug)]
 pub struct KeyFile {
     pub path: PathBuf,
@@ -123,6 +128,76 @@ pub struct KeyFile {
 impl MasterKeySource for KeyFile {
     fn load(&self) -> Result<MasterKey, SecretsError> {
         read_key_file(&self.path, true)
+    }
+
+    fn check_location(&self, secrets_dir: &std::path::Path) -> Result<(), SecretsError> {
+        let dir = canonical_allow_missing(secrets_dir)?;
+        let key = canonical_allow_missing(&self.path)?;
+        let outside = || {
+            SecretsError::KeyUnavailable(
+                "master key file must be outside the secrets directory".into(),
+            )
+        };
+        if key.starts_with(&dir) {
+            return Err(outside());
+        }
+        // 硬链接的路径不在目录内，但同一文件已在目录内；按 inode 再查一次。
+        let key_meta = match std::fs::metadata(&key) {
+            Ok(meta) => Some(meta),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(key_meta) = key_meta {
+            match std::fs::metadata(&dir) {
+                Ok(dir_meta) if dir_meta.is_dir() => {
+                    if contains_inode(&dir, key_meta.dev(), key_meta.ino())? {
+                        return Err(outside());
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+}
+
+fn contains_inode(dir: &std::path::Path, dev: u64, ino: u64) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            if contains_inode(&path, dev, ino)? {
+                return Ok(true);
+            }
+        } else if meta.is_file() && meta.dev() == dev && meta.ino() == ino {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 规范化路径；末端组件不存在时沿用已存在的父目录。
+fn canonical_allow_missing(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    match path.canonicalize() {
+        Ok(canonical) => Ok(canonical),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty());
+            let name = path.file_name();
+            match (parent, name) {
+                (Some(parent), Some(name)) => Ok(canonical_allow_missing(parent)?.join(name)),
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -163,7 +238,7 @@ fn read_key_file(path: &std::path::Path, check_owner: bool) -> Result<MasterKey,
     }
     if check_owner {
         let mode = meta.mode() & 0o7777;
-        if meta.uid() != rustix::process::geteuid().as_raw() || mode & 0o077 != 0 {
+        if meta.uid() != rustix::process::geteuid().as_raw() || mode != 0o400 {
             return Err(SecretsError::InsecurePermissions {
                 path: path.to_path_buf(),
                 mode,
