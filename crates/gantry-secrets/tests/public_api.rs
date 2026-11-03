@@ -9,6 +9,7 @@ use std::path::Path;
 
 const ALLOWED: &[&str] = &[
     // key.rs
+    "check_location",
     "from_bytes",
     "generate",
     "load",

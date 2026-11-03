@@ -307,10 +307,16 @@ fn key_file_permissions_and_length() {
         source.load(),
         Err(SecretsError::InsecurePermissions { mode: 0o644, .. })
     ));
+    set_mode(&path, 0o600);
+    assert!(matches!(
+        source.load(),
+        Err(SecretsError::InsecurePermissions { mode: 0o600, .. })
+    ));
     set_mode(&path, 0o400);
     assert!(source.load().is_ok());
     set_mode(&path, 0o600);
     fs::write(&path, &bytes[..31]).unwrap();
+    set_mode(&path, 0o400);
     assert!(matches!(
         source.load(),
         Err(SecretsError::KeyUnavailable(_))
@@ -322,6 +328,67 @@ fn key_file_permissions_and_length() {
         missing.load(),
         Err(SecretsError::KeyUnavailable(_))
     ));
+}
+
+#[test]
+fn key_file_inside_secrets_directory_is_rejected() {
+    let tmp = TempDir::new("keyfile-inside");
+    let key = Key::random();
+    let dir = tmp.path().join("inst");
+    Secrets::init(cfg(&dir, &[Consumer::Forge], &key)).unwrap();
+    let inside = dir.join("master.key");
+    fs::write(&inside, [7u8; 32]).unwrap();
+    set_mode(&inside, 0o400);
+    // 目录权限本身不合格；位置检查必须先于 check_tree 报错。
+    set_mode(&dir, 0o755);
+    let source = KeyFile { path: inside };
+    let config = SecretsConfig::new(dir, vec![Consumer::Forge], Box::new(source));
+    match Secrets::open(config) {
+        Err(SecretsError::KeyUnavailable(message)) => {
+            assert!(
+                message.contains("outside the secrets directory"),
+                "{message}"
+            );
+        }
+        Err(other) => panic!("unexpected error: {other:?}"),
+        Ok(_) => panic!("key file inside the secrets directory must be rejected"),
+    }
+}
+
+#[test]
+fn key_file_hard_linked_into_secrets_directory_is_rejected() {
+    for target in ["master.key", "forge/master.key"] {
+        let tmp = TempDir::new("keyfile-hardlink");
+        let key_path = tmp.path().join("master.key");
+        fs::write(&key_path, [9u8; 32]).unwrap();
+        set_mode(&key_path, 0o400);
+        let dir = tmp.path().join("inst");
+        let key = KeyFile {
+            path: key_path.clone(),
+        };
+        Secrets::init(SecretsConfig::new(
+            &dir,
+            vec![Consumer::Forge],
+            Box::new(key),
+        ))
+        .unwrap();
+        fs::hard_link(&key_path, dir.join(target)).unwrap();
+        let config = SecretsConfig::new(
+            &dir,
+            vec![Consumer::Forge],
+            Box::new(KeyFile { path: key_path }),
+        );
+        match Secrets::open(config) {
+            Err(SecretsError::KeyUnavailable(message)) => {
+                assert!(
+                    message.contains("outside the secrets directory"),
+                    "{target}: {message}"
+                );
+            }
+            Err(other) => panic!("{target}: unexpected error: {other:?}"),
+            Ok(_) => panic!("hard-linked key inside the secrets directory must be rejected"),
+        }
+    }
 }
 
 #[test]
