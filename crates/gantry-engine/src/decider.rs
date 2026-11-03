@@ -20,7 +20,7 @@ use gantry_core::canon::{IdempotencyKey, SubjectDigest};
 use gantry_core::egress::LedgerRef;
 use gantry_core::entities::{
     Actor, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, ForgeActionKind, InboxKind,
-    InboxPayload, NodeStatus, OutboxStatus, Priority, PullRequestState, Severity, Stage,
+    InboxPayload, NodeStatus, OutboxStatus, Priority, PullRequestState, Ref, Severity, Stage,
     StageStatus, WorkflowStatus,
 };
 use gantry_core::events::{
@@ -1561,7 +1561,15 @@ fn attempt_plan(
             .filter_map(|a| Some((a.id, a.failure_class?, a.failure_detail.clone())))
             .collect(),
         instructions: TrustedInstructions::compose(ROLE_TEMPLATE_SINGLE, &state.delivery.user_text),
-        refs: Vec::new(),
+        refs: state
+            .delivery
+            .issues
+            .iter()
+            .map(|issue| Ref::Issue {
+                repo: issue.repo.clone(),
+                number: issue.number,
+            })
+            .collect(),
         lock,
         resume,
     }

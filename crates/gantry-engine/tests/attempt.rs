@@ -3,17 +3,19 @@
 //! 全部用替身：`FakeSandboxService`（回放 `JobOutcome`）、`FakeRepo`（补丁闸门与锁）、
 //! `FakePolicy`、`FakeForge`（`ForgeReader::discussion` / `OutboxPort`）、内存 CAS。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use gantry_core::canon::{sha256, GitOid, IdempotencyKey, RepoSlug, Sha256Digest, SubjectDigest};
 use gantry_core::egress::{DeniedCounters, FinalUsage, JobTokenState, UpstreamErrors};
 use gantry_core::entities::{
-    Actor, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, DeliveryOrigin, Exec,
-    FailureClass, ForgeActionKind, LockHolder, NodeStatus, PatchRef, Ref, Role, SandboxLimits,
-    SandboxTrust, Seq, Stage, Tier, TokenUsage, TokenWeights, WorkflowStatus, Worktree,
+    Actor, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, BudgetLedger, DeliveryOrigin,
+    Exec, FailureClass, ForgeActionKind, IssueRef, IssueState, LockHolder, MergeMethod, NodeStatus,
+    PatchRef, Ref, Role, SandboxLimits, SandboxTrust, Seq, Stage, Tier, TokenUsage, TokenWeights,
+    WorkflowStatus, Worktree,
 };
+use gantry_core::events::{AttemptStartedData, EventType, NewEvent, Subject};
 use gantry_core::ids::{AttemptId, DeliveryId, IdGen, MessageId, NodeId, ProjectId, Ulid};
 use gantry_core::ids::{WorkflowId, WorktreeId};
 use gantry_core::level::{Effort, Level};
@@ -48,13 +50,15 @@ use gantry_engine::attempt::{
 };
 use gantry_engine::create::{budget_from_level, NewDelivery};
 use gantry_engine::decide::{
-    AttemptPlan, Effect, EffectErrorClass, EffectKey, EffectReport, Finalized, Input,
-    InputIdentity, PatchResult, ProposalRef, ProposalText, ResolvedModel, RetryBlocked, TickReason,
-    TimerKind, TrustedInstructions,
+    AttemptPlan, DecideEnv, DecideSeed, Decision, Effect, EffectErrorClass, EffectKey,
+    EffectReport, EngineConsts, EngineSettings, Finalized, Input, InputIdentity, ModelTable,
+    PatchResult, ProjectFacts, ProposalRef, ProposalText, ProposalTexts, ReservationPolicy,
+    ResolvedModel, RetryBlocked, SandboxLimits as DecideSandboxLimits, TemplateRegistry,
+    TickReason, TimerKind, TrustedInstructions,
 };
 use gantry_engine::effects::PortEffects;
 use gantry_engine::engine::{load_delivery_state, Engine};
-use gantry_engine::state::{DeliveryState, NodeState, WorkflowState};
+use gantry_engine::state::{ActionKey, AttemptState, DeliveryState, NodeState, WorkflowState};
 use gantry_fakes::forge::FakeForge;
 use gantry_fakes::inbox::FakeInbox;
 use gantry_fakes::policy::FakePolicy;
@@ -197,6 +201,10 @@ struct H {
 
 impl H {
     async fn new() -> Self {
+        Self::new_with_issues(Vec::new()).await
+    }
+
+    async fn new_with_issues(issues: Vec<IssueRef>) -> Self {
         let clock = Arc::new(FakeClock::new(T0));
         let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
         let store = Store::open_in_memory(
@@ -224,7 +232,7 @@ impl H {
                 source_message_id: "msg_01JB7N3R5T8X2V6M9Q4K1W7YZD"
                     .parse::<MessageId>()
                     .unwrap(),
-                issues: vec![],
+                issues,
                 budget: budget_from_level(&LevelEntry {
                     graph_template: "low.single".to_owned(),
                     budget: LevelBudget {
@@ -635,6 +643,195 @@ async fn previous_attempts_are_codes_only() {
             "failure_detail": "exec.output_invalid"
         }])
     );
+}
+
+#[tokio::test]
+async fn delivery_issue_refs_feed_materials_without_entering_events() {
+    const MARK: &str = "DISPATCH-INJECT";
+    let issue = IssueRef {
+        repo: RepoSlug::parse("acme/widgets").unwrap(),
+        number: 5,
+        node_id: "I_5".into(),
+        title: UntrustedText::new("pagination".into(), "github".into(), false),
+        state: IssueState::Open,
+        state_reason: None,
+        synced_at: ts(T0),
+    };
+    let mut h = H::new_with_issues(vec![issue]).await;
+    h.forge.set_discussion(
+        h.project,
+        DiscussionTarget::Issue(5),
+        Discussion {
+            title: UntrustedText::new(format!("title {MARK}"), "issue_title".into(), false),
+            body: Some(UntrustedText::new(
+                format!("body {MARK}"),
+                "issue_body".into(),
+                false,
+            )),
+            comments: vec![],
+            truncated: false,
+            fetched_at: ts(T0),
+        },
+    );
+    let attempt: AttemptId = id(114);
+    h.script(attempt, OutcomeSpec::default()).await;
+    let mut plan = h.plan(attempt);
+    plan.refs = h
+        .state
+        .delivery
+        .issues
+        .iter()
+        .map(|issue| Ref::Issue {
+            repo: issue.repo.clone(),
+            number: issue.number,
+        })
+        .collect();
+    let config_rev = Seq::new(1).unwrap();
+    {
+        let workflow = h.state.workflows.get_mut(&plan.workflow_id).unwrap();
+        let node = workflow.nodes.get_mut(&plan.node_id).unwrap();
+        node.attempts.push(AttemptState {
+            id: attempt,
+            n: 1,
+            exec: plan.exec,
+            status: AttemptStatus::Running,
+            base_sha: plan.base_sha,
+            tokens_reserved: plan.tokens_total,
+            wall_time_s: plan.wall_time_s,
+            config_rev,
+            started_at: ts(T0),
+            finished_at: None,
+            failure_class: None,
+            failure_detail: None,
+            result_ref: None,
+            result_tree: None,
+            result_commit: None,
+            accepted_open_pr: None,
+            after_retry_request: 0,
+        });
+    }
+    {
+        let mut tx = h.store.begin_write().await.unwrap();
+        tx.append(NewEvent {
+            ty: EventType::AttemptStarted,
+            subject: Subject::parse(&attempt.to_string()).unwrap(),
+            project_id: Some(h.project),
+            actor: Actor::new(ActorKind::Engine, "test"),
+            causation_id: None,
+            correlation_id: Some(DELIVERY.to_owned()),
+            data: serde_json::to_value(AttemptStartedData {
+                attempt_id: attempt,
+                node_id: plan.node_id,
+                n: 1,
+                provider: plan.model.provider_id.clone(),
+                model: plan.model.model.clone(),
+                reasoning_effort: plan.model.reasoning_effort,
+                config_rev,
+                base_sha: plan.base_sha,
+                tokens_total: plan.tokens_total,
+                wall_time_s: plan.wall_time_s,
+            })
+            .unwrap(),
+            dedup_key: None,
+        })
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let finalized = h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+    let spec = &h.submitted()[0];
+    assert!(spec
+        .raw_materials
+        .iter()
+        .any(|material| material.text.as_untrusted_str().contains(MARK)));
+    let job = serde_json::to_string(&spec.job).unwrap();
+    assert!(!job.contains(MARK));
+
+    struct FixedReserve;
+    impl ReservationPolicy for FixedReserve {
+        fn reserve(&self, _: &BudgetLedger, _: Tier, _: usize) -> u64 {
+            0
+        }
+    }
+    let settings = EngineSettings {
+        config_rev,
+        project: ProjectFacts {
+            repo: repo_slug(),
+            default_branch: "main".into(),
+            branch_prefix: "gantry/".into(),
+            allowed_merge_methods: vec![MergeMethod::Squash],
+        },
+        sandbox: DecideSandboxLimits {
+            wall_time_s: plan.wall_time_s,
+            kill_grace_s: 10,
+        },
+    };
+    let models = ModelTable::new();
+    let templates = TemplateRegistry;
+    let inflight: BTreeSet<EffectKey> = BTreeSet::new();
+    let denied: BTreeSet<ActionKey> = BTreeSet::new();
+    let proposals = ProposalTexts::default();
+    let seed = DecideSeed::derive(
+        &h.state.delivery.id,
+        &InputIdentity::Report(EffectKey::Run(attempt)),
+        h.state.last_seq,
+    );
+    let env = DecideEnv {
+        now: ts(T0 + 1_000),
+        seed,
+        settings: &settings,
+        models: &models,
+        templates: &templates,
+        reservation: &FixedReserve,
+        sandbox_capacity: 1,
+        inflight: &inflight,
+        denied: &denied,
+        proposals: &proposals,
+        consts: EngineConsts::default(),
+    };
+    let decisions = gantry_engine::decide(
+        &h.state,
+        &Input::Report(EffectReport::AttemptFinalized(finalized)),
+        &env,
+    );
+    let mut tx = h.store.begin_write().await.unwrap();
+    for decision in decisions {
+        if let Decision::Append(event) = decision {
+            tx.append(event).await.unwrap();
+        }
+    }
+    tx.commit().await.unwrap();
+
+    let filter = gantry_store::EventFilter {
+        project_ids: None,
+        include: Vec::new(),
+        exclude: Vec::new(),
+    };
+    let page = h
+        .store
+        .events()
+        .scan(Seq::ZERO, &filter, 200)
+        .await
+        .unwrap();
+    let events = serde_json::to_string(&page.events).unwrap();
+    assert!(events.contains("attempt.started"), "{events}");
+    assert!(events.contains("attempt.finished"), "{events}");
+    assert!(!events.contains(MARK), "{events}");
+}
+
+#[tokio::test]
+async fn missing_discussion_yields_no_materials_and_does_not_fail_dispatch() {
+    let mut h = H::new().await;
+    // `H::new` 预置了讨论数据；换一个空的 FakeForge 得到 NotFound。
+    h.ports.forge = Arc::new(FakeForge::new(ts(T0)));
+    let attempt: AttemptId = id(113);
+    h.script(attempt, OutcomeSpec::default()).await;
+    let plan = h.plan(attempt);
+    h.runner(3).run(&plan, &h.cx(&plan), &ctx()).await.unwrap();
+    let spec = &h.submitted()[0];
+    assert!(spec.raw_materials.is_empty());
+    assert!(spec.job.materials.is_empty());
 }
 
 #[tokio::test]
