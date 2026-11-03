@@ -2,14 +2,14 @@
 
 本文件是当前迭代的入口：现状、待拍板事项和后续规划。项目总体情况与目录入口见 [AGENTS.md](AGENTS.md)，运行与检查入口见[根目录说明](README.md#本地接入)和[前端说明](apps/desktop/README.md)。
 
-## 现状（2026-10-29）
+## 现状（2026-11-03）
 
-本轮工作基于 `main@93dd239`（PR #397 已合入；#393–#396、#374 等也已合入）。M1.3 里程碑已关闭，收尾评审见 [M1.3 收尾评审](docs/reviews/2026-10-29-m13-closeout-review.md)。
+本轮工作基于 `main@c011a14`（PR #397、#393–#396、#374、#413–#419 等已合入）。M1.3 里程碑已关闭，收尾评审见 [M1.3 收尾评审](docs/reviews/2026-10-29-m13-closeout-review.md)。
 
 - **M0 已合入。** 领域核心、端口、内存存储、测试替身、内存模拟接口和浏览器模拟场景前端都在 `main` 上；M0 契约文本已于 2026-10-27 由用户统一批准。
 - **M1.1、M1.2、M1.3 的 issue 与里程碑均已关闭。** M1.1 18/18、M1.2 16/16、M1.3 6/6。#289 于 2026-10-29 依用户确认关闭：PR #323 提供了 `from_settings`、`EqualShareReservation` 与 `status()`；真实消费路径归 #105，自动热加载归 #318，在途预留归 #317。已关闭 issue 不等于每条规格边界都已满足，评审发现见 [M1.1–M1.3 评审](docs/reviews/2026-10-27-m1-closeout-review.md) 与 M1.3 收尾评审。
 - **服务端各模块已有 crate 与测试。** 证据主要来自替身、模块测试和 #105 已合入的本机联测切片（SQLite 跨进程重启、真实策略审批、Forge 执行前审批消费、真实 Git 仓库与持久存储、仓库/沙盒与存储 CAS、执行器补丁策略链）；#319 的内置 schema 注册表与 #362 的任务身份已合入。真实 GitHub、模型、Podman、密钥环境尚未联合验证。
-- **生产装配**：`assemble_real` 仍返回 `NotReady`，生产二进制没有替身回退。PR #397 合入了 policy / notify 的生产构造函数；现已加入 `build_secrets` / `build_pki`（含 pki 私有表注册），并由进程级测试装配实际使用。生产仍未打开 secrets / pki：生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定；`pki.ca_dir` 是另一个缺口，尚无 BootConfig 字段映射。替身装配在 `crates/gantryd/tests/support/`，已用 `from_settings` 换算引擎配置并由 `fake.runtime_status` 读取运行时 `status()`；模型表仍由测试 helper 用硬编码设置经 `ModelsView` 推导，生产 `assemble_real` 尚未完整接线，生产命令组为空。切入点已写入 [#105 评论](https://github.com/LeXwDeX/gantry/issues/105#issuecomment-6487468346)。
+- **生产装配**：`assemble_real` 仍返回 `NotReady`，生产二进制没有替身回退。`build_secrets` / `build_pki` / `build_forge` / `build_policy` / `build_repo` / `build_models` 等生产构造函数已就绪，但 `assemble_real` 只打开 SQLite store 并保留 notify 构造点。生产主密钥来源与 `pki.ca_dir` 已由 #405 的 K4/K5 拍板（C2 契约、C3 实现待做）；生产命令组为空。测试装配在 `crates/gantryd/tests/support/`，已用 `from_settings` 换算引擎配置并由 `fake.runtime_status` 读取运行时 `status()`；模型表仍由测试 helper 用硬编码设置经 `ModelsView` 推导。切入点已写入 [#105 评论](https://github.com/LeXwDeX/gantry/issues/105#issuecomment-6487468346)。
 - **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock、仅 mock 可联网等边界已静态核对；Tauri 适配器的参数形状与前端路由表已有对账测试（#370，PR #374），但不覆盖真实 IPC 与服务端联调，真实服务端联调仍未证明。
 - **工作区**：20 个 package，即 19 个 `crates/*` 加 `apps/desktop/src-tauri/shell-core`（package `gantry-desktop-shell`）。Tauri 应用本身在 `apps/desktop/src-tauri`，因系统 WebView 依赖不在根 workspace。
 - **验收口径**：A + B 级全绿才记为「M1 本机验收通过」，C 级全绿才记为「M1 退出」（#87）。当前三级证据都未全部取得。
@@ -19,10 +19,10 @@
 
 **未实现或未验证**：
 - 真实装配（#105）、真实 GitHub App、模型、Podman、目标主机与代码签名；桌面端真实 API 联调。
-- secrets / pki 的生产配置与生命周期：生产凭据来源（主密钥来源与名称，OQ-2 / OPS-08）、`pki.ca_dir` 的 BootConfig 映射与 `Pki::tick` 调度尚未接线；吊销日志在 `revoke` 内同步写本地与备份。测试里的 `real` 只覆盖本机临时目录与软件密钥。
+- secrets / pki 的生产配置与生命周期：主密钥与 `pki.ca_dir` 已由 #405 的 K4/K5 拍板，C2 契约与 C3 实现尚未接线；`Pki::tick` 调度也尚未接线；吊销日志在 `revoke` 内同步写本地与备份。测试里的 `real` 只覆盖本机临时目录与软件密钥。
 - #362 已关闭，但其真实 Podman 与生产装配路径仍未验证。
 - api 的读路由 / 共用用例（#280，仍开放）。
-- 评审确认的问题 #293–#310（文档项 #299）、#317–#322；M1.3 收尾评审登记的 #367–#371 已关闭（#370 由 PR #374 完成），不再列为未完成项。
+- 评审确认的问题 #293–#310（文档项 #299）、#317–#322。已关闭的 #267、#305、#367–#371、#378、#401、#409 不再列为未完成项。
 - #311–#315 是尚待复核的疑点，不代表已证实缺陷。
 - 远端 CI 诊断项 #346、#347、#352。
 
@@ -65,7 +65,7 @@ M0.9 只剩 #86；#82–#85、#122、#135、#179、#292 已关闭。M1.1（18/18
 
 ### 当前优先级（2026-10-29 起）
 
-1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（模型表仍是测试 helper 用硬编码设置经 `ModelsView` 推导）；下一步按 #105 的 A 线顺序接线 worker、sandbox、conversation/models、egress 与 api（models 与 conversation 同片）；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。S3 分片：S0 控制通道（#401）、S1 配置决策登记（#405）、S2 真实 `ForgeReader` 快照与镜像拉取（#305，PR #407）、S3a 前置 #409（PR #413）与 S3a forge 装配（PR #414）已合入；S3b repo 片（PR #415）也已合入。models 片已有 `build_models` 独立构造与本机回环测试；测试装配仍是 `FakeModelProvider`，`assemble_real` 仍返回 `NotReady`。
+1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（模型表仍是测试 helper 用硬编码设置经 `ModelsView` 推导）；下一步按 #105 的 A 线顺序接线 worker、sandbox、conversation/models、egress 与 api（models 与 conversation 同片）；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。S3 分片：S0 控制通道（#401）、S1 配置决策登记（#405）、S2 真实 `ForgeReader` 快照与镜像拉取（#305，PR #407）、S3a 前置 #409（PR #413）与 S3a forge 装配（PR #414）已合入；S3b repo 片（PR #415）也已合入。models 片已有 `build_models` 独立构造与本机回环测试；测试装配仍是 `FakeModelProvider`，`assemble_real` 仍返回 `NotReady`。A1 status 纠偏（PR #418）与 C1 KeyFile 权限/目录检查（PR #419）已合入。
 2. **#280**：api 读路由 / 共用用例，可与 #105 并行。#267 已关闭（PR #393–#395）。
 3. **M1.3 收尾评审的小项**：#367、#368、#369、#370、#371 均已关闭（PR #374、#376、#390、#391/#392 等）；真实主机检查归 #106。
 4. **#106 → #107**：B 级本机 Ubuntu 虚拟机、C 级外部资源。两项都要先征求用户确认，C 级还需要真实资源。
