@@ -814,10 +814,12 @@ fn status_reports_profile_and_module_providers() {
             .unwrap_or_else(|| panic!("{module} missing from {status}"))["provider"]
             .clone()
     };
-    for module in ["engine", "notify", "policy", "secrets", "pki", "forge"] {
+    for module in [
+        "engine", "notify", "policy", "secrets", "pki", "forge", "repo",
+    ] {
         assert_eq!(provider(module), "real", "{module}");
     }
-    for module in ["store", "repo", "sandbox", "models", "egress"] {
+    for module in ["store", "sandbox", "models", "egress"] {
         assert_eq!(provider(module), "fake", "{module}");
     }
 }
@@ -1073,7 +1075,7 @@ fn server_binary_opens_store_then_refuses_missing_modules() {
         !stderr.contains("persistent SQLite store"),
         "store 不应再是缺失项：{stderr}"
     );
-    assert!(stderr.contains("forge"), "下一个缺失模块：{stderr}");
+    assert!(stderr.contains("sandbox"), "下一个未接线模块：{stderr}");
     assert!(!scratch.socket().exists());
     assert!(
         scratch.dir.join("data/gantry.db").exists(),
@@ -1436,7 +1438,7 @@ fn real_policy_approval(invalid: bool) {
         ("pki", "real"),
         ("store", "fake"),
         ("forge", "real"),
-        ("repo", "fake"),
+        ("repo", "real"),
         ("sandbox", "fake"),
         ("worker", "fake"),
         ("models", "fake"),
@@ -2051,7 +2053,7 @@ fn sqlite_store_survives_process_crash_and_restart() {
         ("engine", "real"),
         ("notify", "real"),
         ("forge", "real"),
-        ("repo", "fake"),
+        ("repo", "real"),
         ("policy", "real"),
         ("secrets", "real"),
         ("pki", "real"),

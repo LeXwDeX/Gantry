@@ -97,7 +97,7 @@ pub trait CommandSet: Send + Sync {
 | secrets | 真实 | `assembly::build_secrets`：测试临时目录里的 `FileSecrets`，M1 只承载 Forge / Pki；Notify 自 M4 才加入，**不含 Egress**；测试代码显式 `init`，生产构造函数只 `open` |
 | pki | 真实 | `assembly::build_pki`：测试 CA（`bootstrap::run_with` + 可替换内存盘探测）与真实 `Pki::open`；测试设备经公开 `pairing().open_session` / `redeem` 登记，私钥只留在测试进程内存；吊销经真实 `StoreAdmin::revoke` 写本地与备份吊销日志（都在 scratch 内） |
 | forge | 真实 | `assembly::build_forge` 两阶段构造：同一 `Forge` 先给 policy 无 mirror 的 reader，再接 repo/policy 构造执行器与完整 reader；GitHub 用回环 `FakeGitHub`，由父测试进程持有 |
-| repo | 替身（测试侧真实 Git） | 测试装配经 `assembly::build_repo` 构造真实 `GitRepo` + 测试裸远端；`assemble_real` 尚未调用 `build_repo`，`status` 仍报 fake |
+| repo | 真实 | 测试装配经 `assembly::build_repo` 构造真实 `GitRepo` + 测试裸远端；`assemble_real` 尚未调用 `build_repo` |
 | sandbox | 替身 | `GoldenSandbox`（显式注入可应用到 base 的完整补丁） |
 | worker / models / egress / conversation | 替身 | `gantry-fakes` 对应替身；models 另有 `assembly::build_models` 独立构造与回环测试，测试装配未切换 |
 | api | 未装配 | 不计入 `Assembly` 字段：api 是 `serve` 的服务任务；M1.4 接线时补齐 |
@@ -176,7 +176,7 @@ pub trait CommandSet: Send + Sync {
 
 - **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供。测试装配已改为经 `from_settings` 换算，`fake.runtime_status` 读取运行时 `status()`；模型表由测试 helper 用硬编码设置经 `gantry-models::ModelsView` 推导，不是从生产设置自动推导。生产 `assemble_real` 尚未调用这些入口，控制通道 `status` 仍只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
 - **models 生产构造**：`build_models` 已把 `StoreSettings` / `ViewCache`、`AnthropicProvider`、注入的 Egress / ID / 熵 / 时钟 / 能力表接到真实 `ModelRouter`；本机回环测试覆盖 utility / planner 调用与失败闭合。`assemble_real` 未调用，测试装配仍是 `FakeModelProvider`。模型配置值（provider / model）来自 models 设置且没有内置默认；推理深度能力表由调用方注入（models.md OQ-1 / OQ-8），提供方凭据由 Egress 持有。以上不代表真实模型 / Egress 验收。
-- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 forge 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_forge` / `build_policy` / `build_repo` / `build_notify`，其中 policy / notify 的 `status` 报 real，repo 仍报 fake；`assemble_real` 目前只调用 `build_notify`，policy 依赖 `ForgeReader`，待 forge 片接入。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
+- **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 sandbox 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_forge` / `build_policy` / `build_repo` / `build_notify`，其中 policy / notify / repo 的 `status` 报 real；`assemble_real` 目前只打开 store 并构造 notify，尚未按依赖顺序调用 forge / policy / repo / models。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
 - **secrets / pki 的生产配置**：`build_secrets` 已按 `server.secrets_dir` 打开实例，`build_pki` 接受显式 `PkiConfig` 与按 `Consumer::Pki` 限定的 `SecretSink`；两者均由调用方注入，gantryd 不猜主密钥来源、CA 目录或 Egress 实例。`assemble_real` 尚未打开它们：生产凭据来源（主密钥来源与名称）按 secrets.md OQ-2、deploy OPS-08 未定；`pki.ca_dir` 是另一项缺口，尚无 BootConfig 字段映射。两者接线前还需解决配置与 `harden_process` 的顺序。
 - **pki 后台生命周期**：`Pki::tick()`（关闭过期配对窗口、按需续签服务端证书）尚未由 `serve` 周期调用；吊销日志在 `revoke` 内同步追加并 fsync 本地与备份目标，不需要额外调度。测试只覆盖同步构造、配对、授权、吊销与崩溃重启，不代表周期任务已在运行。
 - **测试 `real` 的边界**：测试装配里的 secrets / pki 使用测试临时目录、静态主密钥与软件设备密钥。它证明的是生产构造路径与跨模块语义，不证明操作系统用户隔离、真实设备配对或 Ubuntu 部署；这些证据归 B / C 级验收。
