@@ -166,6 +166,7 @@ pub trait ProjectionRead {
     fn head_seq(&self) -> Seq;                                               // 与本 trait 其余读取同一快照
     // 项目与对话
     async fn project(&mut self, id: &ProjectId) -> Result<Option<Project>>;
+    /// 仅在恰好绑定一个项目时返回 `Some`；无绑定或存在歧义时返回 `None`（K3）。
     async fn project_by_repo(&mut self, repo: &RepoSlug) -> Result<Option<Project>>;
     async fn projects(&mut self, p: &Page) -> Result<Paged<Project>>;
     async fn conversations(&mut self, project: &ProjectId) -> Result<Vec<Conversation>>;
@@ -423,7 +424,7 @@ CREATE TABLE settings_docs (                                -- 投影：settings
 
 | 表 | 实体 | 驱动事件 | 关键索引 / 约束 |
 | --- | --- | --- | --- |
-| `projects` | Project | `project.added` / `updated` | `UNIQUE(repo)`；不含 `settings_override`（它在 `settings_docs`） |
+| `projects` | Project | `project.added` / `updated` | `(repo)` 索引；允许多项目绑定同一 repo；不含 `settings_override`（它在 `settings_docs`） |
 | `conversations` | Conversation | `conversation.created` | `UNIQUE(project_id)` |
 | `messages` | Message | `message.posted` | `(conversation_id, id)` |
 | `deliveries` | Delivery | `delivery.created` / `stage_changed` / `level_changed` / `paused` / `resumed` / `abandoned`；`worktree.created`（挂 `worktree_id`） | `(project_id, stage, id)`；`(parent_id)` |
@@ -443,7 +444,8 @@ CREATE TABLE settings_docs (                                -- 投影：settings
 - 快照列**只由 `forge.synced` 折叠**，`forge.<kind>` 不写快照列（forge 的约定见 #150 评论），避免两条派生路径不一致。信封必须是 `actor.kind = forge`、`subject = project_id`，否则整条事件拒绝（core 只校验 `data`）。
 - 折叠只取 `changes[].to`。本地该列已有值时要求 `from` 等于它，否则 `PreconditionFailed`，整条事件不生效：forge 按"回读值 − 当前快照"做差，`from` 不符说明两边已漂移。本地还没有值时不比较 `from`，所以首次快照的 `from` 取什么（#150 的方案 A：`from = null`）由契约决定，投影规则不变。
 - 同一 `(project_id, number)` 的 `target.node_id` 必须不变；PR 与 Issue 分开存放。Issue 不接受 `merged`。`state_reason` 的 `null` 是真实值（未同步与"无关闭原因"区分开）。
-- `pr_snapshot(repo, number)` / `issue_snapshot(repo, number)` 经 `project.added` / `project.updated` 维护的 `project → repo` 索引解析项目；仓库同时绑定多个项目时有歧义，返回 `None`。PR 的全部列都同步过才返回 `Some`（Issue 要求 `title` 与 `state`），不编造默认值。
+- `pr_snapshot(repo, number)` / `issue_snapshot(repo, number)` 经 `project.added` / `project.updated` 维护的 `project → repo` 索引解析项目；仓库同时绑定多个项目时有歧义，返回 `None`；`project_by_repo(repo)` 同样只在恰好一个项目绑定时返回 `Some`。PR 的全部列都同步过才返回 `Some`（Issue 要求 `title` 与 `state`），不编造默认值。
+- `project.added` / `project.updated` 按 `project_id` 全量覆盖：重复 `added` 与未知 `updated` 不拒绝事件，投影以后写覆盖先写。追加与重放都要求 `subject == project_id == data.id`（[event-data.md §2.2](../interfaces/event-data.md)）；不符即完整性错误，错误带 `seq` 与事件类型，追加整条拒绝，重放拒绝打开实例。M1 前未装配期的库不受支持，不自动修复、不跳过、不删除。
 - 折叠规则是纯函数 `gantry_store::GithubSnapshots::apply`，从日志全量重放与增量折叠结果一致（测试 `rebuild_from_log_matches_incremental_fold`）；SQLite 版复用同一函数与同一组测试。
 
 ### 7.3 写路径
