@@ -66,7 +66,7 @@ M0.9 只剩 #86；#82–#85、#122、#135、#179、#292 已关闭。M1.1（18/18
 ### 当前优先级（2026-10-29 起）
 
 1. **#105**：A 级跨泳道集成与真实装配，当前主线。替身装配已改走 `from_settings` 与 `EqualShareReservation`，进程级 §12.2 用例覆盖真实换算（模型表仍是测试 helper 用硬编码设置经 `ModelsView` 推导）；下一步按 #105 的 A 线顺序接线 worker、sandbox、conversation/models、egress 与 api（models 与 conversation 同片）；接线时一并核对 #317–#322。`settings.bootstrap_set` 参数契约已由 #371（PR #391/#392）合入。S3 分片：S0 控制通道（#401）、S1 配置决策登记（#405）、S2 真实 `ForgeReader` 快照与镜像拉取（#305，PR #407）、S3a 前置 #409（PR #413）与 S3a forge 装配（PR #414）已合入；S3b repo 片（PR #415）也已合入。models 片已有 `build_models` 独立构造与本机回环测试；测试装配仍是 `FakeModelProvider`，`assemble_real` 仍返回 `NotReady`。A1 status 纠偏（PR #418）、C1 KeyFile 权限/目录检查（PR #419）、A2 交付引用传递（#310）与 A3 默认档位拒绝（#320）已合入。
-2. **#280**：api 读路由 / 共用用例，可与 #105 并行。#267 已关闭（PR #393–#395）。B1 契约已合入：project 事件信封三处 ID 一致校验、多项目绑定同一 repo、重复 added / 未知 updated 全量覆盖；B2 store 投影实现待做。
+2. **#280**：api 读路由 / 共用用例，可与 #105 并行。#267 已关闭（PR #393–#395）。B1 契约已合入：project 事件信封三处 ID 一致校验、多项目绑定同一 repo、重复 added / 未知 updated 全量覆盖；B2a 内存 projects 投影与分页已合入，B2b 追加/重放校验与 B2c SQLite 投影待做。
 3. **M1.3 收尾评审的小项**：#367、#368、#369、#370、#371 均已关闭（PR #374、#376、#390、#391/#392 等）；真实主机检查归 #106。
 4. **#106 → #107**：B 级本机 Ubuntu 虚拟机、C 级外部资源。两项都要先征求用户确认，C 级还需要真实资源。
 5. **M2-prep**：#108 → #109 → #110 按顺序推进；可与 M1 并行，不阻塞 M1.4。
