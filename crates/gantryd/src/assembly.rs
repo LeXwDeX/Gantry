@@ -128,10 +128,40 @@ pub struct Assembly {
     pub settings_ctx: Arc<dyn SettingsContext>,
     /// API 监听器所需的装配产物；`None` 表示本装配不启动 HTTP 面。
     pub api: Option<ApiRuntime>,
+    /// 配对监听器；`None` 表示本装配不启动配对面。
+    pub pairing: Option<PairingRuntime>,
     pub modules: Vec<ModuleInfo>,
 }
 
 /// `serve` 要启动的 API 监听器：`ApiCore` 已装配，`tls` 与 `listener` 由装配层给出。
+/// 配对监听器：单向 TLS，只在配对窗口内接受连接。
+pub struct PairingRuntime {
+    pub handler: Arc<gantry_api::pairing::PairingListener>,
+    pub tls: Arc<rustls::ServerConfig>,
+    listener: std::sync::Mutex<Option<tokio::net::TcpListener>>,
+}
+
+impl PairingRuntime {
+    pub fn new(
+        handler: Arc<gantry_api::pairing::PairingListener>,
+        tls: Arc<rustls::ServerConfig>,
+        socket: tokio::net::TcpListener,
+    ) -> Self {
+        Self {
+            handler,
+            tls,
+            listener: std::sync::Mutex::new(Some(socket)),
+        }
+    }
+
+    pub fn take_listener(&self) -> Option<tokio::net::TcpListener> {
+        self.listener
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
 pub struct ApiRuntime {
     pub core: Arc<ApiCore>,
     pub tls: Arc<rustls::ServerConfig>,
