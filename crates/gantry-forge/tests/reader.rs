@@ -526,3 +526,58 @@ async fn comments_are_paged_past_one_hundred() {
     assert_eq!(discussion.comments.len(), 120);
     assert!(discussion.truncated);
 }
+
+fn actor_ctx() -> gantry_core::ports::ActorCtx {
+    use gantry_core::ids::Ulid;
+    use gantry_core::ports::ActorCtx;
+    ActorCtx {
+        actor: Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: "01JB7N3R5T8X2V6M9Q4K1W7YZD"
+            .parse::<Ulid>()
+            .expect("request id"),
+        idempotency_key: None,
+        dedup_key: None,
+        causation_id: None,
+    }
+}
+
+#[tokio::test]
+async fn refresh_pr_reads_github_head() {
+    use gantry_core::forge::PrHead;
+    use gantry_core::ports::forge::PrRefresher;
+
+    let h = harness();
+    h.github.set_branch(REPO, "feature/login", SHA_A);
+    let number = h
+        .github
+        .insert_pull(REPO, "feature/login", "main", ("alice", 1), "body");
+    let head = h
+        .reader
+        .refresh_pr(&project().repo, number, &actor_ctx())
+        .await
+        .expect("refresh");
+    assert_eq!(
+        head,
+        PrHead {
+            ref_name: "feature/login".to_owned(),
+            sha: SHA_A.parse().expect("sha"),
+            repo: project().repo,
+        }
+    );
+}
+
+#[tokio::test]
+async fn refresh_pr_unknown_repo_is_not_found() {
+    use gantry_core::ports::context::ModuleError;
+    use gantry_core::ports::forge::PrRefresher;
+
+    let h = harness();
+    let unknown = RepoSlug::parse("acme/other").expect("slug");
+    assert_eq!(
+        h.reader.refresh_pr(&unknown, 1, &actor_ctx()).await,
+        Err(ModuleError::NotFound)
+    );
+}
