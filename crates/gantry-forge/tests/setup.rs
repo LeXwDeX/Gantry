@@ -30,8 +30,9 @@ const HOOK_SECRET: &str = "sentinel-webhook-secret";
 #[derive(Default)]
 struct RecordingWriter(Mutex<Vec<GithubAppSettings>>);
 
+#[async_trait::async_trait]
 impl GithubSettingsWriter for RecordingWriter {
-    fn write_app(&self, settings: &GithubAppSettings) -> Result<(), String> {
+    async fn write_app(&self, settings: &GithubAppSettings) -> Result<(), String> {
         self.0.lock().unwrap().push(settings.clone());
         Ok(())
     }

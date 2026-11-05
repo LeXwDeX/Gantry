@@ -29,8 +29,11 @@ use crate::github::GithubClient;
 
 /// 写入 `github.app.*` 与 `github.commit_identity`（config §2.5、P-66）。实现方（设置模块）
 /// 负责落盘与审计事件；forge 只给出换回的非密钥字段与密钥的引用名。
+///
+/// 异步接口：设置写入经 store 的写事务。
+#[async_trait::async_trait]
 pub trait GithubSettingsWriter: Send + Sync {
-    fn write_app(&self, settings: &GithubAppSettings) -> Result<(), String>;
+    async fn write_app(&self, settings: &GithubAppSettings) -> Result<(), String>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,6 +281,7 @@ impl SetupService {
                 commit_identity_name: bot_login,
                 commit_identity_email: email,
             })
+            .await
             .map_err(|_| failed("settings_write_failed", "writing github settings failed"))?;
         // 只回非密钥字段（应答不含 pem / webhook_secret / client_secret）。
         Ok(json!({
