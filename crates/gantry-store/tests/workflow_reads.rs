@@ -6,7 +6,7 @@ use gantry_core::entities::{Actor, ActorKind, NodeStatus, Stage, WorkflowStatus}
 use gantry_core::events::{EventType, NewEvent, Subject};
 use gantry_core::ids::{IdGen, ProjectId};
 use gantry_core::testing::{FakeClock, SeqEntropy};
-use gantry_store::{Order, Page, Store, StoreDeps};
+use gantry_store::{Order, Page, Store, StoreDeps, StoreError};
 use serde_json::json;
 
 const NOW: i64 = 1_700_000_000_000;
@@ -194,4 +194,128 @@ async fn workflow_revision_adds_nodes_and_marks_superseded() {
         .nodes
         .iter()
         .any(|node| node.id.to_string() == VERIFY && node.status == NodeStatus::Superseded));
+}
+
+#[tokio::test]
+async fn attempt_terminal_and_invalid_detail_are_rejected_without_side_effects() {
+    let store = store().await;
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(workflow_created()).await.unwrap();
+    tx.append(event(
+        EventType::AttemptStarted,
+        ATTEMPT,
+        json!({
+            "attempt_id": ATTEMPT, "node_id": BUILD, "n": 1,
+            "provider": "anthropic", "model": "claude", "reasoning_effort": "medium",
+            "config_rev": 1,
+            "base_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+            "tokens_total": 1000, "wall_time_s": 600
+        }),
+    ))
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    // 非法 failure_detail：投影不得先改字段再报错。
+    let mut tx = store.begin_write().await.unwrap();
+    let bad = event(
+        EventType::AttemptFinished,
+        ATTEMPT,
+        json!({"status": "failed", "failure_class": "infra_error", "failure_detail": ""}),
+    );
+    assert!(matches!(
+        tx.append(bad).await,
+        Err(StoreError::PreconditionFailed(_))
+    ));
+    tx.commit().await.unwrap();
+    let snap = store.snapshot().await.unwrap();
+    let running = snap.attempt(&ATTEMPT.parse().unwrap()).unwrap();
+    assert_eq!(
+        running.status,
+        gantry_core::entities::AttemptStatus::Running
+    );
+    assert!(running.ended_at.is_none());
+
+    // 正常终结后，第二条终结事件必须被拒绝且不改投影。
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(event(
+        EventType::AttemptFinished,
+        ATTEMPT,
+        json!({"status": "failed", "failure_class": "infra_error", "failure_detail": "infra.base_conflict"}),
+    ))
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    let again = event(
+        EventType::AttemptFinished,
+        ATTEMPT,
+        json!({"status": "failed", "failure_class": "exec_failed", "failure_detail": "exec.output_invalid"}),
+    );
+    assert!(matches!(
+        tx.append(again).await,
+        Err(StoreError::PreconditionFailed(_))
+    ));
+    tx.commit().await.unwrap();
+    let snap = store.snapshot().await.unwrap();
+    let done = snap.attempt(&ATTEMPT.parse().unwrap()).unwrap();
+    assert_eq!(done.status, gantry_core::entities::AttemptStatus::Failed);
+    assert_eq!(
+        done.failure_detail.as_ref().map(|d| d.as_str()),
+        Some("infra.base_conflict")
+    );
+}
+
+#[tokio::test]
+async fn attempt_cursor_is_bound_to_its_node() {
+    let store = store().await;
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(workflow_created()).await.unwrap();
+    for (node, attempt, n) in [
+        (BUILD, ATTEMPT, 1),
+        (VERIFY, "att_01JB7M9X5N3R8T2Q6K1V4W7YZJ", 1),
+    ] {
+        tx.append(event(
+            EventType::AttemptStarted,
+            attempt,
+            json!({
+                "attempt_id": attempt, "node_id": node, "n": n,
+                "provider": "anthropic", "model": "claude", "reasoning_effort": "medium",
+                "config_rev": 1,
+                "base_sha": "9f2c4e7a1b3d5f60718293a4b5c6d7e8f9012345",
+                "tokens_total": 1000, "wall_time_s": 600
+            }),
+        ))
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    let mut snap = store.snapshot().await.unwrap();
+    let first = snap
+        .attempts(
+            &BUILD.parse().unwrap(),
+            &Page {
+                limit: 1,
+                cursor: None,
+                order: Order::Asc,
+            },
+        )
+        .await
+        .unwrap();
+    // BUILD 只有一条，构造跨节点游标：手工用 attempts:<verify>:asc:1。
+    let cursor = gantry_store::PageCursor::new(format!("attempts:{}:asc:1", VERIFY));
+    assert!(matches!(
+        snap.attempts(
+            &BUILD.parse().unwrap(),
+            &Page {
+                limit: 1,
+                cursor: Some(cursor),
+                order: Order::Asc,
+            },
+        )
+        .await,
+        Err(StoreError::InvalidCursor)
+    ));
+    assert_eq!(first.items.len(), 1);
 }

@@ -148,7 +148,7 @@ pub async fn list_delivery_workflows(
     let mut page = Page {
         limit: limit(q),
         cursor: None,
-        order: order(q, Order::Asc),
+        order: order(q, Order::Desc),
     };
     if let Some(cursor) = q.str("cursor") {
         page.cursor = Some(PageCursor::new(unwrap_cursor(TAG, cursor)?));
@@ -404,6 +404,14 @@ async fn delivery_json(
             .map_err(store_error)?,
         _ => None,
     };
+    let mut issues = Vec::with_capacity(row.issues.len());
+    for issue in &row.issues {
+        let current = snapshot
+            .issue_snapshot(&issue.repo, issue.number)
+            .await
+            .map_err(store_error)?;
+        issues.push(current.unwrap_or_else(|| issue.clone()));
+    }
     Ok(json!({
         "id": row.id,
         "project_id": row.project_id,
@@ -412,7 +420,7 @@ async fn delivery_json(
         "level_effective": row.level_effective,
         "stage": row.stage,
         "stage_status": row.stage_status,
-        "issues": row.issues,
+        "issues": issues,
         "pr": pr,
         "worktree_id": row.worktree_id,
         "parent_id": null,

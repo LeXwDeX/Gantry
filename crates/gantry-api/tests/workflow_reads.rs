@@ -15,6 +15,9 @@ const WORKFLOW: &str = "wfl_01JB7M6T3X9V2N5R8Q1K4W7YZF";
 const BUILD: &str = "nod_01JB7M7V4X2N9R5T8Q3K6W1YZG";
 const VERIFY: &str = "nod_01JB7M7W5X3N9R6T8Q2K4V1YZH";
 const ATTEMPT: &str = "att_01JB7M9X5N3R8T2Q6K1V4W7YZH";
+const WORKFLOW2: &str = "wfl_01JB7M6T3X9V2N5R8Q1K4W7YZG";
+const WORKFLOW3: &str = "wfl_01JB7M6T3X9V2N5R8Q1K4W7YZH";
+const DELIVERY2: &str = "dlv_01JB7M4P8R2X6V9N3Q5T7W1YZC";
 
 #[tokio::test]
 async fn workflow_node_and_attempt_reads_use_store_projection() {
@@ -70,6 +73,25 @@ async fn workflow_node_and_attempt_reads_use_store_projection() {
         None,
     )
     .await;
+    for (workflow, delivery) in [(WORKFLOW2, DELIVERY), (WORKFLOW3, DELIVERY2)] {
+        doubles::record(
+            &h.store,
+            EventType::WorkflowCreated,
+            workflow,
+            Some(project),
+            json!({
+                "stage": "implement",
+                "template": "medium.implement",
+                "graph_rev": 1,
+                "delivery_id": delivery,
+                "nodes": [
+                    {"node_id": "nod_01JB7M7V4X2N9R5T8Q3K6W1YZJ", "key": "build", "role": "build", "depends_on": [], "required": true, "critical": false}
+                ]
+            }),
+            None,
+        )
+        .await;
+    }
     doubles::record(
         &h.store,
         EventType::WorkflowRevised,
@@ -88,9 +110,34 @@ async fn workflow_node_and_attempt_reads_use_store_projection() {
     let resp = send(&h, req(Method::GET, &base, &d), "").await;
     assert_eq!(resp.status().as_u16(), 200, "{:?}", body(&resp));
     let page = body(&resp);
-    assert_eq!(page["items"].as_array().unwrap().len(), 1);
-    assert_eq!(page["items"][0]["id"], json!(WORKFLOW));
+    // 默认 id desc：较新的 WORKFLOW2 在前。
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["items"][0]["id"], json!(WORKFLOW2));
     assert!(page["items"][0].get("nodes").is_none());
+
+    // 游标绑定交付单元：把 DELIVERY 的游标用于 DELIVERY2 → 400 invalid_cursor。
+    let resp = send(
+        &h,
+        req(
+            Method::GET,
+            &format!("/v1/deliveries/{DELIVERY}/workflows?limit=1"),
+            &d,
+        ),
+        "",
+    )
+    .await;
+    let cursor = body(&resp)["next_cursor"].as_str().unwrap().to_owned();
+    let resp = send(
+        &h,
+        req(
+            Method::GET,
+            &format!("/v1/deliveries/{DELIVERY2}/workflows?limit=1&cursor={cursor}"),
+            &d,
+        ),
+        "",
+    )
+    .await;
+    assert_problem(&resp, 400, "invalid_cursor");
 
     let resp = send(
         &h,
@@ -141,7 +188,7 @@ async fn workflow_node_and_attempt_reads_use_store_projection() {
         &h,
         req(
             Method::GET,
-            "/v1/workflows/wfl_01JB7M6T3X9V2N5R8Q1K4W7YZG",
+            "/v1/workflows/wfl_01JB7M6T3X9V2N5R8Q1K4W7YZK",
             &d,
         ),
         "",
