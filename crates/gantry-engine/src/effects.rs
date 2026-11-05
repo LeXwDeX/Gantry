@@ -53,7 +53,7 @@ pub struct PortEffects {
     outbox: Arc<dyn OutboxPort>,
     config: RwLock<Arc<RunnerConfig>>,
     /// `RemoveWorktree` 在锁已释放时先以 engine 身份取锁，这是那把临时锁的租约。
-    cleanup_lease: Duration,
+    cleanup_lease: RwLock<Duration>,
     deliver: Deliver,
 }
 
@@ -69,9 +69,17 @@ impl PortEffects {
             ports,
             outbox,
             config: RwLock::new(Arc::new(config)),
-            cleanup_lease,
+            cleanup_lease: RwLock::new(cleanup_lease),
             deliver,
         }
+    }
+
+    /// 清理工作树时临时取锁的租约（`settings.updated` 热加载，#318）。
+    pub fn set_cleanup_lease(&self, lease: Duration) {
+        *self
+            .cleanup_lease
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = lease;
     }
 
     /// 两次派发之间整体切换配置（§7.13）；已开始组装的 spec 用的是开始时的快照。
@@ -146,6 +154,11 @@ impl EffectRunner for PortEffects {
                 }
             }
             Effect::RemoveWorktree { worktree_id, lock } => {
+                // 安装热加载后的租约在 `.await` 之前取出，避免跨 await 持有读锁。
+                let cleanup_lease = *self
+                    .cleanup_lease
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let token = match lock {
                     Some(token) => token,
                     None => match repo
@@ -154,7 +167,7 @@ impl EffectRunner for PortEffects {
                             &worktree_id,
                             LockHolder::Engine,
                             &delivery,
-                            self.cleanup_lease,
+                            cleanup_lease,
                         )
                         .await
                     {

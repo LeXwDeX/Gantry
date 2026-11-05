@@ -34,6 +34,12 @@ pub const M1_WORKER_MAX_PROPOSALS: u32 = 20;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeSettingsError {
+    #[error("config revision {next:?} is not newer than {current:?}")]
+    StaleRevision { current: Seq, next: Seq },
+    #[error("actor config revision {actor:?} != runner config revision {runner:?}")]
+    RevisionMismatch { actor: Seq, runner: Seq },
+    #[error("repository changed from {current} to {next}")]
+    RepoChanged { current: String, next: String },
     #[error("model table revision differs from config revision")]
     ModelRevisionMismatch,
     #[error("worker sandbox model does not match configured worker")]
