@@ -146,7 +146,9 @@ impl ControlClient for UnixControlClient {
 
 #[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
-    stream.peer_cred().map(|cred| cred.uid())
+    nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+        .map(|cred| cred.uid())
+        .map_err(std::io::Error::from)
 }
 
 #[cfg(target_vendor = "apple")]
