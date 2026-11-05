@@ -523,7 +523,7 @@ async fn older_schema_is_migrated_forward() {
         tx.commit().await.unwrap();
         store
             .execute_raw_sql(
-                "DROP TABLE cas_objects; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+                "DROP TABLE cas_objects; DROP TABLE projects; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
             )
             .unwrap();
     }
@@ -711,4 +711,100 @@ async fn restore_replaces_an_unreadable_database() {
     assert_eq!(identity.log_epoch, 2);
     let store = open(&dir, 1_700_000_200_000).await.unwrap();
     assert_eq!(store.events().head().await.unwrap().as_u64(), 1);
+}
+
+fn project_row(n: u128, repo: &str) -> gantry_core::entities::Project {
+    let id: ProjectId = gantry_core::ids::Id::from_parts(1_700_000_000_000, n).unwrap();
+    serde_json::from_value(json!({
+        "id": id, "repo": repo,
+        "installation_id": 1,
+        "bot_user_id": 2,
+        "default_branch": "main",
+        "allowed_merge_methods": ["squash"],
+        "merge_queue_enabled": false,
+        "created_at": "2026-10-24T12:00:00.000Z",
+        "updated_at": "2026-10-24T12:00:00.000Z"
+    }))
+    .unwrap()
+}
+
+fn project_event(row: &gantry_core::entities::Project) -> NewEvent {
+    NewEvent {
+        ty: EventType::ProjectAdded,
+        subject: Subject::parse(&row.id.to_string()).unwrap(),
+        project_id: Some(row.id),
+        actor: Actor::new(ActorKind::System, "api"),
+        causation_id: None,
+        correlation_id: None,
+        data: serde_json::to_value(row).unwrap(),
+        dedup_key: None,
+    }
+}
+
+fn open_db(dir: &Dir) -> rusqlite::Connection {
+    rusqlite::Connection::open(dir.0.join("gantry.db")).unwrap()
+}
+
+#[tokio::test]
+async fn project_table_is_persisted_and_full_verify_compares_it() {
+    let dir = Dir::new("projects-table");
+    let row = project_row(1, "acme/one");
+    let store = open(&dir, 1_700_000_000_000).await.unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(project_event(&row)).await.unwrap();
+    tx.commit().await.unwrap();
+    let report = store.verify(gantry_store::VerifyLevel::Full).await.unwrap();
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    drop(store);
+
+    let conn = open_db(&dir);
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    conn.execute("UPDATE projects SET repo = 'acme/tampered'", [])
+        .unwrap();
+    drop(conn);
+
+    let store = open(&dir, 1_700_000_100_000).await.unwrap();
+    let report = store.verify(gantry_store::VerifyLevel::Full).await.unwrap();
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|problem| problem.contains("projects table differs")),
+        "{:?}",
+        report.problems
+    );
+}
+
+#[tokio::test]
+async fn mismatched_project_event_fails_replay() {
+    let dir = Dir::new("projects-replay");
+    let row = project_row(2, "acme/two");
+    let store = open(&dir, 1_700_000_000_000).await.unwrap();
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(project_event(&row)).await.unwrap();
+    tx.commit().await.unwrap();
+    drop(store);
+
+    let conn = open_db(&dir);
+    conn.execute_batch(
+        "DROP TRIGGER events_no_update;
+         UPDATE events SET project_id = 'prj_01JB7K2M9Q4X8V3N5R6T1W0YZA' WHERE type = 'project.added';",
+    )
+    .unwrap();
+    drop(conn);
+
+    let error = match open(&dir, 1_700_000_100_000).await {
+        Ok(_) => panic!("mismatched project event must fail replay"),
+        Err(error) => error,
+    };
+    match error {
+        StoreError::Corrupt(message) => {
+            assert!(message.contains("project.added"), "{message}");
+            assert!(message.contains("seq 1"), "{message}");
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
 }
