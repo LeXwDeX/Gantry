@@ -6,17 +6,18 @@
 
 Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付的 AI 开发平台：服务端（Ubuntu）在沙盒中运行 agent，桌面端（Windows / macOS）只负责查看、控制和签名。它是前身项目 [GraphAgent](https://github.com/LeXwDeX/OpenCode-GraphAgent)（DAG 编排）与 [SpecGit](https://github.com/LeXwDeX/SpecGit)（Issue → PR → 验证完成的交付语义）的继任者。GraphAgent 是 AGPL 许可，只借鉴设计与教训，不复用代码。
 
-截至 2026-11-03（代码基线 `main@c011a14`）：
+截至 2026-11-05（代码基线 `main@b996594`）：
 
 - **M0 统一开发基线已合入。** 已有领域核心、跨模块端口、内存存储、测试替身、内存模拟接口（Mock API）和浏览器模拟场景前端。M0 各份契约文本已于 2026-10-27 由用户统一批准。M0.9 只剩 #86（#292 已由 PR #324 修复并关闭）。
-- **M1.1、M1.2、M1.3 的 issue 与里程碑均已关闭。** M1.1 18/18、M1.2 16/16、M1.3 6/6。#289 于 2026-10-29 依用户确认关闭：引擎侧三项前置（settings 换算 `from_settings`、默认 `EqualShareReservation`、`status()`）由 PR #323 合入；真实消费路径归 #105，自动热加载归 #318，在途预留归 #317。已关闭 issue 不等于实现满足每条规格边界，评审发现见 [M1.1–M1.3 评审](docs/reviews/2026-10-27-m1-closeout-review.md) 和 [M1.3 收尾评审](docs/reviews/2026-10-29-m13-closeout-review.md)。
+- **M1.1、M1.2、M1.3 的 issue 与里程碑均已关闭。** M1.1 18/18、M1.2 16/16、M1.3 6/6。#289 于 2026-10-29 依用户确认关闭：引擎侧三项前置（settings 换算 `from_settings`、默认 `EqualShareReservation`、`status()`）由 PR #323 合入；真实消费路径归 #105，自动热加载归 #318，在途预留归 #317。已关闭 issue 不等于实现满足每条规格边界，评审发现见本地未追踪的 `docs/reviews/2026-10-27-m1-closeout-review.md` 和 `docs/reviews/2026-10-29-m13-closeout-review.md`。
 - **服务端各模块已有 crate，证据主要来自替身和模块测试。** `api`、`forge`、`repo`、`sandbox`、`worker`、`egress`、`models`、`policy`、`notify`、`conversation`、`pki`、`secrets` 和 store 的 SQLite 持久层都已实现；#105 已合入若干跨模块联测切片（SQLite 跨进程重启、真实策略审批、Forge 执行前审批消费、真实 Git 仓库与持久存储、仓库/沙盒与存储 CAS、执行器补丁策略链），#319 的内置 schema 注册表与 #362 的任务身份已合入。这些仍是本机联测，不等于真实 GitHub、模型、Podman 或密钥环境已联调。
 - **生产装配未闭合。** `gantryd` 的 `assemble_real` 总是返回 `NotReady`（`crates/gantryd/src/assembly.rs:347-351`），生产二进制没有替身回退；模块都有代码，不代表能在生产路径一起运行。测试替身装配在 `crates/gantryd/tests/support/`，已用 `from_settings` 与 `ModelsView` 换算配置，#289 的前置（#323 的三个入口）已由测试装配调用，生产 `assemble_real` 尚未调用；真实装配与跨泳道集成归 #105（见 M1.3 收尾评审 N1 与 #105 评论）。
-- **当前里程碑**：[M1.4 M1 验收](https://github.com/LeXwDeX/gantry/milestone/5)。下一条主线是 #105（A 级跨泳道集成、真实装配）；#280、#405 可并行；#106 B 级本机 Ubuntu 虚拟机、#107 C 级外部资源都需先征求用户确认，C 级还需要真实资源。M1.4 开放 #105–#107、#280、#405；#305、#378、#401、#409 已关闭。全局顺序见 [NEXT-STEPS.md](NEXT-STEPS.md)。
+- **当前里程碑**：[M1.4 M1 验收](https://github.com/LeXwDeX/gantry/milestone/5)。下一条主线是 #105（A 级跨泳道集成、真实装配）；#280、#405 可并行；#106 B 级本机 Ubuntu 虚拟机、#107 C 级外部资源都需先征求用户确认，C 级还需要真实资源。M1.4 开放 #105–#107、#280、#405；#305、#378、#401、#409 已关闭。全局顺序见本地未追踪的 `NEXT-STEPS.md`（已冻结，不再回写）。
 - **工作区规模**：20 个 package，即 19 个 `crates/*` 加 `apps/desktop/src-tauri/shell-core`。Tauri 应用本身（`apps/desktop/src-tauri`）因系统 WebView 依赖不在根 workspace 内。
 - **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock 等边界已静态核对；前端有 scenario、mock、Tauri 三种适配器，Tauri 适配器的参数形状与路由表已有对账测试（#370，PR #374），真实服务端联调尚未证明。
 - **验收口径**：替身测试通过不等于真实环境通过。M1 各条退出标准分三级取证：本机替身、本机虚拟机、外部资源。见 [M1 验收证据分级](docs/m1-acceptance.md)；宣布方式已定为两步：A + B 级全绿记为「M1 本机验收通过」，C 级全绿记为「M1 退出」（#87）。本机门槛也不能替代真实环境证据。
 - **验证状态**：各 PR 描述记录了合入前的全工作区本机门槛结果；M1.3 收尾评审 PR 在合入后的结果上复跑了全部门槛（含 MSRV 1.85 的 `--all-targets`）。
+- **自建 CI 尚未建成**：仓库内还没有 `ci/`，PR 的合并依据暂时缺位；CI 建成前只允许文档类与 CI 本身的 PR。
 - **已知外部阻塞**：没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
 
 ## 2. 架构与目录入口
@@ -31,8 +32,8 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 | 模块之间的 IO 契约（API、Worker 协议、Forge 动作、配置、Egress） | [docs/interfaces/](docs/interfaces/) |
 | 单个模块的规格书（职责、接口、内部设计、测试与验收、开放问题） | `docs/modules/<模块>.md` |
 | 里程碑、泳道、替身清单 | [docs/milestones.md](docs/milestones.md) |
-| 评审记录（只读） | [docs/reviews/](docs/reviews/) |
-| 当前迭代状态与后续规划 | [NEXT-STEPS.md](NEXT-STEPS.md) |
+| 评审记录（只读，本地未追踪） | `docs/reviews/` |
+| 历史迭代状态（本地未追踪、已冻结） | `NEXT-STEPS.md` |
 | **本机接手入口**：交接状态、协作约定、下一步逐步执行清单 | 根目录本地 `handoff.md`（如有，不入库） |
 | 界面原型 | [docs/prototype.md](docs/prototype.md)，源码在 `prototype/` |
 
@@ -118,13 +119,13 @@ npm run build --prefix apps/desktop
 1. **框架结构评审**：质量、扩展性、稳固性、边界设计；
 2. **代码评审**：质量、边界设计、扩展性。发现问题就开修正 PR，评审记录写进 `docs/reviews/`；
 3. **合并到基线**：全部 PR 合入 `main`，并清理已合并的分支和工作树，下一阶段直接从 `main` 开始；
-4. **更新本文件**：跑一次 init，让项目现状、目录入口与规约跟上实际。
+4. **更新本文件**：按当前实际状态更新项目现状、目录入口与规约。
 
 收尾结束后，再开下一个里程碑和它的 issue。
 
 ### 扩展性预留
 
-agent 的 skill、MCP、hooks、上下文管理都要留出扩展空间，但扩展只能来自服务端的可信配置，不能来自仓库内容。落地节奏照搬 `ConfigView.injection`：先在契约里定义类型，M1 拒绝非空，后续里程碑逐类启用。设计前先调研前身项目 GraphAgent 与 SpecGit 的边界设计与教训。详见 NEXT-STEPS.md「后续规划 · 阶段 6」。
+agent 的 skill、MCP、hooks、上下文管理都要留出扩展空间，但扩展只能来自服务端的可信配置，不能来自仓库内容。落地节奏照搬 `ConfigView.injection`：先在契约里定义类型，M1 拒绝非空，后续里程碑逐类启用。设计前先调研前身项目 GraphAgent 与 SpecGit 的边界设计与教训。详见本地未追踪的 `NEXT-STEPS.md`（已冻结）「后续规划 · 阶段 6」。
 
 
 <!-- specgit:project:v2:start -->

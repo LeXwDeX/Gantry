@@ -1,6 +1,6 @@
 # 界面原型说明
 
-> 状态：原型 v0.2（2026-10-24），已按[交互评审](reviews/2026-10-24-ux-review.md)修订。**界面中全部为示例数据**。可交互原型：[Gantry 控制台原型](https://claude.ai/artifact/AFWjX1VuDkwHvxfNLC5t29)（私有链接，所有者分享后他人才能打开），源码在 [prototype/](../prototype/)。本文是原型的文字版规格，`desktop-ui` 与 `mobile` 按本文实现。
+> 状态：原型 v0.2（2026-10-24），已按交互评审（本地未追踪的 `docs/reviews/2026-10-24-ux-review.md`）修订。**界面中全部为示例数据**。可交互原型：[Gantry 控制台原型](https://claude.ai/artifact/AFWjX1VuDkwHvxfNLC5t29)（私有链接，所有者分享后他人才能打开），源码在 [prototype/](../prototype/)。本文是原型的文字版规格，`desktop-ui` 与 `mobile` 按本文实现。
 
 ## 1. 设计原则
 

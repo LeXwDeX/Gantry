@@ -1,6 +1,6 @@
 # Gantry 架构设计
 
-> 状态：设计阶段 v0.1（2026-10-24）。决策的确定程度见 [decisions.md](decisions.md)；本文中标注 **[提议]** 的内容尚未经用户确认。讨论过程见 [design.md](design.md)。
+> 状态：设计阶段 v0.1（2026-10-24）。决策的确定程度见 [decisions.md](decisions.md)；本文中标注 **[提议]** 的内容尚未经用户确认。讨论过程见本地未追踪的 `docs/design.md`。
 
 本文是所有模块共同遵守的"总图"：目标与边界、模块地图、信任边界与不变式、状态归属、核心流程、档位与模型分层。单个模块怎么做见 [modules/](modules/)，模块之间的 IO 契约见 [interfaces/](interfaces/)，数据结构见 [data-model.md](data-model.md)。
 
@@ -378,4 +378,4 @@ D-14 与 D-15 记录了用户目标：项目主对话统筹多个工作树并行
 | [prototype.md](prototype.md) | 界面原型说明 |
 | [collaboration.md](collaboration.md) | 多工作树协作的目标设计（待契约批准的提案） |
 | [milestones.md](milestones.md) | 可并行开发的里程碑 |
-| [design.md](design.md) | 设计讨论记录（历史） |
+| `docs/design.md`（本地未追踪） | 设计讨论记录（历史） |

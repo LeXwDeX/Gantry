@@ -4,7 +4,7 @@
 >
 > 本文件只定义下列 13 个事件的 `data` 候选规格，供契约审查使用。它不修改生产契约、schema、fixture、Rust、Mock 或前端，也不表示任何字段、枚举或一致性规则已经冻结。运行时按 `core` 事件目录的实际落地情况校验：已落地 data 校验的事件按本契约校验，尚未落地（`ContractUndefined`）的仍按 fail-closed（失败闭合）拒绝。
 >
-> 本文件的来源、理由与取舍记录是 [docs/m0-contract-proposal.md](../m0-contract-proposal.md) §2。这里只把该节中 13 个事件的推荐规格独立成送审文档，不新增取舍、字段或枚举；该提案的待决状态不因本文件而改变。
+> 本文件的来源、理由与取舍记录是 `docs/m0-contract-proposal.md`（本地未追踪）§2。这里只把该节中 13 个事件的推荐规格独立成送审文档，不新增取舍、字段或枚举；该提案的待决状态不因本文件而改变。
 >
 > 权威优先级：`decisions.md` > `architecture.md` 的不变式 > `interfaces/` > `modules/` > 其余文档。冲突时以更高优先级的权威文档为准。本文件位于 `interfaces/`。
 
@@ -16,7 +16,7 @@
 
 ## 2. 事件 data 推荐规格
 
-以下 §2.1–§2.4 大体沿用 [m0-contract-proposal.md](../m0-contract-proposal.md) §2 的编号与正文顺序，便于逐项对照；因排除 `forge.drift_detected` 与独立契约的端点细节，个别小节编号重排。
+以下 §2.1–§2.4 大体沿用 `docs/m0-contract-proposal.md`（本地未追踪）§2 的编号与正文顺序，便于逐项对照；因排除 `forge.drift_detected` 与独立契约的端点细节，个别小节编号重排。
 
 ### 2.1 阻塞总表
 
