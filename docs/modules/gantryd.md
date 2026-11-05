@@ -148,6 +148,8 @@ BootConfig 字段映射、装配顺序与 `Pki::tick` 的周期调度都还没�
 
 引导配置键与默认值见 deploy.md §10；gantryd 当前读取 `server.*`（含 `control_socket`）、`forge.webhook.*`、`sandbox.runtime_*`、`egress.control_socket`、`backup.*`、`upgrade.*`，并校验 https URL、绝对路径与保留期格式（`<正整数><s|m|h|d>`）。
 
+`settings.updated` 的自动订阅与安装归 #105：gantryd 从同一快照构造 `RuntimeSettings` 并调用 `EngineRuntime::install`；失败时保留最后成功配置、通过控制通道上报，不推进事件游标。
+
 ## 11. 可观测性
 
 - `status` 命令：装配来源、事件日志 head、各模块提供方、`engine.degraded`。

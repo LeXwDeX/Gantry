@@ -706,6 +706,15 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - **期望动作集合**：Outbox 动作不靠"刚才发生了什么"决定，而由纯函数 `expected_actions(state, env.proposals) -> BTreeMap<ActionKey, ActionIntent>` 从状态推出（`proposals` 只用于 `create_pr` 的提议原文，7.14.4）（例如阶段为 `propose` 且有 `candidate_head` → 期望一条 `push_branch`）。`JudgeAction` 只为"期望中、`outbox` 里没有、未在途、未被本进程判过 `Deny`"的意图产出；`Enqueue` 回流时再核对该意图仍在期望集合中（用户中途放弃则不入队）。
 - **判定是两段式的**：`PolicyPort::decide_action` / `request_approval` 没有事务参数且自身写事件（`policy.denied`、`approval.requested`），不能在引擎的单写者事务里调用。所以 `decide` 先产出 `Effect::JudgeAction`，判定作为 `Report::ActionJudged` 回流后再产出 `Enqueue`、`Effect::RequestApproval` 或 `Raise`。因此"入队与决策同事务"（§1 第 9 条、§7.1、§7.12）在本节之后的含义是：**入队与"决定入队的那次决策"同事务**；阶段事件（如 T6 的 `stage_changed`）与入队之间存在一个崩溃窗口，由期望动作集合在 `Tick(Recover)` 时补齐，幂等键保证不重复（§7.13 第 4 步"不会悬空"指的是这一点）。`Deny` 的意图记入执行体内存的 `env.denied`，本进程内不再重判，收到 `settings.updated` 时清空（策略可能已改）；重启后至多重判一次（`policy.denied` 由 `policy` 去重）。
 
+**配置安装（#318）**：`EngineRuntime` 暴露一个**可失败**的安装接口 `install(settings: RuntimeSettings) -> Result<(), RuntimeSettingsError>`，用于 `settings.updated` 热加载。
+
+- 校验在同一把锁内完成：`settings.actor.settings.config_rev` 必须严格大于当前已安装修订（相同或更旧 → `StaleRevision`）；`settings.actor.settings.project.repo` 必须等于运行时绑定的仓库（变化 → `RepoChanged`，仓库迁移不在本接口内）。
+- 校验失败时不改动任何组件，保留最后一次成功配置；调用方负责上报失败原因，不得把失败记为已应用或推进事件游标。
+- 校验通过后原子安装 actor 配置、runner 配置与清理租约；活跃执行体立即用新配置做下一次决策。
+- 运行中的尝试保留其开始时的配置快照：`RunAttempt` 的 `AttemptPlan` 与 `RunnerConfig` 在副作用启动时已取出，安装只影响之后的副作用。
+- 持久游标只在安装成功后由订阅方推进；失败时可重试同一修订。
+- `RunnerConfig` 没有独立修订字段，本接口不校验它与 actor 配置同源；调用方必须从同一 `settings.updated` 快照构造 `RuntimeSettings`。
+
 **事件游标**：§7.1 第 4 步改为由 `EventRouter` 推进。各执行体按 `seq` 顺序处理各自的输入并在提交后向路由器回报已处理到的 `seq`。低水位 = 仍有"已投递未处理完"事件的执行体中最小的未处理 `seq` − 1；没有积压时取路由器已读到的最大 `seq`（含不投给任何执行体的事件）。路由器以低水位推进持久游标 `engine`，空闲执行体不拖住游标。崩溃后从低水位重放，重复投递由前置条件消化。执行体自己的事务不再 `advance_cursor`。
 
 `create_delivery`（T1）不经 `decide`：此时还没有 `DeliveryState`，由 `Engine::create_delivery` 直接写 `delivery.created`；提交后执行体用 `Tick(Settle)` 推进 T2 / T2b。None 档 `run_answer` 的会话临时图使用同一组 `Input` / `Decision` 类型，状态为 `AnswerState { workflow: WorkflowState, ledger: BudgetLedger, conversation_id }`，决策函数 `decide_answer` 只覆盖调度、尝试与记账，不涉及阶段机（P-58）。
