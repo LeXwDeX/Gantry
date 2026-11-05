@@ -2107,3 +2107,20 @@ fn zero_wall_budget_reports_wall_time_exhausted() {
         .iter()
         .any(|d| matches!(d, Decision::Raise(r) if r.kind == InboxKind::BudgetExhausted)));
 }
+
+/// 成功但无补丁：节点失败并上报 escalation(no_change)，不进入补丁链（§7.8、OQ-15）。
+#[test]
+fn no_change_succeeded_attempt_escalates_and_fails_the_node() {
+    let mut sim = dispatched();
+    let mut f = finalized(&sim, vec![]);
+    let attempt = f.attempt_id;
+    f.status = AttemptStatus::Succeeded;
+    f.patch = PatchResult::NoChange;
+    let _ = sim.report(EffectReport::AttemptFinalized(f), EffectKey::Run(attempt));
+
+    assert_eq!(node_status(&sim), NodeStatus::Failed);
+    assert_eq!(open_kinds(&sim), vec![InboxKind::Escalation]);
+    let item = sim.state.open_inbox.values().next().unwrap().clone();
+    assert_eq!(item.reason_code.unwrap().as_str(), "no_change");
+    assert_eq!(sim.state.stage_status(), StageStatus::WaitingHuman);
+}
