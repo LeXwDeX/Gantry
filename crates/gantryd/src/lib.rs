@@ -112,6 +112,18 @@ pub async fn serve(
             });
         }
     }
+    if let Some(pairing) = assembly.pairing.as_ref() {
+        if let Some(listener) = pairing.take_listener() {
+            let handler = pairing.handler.clone();
+            let tls = pairing.tls.clone();
+            let shutdown = stopped.clone();
+            tokio::spawn(async move {
+                if let Err(error) = handler.serve(listener, tls, shutdown).await {
+                    eprintln!("gantryd: pairing listener stopped: {error}");
+                }
+            });
+        }
+    }
     let engine = tokio::spawn(assembly.engine.clone().run(stopped_signal(stopped.clone())));
     let control = Arc::new(Control::new(assembly, commands));
     let serve = socket.serve(control, auth, stopped);

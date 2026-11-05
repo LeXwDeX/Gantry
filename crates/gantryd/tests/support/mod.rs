@@ -1007,6 +1007,32 @@ async fn assemble_variant(
         gantryd::assembly::ApiRuntime::new(core, tls, listener)
     };
 
+    let pairing = {
+        let handler = Arc::new(gantry_api::pairing::PairingListener::new(
+            pki.pairing(),
+            store.clone(),
+            clock.clone(),
+            ids.clone(),
+        ));
+        let tls = Arc::new(
+            gantry_api::tls::pairing_server_config(
+                Arc::new(gantry_pki::verifier::p256_only_provider()),
+                Arc::new(gantry_pki::verifier::ClockTimeProvider::new(clock.clone())),
+                pki.tls().server_cert_resolver,
+            )
+            .expect("pairing tls"),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("pairing listener");
+        std::fs::write(
+            test_dir.join("pairing.addr"),
+            listener.local_addr().expect("pairing addr").to_string(),
+        )
+        .expect("write pairing addr");
+        gantryd::assembly::PairingRuntime::new(handler, tls, listener)
+    };
+
     let assembly = Assembly {
         profile: Profile::Fakes,
         store: store.clone(),
@@ -1025,6 +1051,7 @@ async fn assemble_variant(
         conversation,
         settings_ctx,
         api: Some(api),
+        pairing: Some(pairing),
         modules,
     };
     let handles = FakeHandles {
