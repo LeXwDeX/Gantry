@@ -692,6 +692,7 @@ impl DeliveryState {
                     base_sha: data.base_sha,
                 });
                 self.base_override = None;
+                self.delivery.worktree_id = Some(data.worktree_id);
             }
             EventType::WorktreeLocked => {
                 let data: WorktreeLockedData = decode(event, ty)?;
@@ -714,6 +715,7 @@ impl DeliveryState {
                 if self.worktree.as_ref().map(|w| w.id) == Some(data.worktree_id) {
                     self.worktree = None;
                     self.base_override = None;
+                    self.delivery.worktree_id = None;
                 }
             }
             // T12 的合并证据与 Issue 关闭事实（§7.6）；信封由 forge 校验，折叠只取所需字段。

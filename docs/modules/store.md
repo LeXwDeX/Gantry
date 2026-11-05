@@ -160,6 +160,12 @@ pub enum Appended { New(Event), Duplicate { existing_seq: Seq } }   // Duplicate
 pub struct Page { pub limit: u32 /* 1..=200，默认 50 */, pub cursor: Option<PageCursor>, pub order: Order }
 pub struct Paged<T> { pub items: Vec<T>, pub next_cursor: Option<PageCursor> }
 pub struct PageCursor(String);   // 不透明；内含 资源标签 + 排序键 + 方向；跨资源复用或被篡改 → StoreError::InvalidCursor
+pub struct DeliveryQuery {
+    pub project_id: Option<ProjectId>,
+    pub stages: Vec<Stage>,              // 任一命中；空 = 全部
+    pub stage_status: Option<StageStatus>,
+    pub active: bool,                    // true = 排除 closed / abandoned
+}
 
 /// ReadSnapshot 与 TxReader 实现同一 trait。
 pub trait ProjectionRead {

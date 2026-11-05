@@ -133,6 +133,9 @@ fn expected_low_path() -> DeliveryState {
                 reason: None,
             },
             abandon_cause: None,
+            worktree_id: Some(id(WORKTREE)),
+            created_at: ts(1),
+            updated_at: ts(23),
         },
         pr: Some(v(
             json!({"number": 12, "node_id": "PR_x", "head_sha": BASE_SHA}),

@@ -30,6 +30,8 @@ impl RouteHandler for Builtin {
             }
             "retryNode" => control::retry_node(core, &req).await,
             "postMessage" => control::post_message(core, &req).await,
+            "listDeliveries" => reads::list_deliveries(core, &req).await,
+            "getDelivery" => reads::get_delivery(core, &req).await,
             "listProjects" => reads::list_projects(core, &req).await,
             "getProject" => reads::get_project(core, &req).await,
             "listConversations" => reads::list_conversations(core, &req).await,

@@ -192,6 +192,8 @@ fn normalize(state: &mut DeliveryState) {
     state.last_seq = Seq::ZERO;
     state.delivery.stage_entered.seq = Seq::ZERO;
     state.delivery.stage_entered.ts = zero;
+    state.delivery.created_at = zero;
+    state.delivery.updated_at = zero;
     for workflow in state.workflows.values_mut() {
         workflow.created_seq = Seq::ZERO;
         for node in workflow.nodes.values_mut() {

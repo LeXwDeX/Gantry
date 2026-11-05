@@ -9,11 +9,11 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use gantry_core::entities::{InboxKind, InboxStatus};
-use gantry_core::ids::{ConversationId, InboxId, ProjectId};
+use gantry_core::entities::{InboxKind, InboxStatus, OutboxStatus, Stage, StageStatus};
+use gantry_core::ids::{ConversationId, DeliveryId, InboxId, ProjectId};
 use gantry_core::ports::context::{PageOrder, PageQuery, StoreError as PortStoreError};
 use gantry_core::ports::conversation::ConvError;
-use gantry_store::{InboxQuery, Order, Page, PageCursor, StoreError};
+use gantry_store::{DeliveryQuery, DeliveryRow, InboxQuery, Order, Page, PageCursor, StoreError};
 use http::StatusCode;
 use serde_json::{json, Value};
 
@@ -130,6 +130,122 @@ pub async fn list_messages(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<R
         page_body(items, next),
         page.last_seq,
     ))
+}
+
+/// #5 `GET /v1/deliveries`（api.md §4.4）。
+pub async fn list_deliveries(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Problem> {
+    const TAG: &str = "deliveries";
+    let q = req.query;
+    let mut page = Page {
+        limit: limit(q),
+        cursor: None,
+        order: order(q, Order::Desc),
+    };
+    if let Some(cursor) = q.str("cursor") {
+        page.cursor = Some(PageCursor::new(unwrap_cursor(TAG, cursor)?));
+    }
+    let query = DeliveryQuery {
+        project_id: q.str("project_id").map(parse).transpose()?,
+        stages: q
+            .list("stage")
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|s| stage(s))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        stage_status: q.str("stage_status").map(stage_status).transpose()?,
+        active: q.bool("active").unwrap_or(false),
+    };
+    let mut snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let paged = snapshot
+        .deliveries(&query, &page)
+        .await
+        .map_err(store_error)?;
+    let mut out = Vec::with_capacity(paged.items.len());
+    for row in &paged.items {
+        out.push(delivery_json(&mut snapshot, row).await?);
+    }
+    let next = paged.next_cursor.map(|c| wrap_cursor(TAG, c.as_str()));
+    Ok(Reply::json(StatusCode::OK, page_body(out, next), seq))
+}
+
+/// #6 `GET /v1/deliveries/{delivery_id}`。
+pub async fn get_delivery(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Problem> {
+    let id: DeliveryId = parse(req.param("delivery_id"))?;
+    let mut snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let row = snapshot.delivery(&id).ok_or_else(Problem::not_found)?;
+    Ok(Reply::json(
+        StatusCode::OK,
+        delivery_json(&mut snapshot, &row).await?,
+        seq,
+    ))
+}
+
+fn stage(raw: &str) -> Result<Stage, Problem> {
+    serde_json::from_value(json!(raw))
+        .map_err(|_| Problem::new(ProblemCode::InvalidRequest, "parameter is invalid"))
+}
+
+fn stage_status(raw: &str) -> Result<StageStatus, Problem> {
+    serde_json::from_value(json!(raw))
+        .map_err(|_| Problem::new(ProblemCode::InvalidRequest, "parameter is invalid"))
+}
+
+/// `Delivery` 表示：`pr` 取 `create_pr` 成功动作的 GitHub 引用，再从 store 的 PR 快照补全（api.md §4.4）。
+async fn delivery_json(
+    snapshot: &mut gantry_store::ReadSnapshot,
+    row: &DeliveryRow,
+) -> Result<Value, Problem> {
+    let project = snapshot
+        .project(&row.project_id)
+        .await
+        .map_err(store_error)?;
+    let pr_ref = snapshot.outbox_list().into_iter().find_map(|action| {
+        (action.delivery_id == row.id
+            && action.kind == gantry_core::entities::ForgeActionKind::CreatePr
+            && action.status == OutboxStatus::Succeeded)
+            .then(|| action.github_ref.as_ref()?.pr.clone())
+            .flatten()
+    });
+    let pr = match (project.as_ref(), pr_ref) {
+        (Some(project), Some(pr)) => snapshot
+            .pr_snapshot(&project.repo, pr.number)
+            .await
+            .map_err(store_error)?,
+        _ => None,
+    };
+    Ok(json!({
+        "id": row.id,
+        "project_id": row.project_id,
+        "title": row.title,
+        "level_cap": row.level_cap,
+        "level_effective": row.level_effective,
+        "stage": row.stage,
+        "stage_status": row.stage_status,
+        "issues": row.issues,
+        "pr": pr,
+        "worktree_id": row.worktree_id,
+        "parent_id": null,
+        "depends_on": [],
+        "origin": row.origin,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }))
 }
 
 /// #3 `GET /v1/projects`。
