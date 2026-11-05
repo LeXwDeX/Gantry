@@ -5,3 +5,4 @@ node_modules/
 .opencode/workflow-drafts
 .DS_Store
 .serena/
+/hosts.local.md
