@@ -197,6 +197,8 @@ async fn stop_kill_remove_and_image_exists_commands() {
     let id = ContainerId::new(ID);
     podman.respond("inspect", &inspect_json("exited", 143, false), "", 0);
     driver.stop(&id, Duration::from_secs(10)).await.unwrap();
+    // K8（#321）：0 不给宽限期，Podman 立即强杀；不得被改成 1 秒。
+    driver.stop(&id, Duration::ZERO).await.unwrap();
     driver.remove(&id).await.unwrap();
     podman.respond(
         "kill",
@@ -215,6 +217,9 @@ async fn stop_kill_remove_and_image_exists_commands() {
     assert!(args
         .iter()
         .any(|l| l.ends_with(&format!("[stop] [--time=10] [{ID}]"))));
+    assert!(args
+        .iter()
+        .any(|l| l.ends_with(&format!("[stop] [--time=0] [{ID}]"))));
     assert!(args
         .iter()
         .any(|l| l.ends_with(&format!("[rm] [--force] [--ignore] [{ID}]"))));

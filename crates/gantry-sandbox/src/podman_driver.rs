@@ -370,7 +370,7 @@ impl SandboxDriver for PodmanDriver {
     async fn stop(&self, id: &ContainerId, grace: Duration) -> Result<(), DriverError> {
         let args = vec![
             "stop".into(),
-            format!("--time={}", grace.as_secs().max(1)),
+            format!("--time={}", grace.as_secs()),
             id.to_string(),
         ];
         self.run("stop", &args).await?;
