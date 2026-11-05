@@ -128,6 +128,26 @@ BootConfig 字段映射、装配顺序与 `Pki::tick` 的周期调度都还没�
 
 注册与接收分开看：注册在绑定之前完成，`tokio::signal::unix::signal` 同步安装进程级处理器并建立接收器；接收发生在绑定之后的 `select` 里，首次 `poll` 之前送达的信号先记为 pending，待运行时信号驱动分发后由接收器取得，同类信号可能合并。因此修复后套接字一旦可连接，SIGTERM / SIGINT 都只会走正常停机，不会按进程原有处置终止进程（#401）。SIGINT 与 SIGTERM 走同一路径，不使用 `ctrl_c()`——它要到首次 `poll` 才注册，覆盖不了绑定与首次轮询之间的窗口。装配和信号注册之前（进程刚启动时）送达的信号按进程原有处置，不一定是默认动作（可继承忽略）。
 
+### 7.4 后台调度
+
+`serve` 是后台任务的唯一调度方；模块只提供可测的单步动作（`pki.md` §6.1）。
+M1 只启动 `Pki::tick`，其余任务在对应模块提供公开的单步入口后再接入。
+
+| 任务 | 节奏 | 失败处理 |
+| --- | --- | --- |
+| `Pki::tick`（关闭过期配对窗口、按需续签服务端证书） | 启动后立即一次，之后每 6 小时 | 记录 `pki` 的 `health` 与 stderr；下一周期重试，不终止 `serve` |
+| policy 审批过期清扫 | 事件驱动；周期清扫等 `PolicyApprovals` 提供公开单步入口后接入 | 归 #314 跟踪，不让 `serve` 退出 |
+| `Notify::AutoClose` | 事件驱动（每批新事件后 `run_once`）；订阅循环归 notify 后续切片 | 记录 stderr，不终止 `serve` |
+
+总则：
+
+- 后台任务失败只影响对应模块的 `health` 或日志，不改变 `serve` 的退出条件；
+  停机时随 `watch` 信号结束。
+- `Pki::tick` 的 6 小时是 `pki.md` 的建议值；配对窗口仍按设置窗口工作，tick
+  只负责关闭过期窗口。
+- 本规格不提供 `Pki::spawn_background`：调度归 `gantryd`，避免模块自己持有
+  任务生命周期。
+
 ### 7.3 进程级测试的驱动
 
 替身装配额外注册 `fake.*` 命令组（只在测试里编译）：`fake.create_delivery`、`fake.events`、`fake.end_bootstrap`，以及 `fake.drive`——每次调用驱动真实 forge 执行器处理 Outbox、用真实 `Dispatcher` 回读 GitHub 写快照，并为测试分支注入成功的 CI 检查；`auto_approve` 时再以 challenge + 测试设备签名授予待决审批，`manual` 模式关掉自动授予，用于签名正负对照。FakeGitHub 与测试裸远端由父测试进程持有，子进程经 HTTP 控制端点同步分支与检查；跨 daemon 重启复用同一外部事实。`fake.device_info` 实时读取设备目录，`fake.revoke_device` 用真实 `StoreAdmin::revoke` 吊销测试设备。父进程只经控制通道反复调用并观察阶段，不触碰执行体内部。测试设备经真实配对服务登记；每次授权都从 `DeviceDirectory::get` 与 `verifying_key` 取身份、角色、状态与公钥，不缓存，吊销后下一次授权即失败。测试签名私钥只留在测试进程内存。

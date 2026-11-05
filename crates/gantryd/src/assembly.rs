@@ -258,7 +258,10 @@ pub fn build_policy(
 }
 
 /// notify 的生产构造；状态在 store 的内置投影里，不注册私有表。
-pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
+///
+/// 返回具体类型，`gantryd` 的后台调度（`AutoClose`）需要它的具体方法；
+/// 消费方按 `InboxPort` 使用。
+pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<Notify> {
     Arc::new(Notify::new(store.clone(), ids))
 }
 
