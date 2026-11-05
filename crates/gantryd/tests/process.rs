@@ -819,7 +819,7 @@ fn status_reports_profile_and_module_providers() {
     ] {
         assert_eq!(provider(module), "real", "{module}");
     }
-    for module in ["store", "sandbox", "models", "egress"] {
+    for module in ["store", "sandbox", "egress"] {
         assert_eq!(provider(module), "fake", "{module}");
     }
 }
@@ -892,9 +892,10 @@ fn create_delivery_appends_one_event_and_dedupes_by_message() {
     assert_eq!(created.len(), 1, "{events:?}");
     // 装配期先写 settings / project / 登记测试设备；建单事件紧随其后。
     assert_eq!(events[0]["type"], "settings.updated");
-    assert_eq!(events[1]["type"], "project.added");
-    assert_eq!(events[2]["type"], "device.paired");
-    assert_eq!(events[3]["type"], "delivery.created");
+    assert_eq!(events[1]["type"], "settings.updated");
+    assert_eq!(events[2]["type"], "project.added");
+    assert_eq!(events[3]["type"], "device.paired");
+    assert_eq!(events[4]["type"], "delivery.created");
     assert_eq!(created[0]["subject"], first);
     assert_eq!(created[0]["data"]["budget"]["template"], "low.single");
 }
@@ -1441,9 +1442,9 @@ fn real_policy_approval(invalid: bool) {
         ("repo", "real"),
         ("sandbox", "fake"),
         ("worker", "real"),
-        ("models", "fake"),
+        ("models", "real"),
         ("egress", "fake"),
-        ("conversation", "fake"),
+        ("conversation", "real"),
         ("api", "absent"),
     ] {
         assert!(

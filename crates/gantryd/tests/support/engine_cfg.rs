@@ -8,6 +8,7 @@ use std::time::Duration;
 use gantry_core::canon::{GitOid, RepoSlug};
 use gantry_core::entities::{MergeMethod, Seq, Tier};
 use gantry_core::level::Level;
+use gantry_core::settings::resource::LevelEntry;
 use gantry_core::settings::{
     builtin_defaults, effective, parse_resolved, ResolvedSettings, SettingsResource,
 };
@@ -16,7 +17,7 @@ use gantry_core::worker::output_schema;
 use gantry_engine::decide::{ModelKey, ModelTable, ProjectFacts, ResolvedModel};
 use gantry_engine::runtime::RuntimeSettings;
 use gantry_engine::runtime_settings::from_settings;
-use gantry_models::{ModelsView, Purpose, ResolveQuery};
+use gantry_models::{EffortTable, ModelsView, Purpose, ResolveQuery};
 use serde_json::json;
 use std::sync::OnceLock;
 
@@ -46,32 +47,70 @@ pub fn repo_slug() -> RepoSlug {
     RepoSlug::parse("acme/web").expect("fixture")
 }
 
+/// 测试装配与 engine 模型表共用的 models 设置文档；provider 凭据名与 `models.rs`
+/// 的 `secret_ref` 命名一致。
+pub fn models_doc() -> serde_json::Value {
+    json!({
+        "providers": {"anthropic": {
+            "kind": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "credential": {"type": "api_key", "secret_ref": "model.anthropic.main"}
+        }},
+        "utility": {"provider": "anthropic", "model": "utility-from-settings"},
+        "planner": {"provider": "anthropic", "model": "planner-from-settings"},
+        "worker": {"provider": "anthropic", "model": "worker-model"}
+    })
+}
+
+/// 与 [`models_doc`] 一致的推理深度能力表。
+pub fn efforts() -> EffortTable {
+    EffortTable::new()
+        .with_model(
+            "utility-from-settings",
+            [(gantry_core::level::Effort::Low, "low")],
+        )
+        .with_model(
+            "planner-from-settings",
+            [(gantry_core::level::Effort::High, "high")],
+        )
+}
+
+/// 设置修订号；测试装配只写一次设置。
+pub fn config_rev() -> Seq {
+    Seq::new(1).expect("fixture")
+}
+
+/// `levels.low` 的预算模板；conversation 创建交付时使用。
+pub fn low() -> LevelEntry {
+    let ResolvedSettings::Levels(levels) = resolve(SettingsResource::Levels, json!({}), json!({}))
+    else {
+        unreachable!()
+    };
+    levels.low
+}
+
+fn resolve(
+    resource: SettingsResource,
+    global: serde_json::Value,
+    project: serde_json::Value,
+) -> ResolvedSettings {
+    let merged = effective(
+        resource,
+        &builtin_defaults(resource),
+        &global,
+        Some(&project),
+    );
+    parse_resolved(resource, &merged.value).expect("fixture settings")
+}
+
 /// 替身装配的引擎配置：由内置设置 + 测试模型覆盖经 `from_settings` 换算。
 ///
 /// 单项目 `acme/web`、基线 `BASE`。模型覆盖只让替身流程有一个可选的 worker 模型；
 /// 其余值全部来自 core 的设置默认值，进程级 §12.2 用例因此覆盖真实换算（不再是手写配置）。
 pub fn runtime_settings() -> RuntimeSettings {
-    let resolve = |resource, global: serde_json::Value, project: serde_json::Value| {
-        let merged = effective(
-            resource,
-            &builtin_defaults(resource),
-            &global,
-            Some(&project),
-        );
-        parse_resolved(resource, &merged.value).expect("fixture settings")
-    };
-    let ResolvedSettings::Models(models) = resolve(
-        SettingsResource::Models,
-        json!({
-            "providers": {"anthropic": {
-                "kind": "anthropic",
-                "base_url": "https://api.anthropic.com",
-                "credential": {"type": "api_key", "secret_ref": "model-key"}
-            }},
-            "worker": {"provider": "anthropic", "model": "claude"}
-        }),
-        json!({}),
-    ) else {
+    let ResolvedSettings::Models(models) =
+        resolve(SettingsResource::Models, models_doc(), json!({}))
+    else {
         unreachable!()
     };
     let ResolvedSettings::Levels(levels) = resolve(SettingsResource::Levels, json!({}), json!({}))

@@ -29,7 +29,6 @@ use gantry_core::ports::conversation::ConversationService;
 use gantry_core::ports::egress::EgressControl;
 use gantry_core::ports::forge::{ForgeReader, OutboxPort};
 use gantry_core::ports::inbox::InboxPort;
-use gantry_core::ports::models::ModelProvider;
 use gantry_core::ports::policy::PolicyPort;
 use gantry_core::ports::repo::{RepoService, WorktreeLocks};
 use gantry_core::ports::sandbox::SandboxService;
@@ -116,7 +115,7 @@ pub struct Assembly {
     pub locks: Arc<dyn WorktreeLocks>,
     pub sandbox: Arc<dyn SandboxService>,
     pub worker: Arc<dyn WorkerAdapter>,
-    pub models: Arc<dyn ModelProvider>,
+    pub models: Arc<dyn ModelsPort>,
     pub egress: Arc<dyn EgressControl>,
     pub conversation: Arc<dyn ConversationService>,
     pub modules: Vec<ModuleInfo>,
@@ -199,7 +198,7 @@ pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
 /// Egress 端口、ID / 熵 / 时钟和调用方给出的推理深度能力表（`EffortTable`），不
 /// 内置模型能力数据（models.md OQ-1 / OQ-8）。
 ///
-/// `assemble_real` 尚未调用本函数；测试装配仍使用 `FakeModelProvider`。
+/// `assemble_real` 尚未调用本函数；测试装配经本函数构造真实 `ModelRouter`。
 /// 生产 `worker` 适配器：只声明镜像、命令、非密环境变量、令牌变量与能力表。
 /// **不在本进程运行沙盒内二进制**；实际执行由沙盒中的 worker 完成。
 ///
