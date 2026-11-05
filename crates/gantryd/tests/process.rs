@@ -54,6 +54,7 @@ fn fake_gantryd(scratch: &Scratch, control_uid: u32) -> Command {
             support::CHILD_ENV,
             format!("{}\n{control_uid}", scratch.config().display()),
         )
+        .env(support::CHILD_EGRESS_ENV, &scratch.egress.socket)
         .env(
             support::CHILD_FORGE_ENV,
             format!(
@@ -83,6 +84,7 @@ struct Scratch {
     git_base: PathBuf,
     bare: PathBuf,
     base: GitOid,
+    egress: support::egress::TestEgress,
 }
 
 struct ScratchOwner(PathBuf);
@@ -139,6 +141,8 @@ journal_target = "{}"
         let control = support::TestForgeControl::start(github.clone());
         let (git_base, base, _) = support::init_bare_remote(&dir);
         let bare = git_base.join("acme/web.git");
+        let egress =
+            support::egress::TestEgress::start(&dir, std::fs::metadata(&dir).unwrap().uid());
         Self {
             dir,
             owner,
@@ -147,6 +151,7 @@ journal_target = "{}"
             git_base,
             bare,
             base,
+            egress,
         }
     }
 
@@ -819,7 +824,7 @@ fn status_reports_profile_and_module_providers() {
     ] {
         assert_eq!(provider(module), "real", "{module}");
     }
-    for module in ["store", "sandbox", "egress"] {
+    for module in ["store", "sandbox"] {
         assert_eq!(provider(module), "fake", "{module}");
     }
 }
@@ -1443,7 +1448,7 @@ fn real_policy_approval(invalid: bool) {
         ("sandbox", "fake"),
         ("worker", "real"),
         ("models", "real"),
-        ("egress", "fake"),
+        ("egress", "real"),
         ("conversation", "real"),
         ("api", "absent"),
     ] {

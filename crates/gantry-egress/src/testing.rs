@@ -438,6 +438,7 @@ pub fn job_request(n: u128, tokens_total: u64) -> IssueJobTokenRequest {
 
 pub struct Options {
     pub provider_host: &'static str,
+    pub config_rev: u64,
     pub limits: Limits,
     pub sandbox_cidrs: Option<Vec<Cidr>>,
     pub trust_test_ca: bool,
@@ -447,6 +448,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             provider_host: "localhost",
+            config_rev: 7,
             limits: Limits::default(),
             sandbox_cidrs: None,
             trust_test_ca: true,
@@ -490,7 +492,7 @@ impl Egress {
         )
         .unwrap();
         registry
-            .apply_config(view(7, options.provider_host))
+            .apply_config(view(options.config_rev, options.provider_host))
             .unwrap();
         let staged = registry
             .stage_secret(
