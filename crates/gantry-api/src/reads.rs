@@ -4,9 +4,8 @@
 //! 分页游标对客户端不透明：本模块把下游游标包成 `base64url`，解析失败、跨资源、
 //! 方向不符一律 `400 invalid_cursor`（本文 §7.7）。
 //!
-//! 项目、交付单元、工作流、节点尝试（#3–#6、#17–#20）要等 `store` 的完整
-//! `ProjectionRead`（store.md §6.2），当前 M0 内存实现只有收件箱与交付单元行；
-//! 项目对话列表 #10 仍需项目存在性的读取支持。
+//! 项目读路由（#3、#4、#10）使用 store 的 projects 投影（B2a–B2c）；交付单元、
+//! 工作流、节点尝试（#5、#6、#17–#20）仍待对应的投影读入口。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -108,6 +107,110 @@ pub async fn list_messages(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<R
         .conversation
         .list_messages(
             &id,
+            PageQuery {
+                cursor,
+                limit: limit(req.query),
+                order: Some(page_order),
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            ConvError::NotFound => Problem::not_found(),
+            ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor" => invalid_cursor(),
+            ConvError::Forbidden => {
+                Problem::forbidden_role(gantry_core::entities::DeviceRole::Viewer)
+            }
+            ConvError::Store(PortStoreError::Unavailable { .. }) => unavailable(),
+            _ => Problem::internal(),
+        })?;
+    let items = page.items.iter().map(to_json).collect::<Result<_, _>>()?;
+    let next = page.next_cursor.map(|cursor| wrap_cursor(&tag, &cursor));
+    Ok(Reply::json(
+        StatusCode::OK,
+        page_body(items, next),
+        page.last_seq,
+    ))
+}
+
+/// #3 `GET /v1/projects`。
+pub async fn list_projects(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Problem> {
+    const TAG: &str = "projects";
+    let q = req.query;
+    let mut page = Page {
+        limit: limit(q),
+        cursor: None,
+        order: order(q, Order::Desc),
+    };
+    if let Some(cursor) = q.str("cursor") {
+        page.cursor = Some(PageCursor::new(unwrap_cursor(TAG, cursor)?));
+    }
+    let mut snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let paged = snapshot.projects(&page).await.map_err(store_error)?;
+    let items = paged.items.iter().map(to_json).collect::<Result<_, _>>()?;
+    let next = paged.next_cursor.map(|c| wrap_cursor(TAG, c.as_str()));
+    Ok(Reply::json(StatusCode::OK, page_body(items, next), seq))
+}
+
+/// #4 `GET /v1/projects/{project_id}`。
+pub async fn get_project(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Problem> {
+    let id: ProjectId = parse(req.param("project_id"))?;
+    let mut snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let project = snapshot
+        .project(&id)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(Problem::not_found)?;
+    Ok(Reply::json(StatusCode::OK, to_json(&project)?, seq))
+}
+
+/// #10 `GET /v1/projects/{project_id}/conversations`。
+pub async fn list_conversations(
+    core: &ApiCore,
+    req: &HandlerRequest<'_>,
+) -> Result<Reply, Problem> {
+    let project: ProjectId = parse(req.param("project_id"))?;
+    // 项目不存在是 404，由 API 边界按 store 投影判定，不依赖下游实现。
+    let mut snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    if snapshot
+        .project(&project)
+        .await
+        .map_err(store_error)?
+        .is_none()
+    {
+        return Err(Problem::not_found());
+    }
+    let tag = format!("v1:conversations:{project}");
+    let cursor = req
+        .query
+        .str("cursor")
+        .map(|cursor| unwrap_cursor(&tag, cursor))
+        .transpose()?;
+    let page_order = match req.query.str("order") {
+        Some("asc") => PageOrder::Asc,
+        _ => PageOrder::Desc,
+    };
+    let page = core
+        .services()
+        .conversation
+        .list_conversations(
+            &project,
             PageQuery {
                 cursor,
                 limit: limit(req.query),

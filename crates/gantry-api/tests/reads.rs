@@ -8,7 +8,7 @@ use gantry_api::{ApiConfig, ApiCore};
 use gantry_conversation::{ConversationDeps, DeliveryHandle, EngineApi, Limits, ModelsPort};
 use gantry_core::entities::Ref;
 use gantry_core::entities::{Conversation, DevicePlatform, DeviceRole, Message};
-use gantry_core::events::EventType;
+use gantry_core::events::{EventType, NewEvent, Subject};
 use gantry_core::ids::{ConversationId, DeliveryId, MessageId, ProjectId, Ulid};
 use gantry_core::ports::context::{ActorCtx, PageOrder, PageQuery, PageWithSeq, StoreError};
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
@@ -720,4 +720,64 @@ async fn real_service_concurrent_responses_match_their_log_watermarks() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn project_reads_use_store_projection() {
+    let h = harness(None);
+    let d = device(20, DevicePlatform::Macos, DeviceRole::Viewer);
+    h.devices.insert(d.clone());
+
+    let mut project = builders::project();
+    project.id = ProjectId::from_parts(T0 as u64, 20).unwrap();
+    let id = project.id;
+    let mut tx = h.store.begin_write().await.unwrap();
+    tx.append(NewEvent {
+        ty: EventType::ProjectAdded,
+        subject: Subject::parse(&id.to_string()).unwrap(),
+        project_id: Some(id),
+        actor: gantry_core::entities::Actor::new(gantry_core::entities::ActorKind::System, "api"),
+        causation_id: None,
+        correlation_id: None,
+        data: serde_json::to_value(&project).unwrap(),
+        dedup_key: None,
+    })
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let resp = send(&h, req(Method::GET, "/v1/projects", &d), "").await;
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", body(&resp));
+    let page = body(&resp);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["id"], serde_json::json!(id));
+    assert!(header(&resp, "x-event-seq").is_some());
+
+    let resp = send(&h, req(Method::GET, &format!("/v1/projects/{id}"), &d), "").await;
+    assert_eq!(resp.status().as_u16(), 200, "{:?}", body(&resp));
+    assert_eq!(body(&resp)["id"], serde_json::json!(id));
+
+    let unknown = ProjectId::from_parts(T0 as u64, 21).unwrap();
+    let resp = send(
+        &h,
+        req(Method::GET, &format!("/v1/projects/{unknown}"), &d),
+        "",
+    )
+    .await;
+    assert_problem(&resp, 404, "not_found");
+
+    let resp = send(
+        &h,
+        req(
+            Method::GET,
+            &format!("/v1/projects/{unknown}/conversations"),
+            &d,
+        ),
+        "",
+    )
+    .await;
+    assert_problem(&resp, 404, "not_found");
+
+    let resp = send(&h, req(Method::GET, "/v1/projects?limit=201", &d), "").await;
+    assert_problem(&resp, 400, "invalid_request");
 }

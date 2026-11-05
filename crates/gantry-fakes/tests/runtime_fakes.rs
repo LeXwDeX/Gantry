@@ -721,8 +721,8 @@ async fn fake_conversation_keysets_replace_duplicate_ids_and_survive_inserts() {
         .items
         .is_empty());
     for order in [PageOrder::Asc, PageOrder::Desc] {
-        let error = fake
-            .list_conversations(
+        assert_eq!(
+            fake.list_conversations(
                 &project,
                 PageQuery {
                     order: Some(order),
@@ -730,8 +730,11 @@ async fn fake_conversation_keysets_replace_duplicate_ids_and_survive_inserts() {
                 },
             )
             .await
-            .unwrap_err();
-        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/order"));
+            .unwrap()
+            .items
+            .len(),
+            1
+        );
     }
     for cursor in ["", "seq:1", "bad"] {
         let error = fake

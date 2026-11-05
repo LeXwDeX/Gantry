@@ -932,8 +932,9 @@ async fn conversation_list_validates_cursor_order_and_project() {
         .unwrap();
     assert_eq!(known.items.len(), 1);
     assert_eq!(known.last_seq, h.store.events().head().await.unwrap());
+    // 对话至多一个，两个方向的结果相同（OpenAPI 声明了 order 参数）。
     for order in [PageOrder::Asc, PageOrder::Desc] {
-        let error = h
+        let page = h
             .conv
             .list_conversations(
                 &h.project,
@@ -943,8 +944,8 @@ async fn conversation_list_validates_cursor_order_and_project() {
                 },
             )
             .await
-            .unwrap_err();
-        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/order"));
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
     }
     let error = h
         .conv

@@ -60,6 +60,18 @@ export function sharedBehavior({ test, base, name }) {
     await problem(await request("/v1/events?project_id=oops"), 400, "invalid_request");
   });
 
+  test(`[${name}] project reads reject unknown ids and bad paging`, async () => {
+    const list = await request("/v1/projects");
+    assert.equal(list.status, 200);
+    const page = await list.json();
+    assert.ok(Array.isArray(page.items));
+    assert.ok(list.headers.get("x-event-seq"), "X-Event-Seq on success");
+    await problem(await request("/v1/projects?limit=201"), 400, "invalid_request");
+    const unknown = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZZ";
+    await problem(await request(`/v1/projects/${unknown}`), 404, "not_found");
+    await problem(await request(`/v1/projects/${unknown}/conversations`), 404, "not_found");
+  });
+
   test(`[${name}] write paths check Idempotency-Key and Content-Type`, async () => {
     const path = "/v1/conversations/cnv_01JB7K5Q1M3X8V2N6R9T4W0YZC/messages";
     await problem(

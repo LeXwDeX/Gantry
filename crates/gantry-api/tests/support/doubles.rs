@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use gantry_core::entities::{Actor, ActorKind, Conversation, Message, Seq};
 use gantry_core::events::{EventType, NewEvent, Subject};
 use gantry_core::ids::{ConversationId, ProjectId};
-use gantry_core::ports::context::{ActorCtx, PageQuery, PageWithSeq};
+use gantry_core::ports::context::{ActorCtx, PageQuery, PageWithSeq, StoreError as PortStoreError};
 use gantry_core::ports::conversation::{ConvError, ConversationService, NewUserMessage};
 use gantry_fakes::conversation::FakeConversation;
 use gantry_store::{Appended, Store};
@@ -59,13 +59,16 @@ pub async fn record(
 /// `FakeConversation` 外的故障注入层。
 pub struct ConvFaults {
     pub inner: FakeConversation,
+    /// 真实契约要求项目存在；替身不建模项目表，这里查真实 store 投影。
+    pub store: Store,
     pub next_error: Mutex<Option<ConvError>>,
 }
 
 impl ConvFaults {
-    pub fn new() -> Self {
+    pub fn new(store: Store) -> Self {
         Self {
             inner: FakeConversation::new(),
+            store,
             next_error: Mutex::new(None),
         }
     }
@@ -103,6 +106,19 @@ impl ConversationService for ConvFaults {
         project: &ProjectId,
         page: PageQuery,
     ) -> Result<PageWithSeq<Conversation>, ConvError> {
+        let mut snapshot = self
+            .store
+            .snapshot()
+            .await
+            .map_err(|_| ConvError::Store(PortStoreError::Unavailable { retry_after: None }))?;
+        if snapshot
+            .project(project)
+            .await
+            .map_err(|_| ConvError::Store(PortStoreError::Unavailable { retry_after: None }))?
+            .is_none()
+        {
+            return Err(ConvError::NotFound);
+        }
         self.inner.list_conversations(project, page).await
     }
 
