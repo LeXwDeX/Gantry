@@ -30,7 +30,7 @@ use gantry_core::canon::{IdempotencyKey, RepoSlug};
 use gantry_core::entities::{
     Actor, ActorKind, Device, ForgeActionKind, GithubRef, InboxItem, InboxKind, InboxStatus,
     IssueRef, OutboxAction, OutboxError, OutboxStatus, Priority, Project, PullRequestRef, Seq,
-    SettingsResource, SettingsScope, Severity,
+    SettingsResource, SettingsScope, Severity, Stage,
 };
 use gantry_core::events::{
     Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NewEvent,
@@ -39,8 +39,8 @@ use gantry_core::events::{
 };
 use gantry_core::forge::ActionPayload;
 use gantry_core::ids::{
-    Act, ActionId, Clock, DeliveryId, DeviceId, Dlv, EventId, Evt, IdError, IdGen, Inb, InboxId,
-    Prj, ProjectId,
+    Act, ActionId, AttemptId, Clock, DeliveryId, DeviceId, Dlv, EventId, Evt, IdError, IdGen, Inb,
+    InboxId, NodeId, Prj, ProjectId, WorkflowId,
 };
 use gantry_core::time::Timestamp;
 use serde_json::Value;
@@ -55,6 +55,7 @@ mod durable;
 pub mod github;
 pub mod module;
 pub mod projection;
+mod workflows;
 
 pub use cas::{Cas, CasKind, CasReader, CasStat, CasVerifyReport, GcReport, RetentionPolicy};
 pub use deliveries::DeliveryQuery;
@@ -62,6 +63,7 @@ pub use durable::{StoreConfig, SCHEMA_VERSION};
 pub use github::{GithubSnapshots, IssueSnapshotRow, PrSnapshotRow};
 pub use module::{ModuleConn, ModuleReader, ModuleRow, ModuleSpec, MODULE_SCAN_MAX};
 pub use projection::{DeliveryRow, FoldError, StageEntered};
+pub use workflows::{AttemptRow, NodeRow, WorkflowRow};
 
 // ---------------------------------------------------------------------------
 // 打开
@@ -599,6 +601,7 @@ struct Inner {
     secret_changes: BTreeMap<(String, u64), Seq>,
     next_enqueue_seq: u64,
     deliveries: BTreeMap<DeliveryId, DeliveryRow>,
+    workflows: BTreeMap<WorkflowId, WorkflowRow>,
     projects: BTreeMap<ProjectId, Project>,
     /// 内置 `inbox_items` 投影（store.md §7.2）；收件箱状态的唯一来源。
     inbox: BTreeMap<InboxId, InboxItem>,
@@ -631,6 +634,7 @@ impl Clone for Inner {
             secret_changes: self.secret_changes.clone(),
             next_enqueue_seq: self.next_enqueue_seq,
             deliveries: self.deliveries.clone(),
+            workflows: self.workflows.clone(),
             projects: self.projects.clone(),
             inbox: self.inbox.clone(),
             devices: self.devices.clone(),
@@ -1161,6 +1165,7 @@ impl Inner {
         );
         check("deliveries", self.deliveries == other.deliveries);
         check("projects", self.projects == other.projects);
+        check("workflows", self.workflows == other.workflows);
         check("inbox", self.inbox == other.inbox);
         check("devices", self.devices == other.devices);
         check("github snapshots", self.github == other.github);
@@ -1175,6 +1180,9 @@ impl Inner {
     /// 折叠一条事件。`Replay` 是启动时从日志重建：Outbox 是主表（§7.2），
     /// 它的行从持久层载入，`outbox.*` 事件此时不再改行。
     fn project(&mut self, event: &Event<Value>, mode: Fold) -> Result<(), StoreError> {
+        if workflows::project(&mut self.workflows, event)? {
+            return Ok(());
+        }
         match event.ty {
             EventType::OutboxSucceeded | EventType::OutboxFailed if mode == Fold::Replay => {}
             // 行由 `OutboxTx` 在同一事务写入；这些事件本身不再改表。
@@ -1771,6 +1779,37 @@ impl ReadSnapshot {
         page: &Page,
     ) -> Result<Paged<DeliveryRow>, StoreError> {
         deliveries::list(&self.inner.deliveries, q, page)
+    }
+
+    pub async fn workflows(
+        &mut self,
+        delivery: &DeliveryId,
+        stage: Option<Stage>,
+        page: &Page,
+    ) -> Result<Paged<WorkflowRow>, StoreError> {
+        workflows::list(&self.inner.workflows, delivery, stage, page)
+    }
+
+    pub fn workflow(&self, id: &WorkflowId) -> Option<WorkflowRow> {
+        self.inner.workflows.get(id).cloned()
+    }
+
+    pub async fn attempts(
+        &mut self,
+        node: &NodeId,
+        page: &Page,
+    ) -> Result<Paged<AttemptRow>, StoreError> {
+        workflows::attempts(&self.inner.workflows, node, page)
+    }
+
+    pub fn attempt(&self, id: &AttemptId) -> Option<AttemptRow> {
+        self.inner
+            .workflows
+            .values()
+            .flat_map(|workflow| workflow.nodes.iter())
+            .flat_map(|node| node.attempts.iter())
+            .find(|attempt| attempt.id == *id)
+            .cloned()
     }
 
     /// 扫描本快照中的事件，语义与 `EventLog::scan` 相同。
