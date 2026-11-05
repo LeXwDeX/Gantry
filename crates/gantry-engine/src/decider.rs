@@ -1211,31 +1211,41 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -
             },
         ));
     }
-    let node_status = match finalized.status {
-        AttemptStatus::Succeeded => Some(NodeStatus::Succeeded),
-        AttemptStatus::Cancelled => Some(NodeStatus::Cancelled),
-        _ => {
-            // 失败：§7.8 允许时保持 running，由派发在退避后新建 Attempt；否则节点失败并上报。
-            let detail = finalized
-                .failure_detail
-                .as_ref()
-                .map(|d| d.as_str().to_owned())
-                .unwrap_or_default();
-            let mut since: Vec<AttemptState> =
-                node.attempts[node.attempts_at_retry as usize..].to_vec();
-            if let Some(this) = since.iter_mut().find(|a| a.id == attempt.id) {
-                this.failure_detail = finalized.failure_detail.clone();
-            }
-            if finalized.retry_blocked.is_none()
-                && will_retry(&detail, since.len() as u32, &since, env)
-            {
-                None
-            } else {
-                // 已终结的交付单元不再上报（放弃收尾中被取消的尝试可能以失败告终）。
-                if !state.delivery.stage.is_terminal() {
-                    out.extend(failure_reports(state, node, attempt, finalized, &detail));
+    // 无补丁的成功尝试不进入补丁链：节点按失败处理并上报 no_change（§7.8、OQ-15）。
+    let no_change = finalized.status == AttemptStatus::Succeeded
+        && matches!(finalized.patch, PatchResult::NoChange);
+    let node_status = if no_change {
+        if !state.delivery.stage.is_terminal() {
+            out.extend(no_change_report(state, node));
+        }
+        Some(NodeStatus::Failed)
+    } else {
+        match finalized.status {
+            AttemptStatus::Succeeded => Some(NodeStatus::Succeeded),
+            AttemptStatus::Cancelled => Some(NodeStatus::Cancelled),
+            _ => {
+                // 失败：§7.8 允许时保持 running，由派发在退避后新建 Attempt；否则节点失败并上报。
+                let detail = finalized
+                    .failure_detail
+                    .as_ref()
+                    .map(|d| d.as_str().to_owned())
+                    .unwrap_or_default();
+                let mut since: Vec<AttemptState> =
+                    node.attempts[node.attempts_at_retry as usize..].to_vec();
+                if let Some(this) = since.iter_mut().find(|a| a.id == attempt.id) {
+                    this.failure_detail = finalized.failure_detail.clone();
                 }
-                Some(NodeStatus::Failed)
+                if finalized.retry_blocked.is_none()
+                    && will_retry(&detail, since.len() as u32, &since, env)
+                {
+                    None
+                } else {
+                    // 已终结的交付单元不再上报（放弃收尾中被取消的尝试可能以失败告终）。
+                    if !state.delivery.stage.is_terminal() {
+                        out.extend(failure_reports(state, node, attempt, finalized, &detail));
+                    }
+                    Some(NodeStatus::Failed)
+                }
             }
         }
     };
@@ -1263,6 +1273,36 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -
         }
     }
     out
+}
+
+/// 无补丁成功：节点按失败处理，上报 `escalation(no_change)`（§7.8、OQ-15）。
+fn no_change_report(state: &DeliveryState, node: &NodeState) -> Vec<Decision> {
+    use gantry_core::entities::{InboxOption, InboxPayload, ReasonCode, Severity};
+    use gantry_core::ports::inbox::{DedupKey, RaiseRequest, SafeSummary};
+
+    vec![Decision::Raise(RaiseRequest {
+        project_id: Some(state.delivery.project_id),
+        delivery_id: Some(state.delivery.id),
+        kind: InboxKind::Escalation,
+        severity: Severity::Blocker,
+        summary: SafeSummary::new(format!("节点 {} 无补丁变更", node.key)),
+        payload: InboxPayload::Escalation {
+            reason_code: ReasonCode::parse("no_change").expect("no_change is a valid reason code"),
+            node_id: Some(node.id),
+            attempt_id: None,
+            target_level: None,
+            action_id: None,
+            evidence: Vec::new(),
+            options: Some(vec![
+                InboxOption::new("continue", "继续", true),
+                InboxOption::new("abandon", "放弃", false),
+            ]),
+        },
+        dedup_key: DedupKey::new(format!("esc:{}:no_change:{}", state.delivery.id, node.id)),
+        supersedes: Vec::new(),
+        actor: engine_actor(),
+        causation_id: None,
+    })]
 }
 
 /// 节点因失败进入终态时的上报（§7.8"失败处理"表、§7.11）。
