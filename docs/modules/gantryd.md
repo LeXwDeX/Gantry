@@ -152,6 +152,33 @@ M1 只启动 `Pki::tick`，其余任务在对应模块提供公开的单步入�
 
 替身装配额外注册 `fake.*` 命令组（只在测试里编译）：`fake.create_delivery`、`fake.events`、`fake.end_bootstrap`，以及 `fake.drive`——每次调用驱动真实 forge 执行器处理 Outbox、用真实 `Dispatcher` 回读 GitHub 写快照，并为测试分支注入成功的 CI 检查；`auto_approve` 时再以 challenge + 测试设备签名授予待决审批，`manual` 模式关掉自动授予，用于签名正负对照。FakeGitHub 与测试裸远端由父测试进程持有，子进程经 HTTP 控制端点同步分支与检查；跨 daemon 重启复用同一外部事实。`fake.device_info` 实时读取设备目录，`fake.revoke_device` 用真实 `StoreAdmin::revoke` 吊销测试设备。父进程只经控制通道反复调用并观察阶段，不触碰执行体内部。测试设备经真实配对服务登记；每次授权都从 `DeviceDirectory::get` 与 `verifying_key` 取身份、角色、状态与公钥，不缓存，吊销后下一次授权即失败。测试签名私钥只留在测试进程内存。
 
+### 7.5 A 级证据索引（M1 收尾）
+
+`docs/m1-acceptance.md` §3 的 10 条退出标准在测试装配上的对应证据（`main@e37a059`）：
+
+| # | 证据 |
+| --- | --- |
+| 1 | `gantryd/tests/process.rs::end_to_end_low_delivery_reaches_closed_with_fakes`（独立进程，阶段序列 `spec → implement → propose → review → merge → closed`） |
+| 2 | `gantry-engine/tests/actor.rs::delivery_reaches_closed_without_any_client`；`tools/mock-api/test/http.test.mjs` 的 SSE 游标回放用例 |
+| 3 | 无适用 A 级证据（替身没有网络；需 B 级虚拟机） |
+| 4 | `gantry-forge/tests/webhook.rs::duplicate_delivery_is_stored_once_202_then_200`；`normalize.rs::duplicate_and_same_fact_deliveries_produce_one_event_each` |
+| 5 | `gantry-forge/tests/outbox_executor.rs::create_pr_crash_after_apply_does_not_duplicate` |
+| 6 | `gantry-engine/tests/decide_low.rs::protected_workflows_raise_manual_action_with_patch`、`protected_lockfile_raises_escalation_with_patch_evidence`；`gantry-repo/tests/policy_v0.rs::workflow_manifest_and_lockfile_patches_are_denied_by_policy_v0` |
+| 7 | `gantryd/tests/process.rs::real_policy_verifies_signed_approval_before_merge_enqueue`、`real_policy_rejects_wrong_signature_without_grant_or_merge`、`real_executor_consumes_real_signed_approval_before_merge` |
+| 8 | `gantry-fakes/tests/runtime_fakes.rs::egress_stub_issues_reissues_revokes_and_meters_real_http`；`gantry-egress/tests/registry.rs::revoke_is_final_idempotent_and_forget_then_not_found` |
+| 9 | `gantry-pki/tests/open.rs::server_certificate_renews_within_thirty_days_and_hot_swaps` |
+| 10 | `gantry-api/tests/events.rs::revoked_device_stream_closes_within_one_heartbeat` |
+
+测试装配的替换清单（仍由替身提供、不影响 A 级结论）：
+
+- `sandbox`：`GoldenSandbox`（真实 Podman 归 #106）。
+- `egress`：真实 `EgressClient` + `gantry_egress::testing` 的 Registry / 代理；网段与 uid 隔离归 #106。
+- `models`：真实 `ModelRouter`；凭据经 `EgressStub`，真实模型与 Egress 数据面归 #106。
+- `forge`：真实 `Forge`；GitHub 用 `FakeGitHub`，真实 GitHub 归 #107（C 级）。
+- `worker`：`ClaudeCodeAdapter` 只声明镜像与命令，不在本进程运行沙盒二进制。
+- `store`：内存或测试目录下的 SQLite；不代表生产数据目录。
+- `pki` / `secrets` / `policy` / `notify` / `repo` / `conversation` / `api`：生产构造函数 + 测试 CA / 临时目录。
+
 ## 8. 不变式与安全要求
 
 - **I1 沙盒只计算**：控制套接字 0600、仅 root，永不挂入沙盒（deploy.md §12）。
