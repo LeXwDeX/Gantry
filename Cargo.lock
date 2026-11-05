@@ -824,6 +824,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "gantry-core",
+ "gantry-engine",
  "gantry-fakes",
  "gantry-models",
  "gantry-store",
@@ -1139,6 +1140,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "gantry-conversation",
  "gantry-core",
  "gantry-deploy",
  "gantry-engine",

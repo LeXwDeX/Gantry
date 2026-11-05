@@ -372,7 +372,7 @@ P-32 要求"消息发往哪里由输入区的 `@` 决定"。因此：
 | --- | --- |
 | `FakeModelProvider`（经 `models`） | 按规则返回 `intent` / `classify` 的固定输出，可注入失败、慢响应、恶意输出（越权 `delivery_id`、`intent = control`） |
 | `store` | `Store::open_in_memory`（M0，P-51）；崩溃类测试用 `open_temp` |
-| `EngineApi` 桩 | 测试夹具内的薄桩（M0 替身清单没有 `FakeEngine`）：记录调用、按脚本返回；只验证"调用了什么"，不重现引擎逻辑。引擎就绪后用真实引擎 + `FakeSandboxService` / `FakeRepo` / `FakeForge` 做端到端 |
+| `EngineApi` 桩 | 测试夹具内的薄桩（M0 替身清单没有 `FakeEngine`）：记录调用、按脚本返回；只验证"调用了什么"，不重现引擎逻辑。生产适配是 `engine_api::EngineApiAdapter`（`#105` A7，真实 `Engine` + 存储集成测试）；端到端仍用真实引擎 + `FakeSandboxService` / `FakeRepo` / `FakeForge` |
 | `FakeInbox`（M0，P-51） | 实现 `InboxPort`，记录 `resolve` 调用 |
 
 ### 12.2 M1 验收
