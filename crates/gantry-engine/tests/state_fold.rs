@@ -144,6 +144,7 @@ fn expected_low_path() -> DeliveryState {
             base_ref: "main".to_owned(),
             base_sha: v(json!(BASE_SHA)),
         }),
+        base_override: None,
         ledger: LedgerState {
             used,
             exhausted: vec![],
@@ -540,6 +541,37 @@ fn accepted_open_pr_is_folded_into_attempt() {
     let attempt = &state.node(&id(NODE)).unwrap().attempts[0];
     assert_eq!(attempt.accepted_open_pr.as_deref(), Some("proposal-1"));
     assert_eq!(state.evidence.candidate_head, Some(v(json!(COMMIT))));
+}
+
+/// #452：`attempt.finished.base_after_conflict` 覆盖下一次派发的 base；新工作树清空覆盖。
+#[test]
+fn base_after_conflict_overrides_until_worktree_recreated() {
+    const CONFLICT_HEAD: &str = "cccccccccccccccccccccccccccccccccccccccc";
+    let mut path = low_path();
+    path.truncate(11);
+    let mut finished = attempt_finished();
+    finished.data["status"] = json!("failed");
+    finished.data["result_ref"] = Value::Null;
+    finished.data["result_tree"] = Value::Null;
+    finished.data["result_commit"] = Value::Null;
+    finished.data["failure_class"] = json!("infra_error");
+    finished.data["failure_detail"] = json!("infra.base_conflict");
+    finished.data["base_after_conflict"] = json!(CONFLICT_HEAD);
+    path.push(finished);
+    let state = fold(&path);
+    assert_eq!(state.base_override, Some(v(json!(CONFLICT_HEAD))));
+    assert_eq!(
+        state.node(&id(NODE)).unwrap().attempts[0].status,
+        AttemptStatus::Failed
+    );
+
+    path.push(spec(
+        "worktree.created",
+        WORKTREE,
+        json!({"worktree_id": WORKTREE, "project_id": PROJECT, "delivery_id": DELIVERY,
+               "branch": "gantry/dlv-12", "base_ref": "main", "base_sha": BASE_SHA}),
+    ));
+    assert_eq!(fold(&path).base_override, None);
 }
 
 /// 被取代的旧项只出现在新项 `inbox.raised.data.supersedes` 里，不会另发 `inbox.resolved`；
