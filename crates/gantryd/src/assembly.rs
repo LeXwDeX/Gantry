@@ -288,7 +288,9 @@ pub fn egress_config_view(
             )
         })
         .collect();
-    let mut injection: std::collections::BTreeMap<String, InjectionView> = egress
+    // `injection` 只放私有包仓库；模型 API 的注入由 `providers` 表达，
+    // 不在两处重复 `secret_ref`（config.md §8.1）。
+    let injection: std::collections::BTreeMap<String, InjectionView> = egress
         .injection
         .iter()
         .map(|(id, item)| {
@@ -310,26 +312,6 @@ pub fn egress_config_view(
             (id.clone(), view)
         })
         .collect();
-    for (id, provider) in &models.providers {
-        let host = provider
-            .base_url
-            .split_once("://")
-            .map_or(provider.base_url.as_str(), |(_, rest)| rest)
-            .split('/')
-            .next()
-            .unwrap_or_default();
-        injection.insert(
-            format!("model.{id}"),
-            InjectionView {
-                hosts: vec![host.to_owned()],
-                kind: InjectionKind::Bearer,
-                header: None,
-                credential: InjectionCredentialView {
-                    secret_ref: provider.credential.secret_ref.clone(),
-                },
-            },
-        );
-    }
     ConfigView {
         rev: rev.as_u64(),
         providers: models

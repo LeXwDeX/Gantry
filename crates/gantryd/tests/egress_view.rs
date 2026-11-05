@@ -30,7 +30,7 @@ fn models() -> gantry_core::settings::resource::Models {
 }
 
 #[test]
-fn models_providers_become_injection_entries() {
+fn models_providers_stay_in_providers() {
     let ResolvedSettings::Egress(egress) = builtin_resolved(SettingsResource::Egress) else {
         unreachable!()
     };
@@ -46,9 +46,12 @@ fn models_providers_become_injection_entries() {
     assert_eq!(provider.kind, "anthropic");
     assert_eq!(provider.base_url, "https://api.anthropic.com");
 
-    let derived = &view.injection["model.anthropic"];
-    assert_eq!(derived.hosts, vec!["api.anthropic.com"]);
-    assert_eq!(derived.credential.secret_ref, provider.secret_ref);
+    // 模型 API 注入由 providers 表达；injection 保持为空。
+    assert!(view.injection.is_empty());
+    assert_eq!(
+        provider.secret_ref,
+        models.providers["anthropic"].credential.secret_ref
+    );
     assert_eq!(view.token_weights, levels.token_weights);
 
     // 视图序列化后再反序列化必须通过 ConfigView 的复核。
@@ -85,7 +88,7 @@ fn explicit_injection_entries_are_kept() {
         gantryd::assembly::egress_config_view(&egress, &models, &levels, Seq::new(1).expect("rev"));
 
     assert_eq!(view.injection["registry"].hosts, vec!["npm.example.com"]);
-    assert!(view.injection.contains_key("model.anthropic"));
+    assert!(!view.injection.contains_key("model.anthropic"));
 }
 
 #[tokio::test]

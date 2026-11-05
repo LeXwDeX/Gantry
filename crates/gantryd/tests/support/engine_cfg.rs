@@ -82,11 +82,35 @@ pub fn config_rev() -> Seq {
 
 /// `levels.low` 的预算模板；conversation 创建交付时使用。
 pub fn low() -> LevelEntry {
+    levels().low
+}
+
+/// 完整的内置 levels 设置（含 `token_weights`）。
+pub fn levels() -> gantry_core::settings::resource::Levels {
     let ResolvedSettings::Levels(levels) = resolve(SettingsResource::Levels, json!({}), json!({}))
     else {
         unreachable!()
     };
-    levels.low
+    levels
+}
+
+/// 与 [`models_doc`] 一致的 models 设置。
+pub fn models() -> gantry_core::settings::resource::Models {
+    let ResolvedSettings::Models(models) =
+        resolve(SettingsResource::Models, models_doc(), json!({}))
+    else {
+        unreachable!()
+    };
+    models
+}
+
+/// 内置 egress 设置。
+pub fn egress() -> gantry_core::settings::resource::Egress {
+    let ResolvedSettings::Egress(egress) = resolve(SettingsResource::Egress, json!({}), json!({}))
+    else {
+        unreachable!()
+    };
+    egress
 }
 
 fn resolve(

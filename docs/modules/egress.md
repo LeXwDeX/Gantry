@@ -429,7 +429,7 @@ struct JobState {
 
 ## 12. 测试与验收
 
-测试替身（`gantry_egress::testing`，`testing` feature；egress 自己的集成测试与 `gantryd` 装配测试共用同一实现）：
+测试替身（`gantry_egress::testing`，`testing` feature；egress 自己的集成测试与 `gantryd` 装配测试共用同一实现；`Options::config_rev` 控制初始视图修订号，`gantryd` 测试用 `0` 让设置视图真正替换）：
 
 - `MockUpstream`：本地 TLS 服务（测试 CA 注入 Egress 的信任库），可脚本化：JSON 响应与 SSE 流（带 `usage` 的各种组合）、429 / 5xx、慢速流、中途断连、重定向、畸形用量；**带外**记录收到的请求头集合（绝不在响应里回显，以免哨兵泄露被测试自己造成）。
 - `TestSandboxClient`：带指定 `job_token`、从指定源地址发起连接的原始 TCP 客户端。用不同令牌扮演不同沙盒、用环回别名扮演沙盒网段与非沙盒网段，使归属逻辑**不需要容器**就能完整测试。

@@ -4,6 +4,7 @@
 //! `GANTRYD_FAKES_CHILD` 环境变量重新执行自身（只跑 [`CHILD_TEST`] 这一个测试），
 //! 这个子进程就是"用替身装配的 gantryd"；父进程只经控制通道和信号跟它交互。
 
+pub mod egress;
 pub mod engine_cfg;
 pub mod fake_cmds;
 
@@ -18,6 +19,7 @@ use gantry_core::entities::{
     SettingsScope,
 };
 use gantry_core::ids::{Clock, DeviceId, IdGen, ProjectId, Ulid};
+use gantry_core::ports::egress::EgressControl;
 use gantry_core::ports::inbox::InboxPort;
 use gantry_core::ports::{ActorCtx, Expect, MirrorWant, SecretSink, SecretSource, SecretValue};
 use gantry_core::secret::{Consumer, SecretName, SecretString};
@@ -40,10 +42,10 @@ use gantry_repo::{RepoConfig, RepoDeps};
 use gantry_secrets::{MasterKey, MasterKeySource, Secrets, SecretsConfig, StaticMasterKey};
 use gantry_store::{Page, Store, StoreConfig, StoreDeps};
 use gantryd::assembly::{
-    build_conversation, build_forge, build_forge_executor, build_forge_reader, build_models,
-    build_notify, build_pki, build_policy, build_repo, build_secrets, build_worker, module_specs,
-    secrets_consumers, Assembly, ForgeDeps, ForgeExecutorDeps, ModuleInfo, OsEntropy, Profile,
-    Provider, SystemClock,
+    build_conversation, build_egress, build_forge, build_forge_executor, build_forge_reader,
+    build_models, build_notify, build_pki, build_policy, build_repo, build_secrets, build_worker,
+    module_specs, secrets_consumers, Assembly, ForgeDeps, ForgeExecutorDeps, ModuleInfo, OsEntropy,
+    Profile, Provider, SystemClock,
 };
 use gantryd::config::BootConfig;
 use gantryd::control::{CommandSet, ControlAuth};
@@ -57,6 +59,8 @@ pub const CHILD_ENV: &str = "GANTRYD_FAKES_CHILD";
 pub const CHILD_SQLITE_ENV: &str = "GANTRYD_FAKES_SQLITE_DIR";
 /// 父进程持有的外部事实：`<control_base>\n<api_base>\n<git_base>\n<base_oid>\n<bare>`。
 pub const CHILD_FORGE_ENV: &str = "GANTRYD_FAKES_FORGE";
+/// 父进程真实 egress 的控制套接字路径。
+pub const CHILD_EGRESS_ENV: &str = "GANTRYD_FAKES_EGRESS";
 
 /// `fake.*` 命令要直接操纵的替身。
 pub struct FakeHandles {
@@ -108,6 +112,7 @@ pub struct ExternalFacts {
     pub git_base: PathBuf,
     pub base: GitOid,
     pub bare: PathBuf,
+    pub egress_socket: PathBuf,
 }
 
 /// 测试侧控制服务器：父进程持有 `FakeGitHub`，子进程经回环 HTTP 调用它的公开方法。
@@ -735,6 +740,7 @@ async fn assemble_variant(
         git_base,
         base,
         bare,
+        egress_socket,
     } = external;
     engine_cfg::set_base(base);
     let github = GitHubControl::new(control_base);
@@ -835,10 +841,10 @@ async fn assemble_variant(
     )
     .await
     .expect("engine runtime");
-    let egress = Arc::new(EgressStub::new());
+    let models_egress = Arc::new(EgressStub::new());
     let router = Arc::new(build_models(
         &store,
-        egress.clone(),
+        models_egress.clone(),
         ids.clone(),
         Arc::new(OsEntropy),
         Arc::new(TokioClock::default()),
@@ -894,8 +900,8 @@ async fn assemble_variant(
         ),
         ModuleInfo::new(
             "egress",
-            Fake,
-            "EgressStub; real egress is a separate process",
+            Real,
+            "EgressClient; real egress process started by the parent test",
         ),
         ModuleInfo::new("conversation", Real, "Conversation via build_conversation"),
         ModuleInfo::new(
@@ -910,6 +916,29 @@ async fn assemble_variant(
         ),
         ModuleInfo::new("api", Absent, "not wired yet"),
     ];
+
+    let egress_client = build_egress(
+        &egress_socket,
+        clock.clone(),
+        gantry_core::egress::IssuedTo {
+            process: "gantryd".to_owned(),
+            pid: std::process::id(),
+            started_at: clock.now(),
+        },
+    );
+    egress_client
+        .apply_config(
+            gantryd::assembly::egress_config_view(
+                &engine_cfg::egress(),
+                &engine_cfg::models(),
+                &engine_cfg::levels(),
+                engine_cfg::config_rev(),
+            ),
+            &test_actor_ctx(),
+        )
+        .await
+        .expect("apply egress config");
+    let egress: Arc<dyn EgressControl> = Arc::new(egress_client);
 
     let assembly = Assembly {
         profile: Profile::Fakes,
@@ -997,12 +1026,15 @@ pub fn child_main(spec: &str) {
             let git_base = PathBuf::from(parts.next().expect("git base"));
             let base = GitOid::parse(parts.next().expect("base oid")).expect("base oid");
             let bare = PathBuf::from(parts.next().expect("bare path"));
+            let egress_socket =
+                PathBuf::from(std::env::var(CHILD_EGRESS_ENV).expect("missing egress socket"));
             ExternalFacts {
                 control_base,
                 api_base,
                 git_base,
                 base,
                 bare,
+                egress_socket,
             }
         }
         Err(_) => panic!("missing {CHILD_FORGE_ENV}"),
