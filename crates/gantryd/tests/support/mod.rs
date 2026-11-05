@@ -13,20 +13,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gantry_core::canon::GitOid;
-use gantry_core::entities::{Actor, ActorKind, Device, DevicePlatform, MergeMethod, Project};
+use gantry_core::entities::{
+    Actor, ActorKind, Device, DevicePlatform, MergeMethod, Project, Seq, SettingsResource,
+    SettingsScope,
+};
 use gantry_core::ids::{Clock, DeviceId, IdGen, ProjectId, Ulid};
 use gantry_core::ports::inbox::InboxPort;
 use gantry_core::ports::{ActorCtx, Expect, MirrorWant, SecretSink, SecretSource, SecretValue};
 use gantry_core::secret::{Consumer, SecretName, SecretString};
 use gantry_engine::runtime::{EnginePorts, EngineRuntime};
-use gantry_fakes::{
-    conversation::FakeConversation, egress::EgressStub, golden::GoldenSandbox,
-    models::FakeModelProvider,
-};
+use gantry_fakes::{egress::EgressStub, golden::GoldenSandbox};
 use gantry_forge::{
     Dispatcher, Executor, ExecutorOptions, Forge, ForgeConfig, Permission, ProjectBinding,
     StaticTokenProvider,
 };
+use gantry_models::TokioClock;
 use gantry_pki::bootstrap::{self, BootstrapParams, MemoryFsProbe};
 use gantry_pki::csr::encode_approval_pubkey;
 use gantry_pki::directory::DeviceDirectory;
@@ -39,9 +40,10 @@ use gantry_repo::{RepoConfig, RepoDeps};
 use gantry_secrets::{MasterKey, MasterKeySource, Secrets, SecretsConfig, StaticMasterKey};
 use gantry_store::{Page, Store, StoreConfig, StoreDeps};
 use gantryd::assembly::{
-    build_forge, build_forge_executor, build_forge_reader, build_notify, build_pki, build_policy,
-    build_repo, build_secrets, build_worker, module_specs, secrets_consumers, Assembly, ForgeDeps,
-    ForgeExecutorDeps, ModuleInfo, OsEntropy, Profile, Provider, SystemClock,
+    build_conversation, build_forge, build_forge_executor, build_forge_reader, build_models,
+    build_notify, build_pki, build_policy, build_repo, build_secrets, build_worker, module_specs,
+    secrets_consumers, Assembly, ForgeDeps, ForgeExecutorDeps, ModuleInfo, OsEntropy, Profile,
+    Provider, SystemClock,
 };
 use gantryd::config::BootConfig;
 use gantryd::control::{CommandSet, ControlAuth};
@@ -620,6 +622,15 @@ pub fn project_id() -> ProjectId {
     engine_cfg::PROJECT.parse().expect("fixture")
 }
 
+/// 资源级设置修订号；`settings.updated` 的 `base_rev` 按资源比较，不是全局事件 rev。
+fn settings_rev(store: &Store, resource: SettingsResource) -> Seq {
+    store
+        .snapshot_sync()
+        .expect("snapshot")
+        .settings_current_for(&SettingsScope::Global, None, resource)
+        .rev
+}
+
 async fn assemble_variant(
     config: &BootConfig,
     test_dir: &Path,
@@ -656,7 +667,7 @@ async fn assemble_variant(
     // `forge.synced` 的投影按 `project.added` 绑定仓库，两者都在装配前写入。
     {
         let mut tx = store.begin_write().await.expect("settings write");
-        let rev = tx.read().config_rev(None);
+        let rev = settings_rev(&store, SettingsResource::Github);
         tx.append(gantry_core::events::NewEvent {
             ty: gantry_core::events::EventType::SettingsUpdated,
             subject: gantry_core::events::Subject::parse("settings").expect("subject"),
@@ -675,6 +686,28 @@ async fn assemble_variant(
         .await
         .expect("github settings event");
         tx.commit().await.expect("github settings commit");
+    }
+    {
+        let mut tx = store.begin_write().await.expect("models settings write");
+        let rev = settings_rev(&store, SettingsResource::Models);
+        tx.append(gantry_core::events::NewEvent {
+            ty: gantry_core::events::EventType::SettingsUpdated,
+            subject: gantry_core::events::Subject::parse("settings").expect("subject"),
+            project_id: None,
+            actor: Actor::new(ActorKind::User, "test"),
+            causation_id: None,
+            correlation_id: None,
+            data: serde_json::json!({
+                "scope": "global", "resource": "models", "schema_version": 1,
+                "base_rev": rev.as_u64(),
+                "value": engine_cfg::models_doc(),
+                "relaxes": [], "secret_changes": []
+            }),
+            dedup_key: None,
+        })
+        .await
+        .expect("models settings event");
+        tx.commit().await.expect("models settings commit");
     }
     {
         let mut tx = store.begin_write().await.expect("project write");
@@ -802,6 +835,23 @@ async fn assemble_variant(
     )
     .await
     .expect("engine runtime");
+    let egress = Arc::new(EgressStub::new());
+    let router = Arc::new(build_models(
+        &store,
+        egress.clone(),
+        ids.clone(),
+        Arc::new(OsEntropy),
+        Arc::new(TokioClock::default()),
+        engine_cfg::efforts(),
+    ));
+    let conversation = build_conversation(
+        &store,
+        engine.engine(),
+        ids.clone(),
+        router.clone(),
+        engine_cfg::low(),
+        engine_cfg::config_rev(),
+    );
 
     use Provider::{Absent, Fake, Real};
     let modules = vec![
@@ -839,15 +889,15 @@ async fn assemble_variant(
         ),
         ModuleInfo::new(
             "models",
-            Fake,
-            "FakeModelProvider; real models need provider keys",
+            Real,
+            "ModelRouter via build_models; settings from the test store",
         ),
         ModuleInfo::new(
             "egress",
             Fake,
             "EgressStub; real egress is a separate process",
         ),
-        ModuleInfo::new("conversation", Fake, "FakeConversation"),
+        ModuleInfo::new("conversation", Real, "Conversation via build_conversation"),
         ModuleInfo::new(
             "secrets",
             Real,
@@ -874,9 +924,9 @@ async fn assemble_variant(
         locks: repo.clone(),
         sandbox: sandbox.clone(),
         worker,
-        models: Arc::new(FakeModelProvider::new()),
-        egress: Arc::new(EgressStub::new()),
-        conversation: Arc::new(FakeConversation::new()),
+        models: router,
+        egress,
+        conversation,
         modules,
     };
     let handles = FakeHandles {
