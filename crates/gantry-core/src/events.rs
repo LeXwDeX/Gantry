@@ -1804,6 +1804,10 @@ pub struct AttemptFinishedData {
     /// 执行器据 `result_ref` 从 CAS 取出提议原文填入 `create_pr` 意图，所以必须有 `result_ref`。
     #[serde(default)]
     pub accepted_open_pr: Option<String>,
+    /// `PatchResult::BaseConflict` 时的分支 head（engine.md §7.8 V5）：下一次派发
+    /// 用它作为 `attempt.started.base_sha`，不改 `worktree.created` 历史。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_after_conflict: Option<GitOid>,
 }
 
 impl EventData for AttemptFinishedData {
