@@ -241,7 +241,12 @@ mod tests {
         ));
         peer.set_nonblocking(true).unwrap();
         let mut request = [0; 1];
-        assert_eq!(std::io::Read::read(&mut peer, &mut request).unwrap(), 0);
+        // 客户端在超时后关闭连接：macOS 上对端读到 EOF，Linux 上得到 ECONNRESET。
+        match std::io::Read::read(&mut peer, &mut request) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("unexpected read result: {other:?}"),
+        }
     }
 
     #[test]
