@@ -26,6 +26,7 @@ use gantry_core::events::{
     PatchValidatedData, WorkflowCreatedData, WorkflowFinishedData, WorkflowRevisedData,
     WorktreeCreatedData, WorktreeLockedData, WorktreeRemovedData, WorktreeUnlockedData,
 };
+use gantry_core::forge::derive_target_intent;
 use gantry_core::ids::{
     ActionId, ApprovalId, AttemptId, DeliveryId, InboxId, NodeId, WorkflowId, WorktreeId,
 };
@@ -76,6 +77,9 @@ pub struct DeliveryState {
     /// 折叠不写它，重启后为空，由 `Tick(Recover)` 重新认领。
     pub lock_owner: BTreeMap<WorktreeId, NodeId>,
     pub round_history: Vec<RoundRecord>,
+    /// 用户对 `escalation(outbox_failed:<code>)` 选过 `retry` 的失败动作（§7.14.4，E6）。
+    /// 只用于 `epoch` 推导，重放从事件重建。
+    pub retried: BTreeSet<ActionId>,
     pub last_seq: Seq,
 }
 
@@ -188,6 +192,8 @@ pub struct OpenInbox {
     pub node_id: Option<NodeId>,
     pub attempt_id: Option<AttemptId>,
     pub approval_id: Option<ApprovalId>,
+    /// `escalation(outbox_failed:<code>)` 的失败动作（payload.action_id，#67）。
+    pub action_id: Option<ActionId>,
     pub target_level: Option<Level>,
     pub options: Vec<OptionId>,
     pub raised_seq: Seq,
@@ -206,6 +212,7 @@ impl std::fmt::Debug for OpenInbox {
             .field("node_id", &self.node_id)
             .field("attempt_id", &self.attempt_id)
             .field("approval_id", &self.approval_id)
+            .field("action_id", &self.action_id)
             .field("target_level", &self.target_level)
             .field(
                 "options",
@@ -251,6 +258,8 @@ pub struct OutboxState {
     pub epoch: u32,
     pub status: gantry_core::entities::OutboxStatus,
     pub failure_code: Option<OutboxFailureCode>,
+    /// 同一意图的 `epoch = 0` 幂等键（除 `epoch` 外的部分），用于重试时推导新轮次。
+    pub signature: Option<IdempotencyKey>,
     /// `budget.charged(forge_writes)` 是否已为它记账（`source.action_id`）。
     pub charged: bool,
 }
@@ -307,6 +316,7 @@ impl DeliveryState {
             locks: BTreeMap::new(),
             lock_owner: BTreeMap::new(),
             round_history: Vec::new(),
+            retried: BTreeSet::new(),
             last_seq: event.seq,
         })
     }
@@ -540,6 +550,17 @@ impl DeliveryState {
             }
             EventType::InboxResolved => {
                 let data: InboxResolvedData = decode(event, ty)?;
+                if data.resolution == gantry_core::events::InboxResolution::Chosen
+                    && data.option_id.as_deref() == Some("retry")
+                {
+                    if let Some(action_id) = self
+                        .open_inbox
+                        .get(&data.inbox_id)
+                        .and_then(|item| item.action_id)
+                    {
+                        self.retried.insert(action_id);
+                    }
+                }
                 self.open_inbox.remove(&data.inbox_id);
             }
             // dismiss 只表示"不再提醒"，不解除阻塞（§7.11，OQ-13）。
@@ -547,6 +568,20 @@ impl DeliveryState {
             EventType::OutboxEnqueued => {
                 let data: OutboxEnqueuedData = decode(event, ty)?;
                 let action_id: ActionId = subject(event, ty)?;
+                let signature =
+                    derive_target_intent(&data.action.payload)
+                        .ok()
+                        .and_then(|derived| {
+                            IdempotencyKey::derive(
+                                &self.delivery.project_id,
+                                &self.delivery.id,
+                                data.action.kind,
+                                &derived.target,
+                                &derived.intent,
+                                0,
+                            )
+                            .ok()
+                        });
                 self.outbox.insert(
                     data.action.idempotency_key.clone(),
                     OutboxState {
@@ -555,6 +590,7 @@ impl DeliveryState {
                         epoch: data.action.epoch,
                         status: gantry_core::entities::OutboxStatus::Queued,
                         failure_code: None,
+                        signature,
                         charged: false,
                     },
                 );
@@ -775,6 +811,7 @@ fn open_inbox_item(item: &InboxItem, raised_by: RaisedBy, raised_seq: Seq) -> Op
         node_id: None,
         attempt_id: None,
         approval_id: None,
+        action_id: None,
         target_level: None,
         options: Vec::new(),
         raised_seq,
@@ -804,12 +841,14 @@ fn open_inbox_item(item: &InboxItem, raised_by: RaisedBy, raised_seq: Seq) -> Op
             node_id,
             attempt_id,
             target_level,
+            action_id,
             options: opts,
             ..
         } => {
             open.reason_code = Some(reason_code.clone());
             open.node_id = *node_id;
             open.attempt_id = *attempt_id;
+            open.action_id = *action_id;
             open.target_level = *target_level;
             open.options = opts.as_deref().map(options).unwrap_or_default();
         }

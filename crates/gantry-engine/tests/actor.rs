@@ -37,7 +37,7 @@ use gantry_engine::state::DeliveryState;
 use gantry_fakes::forge::FakeForge;
 use gantry_fakes::inbox::FakeInbox;
 use gantry_store::testing::{FakeClock, SeqEntropy};
-use gantry_store::{ClaimOpts, EventFilter, Store, StoreConfig, StoreDeps};
+use gantry_store::{AfterFailure, ClaimOpts, EventFilter, Store, StoreConfig, StoreDeps};
 use serde_json::json;
 
 const PROJECT: &str = "prj_01JB7K2M9Q4X8V3N5R6T1W0YZA";
@@ -1468,4 +1468,87 @@ async fn retryable_effect_failure_is_retried_after_backoff() {
     assert_eq!(plans.len(), 2);
     assert_eq!(plans[1].attempt_id, plan.attempt_id);
     assert!(plans[1].resume);
+}
+
+/// #302：Outbox 终态失败经执行体上报；用户选 `retry` 后同一意图以 `epoch + 1` 重新判定。
+#[tokio::test]
+async fn outbox_failure_raises_and_retry_uses_new_epoch() {
+    let h = Harness::new().await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    let mut actor = h.actor();
+    h.settle(&mut actor).await;
+    h.pump(&mut router, &mut actor).await;
+    let plan = h.runner.plans().remove(0);
+    h.finalize(&mut actor, &plan).await;
+    h.pump(&mut router, &mut actor).await;
+    assert_eq!(h.state().await.delivery.stage, Stage::Propose);
+
+    let push = h
+        .state()
+        .await
+        .outbox
+        .values()
+        .find(|row| row.kind == ForgeActionKind::PushBranch)
+        .cloned()
+        .expect("push_branch enqueued");
+
+    // 终态失败：forge 认领动作并写失败（同一事务更新 Outbox 主表）。
+    let mut tx = h.store.begin_write().await.unwrap();
+    tx.outbox()
+        .claim(ClaimOpts {
+            lease: Duration::from_secs(60),
+            exclude_deliveries: BTreeSet::new(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    tx.outbox()
+        .fail(
+            &push.action_id,
+            gantry_core::entities::OutboxError {
+                code: "rate_limited".to_owned(),
+                message: "slow down".to_owned(),
+            },
+            AfterFailure::Terminal,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    h.pump(&mut router, &mut actor).await;
+    let item = h
+        .state()
+        .await
+        .open_inbox
+        .values()
+        .find(|item| item.action_id == Some(push.action_id))
+        .cloned()
+        .expect("outbox_failed escalation raised");
+    assert_eq!(item.kind, InboxKind::Escalation);
+    assert_eq!(
+        item.reason_code.as_ref().map(|code| code.as_str()),
+        Some("outbox_failed:rate_limited")
+    );
+
+    // 用户选 retry：记为已重试，下一次求值用新 epoch 重新判定。
+    h.runner
+        .write(
+            "inbox.resolved",
+            &item.id.to_string(),
+            ActorKind::System,
+            h.delivery,
+            json!({"inbox_id": item.id, "resolution": "chosen", "option_id": "retry"}),
+        )
+        .await;
+    h.pump(&mut router, &mut actor).await;
+    eprintln!("stage=after-resolved-pump");
+    let state = h.state().await;
+    assert!(state.retried.contains(&push.action_id));
+    assert_eq!(
+        h.runner.count(|effect| matches!(
+            effect,
+            Effect::JudgeAction { request, .. }
+                if request.kind == ForgeActionKind::PushBranch && request.epoch == 2
+        )),
+        1
+    );
 }

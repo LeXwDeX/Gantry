@@ -2,14 +2,16 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
+use gantry_core::canon::IdempotencyKey;
 use gantry_core::entities::{
-    ApprovalStatus, AttemptStatus, BudgetUsed, Exec, ForgeActionKind, InboxKind, LockHolder,
-    NodeStatus, OutboxStatus, Role, Seq, Stage, StageStatus, Tier, WorkflowStatus,
+    ActorKind, ApprovalStatus, AttemptStatus, BudgetUsed, Exec, ForgeActionKind, InboxKind,
+    LockHolder, NodeStatus, OutboxStatus, Role, Seq, Stage, StageStatus, Tier, WorkflowStatus,
 };
-use gantry_core::events::Subject;
+use gantry_core::events::{EventType, OutboxEnqueuedData, Subject};
+use gantry_core::forge::derive_target_intent;
 use gantry_core::level::Level;
 use gantry_core::machines::delivery::AbandonCause;
 use gantry_core::ports::inbox::DedupKey;
@@ -38,12 +40,31 @@ fn seq(n: u64) -> Seq {
     Seq::new(n).unwrap()
 }
 
+/// 同一意图的 `epoch = 0` 幂等键：折叠从 payload 派生，期望值用同一来源，避免手写常量漂移。
+fn outbox_signature(specs: &[common::Spec]) -> Option<IdempotencyKey> {
+    let event = specs
+        .iter()
+        .find(|event| event.ty == EventType::OutboxEnqueued.as_str())?;
+    let data: OutboxEnqueuedData = serde_json::from_value(event.data.clone()).ok()?;
+    let derived = derive_target_intent(&data.action.payload).ok()?;
+    IdempotencyKey::derive(
+        &id(PROJECT),
+        &id(DELIVERY),
+        data.action.kind,
+        &derived.target,
+        &derived.intent,
+        0,
+    )
+    .ok()
+}
+
 fn fold(specs: &[Spec]) -> DeliveryState {
     DeliveryState::fold(&events(specs)).unwrap().unwrap()
 }
 
 /// 夹具序列走完后的期望状态，逐字段写出。
 fn expected_low_path() -> DeliveryState {
+    let path = low_path();
     let node = NodeState {
         id: id(NODE),
         key: "single".to_owned(),
@@ -157,6 +178,7 @@ fn expected_low_path() -> DeliveryState {
                 epoch: 0,
                 status: OutboxStatus::Succeeded,
                 failure_code: None,
+                signature: outbox_signature(&path),
                 charged: true,
             },
         )]),
@@ -172,6 +194,7 @@ fn expected_low_path() -> DeliveryState {
         locks: BTreeMap::new(),
         lock_owner: BTreeMap::new(),
         round_history: vec![],
+        retried: BTreeSet::new(),
         last_seq: seq(27),
     }
 }
@@ -215,6 +238,7 @@ fn intermediate_state_tracks_lock_inbox_and_running_attempt() {
             node_id: None,
             attempt_id: None,
             approval_id: Some(id(APPROVAL)),
+            action_id: None,
             target_level: None,
             options: vec![],
             raised_seq: seq(25),
@@ -559,4 +583,54 @@ fn human_lock_routes_by_worktree_owner() {
         router.route(&human).unwrap(),
         Route::Delivery { id, .. } if id == owner
     ));
+}
+
+/// #302：`outbox.failed`、上报的 `action_id` 与用户 `retry` 都从事件重建；
+/// `epoch` 推导依赖的 `signature` 也随之重建（重启后重放得到同一结果）。
+#[test]
+fn outbox_failure_and_retry_fold_from_events() {
+    let enqueued = low_path()
+        .into_iter()
+        .find(|event| event.ty == "outbox.enqueued")
+        .unwrap();
+    let path = vec![
+        common::created(DELIVERY),
+        enqueued,
+        spec("outbox.failed", ACTION, json!({"code": "rate_limited"})).actor(ActorKind::Forge),
+        spec(
+            "inbox.raised",
+            INBOX,
+            json!({"item": {
+                "id": INBOX, "project_id": PROJECT, "delivery_id": DELIVERY,
+                "kind": "escalation", "severity": "blocker", "summary": "Outbox 动作失败",
+                "payload": {
+                    "reason_code": "outbox_failed:rate_limited",
+                    "action_id": ACTION,
+                    "evidence": [],
+                    "options": [
+                        {"id": "retry", "label": "重试", "primary": true},
+                        {"id": "abandon", "label": "放弃", "primary": false}
+                    ]
+                },
+                "status": "open", "dedup_key": format!("outbox_failed:{ACTION}"),
+                "created_at": "2026-10-24T12:41:03.120Z", "updated_at": "2026-10-24T12:41:03.120Z"
+            }}),
+        ),
+        spec(
+            "inbox.resolved",
+            INBOX,
+            json!({"inbox_id": INBOX, "resolution": "chosen", "option_id": "retry"}),
+        ),
+    ];
+    let state = fold(&path);
+    let action_id: gantry_core::ids::ActionId = ACTION.parse().unwrap();
+    assert_eq!(state.retried, BTreeSet::from([action_id]));
+    assert!(state.open_inbox.is_empty());
+    let row = state
+        .outbox
+        .values()
+        .find(|row| row.action_id == action_id)
+        .unwrap();
+    assert_eq!(row.status, OutboxStatus::Failed);
+    assert_eq!(row.signature, outbox_signature(&path));
 }
