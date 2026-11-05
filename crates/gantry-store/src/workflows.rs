@@ -223,14 +223,21 @@ pub(crate) fn project(
         gantry_core::events::EventType::AttemptFinished => {
             let data: AttemptFinishedData = decode(event)?;
             let attempt_id: AttemptId = subject_id::<gantry_core::ids::Att>(&event.subject)?;
+            // 先完成全部可失败校验，避免投影改到一半再报错（store.md §12.3）。
+            let detail = attempt_detail(&data)?;
             for row in rows.values_mut() {
                 for node in &mut row.nodes {
                     if let Some(attempt) = node.attempts.iter_mut().find(|a| a.id == attempt_id) {
+                        if attempt.status != AttemptStatus::Running {
+                            return Err(StoreError::PreconditionFailed(format!(
+                                "attempt {attempt_id} is already terminal"
+                            )));
+                        }
                         attempt.status = data.status;
                         attempt.ended_at = Some(event.ts);
                         attempt.result_ref = data.result_ref;
                         attempt.failure_class = data.failure_class;
-                        attempt.failure_detail = attempt_detail(&data)?;
+                        attempt.failure_detail = detail;
                         attempt.usage = data.usage.unwrap_or_default();
                         attempt.updated_at = event.ts;
                         node.updated_at = event.ts;
@@ -260,12 +267,16 @@ pub(crate) fn list(
     let after = match &p.cursor {
         None => None,
         Some(cursor) => {
-            let mut parts = cursor.as_str().splitn(3, ':');
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some("workflows"), Some(order), Some(key)) if order == order_tag(p.order) => Some(
-                    key.parse::<WorkflowId>()
-                        .map_err(|_| StoreError::InvalidCursor)?,
-                ),
+            let mut parts = cursor.as_str().splitn(4, ':');
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some("workflows"), Some(parent), Some(order), Some(key))
+                    if parent == delivery.to_string() && order == order_tag(p.order) =>
+                {
+                    Some(
+                        key.parse::<WorkflowId>()
+                            .map_err(|_| StoreError::InvalidCursor)?,
+                    )
+                }
                 _ => return Err(StoreError::InvalidCursor),
             }
         }
@@ -294,9 +305,14 @@ pub(crate) fn list(
     };
     let next_cursor = if items.len() > limit {
         items.truncate(limit);
-        items
-            .last()
-            .map(|row| PageCursor::new(format!("workflows:{}:{}", order_tag(p.order), row.id)))
+        items.last().map(|row| {
+            PageCursor::new(format!(
+                "workflows:{}:{}:{}",
+                delivery,
+                order_tag(p.order),
+                row.id
+            ))
+        })
     } else {
         None
     };
@@ -323,9 +339,11 @@ pub(crate) fn attempts(
     let after = match &p.cursor {
         None => None,
         Some(cursor) => {
-            let mut parts = cursor.as_str().splitn(3, ':');
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some("attempts"), Some(order), Some(key)) if order == order_tag(p.order) => {
+            let mut parts = cursor.as_str().splitn(4, ':');
+            match (parts.next(), parts.next(), parts.next(), parts.next()) {
+                (Some("attempts"), Some(parent), Some(order), Some(key))
+                    if parent == node.to_string() && order == order_tag(p.order) =>
+                {
                     Some(key.parse::<u32>().map_err(|_| StoreError::InvalidCursor)?)
                 }
                 _ => return Err(StoreError::InvalidCursor),
@@ -350,9 +368,14 @@ pub(crate) fn attempts(
     };
     let next_cursor = if items.len() > limit {
         items.truncate(limit);
-        items
-            .last()
-            .map(|row| PageCursor::new(format!("attempts:{}:{}", order_tag(p.order), row.n)))
+        items.last().map(|row| {
+            PageCursor::new(format!(
+                "attempts:{}:{}:{}",
+                node,
+                order_tag(p.order),
+                row.n
+            ))
+        })
     } else {
         None
     };
