@@ -159,6 +159,11 @@ journal_target = "{}"
         self.dir.join("gantry.toml")
     }
 
+    fn api_addr(&self) -> std::net::SocketAddr {
+        let text = std::fs::read_to_string(self.dir.join("api.addr")).expect("api addr file");
+        text.parse().expect("api addr")
+    }
+
     fn socket(&self) -> PathBuf {
         self.dir.join(CONTROL_SOCKET)
     }
@@ -861,6 +866,18 @@ fn malformed_and_unknown_requests_get_errors_and_connection_stays_up() {
     let response = client.call(json!({"cmd": "pair"}));
     assert_eq!(response["error"]["code"], "unknown_command");
     client.ok(json!({"cmd": "status"}));
+}
+
+#[test]
+fn api_listener_accepts_connections() {
+    let scratch = Scratch::new();
+    let _daemon = Daemon::spawn(&scratch, scratch.uid());
+    let addr = scratch.api_addr();
+    let stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5));
+    assert!(
+        stream.is_ok(),
+        "api listener at {addr} refused the connection"
+    );
 }
 
 #[test]

@@ -1161,6 +1161,7 @@ dependencies = [
  "p256",
  "rcgen",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

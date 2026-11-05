@@ -20,6 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use gantry_api::server::ApiCore;
 use gantry_api::settings::SettingsContext;
 use gantry_conversation::engine_api::EngineApiAdapter;
 use gantry_conversation::ports::{EngineApi, ModelsPort};
@@ -47,7 +48,7 @@ use gantry_engine::engine::Engine;
 use gantry_engine::runtime::EngineRuntime;
 use gantry_forge::{
     Dispatcher, DispatcherDeps, DispatcherOptions, Executor, ExecutorDeps, ExecutorOptions,
-    FaultInjector, Forge, ForgeConfig, ReaderDeps, TokenProvider,
+    FaultInjector, Forge, ForgeConfig, Reader, ReaderDeps, TokenProvider,
 };
 use gantry_models::{
     AnthropicProvider, EffortTable, ModelRouter, RouterClock, RouterDeps, StoreSettings, ViewCache,
@@ -125,7 +126,38 @@ pub struct Assembly {
     pub egress: Arc<dyn EgressControl>,
     pub conversation: Arc<dyn ConversationService>,
     pub settings_ctx: Arc<dyn SettingsContext>,
+    /// API 监听器所需的装配产物；`None` 表示本装配不启动 HTTP 面。
+    pub api: Option<ApiRuntime>,
     pub modules: Vec<ModuleInfo>,
+}
+
+/// `serve` 要启动的 API 监听器：`ApiCore` 已装配，`tls` 与 `listener` 由装配层给出。
+pub struct ApiRuntime {
+    pub core: Arc<ApiCore>,
+    pub tls: Arc<rustls::ServerConfig>,
+    listener: std::sync::Mutex<Option<tokio::net::TcpListener>>,
+}
+
+impl ApiRuntime {
+    pub fn new(
+        core: Arc<ApiCore>,
+        tls: Arc<rustls::ServerConfig>,
+        listener: tokio::net::TcpListener,
+    ) -> Self {
+        Self {
+            core,
+            tls,
+            listener: std::sync::Mutex::new(Some(listener)),
+        }
+    }
+
+    /// `serve` 只取一次监听器；重复调用返回 `None`。
+    pub fn take_listener(&self) -> Option<tokio::net::TcpListener> {
+        self.listener
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
 }
 
 /// 已接入生产构造函数的模块私有表（store.md §7.10）。notify 的状态在 store
@@ -440,7 +472,7 @@ pub fn build_forge_executor(
 
 /// 第二阶段：带 mirror 的完整 reader，供 engine / assembly 使用。它与第一阶段
 /// 的 reader 共享同一 store、ForgeConfig 与 dispatcher。
-pub fn build_forge_reader(stack: &ForgeStack, repo: Arc<dyn RepoService>) -> Arc<dyn ForgeReader> {
+pub fn build_forge_reader(stack: &ForgeStack, repo: Arc<dyn RepoService>) -> Arc<Reader> {
     Arc::new(stack.forge.reader(ReaderDeps {
         tokens: stack.deps.tokens.clone(),
         api_base: stack.deps.api_base.clone(),
