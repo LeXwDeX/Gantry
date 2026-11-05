@@ -100,3 +100,227 @@ impl SettingsContext for RuntimeSettingsContext {
         Ok(self.snapshot.modules.clone())
     }
 }
+
+/// 从 store、engine、egress 与 secrets 构造只读快照。
+///
+/// `forge_names` / `egress_names` 是当前设置里引用到的密钥名；存在性按使用方分别查询
+/// （config.md §2.4）。没有 status API 的模块如实报 `unhealthy`，不虚构 `ok`。
+pub async fn build_settings_context(
+    store: &gantry_store::Store,
+    engine: &gantry_engine::runtime::EngineRuntime,
+    egress: &dyn gantry_core::ports::egress::EgressControl,
+    egress_names: &[SecretName],
+    forge_secrets: &dyn gantry_core::ports::secrets::SecretSource,
+    forge_names: &[SecretName],
+    catalog: Value,
+) -> Result<RuntimeSettingsContext, ModuleError> {
+    const RESOURCES: [SettingsResource; 8] = [
+        SettingsResource::Models,
+        SettingsResource::Levels,
+        SettingsResource::Policies,
+        SettingsResource::Guardian,
+        SettingsResource::Sandbox,
+        SettingsResource::Egress,
+        SettingsResource::Notify,
+        SettingsResource::Github,
+    ];
+
+    let snapshot = store.snapshot().await.map_err(|error| {
+        ModuleError::Store(gantry_core::ports::StoreError::InvalidState {
+            message: error.to_string(),
+        })
+    })?;
+    let mut resources = Vec::new();
+    for resource in RESOURCES {
+        let entry = snapshot.settings_current_for(&SettingsScope::Global, None, resource);
+        if let Some(value) = entry.value {
+            resources.push(((resource, SettingsScope::Global), value));
+        }
+    }
+
+    let mut secrets = BTreeSet::new();
+    for name in forge_names {
+        if forge_secrets.present(name).unwrap_or(false) {
+            secrets.insert((Consumer::Forge, name.clone()));
+        }
+    }
+    if !egress_names.is_empty() {
+        let present = egress.secret_present(egress_names).await.map_err(|error| {
+            ModuleError::Unavailable {
+                message: error.to_string(),
+            }
+        })?;
+        for name in egress_names {
+            if present.get(name).copied().unwrap_or(false) {
+                secrets.insert((Consumer::Egress, name.clone()));
+            }
+        }
+    }
+
+    let (capabilities, adapters) = parse_catalog(&catalog);
+    let mut graph_templates = BTreeMap::new();
+    graph_templates.insert(LevelKey::Low, engine.engine().template_catalog().templates);
+
+    let mut modules = Map::new();
+    match engine.status().await {
+        Ok(status) => {
+            modules.insert(
+                "engine".to_owned(),
+                serde_json::json!({
+                    "applied_rev": status.applied_rev.as_u64(),
+                    "health": if status.degraded.is_empty() { "ok" } else { "degraded" },
+                    "detail": if status.degraded.is_empty() { Value::Null } else {
+                        Value::String(format!("{} degraded deliveries", status.degraded.len()))
+                    },
+                    "unresolved_secret_refs": [],
+                }),
+            );
+        }
+        Err(error) => {
+            modules.insert(
+                "engine".to_owned(),
+                serde_json::json!({
+                    "applied_rev": 0,
+                    "health": "unhealthy",
+                    "detail": error.to_string(),
+                    "unresolved_secret_refs": [],
+                }),
+            );
+        }
+    }
+    match egress.status().await {
+        Ok(status) => {
+            modules.insert(
+                "egress".to_owned(),
+                serde_json::json!({
+                    "applied_rev": status.applied_rev.as_u64(),
+                    "health": match status.health {
+                        gantry_core::ports::Health::Ok => "ok",
+                        gantry_core::ports::Health::Degraded => "degraded",
+                        gantry_core::ports::Health::Unhealthy => "unhealthy",
+                    },
+                    "detail": status.detail,
+                    "unresolved_secret_refs": status
+                        .unresolved_secret_refs
+                        .iter()
+                        .map(|name| name.to_string())
+                        .collect::<Vec<_>>(),
+                }),
+            );
+        }
+        Err(error) => {
+            modules.insert(
+                "egress".to_owned(),
+                serde_json::json!({
+                    "applied_rev": 0,
+                    "health": "unhealthy",
+                    "detail": error.to_string(),
+                    "unresolved_secret_refs": [],
+                }),
+            );
+        }
+    }
+    for module in ["models", "policy", "guardian", "sandbox", "notify", "forge"] {
+        modules.insert(
+            module.to_owned(),
+            serde_json::json!({
+                "applied_rev": 0,
+                "health": "unhealthy",
+                "detail": "module has no status source in this slice",
+                "unresolved_secret_refs": [],
+            }),
+        );
+    }
+
+    Ok(RuntimeSettingsContext::new(SettingsSnapshot {
+        catalog,
+        resources,
+        graph_templates,
+        capabilities,
+        adapters,
+        secrets,
+        modules,
+    }))
+}
+
+fn parse_catalog(
+    catalog: &Value,
+) -> (
+    BTreeMap<(String, String), ModelCapability>,
+    BTreeMap<String, AdapterCapability>,
+) {
+    let mut capabilities = BTreeMap::new();
+    if let Some(models) = catalog["models"]["capabilities"].as_object() {
+        for (key, value) in models {
+            let Some((provider, model)) = key.split_once('/') else {
+                continue;
+            };
+            let efforts = value["reasoning_efforts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|effort| serde_json::from_value(effort.clone()).ok())
+                .collect();
+            capabilities.insert(
+                (provider.to_owned(), model.to_owned()),
+                ModelCapability {
+                    tools: value["tools"].as_bool().unwrap_or(false),
+                    reasoning_efforts: efforts,
+                },
+            );
+        }
+    }
+    let mut adapters = BTreeMap::new();
+    if let Some(list) = catalog["models"]["adapters"].as_object() {
+        for (name, value) in list {
+            adapters.insert(
+                name.clone(),
+                AdapterCapability {
+                    provider_kinds: value["provider_kinds"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|kind| kind.as_str().map(str::to_owned))
+                        .collect(),
+                    supports_fallback: value["supports_fallback"].as_bool().unwrap_or(false),
+                },
+            );
+        }
+    }
+    (capabilities, adapters)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_parsing_reads_capabilities_and_adapters() {
+        let catalog = serde_json::json!({
+            "models": {
+                "capabilities": {
+                    "anthropic/utility": {"tools": false, "reasoning_efforts": ["low", "high"]},
+                    "broken": {"tools": true}
+                },
+                "adapters": {
+                    "claude-code": {"provider_kinds": ["anthropic"], "supports_fallback": false}
+                }
+            }
+        });
+        let (capabilities, adapters) = parse_catalog(&catalog);
+        let capability = capabilities
+            .get(&("anthropic".to_owned(), "utility".to_owned()))
+            .expect("capability");
+        assert!(!capability.tools);
+        assert_eq!(
+            capability.reasoning_efforts,
+            vec![
+                gantry_core::level::Effort::Low,
+                gantry_core::level::Effort::High
+            ]
+        );
+        assert!(!capabilities.contains_key(&("broken".to_owned(), "broken".to_owned())));
+        assert_eq!(adapters["claude-code"].provider_kinds, ["anthropic"]);
+        assert!(!adapters["claude-code"].supports_fallback);
+    }
+}
