@@ -489,16 +489,23 @@ impl ApiCore {
         let mut lease = None;
         if let Some(key) = key {
             let print = idempotency::fingerprint(a.route.method, &a.instance, parsed.as_ref());
-            match self.svc.idempotency.begin(&device_id, key, print) {
-                Begin::Proceed(held) => lease = Some(held),
-                Begin::Replay(stored) => return replay_response(stored, a.log_epoch, a.rate),
-                Begin::InProgress => {
+            match self.svc.idempotency.begin(&device_id, key, print).await {
+                Err(_) => {
+                    return fail(Problem::retry_after(
+                        ProblemCode::Unavailable,
+                        "idempotency store unavailable",
+                        1,
+                    ))
+                }
+                Ok(Begin::Proceed(held)) => lease = Some(held),
+                Ok(Begin::Replay(stored)) => return replay_response(stored, a.log_epoch, a.rate),
+                Ok(Begin::InProgress) => {
                     return fail(Problem::new(
                         ProblemCode::IdempotencyInProgress,
                         "a request with this Idempotency-Key is still in progress",
                     ))
                 }
-                Begin::Reuse => {
+                Ok(Begin::Reuse) => {
                     return fail(Problem::new(
                         ProblemCode::IdempotencyKeyReuse,
                         "Idempotency-Key was used with a different request",
@@ -525,11 +532,13 @@ impl ApiCore {
         if let (Some(key), Some(lease)) = (key, lease) {
             // 首次响应是 5xx 不登记，允许同键重试；4xx 登记并重放。
             if resp.status().is_server_error() {
-                self.svc.idempotency.abandon(&device_id, key, lease);
+                let _ = self.svc.idempotency.abandon(&device_id, key, lease).await;
             } else {
-                self.svc
+                let _ = self
+                    .svc
                     .idempotency
-                    .finish(&device_id, key, lease, stored(&resp));
+                    .finish(&device_id, key, lease, stored(&resp))
+                    .await;
             }
         }
         resp

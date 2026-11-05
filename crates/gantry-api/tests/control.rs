@@ -539,7 +539,7 @@ async fn in_progress_and_retention() {
     // 首次请求仍在处理（租约内）→ 409
     let print = fingerprint("POST", &path, Some(&payload));
     assert!(matches!(
-        h.idempotency.begin(&op.id, KEY, print),
+        h.idempotency.begin(&op.id, KEY, print).await.unwrap(),
         Begin::Proceed(_)
     ));
     let resp = send(&h, post(&op, cnv, KEY), &payload.to_string()).await;
