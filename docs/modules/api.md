@@ -310,9 +310,9 @@ pub struct Problem {                                          // RFC 9457 + 扩�
 
 | 项 | 实现 |
 | --- | --- |
-| 存储 | 表 `api_idempotency(device_id, key, fingerprint, state, status, headers_json, body, created_at, lease_until, expires_at)`，主键 `(device_id, key)`；保留 24 h，后台每 10 分钟清理 |
+| 存储 | store 模块表 `api_idempotency`（`idempotency::module_spec()` 注册，模块 `api`）；键 `"{device_id}:{key}"`，文档存指纹、状态、首次响应、租约与过期时间；保留 24 h，登记时顺带清理过期行 |
 | 指纹 | `SHA-256(method ‖ path ‖ JCS(body))`；无 body 按空串。键相同指纹不同 → `422 idempotency_key_reuse` |
-| 流程 | 步骤 11：原子 `INSERT … ON CONFLICT`：不存在则写 `state = in_progress`（`lease_until = now + 30 s` [建议]）；已 `done` 且指纹相同 → 原样返回首次状态码 + 正文，加 `Idempotent-Replayed: true`；`in_progress` 且租约未到期 → `409 idempotency_in_progress`；租约已过期（上次处理崩溃）→ 接管 |
+| 流程 | 步骤 11（`IdempotencyStore` 为异步接口，每次操作一个 store 写事务，单写者保证原子性）：不存在则写 `state = in_progress`（`lease_until = now + 30 s` [建议]）；已 `done` 且指纹相同 → 原样返回首次状态码 + 正文，加 `Idempotent-Replayed: true`；`in_progress` 且租约未到期 → `409 idempotency_in_progress`；租约已过期（上次处理崩溃）→ 接管 |
 | 完成 | handler 返回后把 `status` / `headers` / `body` 写回并置 `done`；**首次响应是 5xx 不登记**（删除该行，允许同 key 重试）；`4xx` 登记并重放 |
 | 业务层去重 | 所有幂等 POST 追加的业务事件带 `dedup_key = "api:<device_id>:<key>:<n>"`（`n` 为该请求内第几条事件）；`store` 的唯一索引保证：即使 `api_idempotency` 的完成记录因崩溃丢失，同 key 重试也不会重复追加事件——`append` 返回 `Appended::Duplicate { existing_seq }`，handler 据此读取已存在的事件重建响应（`EventLog::by_dedup_key`） |
 | 作用域 | `(device_id, key)`：不同设备的相同 key 互不影响 |
