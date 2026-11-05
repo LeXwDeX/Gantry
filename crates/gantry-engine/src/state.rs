@@ -68,6 +68,9 @@ pub struct DeliveryState {
     /// PR 的 GitHub 快照（I4）。**只读，不由引擎折叠**：加载方从 store 的快照投影读取（#150、#71）。
     pub pr_snapshot: Option<PullRequestRef>,
     pub worktree: Option<WorktreeInfo>,
+    /// `attempt.finished.base_after_conflict`：冲突后下一次派发使用的 base（#452）。
+    /// `worktree.created` 重建工作树时清空；重放从事件重建。
+    pub base_override: Option<GitOid>,
     pub ledger: LedgerState,
     pub workflows: BTreeMap<WorkflowId, WorkflowState>,
     pub evidence: Evidence,
@@ -315,6 +318,7 @@ impl DeliveryState {
             pr: None,
             pr_snapshot: None,
             worktree: None,
+            base_override: None,
             ledger: LedgerState::default(),
             workflows: BTreeMap::new(),
             evidence: Evidence::default(),
@@ -502,6 +506,9 @@ impl DeliveryState {
                 attempt.result_tree = data.result_tree;
                 attempt.result_commit = data.result_commit;
                 attempt.accepted_open_pr = data.accepted_open_pr;
+                if data.base_after_conflict.is_some() {
+                    self.base_override = data.base_after_conflict;
+                }
                 // repo 为已通过校验的补丁生成的最新本地提交（§7.2 Evidence）。
                 if data.status == AttemptStatus::Succeeded {
                     if let (Some(tree), Some(commit)) = (data.result_tree, data.result_commit) {
@@ -684,6 +691,7 @@ impl DeliveryState {
                     base_ref: data.base_ref,
                     base_sha: data.base_sha,
                 });
+                self.base_override = None;
             }
             EventType::WorktreeLocked => {
                 let data: WorktreeLockedData = decode(event, ty)?;
@@ -705,6 +713,7 @@ impl DeliveryState {
                 self.locks.remove(&data.worktree_id);
                 if self.worktree.as_ref().map(|w| w.id) == Some(data.worktree_id) {
                     self.worktree = None;
+                    self.base_override = None;
                 }
             }
             // T12 的合并证据与 Issue 关闭事实（§7.6）；信封由 forge 校验，折叠只取所需字段。

@@ -932,7 +932,7 @@ pub enum EffectKey {
 
 `Missing` 能退回模板，前提是缺失永久不变：CAS 在 M1 不删除对象（store.md OQ-5）。将来引入 CAS 保留期时，必须保留非终态交付单元的 `attempt.finished.result_ref` 所指对象，否则同一意图在恢复前后会得到不同的键。
 
-`EnsureWorktree` 不带 `base_sha`（#70 A）：进入 implement 时还没有工作树与 PR，默认分支的 head 只能由 IO 取得。执行器按 Git 引用的字节规则校验 `base_ref` 是合法短分支名，拒绝完整引用及修订表达式；然后只解析 `refs/mirror/heads/<base_ref>`，要求该完整引用精确存在且指向提交，不回退到本地分支或 Git 的 describe 解析，再调用 `create_worktree`。请求与 `worktree.created.base_ref` 保留原始短分支名。解析得到的 sha 记入 `worktree.created.base_sha`，之后的 `single` / `build` 都取它，重放时从事件读，`decide` 保持纯函数。
+`EnsureWorktree` 不带 `base_sha`（#70 A）：进入 implement 时还没有工作树与 PR，默认分支的 head 只能由 IO 取得。执行器按 Git 引用的字节规则校验 `base_ref` 是合法短分支名，拒绝完整引用及修订表达式；然后只解析 `refs/mirror/heads/<base_ref>`，要求该完整引用精确存在且指向提交，不回退到本地分支或 Git 的 describe 解析，再调用 `create_worktree`。请求与 `worktree.created.base_ref` 保留原始短分支名。解析得到的 sha 记入 `worktree.created.base_sha`，之后的 `single` / `build` 都取它，重放时从事件读，`decide` 保持纯函数。唯一的例外是补丁冲突：`attempt.finished.base_after_conflict` 记下分支当前 head，下一次派发改取它（#452）；不改写 `worktree.created` 历史，新的 `worktree.created` 清空覆盖。
 
 有效 `wall_time_s`（§7.8）= min(`ResolvedModel.sandbox.attempt_wall_s`，`settings.sandbox.wall_time_s`，预算剩余 `wall_time`）；锁租约 `lease_s`（§7.7）= 有效 `wall_time_s` + `settings.sandbox.kill_grace_s` + 锁租约余量（`EngineConsts`，60 s）。两者都只读 `DecideEnv`（#70 C）。
 
@@ -998,6 +998,7 @@ pub struct FindingFingerprint(Sha256Digest);
 | `locks` | `BTreeMap<WorktreeId, LockLite>` | `worktree.locked` / `unlocked`；`LockLite = { holder, lease_until, fence }`。`LockToken` 可由 `{worktree_id, holder, delivery_id, fence, lease_until}` 重建（repo.md §7.6），重启后无需重新取锁即可续租或释放；租约已过期则重新 `AcquireLock` |
 | `lock_owner` | `BTreeMap<WorktreeId, NodeId>` | **内存**：执行体在 `Report::LockAcquired` 时记下锁是为哪个节点取的；重启后为空，由 `Tick(Recover)` 按"有未终结 sandbox 尝试的节点"重新认领 |
 | `worktree` | `Option<WorktreeInfo>` | `worktree.created`（含 `branch`、`base_sha`）设置，`worktree.removed` 清空；首个 `single` / `build` 的 `base_sha` 取它，不再单独 `resolve` |
+| `base_override` | `Option<GitOid>` | `attempt.finished.base_after_conflict`（`PatchResult::BaseConflict` 的分支 head）设置；下一次派发取它代替 `worktree.base_sha`，新的 `worktree.created` / `worktree.removed` 清空（#452） |
 | `last_seq` | `Seq` | 折叠到的最后一条事件 |
 
 `Evidence` 补 `candidate_tree: Option<GitOid>`（`push_branch.expected_tree_oid`）与 `stage_verdicts: BTreeMap<WorkflowId, Verdict>`（按 `VerdictRule` 折叠后的阶段结论）。

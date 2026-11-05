@@ -1483,6 +1483,59 @@ fn recover_resends_unfinished_attempts() {
     assert!(!has(&recover(&sim), |e| matches!(e, Effect::RunAttempt(_))));
 }
 
+/// #452：`BaseConflict` 后自动重试从分支 head 派发，不再回到旧 `worktree.created.base_sha`。
+#[test]
+fn base_conflict_retries_from_new_branch_head() {
+    let mut sim = dispatched();
+    let node = sim
+        .state
+        .workflows
+        .values()
+        .next()
+        .unwrap()
+        .nodes
+        .values()
+        .next()
+        .unwrap();
+    let node_id = node.id;
+    let attempt = node.attempts[0].id;
+    let head = oid("cccccccccccccccccccccccccccccccccccccccc");
+
+    let mut f = finalized(&sim, vec![]);
+    f.attempt_id = attempt;
+    f.status = AttemptStatus::Failed;
+    f.failure_class = Some(gantry_core::entities::FailureClass::InfraError);
+    f.failure_detail =
+        Some(gantry_core::entities::FailureDetail::parse("infra.base_conflict").unwrap());
+    f.result_ref = None;
+    f.patch = PatchResult::BaseConflict { branch_head: head };
+    f.wall_time_s = 0;
+
+    let rest = sim.report(EffectReport::AttemptFinalized(f), EffectKey::Run(attempt));
+    assert!(rest
+        .iter()
+        .any(|d| matches!(d, Decision::Effect(Effect::ReleaseLock { .. }))));
+    assert_eq!(sim.state.base_override, Some(head));
+    assert_eq!(
+        sim.state.node(&node_id).unwrap().status,
+        NodeStatus::Running
+    );
+
+    // 自动重试按退避派发；模拟器不回流 `worktree.unlocked`，锁仍视为有效。
+    let effects = sim.settle();
+    let plan = effects.iter().find_map(|d| match d {
+        Decision::Effect(Effect::RunAttempt(plan)) => Some(plan),
+        _ => None,
+    });
+    let Some(plan) = plan else {
+        panic!("expected RunAttempt, got {effects:?}");
+    };
+    assert_eq!(plan.base_sha, head);
+    let node = sim.state.node(&node_id).unwrap();
+    assert_eq!(node.attempts.len(), 2);
+    assert_eq!(node.attempts[1].base_sha, head);
+}
+
 #[test]
 fn branch_name_follows_section_7_12() {
     let mut sim = Sim::low();

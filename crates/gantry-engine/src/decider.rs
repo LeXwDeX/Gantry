@@ -1157,7 +1157,10 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -
             result_commit,
             served_by: None,
             accepted_open_pr: accepted_open_pr.filter(|_| finalized.result_ref.is_some()),
-            base_after_conflict: None,
+            base_after_conflict: match &finalized.patch {
+                PatchResult::BaseConflict { branch_head } => Some(*branch_head),
+                _ => None,
+            },
         },
     )];
     // tokens_by_tier：Egress 计量（不是自报），加权口径与组装 spec 时一致（§7.14.2、§7.9）。
@@ -1889,6 +1892,7 @@ fn dispatch(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint, out: &mut
         return;
     };
     let running = running_nodes(state);
+    let base_sha = state.base_override.unwrap_or(worktree.base_sha);
     for node in workflow.nodes.values() {
         if !dispatchable(node, env) {
             continue;
@@ -1968,7 +1972,7 @@ fn dispatch(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint, out: &mut
                 model: model.model.clone(),
                 reasoning_effort: model.reasoning_effort,
                 config_rev: env.settings.config_rev,
-                base_sha: worktree.base_sha,
+                base_sha,
                 tokens_total: tokens,
                 wall_time_s: wall,
             },
@@ -1996,7 +2000,7 @@ fn dispatch(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint, out: &mut
             n,
             exec: node.exec,
             status: AttemptStatus::Running,
-            base_sha: worktree.base_sha,
+            base_sha,
             tokens_reserved: tokens,
             wall_time_s: wall,
             config_rev: env.settings.config_rev,
