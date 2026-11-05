@@ -53,6 +53,14 @@ impl Timestamp {
             .map(Self)
     }
 
+    pub fn checked_sub_secs(self, secs: u64) -> Option<Self> {
+        let delta = i64::try_from(secs).ok()?.checked_mul(1000)?;
+        self.0
+            .checked_sub(delta)
+            .filter(|ms| (Self::MIN_MILLIS..=Self::MAX_MILLIS).contains(ms))
+            .map(Self)
+    }
+
     /// 越界值取最近的可表示边界；这类值本身不能序列化。
     pub fn to_date(self) -> Date {
         let ms = self.0.clamp(Self::MIN_MILLIS, Self::MAX_MILLIS);
@@ -422,6 +430,16 @@ mod tests {
         assert_eq!(ts.to_canonical_string(), text);
         assert!(Timestamp::parse_canonical("2026-10-24T12:41:03Z").is_err());
         assert!(Timestamp::parse_canonical("2026-10-24T12:41:03.120+00:00").is_err());
+    }
+
+    #[test]
+    fn checked_sub_secs_roundtrips_and_saturates() {
+        let ts = Timestamp::parse_canonical("2026-10-24T12:41:03.120Z").unwrap();
+        assert_eq!(
+            ts.checked_sub_secs(60).unwrap().to_canonical_string(),
+            "2026-10-24T12:40:03.120Z"
+        );
+        assert!(ts.checked_sub_secs(u64::MAX).is_none());
     }
 
     #[test]

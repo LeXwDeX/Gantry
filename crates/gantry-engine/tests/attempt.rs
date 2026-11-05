@@ -771,6 +771,8 @@ async fn delivery_issue_refs_feed_materials_without_entering_events() {
     let templates = TemplateRegistry;
     let inflight: BTreeSet<EffectKey> = BTreeSet::new();
     let denied: BTreeSet<ActionKey> = BTreeSet::new();
+    let blocked: BTreeMap<gantry_core::ids::WorktreeId, gantry_core::time::Timestamp> =
+        BTreeMap::new();
     let proposals = ProposalTexts::default();
     let seed = DecideSeed::derive(
         &h.state.delivery.id,
@@ -788,6 +790,7 @@ async fn delivery_issue_refs_feed_materials_without_entering_events() {
         inflight: &inflight,
         denied: &denied,
         proposals: &proposals,
+        blocked: &blocked,
         consts: EngineConsts::default(),
     };
     let decisions = gantry_engine::decide(

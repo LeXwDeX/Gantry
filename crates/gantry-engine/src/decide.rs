@@ -517,6 +517,8 @@ pub struct DecideEnv<'a> {
     pub denied: &'a BTreeSet<ActionKey>,
     /// `open_pr` 提议原文，执行体开事务前预取（§7.14.2）；只读。
     pub proposals: &'a ProposalTexts,
+    /// 执行体内存：已知被他人占用的工作树及其租约到期时刻（`LockBusy` 回报，§7.14.5）。
+    pub blocked: &'a BTreeMap<WorktreeId, Timestamp>,
     pub consts: EngineConsts,
 }
 

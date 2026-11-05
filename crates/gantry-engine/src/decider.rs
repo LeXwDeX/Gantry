@@ -32,7 +32,7 @@ use gantry_core::forge::{
     derive_target_intent, ActionPayload, CreatePrPayload, MergeMode, MergePrPayload, PrState,
     PushBranchPayload, PushTransport, UpdatePrPayload,
 };
-use gantry_core::ids::{ActionId, Nod, NodeId, Wfl};
+use gantry_core::ids::{ActionId, Nod, NodeId, Wfl, WorktreeId};
 use gantry_core::level::Level;
 use gantry_core::machines::delivery::{AbandonCause, StageTrigger};
 use gantry_core::ports::forge::{EnqueueRequest, EnqueuedBy, EnqueuedByModule};
@@ -44,9 +44,9 @@ use serde::Serialize;
 use crate::classify::{retry_rule, RetryRule};
 use crate::control;
 use crate::decide::{
-    AttemptPlan, DecideEnv, Decision, Effect, EffectKey, EffectReport, Finalized, IdMint, Input,
-    ModelKey, PatchResult, ProposalRef, ProposalText, ResolvedModel, TickReason,
-    TrustedInstructions,
+    AttemptPlan, DecideEnv, Decision, Effect, EffectErrorClass, EffectKey, EffectReport, Finalized,
+    IdMint, Input, ModelKey, PatchResult, ProposalRef, ProposalText, ResolvedModel, TickReason,
+    TimerKind, TrustedInstructions,
 };
 use crate::stage::advance;
 use crate::state::{ActionKey, AttemptState, DeliveryState, NodeState, WorkflowState};
@@ -67,6 +67,15 @@ pub fn decide(state: &DeliveryState, input: &Input, env: &DecideEnv) -> Vec<Deci
             let mut out = derive(state, env, &mut mint);
             resume_unfinished(state, env, &mut out);
             release_finished(state, env, &mut out);
+            out
+        }
+        // 退避到期：重发该节点未终结尝试（端口失败时尝试从未终结，`dispatch` 不会重派）。
+        Input::Tick(TickReason::Timer {
+            kind: TimerKind::RetryBackoff { node_id },
+            ..
+        }) => {
+            let mut out = derive(state, env, &mut mint);
+            resume_unfinished_node(state, env, *node_id, &mut out);
             out
         }
         Input::Tick(_) => derive(state, env, &mut mint),
@@ -107,6 +116,7 @@ pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<
     acquire_locks(state, env, &mut out);
     dispatch(state, env, mint, &mut out);
     schedule_retries(state, env, &mut out);
+    schedule_lock_renewals(state, env, &mut out);
     finish_workflows(state, &mut out);
     judge_actions(state, env, &mut out);
     raise_approval_needed(state, &mut out);
@@ -825,9 +835,75 @@ fn on_report(state: &DeliveryState, report: &EffectReport, env: &DecideEnv) -> V
     match report {
         EffectReport::ActionJudged { key, decision } => on_judged(state, key, decision, env),
         EffectReport::AttemptFinalized(finalized) => on_finalized(state, finalized, env),
+        // 锁被占用：等租约到期或检查点再试，不靠 Settle 立即重发同一副作用。
+        EffectReport::LockBusy { until, .. } => schedule_lease_check(state, *until, env),
+        // 可重试的副作用失败：安排有界退避；不可重试的错误由 Settle 上报。
+        EffectReport::EffectFailed { key, error } => {
+            if matches!(error, EffectErrorClass::Retryable) {
+                schedule_effect_retry(state, key, env)
+            } else {
+                Vec::new()
+            }
+        }
         // 其余回报只把键移出在途集合（执行体负责），由随后的 Tick(Settle) 求值。
         _ => Vec::new(),
     }
+}
+
+fn schedule_lease_check(
+    state: &DeliveryState,
+    until: Option<gantry_core::time::Timestamp>,
+    env: &DecideEnv,
+) -> Vec<Decision> {
+    let Some(worktree) = &state.worktree else {
+        return Vec::new();
+    };
+    let Some(at) = until.or_else(|| env.now.checked_add_secs(1)) else {
+        return Vec::new();
+    };
+    if at <= env.now {
+        return Vec::new();
+    }
+    let kind = TimerKind::LeaseCheck {
+        worktree_id: worktree.id,
+    };
+    if env.inflight.contains(&EffectKey::Timer(kind.clone())) {
+        return Vec::new();
+    }
+    vec![Decision::Effect(Effect::ScheduleTimer { at, kind })]
+}
+
+fn schedule_effect_retry(state: &DeliveryState, key: &EffectKey, env: &DecideEnv) -> Vec<Decision> {
+    let node_id = match key {
+        EffectKey::Run(attempt) => node_of_attempt(state, *attempt),
+        EffectKey::Lock(worktree) => state.lock_owner.get(worktree).copied(),
+        _ => None,
+    };
+    let Some(node_id) = node_id else {
+        return Vec::new();
+    };
+    let Some(at) = env.now.checked_add_secs(retry_backoff_secs(env)) else {
+        return Vec::new();
+    };
+    let kind = TimerKind::RetryBackoff { node_id };
+    if env.inflight.contains(&EffectKey::Timer(kind.clone())) {
+        return Vec::new();
+    }
+    vec![Decision::Effect(Effect::ScheduleTimer { at, kind })]
+}
+
+fn retry_backoff_secs(env: &DecideEnv) -> u64 {
+    let base = env.consts.retry_backoff_base_ms.max(0) as u64;
+    base.div_ceil(1000).max(1)
+}
+
+fn node_of_attempt(state: &DeliveryState, attempt: gantry_core::ids::AttemptId) -> Option<NodeId> {
+    state
+        .workflows
+        .values()
+        .flat_map(|workflow| workflow.nodes.values())
+        .find(|node| node.attempts.iter().any(|a| a.id == attempt))
+        .map(|node| node.id)
 }
 
 /// 判定回流：`Allow` → `Enqueue`（意图仍在期望集合、`outbox` 仍无该键、依赖已在 `outbox`）；
@@ -1356,7 +1432,10 @@ fn effective_wall_time(state: &DeliveryState, env: &DecideEnv, model: &ResolvedM
 
 /// 锁租约 = 有效 `wall_time_s` + `kill_grace_s` + 租约余量（§7.7）。
 fn lease_seconds(env: &DecideEnv, wall_time_s: u64) -> u64 {
-    wall_time_s + env.settings.sandbox.kill_grace_s + env.consts.lock_lease_margin_s
+    wall_time_s
+        .checked_add(env.settings.sandbox.kill_grace_s)
+        .and_then(|value| value.checked_add(env.consts.lock_lease_margin_s))
+        .unwrap_or(u64::MAX)
 }
 
 /// 节点处于可派发状态：`queued`（本切片不含自动重试，失败重试归切片 4）。
@@ -1461,6 +1540,14 @@ fn acquire_locks(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>
         return;
     };
     if !state.may_dispatch() || env.inflight.contains(&EffectKey::Lock(worktree.id)) {
+        return;
+    }
+    // `LockBusy` 报过占用：等到期由 `Timer(LeaseCheck)` 再试，避免每轮 Settle 重发。
+    if env
+        .blocked
+        .get(&worktree.id)
+        .is_some_and(|until| *until > env.now)
+    {
         return;
     }
     if let Some(lock) = state.locks.get(&worktree.id) {
@@ -1690,24 +1777,119 @@ fn dispatch(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint, out: &mut
 
 /// `Effect(RunAttempt { resume: true })`：尝试有 `attempt.started` 无 `attempt.finished`（`Tick(Recover)`）。
 fn resume_unfinished(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>) {
-    for workflow in state.workflows.values() {
-        for node in workflow.nodes.values() {
-            for attempt in node.attempts.iter().filter(|a| a.finished_at.is_none()) {
-                if env.inflight.contains(&EffectKey::Run(attempt.id)) {
-                    continue;
-                }
-                let Some(model) = model_for(env, state, node) else {
-                    continue;
-                };
-                let lock = state
-                    .worktree
-                    .as_ref()
-                    .and_then(|w| state.lock_token(&w.id))
-                    .filter(|_| node.exec == gantry_core::entities::Exec::Sandbox);
-                out.push(Decision::Effect(Effect::RunAttempt(Box::new(
-                    attempt_plan(state, workflow, node, attempt, model, lock, true),
-                ))));
-            }
-        }
+    for node_id in state
+        .workflows
+        .values()
+        .flat_map(|workflow| workflow.nodes.keys())
+    {
+        resume_unfinished_node(state, env, *node_id, out);
     }
+}
+
+fn resume_unfinished_node(
+    state: &DeliveryState,
+    env: &DecideEnv,
+    node_id: NodeId,
+    out: &mut Vec<Decision>,
+) {
+    let Some(workflow) = current_workflow(state) else {
+        return;
+    };
+    let Some(node) = workflow.nodes.get(&node_id) else {
+        return;
+    };
+    for attempt in node.attempts.iter().filter(|a| a.finished_at.is_none()) {
+        if env.inflight.contains(&EffectKey::Run(attempt.id)) {
+            continue;
+        }
+        let Some(model) = model_for(env, state, node) else {
+            continue;
+        };
+        let lock = state
+            .worktree
+            .as_ref()
+            .and_then(|w| state.lock_token(&w.id))
+            .filter(|_| node.exec == gantry_core::entities::Exec::Sandbox);
+        out.push(Decision::Effect(Effect::RunAttempt(Box::new(
+            attempt_plan(state, workflow, node, attempt, model, lock, true),
+        ))));
+    }
+}
+
+/// 尝试运行期间每半个租约安排一次续租（§7.7）。
+fn schedule_lock_renewals(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>) {
+    let Some(worktree) = &state.worktree else {
+        return;
+    };
+    let Some(lock) = state.locks.get(&worktree.id) else {
+        return;
+    };
+    if lock.holder != gantry_core::entities::LockHolder::Engine {
+        return;
+    }
+    let Some(node) = running_lock_owner(state, &worktree.id) else {
+        return;
+    };
+    let Some(model) = model_for(env, state, node) else {
+        return;
+    };
+    let lease_s = lease_seconds(env, effective_wall_time(state, env, &model));
+    let Some(renew_at) = lock.lease_until.checked_sub_secs(lease_s / 2) else {
+        return;
+    };
+    let kind = TimerKind::LockRenew {
+        worktree_id: worktree.id,
+    };
+    if renew_at > env.now {
+        if !env.inflight.contains(&EffectKey::Timer(kind.clone())) {
+            out.push(Decision::Effect(Effect::ScheduleTimer {
+                at: renew_at,
+                kind,
+            }));
+        }
+    } else {
+        // 已过续租点（定时器丢失或事件回填）：直接补一次，`Renew` 键去重。
+        renew_lock(state, env, out);
+    }
+}
+
+/// `Timer(LockRenew)` 到期：同一把锁续半个租约。
+fn renew_lock(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>) {
+    let Some(worktree) = &state.worktree else {
+        return;
+    };
+    let Some(token) = state.lock_token(&worktree.id) else {
+        return;
+    };
+    if token.holder != gantry_core::entities::LockHolder::Engine {
+        return;
+    }
+    let Some(node) = running_lock_owner(state, &worktree.id) else {
+        return;
+    };
+    if env
+        .inflight
+        .contains(&EffectKey::Renew(token.worktree_id, token.fence))
+    {
+        return;
+    }
+    let Some(model) = model_for(env, state, node) else {
+        return;
+    };
+    out.push(Decision::Effect(Effect::RenewLock {
+        token,
+        lease_s: lease_seconds(env, effective_wall_time(state, env, &model)),
+    }));
+}
+
+/// 正在运行、持有该工作树锁的 sandbox 节点。
+fn running_lock_owner<'a>(
+    state: &'a DeliveryState,
+    worktree_id: &WorktreeId,
+) -> Option<&'a NodeState> {
+    let owner = state.lock_owner.get(worktree_id)?;
+    let node = current_workflow(state)?.nodes.get(owner)?;
+    (node.exec == gantry_core::entities::Exec::Sandbox
+        && node.attempts.iter().any(|a| a.finished_at.is_none()))
+    .then_some(node)
 }

@@ -24,6 +24,7 @@ use gantry_core::ports::context::ActorCtx;
 use gantry_core::ports::forge::{EnqueueError, OutboxPort};
 use gantry_core::ports::inbox::{InboxPort, RaiseError, ResolveError};
 use gantry_core::ports::policy::{ActionDecision, DenyReason};
+use gantry_core::time::Timestamp;
 use gantry_store::{Store, StoreError};
 
 use crate::attempt::{fetch_proposal_text, ResultCas};
@@ -114,6 +115,8 @@ pub struct DeliveryActor {
     inflight: BTreeSet<EffectKey>,
     denied: BTreeSet<ActionKey>,
     lock_owner: BTreeMap<WorktreeId, NodeId>,
+    /// `LockBusy` 报过的占用及其到期时刻；到期前不再重发 `AcquireLock`（§7.14.5）。
+    lock_blocked: BTreeMap<WorktreeId, Timestamp>,
     proposals: ProposalTexts,
     degraded: bool,
     requests: u64,
@@ -128,6 +131,7 @@ impl DeliveryActor {
             inflight: BTreeSet::new(),
             denied: BTreeSet::new(),
             lock_owner: BTreeMap::new(),
+            lock_blocked: BTreeMap::new(),
             proposals: ProposalTexts::default(),
             degraded: false,
             requests: 0,
@@ -215,6 +219,7 @@ impl DeliveryActor {
         match input {
             Input::Report(EffectReport::LockAcquired { node_id, token }) => {
                 self.lock_owner.insert(token.worktree_id, *node_id);
+                self.lock_blocked.remove(&token.worktree_id);
             }
             Input::Report(EffectReport::ActionJudged {
                 key,
@@ -252,6 +257,16 @@ impl DeliveryActor {
         input: &Input,
         identity: &InputIdentity,
     ) -> Result<Round, ActorError> {
+        // 锁占用回报先记入内存，本轮决策立刻按到期时刻跳过重试。
+        if let (
+            Input::Report(EffectReport::LockBusy {
+                until: Some(until), ..
+            }),
+            InputIdentity::Report(EffectKey::Lock(worktree_id)),
+        ) = (input, identity)
+        {
+            self.lock_blocked.insert(*worktree_id, *until);
+        }
         let store = self.deps.store.clone();
         let mut tried = BTreeSet::new();
         let (mut tx, mut state) = loop {
@@ -306,6 +321,7 @@ impl DeliveryActor {
             inflight: &self.inflight,
             denied: &self.denied,
             proposals: &self.proposals,
+            blocked: &self.lock_blocked,
             consts: config.consts,
         };
         // 幂等优先（#73）：命令的请求身份（`ctx.dedup_key`）已写进日志 → 同一请求的重放，返回首次结果
@@ -376,6 +392,7 @@ impl DeliveryActor {
             // 释放锁时清除 lock_owner：自动重试必须重新取锁（§7.14.5 ReleaseLock 行）。
             if let Effect::ReleaseLock { token } = &effect {
                 self.lock_owner.remove(&token.worktree_id);
+                self.lock_blocked.remove(&token.worktree_id);
             }
             let ctx = self.ctx(u64::try_from(now.as_millis()).unwrap_or(0));
             if let Some(report) = self.deps.effects.run(state, effect, &ctx).await {
