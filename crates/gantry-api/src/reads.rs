@@ -4,16 +4,21 @@
 //! 分页游标对客户端不透明：本模块把下游游标包成 `base64url`，解析失败、跨资源、
 //! 方向不符一律 `400 invalid_cursor`（本文 §7.7）。
 //!
-//! 项目读路由（#3、#4、#10）使用 store 的 projects 投影（B2a–B2c）；交付单元、
-//! 工作流、节点尝试（#5、#6、#17–#20）仍待对应的投影读入口。
+//! 项目读路由（#3、#4、#10）使用 store 的 projects 投影（B2a–B2c）；交付单元
+//! （#5、#6）与工作流 / 节点尝试（#17–#20）使用 store 的交付与图投影。
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use gantry_core::entities::{InboxKind, InboxStatus, OutboxStatus, Stage, StageStatus};
-use gantry_core::ids::{ConversationId, DeliveryId, InboxId, ProjectId};
+use gantry_core::ids::{
+    AttemptId, ConversationId, DeliveryId, InboxId, NodeId, ProjectId, WorkflowId,
+};
 use gantry_core::ports::context::{PageOrder, PageQuery, StoreError as PortStoreError};
 use gantry_core::ports::conversation::ConvError;
-use gantry_store::{DeliveryQuery, DeliveryRow, InboxQuery, Order, Page, PageCursor, StoreError};
+use gantry_store::{
+    AttemptRow, DeliveryQuery, DeliveryRow, InboxQuery, NodeRow, Order, Page, PageCursor,
+    StoreError, WorkflowRow,
+};
 use http::StatusCode;
 use serde_json::{json, Value};
 
@@ -130,6 +135,176 @@ pub async fn list_messages(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<R
         page_body(items, next),
         page.last_seq,
     ))
+}
+
+/// #17 `GET /v1/deliveries/{delivery_id}/workflows`。
+pub async fn list_delivery_workflows(
+    core: &ApiCore,
+    req: &HandlerRequest<'_>,
+) -> Result<Reply, Problem> {
+    let delivery: DeliveryId = parse(req.param("delivery_id"))?;
+    const TAG: &str = "workflows";
+    let q = req.query;
+    let mut page = Page {
+        limit: limit(q),
+        cursor: None,
+        order: order(q, Order::Asc),
+    };
+    if let Some(cursor) = q.str("cursor") {
+        page.cursor = Some(PageCursor::new(unwrap_cursor(TAG, cursor)?));
+    }
+    let stage = q.str("stage").map(stage).transpose()?;
+    let mut snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let paged = snapshot
+        .workflows(&delivery, stage, &page)
+        .await
+        .map_err(store_error)?;
+    let items = paged
+        .items
+        .iter()
+        .map(|row| workflow_json(row, false, false))
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = paged.next_cursor.map(|c| wrap_cursor(TAG, c.as_str()));
+    Ok(Reply::json(StatusCode::OK, page_body(items, next), seq))
+}
+
+/// #18 `GET /v1/workflows/{workflow_id}`。
+pub async fn get_workflow(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Problem> {
+    let id: WorkflowId = parse(req.param("workflow_id"))?;
+    let include_superseded = req.query.bool("include_superseded").unwrap_or(false);
+    let snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let row = snapshot.workflow(&id).ok_or_else(Problem::not_found)?;
+    Ok(Reply::json(
+        StatusCode::OK,
+        workflow_json(&row, true, include_superseded)?,
+        seq,
+    ))
+}
+
+/// #19 `GET /v1/nodes/{node_id}/attempts`。
+pub async fn list_node_attempts(
+    core: &ApiCore,
+    req: &HandlerRequest<'_>,
+) -> Result<Reply, Problem> {
+    let node: NodeId = parse(req.param("node_id"))?;
+    const TAG: &str = "attempts";
+    let q = req.query;
+    let mut page = Page {
+        limit: limit(q),
+        cursor: None,
+        order: order(q, Order::Asc),
+    };
+    if let Some(cursor) = q.str("cursor") {
+        page.cursor = Some(PageCursor::new(unwrap_cursor(TAG, cursor)?));
+    }
+    let mut snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let paged = snapshot.attempts(&node, &page).await.map_err(store_error)?;
+    let items = paged
+        .items
+        .iter()
+        .map(attempt_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    let next = paged.next_cursor.map(|c| wrap_cursor(TAG, c.as_str()));
+    Ok(Reply::json(StatusCode::OK, page_body(items, next), seq))
+}
+
+/// #20 `GET /v1/attempts/{attempt_id}`。
+pub async fn get_attempt(core: &ApiCore, req: &HandlerRequest<'_>) -> Result<Reply, Problem> {
+    let id: AttemptId = parse(req.param("attempt_id"))?;
+    let snapshot = core
+        .services()
+        .store
+        .snapshot()
+        .await
+        .map_err(store_error)?;
+    let seq = snapshot.head_seq();
+    let row = snapshot.attempt(&id).ok_or_else(Problem::not_found)?;
+    Ok(Reply::json(StatusCode::OK, attempt_json(&row)?, seq))
+}
+
+fn workflow_json(
+    row: &WorkflowRow,
+    include_nodes: bool,
+    include_superseded: bool,
+) -> Result<Value, Problem> {
+    let mut value = json!({
+        "id": row.id,
+        "delivery_id": row.delivery_id,
+        "conversation_id": row.conversation_id,
+        "stage": row.stage,
+        "graph_rev": row.graph_rev,
+        "status": row.status,
+        "template": row.template,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    });
+    if include_nodes {
+        let nodes = row
+            .nodes
+            .iter()
+            .filter(|node| {
+                include_superseded
+                    || (node.superseded_by.is_none()
+                        && node.status != gantry_core::entities::NodeStatus::Superseded)
+            })
+            .map(node_json)
+            .collect::<Result<Vec<_>, _>>()?;
+        value["nodes"] = Value::Array(nodes);
+    }
+    Ok(value)
+}
+
+fn node_json(row: &NodeRow) -> Result<Value, Problem> {
+    Ok(json!({
+        "id": row.id,
+        "workflow_id": row.workflow_id,
+        "role": row.role,
+        "tier": row.tier,
+        "exec": row.exec,
+        "depends_on": row.depends_on,
+        "required": row.required,
+        "status": row.status,
+        "verdict": row.verdict,
+        "superseded_by": row.superseded_by,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }))
+}
+
+fn attempt_json(row: &AttemptRow) -> Result<Value, Problem> {
+    Ok(json!({
+        "id": row.id,
+        "node_id": row.node_id,
+        "n": row.n,
+        "sandbox_id": row.sandbox_id,
+        "status": row.status,
+        "started_at": row.started_at,
+        "ended_at": row.ended_at,
+        "result_ref": row.result_ref,
+        "failure_class": row.failure_class,
+        "failure_detail": row.failure_detail,
+        "usage": row.usage,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }))
 }
 
 /// #5 `GET /v1/deliveries`（api.md §4.4）。

@@ -42,18 +42,9 @@ async fn unwired_m1_routes_are_404_for_now() {
     let h = harness(None);
     let d = device(1, DevicePlatform::Macos, DeviceRole::Approver);
     h.devices.insert(d.clone());
-    // projects、deliveries 已接线（见 reads.rs / delivery_reads.rs）；图路由仍未接线。
+    // projects、deliveries、workflows/nodes/attempts 已接线；worktrees 仍未接线。
     let resp = send(&h, req(Method::GET, "/v1/deliveries", &d), "").await;
     assert_eq!(resp.status().as_u16(), 200, "{:?}", body(&resp));
-    let resp = send(
-        &h,
-        req(
-            Method::GET,
-            "/v1/workflows/wfl_01JB7X4Q9ZK3M8T5V2N7RHC6WX",
-            &d,
-        ),
-        "",
-    )
-    .await;
+    let resp = send(&h, req(Method::GET, "/v1/worktrees", &d), "").await;
     assert_problem(&resp, 404, "not_found");
 }
