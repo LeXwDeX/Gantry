@@ -22,6 +22,7 @@ gantry-conversation = { path = "../gantry-conversation" }
 gantry-forge = { path = "../gantry-forge" }
 gantry-deploy = { path = "../gantry-deploy" }
 gantry-models = { path = "../gantry-models" }
+gantry-egress = { path = "../gantry-egress" }
 gantry-notify = { path = "../gantry-notify" }
 gantry-pki = { path = "../gantry-pki" }
 gantry-policy = { path = "../gantry-policy" }

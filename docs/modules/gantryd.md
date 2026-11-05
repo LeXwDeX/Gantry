@@ -83,7 +83,7 @@ pub trait CommandSet: Send + Sync {
 
 | 装配 | 在哪里 | 用途 |
 | --- | --- | --- |
-| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store 与 notify 生产构造函数；forge / policy / repo / models / conversation 的构造函数（`build_forge`、`build_policy`、`build_repo`、`build_models`、`build_conversation`）已就绪，但 `assemble_real` 尚未调用；secrets / pki 的生产构造入口（`build_secrets`、`build_pki`）已就绪；生产凭据来源按 P-87 由 BootConfig 显式提供（`[secrets.master_key]` 与 `[pki] ca_dir`，缺失即拒绝启动），但字段映射与装配顺序尚未接线（#405 C3）。其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
+| 真实装配 `assemble_real` | `src/assembly.rs` | 服务端二进制。已接入 SQLite store 与 notify 生产构造函数；forge / policy / repo / models / conversation / egress 的构造函数（`build_forge`、`build_policy`、`build_repo`、`build_models`、`build_conversation`、`egress_config_view`、`build_egress`）已就绪，但 `assemble_real` 尚未调用；secrets / pki 的生产构造入口（`build_secrets`、`build_pki`）已就绪；生产凭据来源按 P-87 由 BootConfig 显式提供（`[secrets.master_key]` 与 `[pki] ca_dir`，缺失即拒绝启动），但字段映射与装配顺序尚未接线（#405 C3）。其余真实模块未接线时仍拒绝启动，不退回内存日志（失败闭合） |
 | 替身装配 `assemble_fakes` | `tests/support/`（只用 dev-dependency） | 进程级测试。测试二进制带 `GANTRYD_FAKES_CHILD` 重新执行自身，作为"用替身装配的 gantryd"子进程 |
 
 替身装配的当前构成（`status` 原样报告）：
@@ -175,6 +175,9 @@ BootConfig 字段映射、装配顺序与 `Pki::tick` 的周期调度都还没�
 - [x] 真实 `revoke` 同步写出本地与备份 `revocations.journal`；测试读取两份文件，断言内容相同、JSON 行可解析且 `device_id` 正确（进程级）。
 - [x] `build_secrets` 只打开、不初始化：缺失目录与错误主密钥分别返回错误且不改写 `secrets.meta`；M1 实例（deploy 初始化为 Forge / Pki）可用 M1 子集打开，Egress 与 Notify 均返回 `Denied`；已含 Notify 的实例仍可用 M1 子集打开，但 M1 实例不承载 Notify；真实写入的 Forge 秘密对 Pki 命名空间不可见（组件测试）。
 - [x] conversation 生产构造（`build_conversation`）：真实 `Conversation` + `EngineApiAdapter` + 内存 store，空 store 上 `run_once` 返回 0 且不写事件（组件测试）。测试装配已切换为真实 `Conversation`，`status` 报 `real`；模型端口由调用方注入。
+- [x] egress 配置视图（`egress_config_view`）：`egress.*` 与 `models.providers` 派生的 `model.<id>` 注入项、`levels.token_weights` 映射到 `ConfigView`；显式 `egress.injection` 保留；序列化往返通过视图复核（组件测试）。
+- [x] egress 客户端（`build_egress`）：指向给定控制套接字，无进程应答时返回错误而不是 panic（组件测试）。
+- [ ] 测试装配接入真实 egress 进程（Registry / ControlServer / ModelProxy），sandbox 与 models 改用 `EgressClient`；归 A8 后续切片。
 - [ ] M4 将 Notify 加入 gantryd 实例并迁移已有实例（本片不配置、不宣称）。
 - [x] SQLite 子进程崩溃重启后复用已登记设备：设备数仍为 1、设备 ID 不变，secrets / CA 来自同一 scratch（进程级）。
 - [ ] 生产 `assemble_real` 打开 secrets / pki 并接入 `Pki::tick`（归后续切片，需先确定凭据来源与 `pki.ca_dir` 配置映射）。
@@ -183,6 +186,7 @@ BootConfig 字段映射、装配顺序与 `Pki::tick` 的周期调度都还没�
 
 - **真实装配接引擎**：engine 侧的 settings → `RuntimeSettings` 换算（`gantry_engine::runtime_settings::from_settings`）、默认 `ReservationPolicy`（`EqualShareReservation`）与 `status() -> RuntimeStatus` 已由 #289（PR #323）提供。测试装配已改为经 `from_settings` 换算，`fake.runtime_status` 读取运行时 `status()`；模型表由测试 helper 用硬编码设置经 `gantry-models::ModelsView` 推导，不是从生产设置自动推导。生产 `assemble_real` 尚未调用这些入口，控制通道 `status` 仍只输出 `engine.degraded`。接线与跨泳道验收归 #105；`settings.updated` 自动订阅与原子热加载归 #318；`status` 若要暴露 `applied_rev`、游标等字段，先改 §6.2。
 - **models 生产构造**：`build_models` 已把 `StoreSettings` / `ViewCache`、`AnthropicProvider`、注入的 Egress / ID / 熵 / 时钟 / 能力表接到真实 `ModelRouter`；本机回环测试覆盖 utility / planner 调用与失败闭合。测试装配已切换为真实 `ModelRouter`，`assemble_real` 未调用。模型配置值（provider / model）来自 models 设置且没有内置默认；推理深度能力表由调用方注入（models.md OQ-1 / OQ-8），提供方凭据由 Egress 持有。以上不代表真实模型 / Egress 验收。
+- **egress 装配**：`egress_config_view` 与 `build_egress` 已就绪；测试装配仍用 `EgressStub`，真实 egress 进程（Registry / ControlServer / ModelProxy）的启动、`apply_config` 下发与 sandbox job token 注入归 A8 后续切片。换算放在 `gantryd`（K11），未改 core 契约类型。
 - **持久存储与真实模块**：SQLite store 已接入 `assemble_real`（打开后仍因缺 sandbox 等模块拒绝启动）。policy / notify 已有生产构造函数；测试装配调用 `assembly::build_forge` / `build_policy` / `build_repo` / `build_notify` / `build_models` / `build_conversation`，其中 policy / notify / repo / models / conversation 的 `status` 报 real；`assemble_real` 目前只打开 store 并构造 notify，尚未按依赖顺序调用其余构造函数。sandbox 的 `BuiltinSchemas` 注入留到 sandbox 片。
 - **secrets / pki 的生产配置**：`build_secrets` 已按 `server.secrets_dir` 打开实例，`build_pki` 接受显式 `PkiConfig` 与按 `Consumer::Pki` 限定的 `SecretSink`；两者均由调用方注入。P-87 已定：BootConfig 必须显式提供 `[secrets.master_key]`（`systemd_credential` / `key_file` 二选一）与 `[pki] ca_dir`（默认 `/etc/gantry/ca`，启动校验三张证书），缺失即拒绝启动、不生成新密钥、不新建 CA。`assemble_real` 的字段映射与 `harden_process → build_secrets → build_pki` 顺序归 #405 C3。
 - **pki 后台生命周期**：`Pki::tick()`（关闭过期配对窗口、按需续签服务端证书）尚未由 `serve` 周期调用；吊销日志在 `revoke` 内同步追加并 fsync 本地与备份目标，不需要额外调度。测试只覆盖同步构造、配对、授权、吊销与崩溃重启，不代表周期任务已在运行。

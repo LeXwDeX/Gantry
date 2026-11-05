@@ -1143,6 +1143,7 @@ dependencies = [
  "gantry-conversation",
  "gantry-core",
  "gantry-deploy",
+ "gantry-egress",
  "gantry-engine",
  "gantry-fakes",
  "gantry-forge",
