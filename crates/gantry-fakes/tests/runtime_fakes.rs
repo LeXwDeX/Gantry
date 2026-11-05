@@ -704,26 +704,34 @@ async fn fake_conversation_keysets_replace_duplicate_ids_and_survive_inserts() {
             .unwrap_err();
         assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/cursor"));
     }
-    for order in [None, Some(PageOrder::Asc), Some(PageOrder::Desc)] {
-        let page = PageQuery {
-            order,
-            ..Default::default()
-        };
-        assert_eq!(
-            fake.list_conversations(&project, page.clone())
-                .await
-                .unwrap()
-                .items
-                .len(),
-            1
-        );
-        let unknown = id::<gantry_core::ids::Prj>(502);
-        assert!(fake
-            .list_conversations(&unknown, page)
+    assert_eq!(
+        fake.list_conversations(&project, PageQuery::default())
             .await
             .unwrap()
             .items
-            .is_empty());
+            .len(),
+        1
+    );
+    let unknown = id::<gantry_core::ids::Prj>(502);
+    // 替身不建模项目表；未知项目返回空列表。
+    assert!(fake
+        .list_conversations(&unknown, PageQuery::default())
+        .await
+        .unwrap()
+        .items
+        .is_empty());
+    for order in [PageOrder::Asc, PageOrder::Desc] {
+        let error = fake
+            .list_conversations(
+                &project,
+                PageQuery {
+                    order: Some(order),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/order"));
     }
     for cursor in ["", "seq:1", "bad"] {
         let error = fake

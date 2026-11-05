@@ -922,29 +922,36 @@ async fn message_keysets_work_in_both_directions_and_reject_wrong_cursors() {
 }
 
 #[tokio::test]
-async fn conversation_list_validates_cursor_and_accepts_both_orders() {
+async fn conversation_list_validates_cursor_order_and_project() {
     let h = harness().await;
     let unknown: ProjectId = Id::from_parts(NOW_MS as u64, 999).unwrap();
-    for order in [None, Some(PageOrder::Asc), Some(PageOrder::Desc)] {
-        let page = PageQuery {
-            order,
-            ..Default::default()
-        };
-        let known = h
+    let known = h
+        .conv
+        .list_conversations(&h.project, PageQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(known.items.len(), 1);
+    assert_eq!(known.last_seq, h.store.events().head().await.unwrap());
+    for order in [PageOrder::Asc, PageOrder::Desc] {
+        let error = h
             .conv
-            .list_conversations(&h.project, page.clone())
+            .list_conversations(
+                &h.project,
+                PageQuery {
+                    order: Some(order),
+                    ..Default::default()
+                },
+            )
             .await
-            .unwrap();
-        assert_eq!(known.items.len(), 1);
-        assert_eq!(known.last_seq, h.store.events().head().await.unwrap());
-        assert!(h
-            .conv
-            .list_conversations(&unknown, page)
-            .await
-            .unwrap()
-            .items
-            .is_empty());
+            .unwrap_err();
+        assert!(matches!(error, ConvError::InvalidRequest { pointer, .. } if pointer == "/order"));
     }
+    let error = h
+        .conv
+        .list_conversations(&unknown, PageQuery::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ConvError::NotFound));
     for cursor in ["", "seq:1", "bad"] {
         let error = h
             .conv

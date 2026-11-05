@@ -242,6 +242,12 @@ impl ConversationService for FakeConversation {
                 message: "unknown cursor".into(),
             });
         }
+        if page.order.is_some() {
+            return Err(ConvError::InvalidRequest {
+                pointer: "/order".into(),
+                message: "conversations do not support an explicit order".into(),
+            });
+        }
         let mut state = self
             .state
             .lock()
