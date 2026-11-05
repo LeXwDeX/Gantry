@@ -269,7 +269,7 @@ M1 的实现（`crates/gantry-pki`，#98）在不改变语义的前提下做了�
 | --- | --- | --- |
 | `DeviceDirectory::list(PageReq) -> Page<Device>` | 直接用 `store` 的 `Page` / `Paged<Device>` | 与 `store` 的键集分页一致，不另造一套 |
 | `replay_revocations()` | `replay_revocations(backup_at)`：只重放 `revoked_at` 晚于备份时刻的条目（P-80） | 备份时刻由 `deploy` 的恢复命令传入，`pki` 读不到备份元数据 |
-| `Pki::spawn_background(shutdown)` | `Pki::tick()`：关闭过期配对窗口 + 按需续签服务端证书，由 `gantryd` 定期调用（建议每 6 小时，配对窗口可更频繁） | 后台任务的调度归装配方，本模块只提供一步可测的动作 |
+| `Pki::tick()` | 关闭过期配对窗口 + 按需续签服务端证书；由 `gantryd` 调度：启动后立即一次，之后每 6 小时（gantryd.md §7.4） | 后台任务的调度归装配方，本模块只提供一步可测的动作；M1 不提供 `spawn_background` |
 | `open_session(opts, host)` / `PkiControl::pair_open(opts, host)` | `open_session(created_by_uid)`：TTL 等取引导配置；配对串编码待 OQ-K3 | 配对串契约未定，`PairingTicket` 先给令牌与根指纹 |
 | `recover::run(cmd, env, store, clock)` | `recover::run(cmd, env, store, directory, admin)` | 吊销要写吊销日志，复用 `StoreAdmin` 的同一份实现 |
 | `pki_pairing_sessions` 每会话一行 | 整张会话表存为一个文档（键 `sessions`） | 同一时刻至多一个 open 会话，已结束会话定期清理，表很小 |

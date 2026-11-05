@@ -818,7 +818,8 @@ async fn assemble_variant(
         GoldenSandbox::new(store.cas(), base, clock.clone())
             .with_patch(TEST_PATCH.as_bytes().to_vec()),
     );
-    let inbox: Arc<dyn InboxPort> = build_notify(&store, ids.clone());
+    let _notify = build_notify(&store, ids.clone());
+    let inbox: Arc<dyn InboxPort> = _notify.clone();
     let worker = Arc::new(build_worker(gantry_core::ports::worker::ImageRef {
         reference: "ghcr.io/gantry/worker".to_owned(),
         digest: gantry_core::canon::Sha256Digest::from_bytes([0; 32]),
