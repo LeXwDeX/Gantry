@@ -357,6 +357,13 @@ impl Store {
                     None => inner.rebuilt()?,
                 };
                 report.problems.extend(inner.differences(&rebuilt));
+                if let Some(durable) = &self.durable {
+                    if durable.projects_rows()? != inner.projects {
+                        report.problems.push(
+                            "projects table differs from the in-memory projection".to_owned(),
+                        );
+                    }
+                }
             }
         }
         if level == VerifyLevel::Full {

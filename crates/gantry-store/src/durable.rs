@@ -15,9 +15,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use gantry_core::canon::Sha256Digest;
-use gantry_core::entities::Seq;
+use gantry_core::canon::{RepoSlug, Sha256Digest};
+use gantry_core::entities::{Project, Seq};
 use gantry_core::events::Event;
+use gantry_core::ids::ProjectId;
 use gantry_core::time::Timestamp;
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
@@ -27,7 +28,7 @@ use crate::module::{ModuleRegistry, ModuleTables};
 use crate::{Fold, Inner, OutboxRow, StoreError};
 
 /// 本二进制支持的 `meta.schema_version`。
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 const DB_FILE: &str = "gantry.db";
 
@@ -74,6 +75,20 @@ CREATE TABLE cas_objects (
   created_at  INTEGER NOT NULL,
   quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1))
 ) STRICT;
+"#,
+    r#"
+CREATE TABLE projects (
+  id                    TEXT PRIMARY KEY,
+  repo                  TEXT NOT NULL,
+  installation_id       INTEGER NOT NULL,
+  bot_user_id           INTEGER NOT NULL,
+  default_branch        TEXT NOT NULL,
+  allowed_merge_methods TEXT NOT NULL CHECK (json_valid(allowed_merge_methods)),
+  merge_queue_enabled   INTEGER NOT NULL CHECK (merge_queue_enabled IN (0, 1)),
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL
+) STRICT;
+CREATE INDEX projects_repo ON projects (repo);
 "#,
 ];
 
@@ -156,7 +171,7 @@ impl Durable {
         )
         .map_err(open_error)?;
 
-        migrate(&mut conn, new_log_id)?;
+        let previous = migrate(&mut conn, new_log_id)?;
         for table in modules.tables() {
             // 表名已由 ModuleRegistry 校验为 `<module>_[a-z0-9_]+`，可以安全拼接。
             conn.execute_batch(&format!(
@@ -165,6 +180,10 @@ impl Durable {
             .map_err(sqlite)?;
         }
         let inner = load(&conn, modules)?;
+        if previous < 3 {
+            // 升级到 v3：projects 表此前不存在，按事件重放结果一次性回填。
+            backfill_projects(&conn, &inner.projects)?;
+        }
         Ok((
             Durable {
                 conn: Mutex::new(conn),
@@ -172,6 +191,63 @@ impl Durable {
             },
             inner,
         ))
+    }
+
+    /// `projects` 表的当前内容（`verify(Full)` 用来与事件重放结果比较）。
+    pub(crate) fn projects_rows(&self) -> Result<BTreeMap<ProjectId, Project>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, repo, installation_id, bot_user_id, default_branch,
+                        allowed_merge_methods, merge_queue_enabled, created_at, updated_at
+                 FROM projects",
+            )
+            .map_err(sqlite)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            })
+            .map_err(sqlite)?;
+        let mut projects = BTreeMap::new();
+        for row in rows {
+            let (
+                id,
+                repo,
+                installation_id,
+                bot_user_id,
+                default_branch,
+                methods,
+                queue,
+                created,
+                updated,
+            ) = row.map_err(sqlite)?;
+            let id = id.parse::<ProjectId>().map_err(corrupt)?;
+            projects.insert(
+                id,
+                Project {
+                    id,
+                    repo: RepoSlug::parse(&repo).map_err(corrupt)?,
+                    installation_id,
+                    bot_user_id,
+                    default_branch,
+                    allowed_merge_methods: serde_json::from_str(&methods).map_err(corrupt)?,
+                    merge_queue_enabled: queue != 0,
+                    created_at: Timestamp::from_millis(created),
+                    updated_at: Timestamp::from_millis(updated),
+                },
+            );
+        }
+        Ok(projects)
     }
 
     /// 在一个 SQLite 事务里写入 `base → next` 的增量。失败时数据库不变。
@@ -219,6 +295,12 @@ impl Durable {
                     ],
                 )
                 .map_err(sqlite)?;
+            }
+        }
+
+        for (id, row) in &next.projects {
+            if base.projects.get(id) != Some(row) {
+                upsert_project(&tx, row)?;
             }
         }
 
@@ -366,7 +448,7 @@ fn create_dir(dir: &Path) -> Result<(), StoreError> {
 fn migrate(
     conn: &mut Connection,
     new_log_id: impl FnOnce() -> Result<String, StoreError>,
-) -> Result<(), StoreError> {
+) -> Result<u32, StoreError> {
     let has_meta: bool = conn
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
@@ -389,7 +471,7 @@ fn migrate(
         });
     }
     if found == SCHEMA_VERSION {
-        return Ok(());
+        return Ok(found);
     }
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -404,7 +486,8 @@ fn migrate(
         set_meta(&tx, "projected_seq", "0")?;
     }
     set_meta(&tx, "schema_version", &SCHEMA_VERSION.to_string())?;
-    tx.commit().map_err(sqlite)
+    tx.commit().map_err(sqlite)?;
+    Ok(found)
 }
 
 /// 从磁盘载入：非投影状态直接读取，投影按 `seq` 重放。
@@ -569,6 +652,47 @@ fn upsert_cursor(
     )
     .map_err(sqlite)?;
     Ok(())
+}
+
+fn upsert_project(conn: &Connection, row: &Project) -> Result<(), StoreError> {
+    conn.execute(
+        "INSERT INTO projects (id, repo, installation_id, bot_user_id, default_branch,
+                               allowed_merge_methods, merge_queue_enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT (id) DO UPDATE SET
+           repo = excluded.repo,
+           installation_id = excluded.installation_id,
+           bot_user_id = excluded.bot_user_id,
+           default_branch = excluded.default_branch,
+           allowed_merge_methods = excluded.allowed_merge_methods,
+           merge_queue_enabled = excluded.merge_queue_enabled,
+           created_at = excluded.created_at,
+           updated_at = excluded.updated_at",
+        params![
+            row.id.to_string(),
+            row.repo.to_string(),
+            row.installation_id,
+            row.bot_user_id,
+            row.default_branch,
+            serde_json::to_string(&row.allowed_merge_methods).map_err(encode)?,
+            row.merge_queue_enabled as i64,
+            row.created_at.as_millis(),
+            row.updated_at.as_millis(),
+        ],
+    )
+    .map_err(sqlite)?;
+    Ok(())
+}
+
+fn backfill_projects(
+    conn: &Connection,
+    projects: &BTreeMap<ProjectId, Project>,
+) -> Result<(), StoreError> {
+    let tx = conn.unchecked_transaction().map_err(sqlite)?;
+    for row in projects.values() {
+        upsert_project(&tx, row)?;
+    }
+    tx.commit().map_err(sqlite)
 }
 
 fn persist_module_tables(
