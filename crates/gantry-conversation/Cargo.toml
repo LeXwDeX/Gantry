@@ -10,6 +10,7 @@ description = "Gantry 会话服务（M1：主对话、意图解析、创建交�
 gantry-core = { path = "../gantry-core" }
 gantry-store = { path = "../gantry-store" }
 gantry-models = { path = "../gantry-models" }
+gantry-engine = { path = "../gantry-engine" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

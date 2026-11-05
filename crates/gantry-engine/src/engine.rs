@@ -59,6 +59,22 @@ pub struct DeliverySummary {
     pub open_spec_needed: Option<InboxId>,
 }
 
+impl DeliverySummary {
+    fn from_state(state: &DeliveryState) -> Self {
+        Self {
+            id: state.delivery.id,
+            project_id: state.delivery.project_id,
+            level_cap: state.delivery.level_cap,
+            stage: state.delivery.stage,
+            open_spec_needed: state
+                .open_inbox
+                .values()
+                .find(|item| item.kind == InboxKind::SpecNeeded)
+                .map(|item| item.id),
+        }
+    }
+}
+
 pub struct Engine {
     store: Store,
     inbox: Arc<dyn InboxPort>,
@@ -107,19 +123,19 @@ impl Engine {
             if state.delivery.stage.is_terminal() || !refs_match(&state, refs) {
                 continue;
             }
-            located.push(DeliverySummary {
-                id,
-                project_id: state.delivery.project_id,
-                level_cap: state.delivery.level_cap,
-                stage: state.delivery.stage,
-                open_spec_needed: state
-                    .open_inbox
-                    .values()
-                    .find(|item| item.kind == InboxKind::SpecNeeded)
-                    .map(|item| item.id),
-            });
+            located.push(DeliverySummary::from_state(&state));
         }
         Ok(located)
+    }
+
+    /// 单个交付单元的摘要；不存在时返回 `None`。供 conversation 的 `EngineApi` 适配使用。
+    pub async fn delivery_summary(
+        &self,
+        id: &DeliveryId,
+    ) -> Result<Option<DeliverySummary>, EngineError> {
+        Ok(load_delivery_state(&self.store, id)
+            .await?
+            .map(|state| DeliverySummary::from_state(&state)))
     }
 
     /// 上报一项；与调用方的事件写入同一事务时由调用方传入事务，此处自开事务。

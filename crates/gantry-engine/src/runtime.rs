@@ -125,7 +125,7 @@ impl PrSnapshots for StoreSnapshots {
 
 pub struct EngineRuntime {
     store: Store,
-    engine: Engine,
+    engine: Arc<Engine>,
     deps: ActorDeps,
     effects: Arc<PortEffects>,
     bound_repo: RepoSlug,
@@ -187,7 +187,7 @@ impl EngineRuntime {
         };
         let router = EventRouter::open(store.clone()).await?;
         Ok(Arc::new(Self {
-            engine: Engine::new(store.clone(), ports.inbox),
+            engine: Arc::new(Engine::new(store.clone(), ports.inbox)),
             store,
             deps,
             effects,
@@ -202,9 +202,9 @@ impl EngineRuntime {
         }))
     }
 
-    /// 现有的写入口（`create_delivery` 等）。
-    pub fn engine(&self) -> &Engine {
-        &self.engine
+    /// 现有的写入口（`create_delivery` 等）；与 `conversation` 共享同一实例。
+    pub fn engine(&self) -> Arc<Engine> {
+        self.engine.clone()
     }
 
     /// `settings.updated` 热加载：两次决策之间整体切换（§7.13）。

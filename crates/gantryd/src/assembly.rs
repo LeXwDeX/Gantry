@@ -20,6 +20,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use gantry_conversation::engine_api::EngineApiAdapter;
+use gantry_conversation::ports::{EngineApi, ModelsPort};
+use gantry_conversation::{Conversation, ConversationDeps, Limits};
+use gantry_core::entities::Seq;
 use gantry_core::ids::{Clock, Entropy, IdGen};
 use gantry_core::ports::conversation::ConversationService;
 use gantry_core::ports::egress::EgressControl;
@@ -32,7 +36,9 @@ use gantry_core::ports::sandbox::SandboxService;
 use gantry_core::ports::worker::{ImageRef, WorkerAdapter};
 use gantry_core::ports::{SecretSink, SecretsError};
 use gantry_core::secret::Consumer;
+use gantry_core::settings::resource::LevelEntry;
 use gantry_core::time::Timestamp;
+use gantry_engine::engine::Engine;
 use gantry_engine::runtime::EngineRuntime;
 use gantry_forge::{
     Dispatcher, DispatcherDeps, DispatcherOptions, Executor, ExecutorDeps, ExecutorOptions,
@@ -220,6 +226,30 @@ pub fn build_models(
         ids,
         clock,
     })
+}
+
+/// conversation 的生产构造：会话写路径经 [`EngineApiAdapter`] 调用共享的
+/// [`Engine`]，模型经 `models` 端口；会话本身不写设置（I7）。
+///
+/// `low` 与 `config_rev` 来自已应用的 settings 快照；`models` 的生产实例是
+/// [`build_models`] 的 `ModelRouter`。
+pub fn build_conversation(
+    store: &Store,
+    engine: Arc<Engine>,
+    ids: Arc<IdGen>,
+    models: Arc<dyn ModelsPort>,
+    low: LevelEntry,
+    config_rev: Seq,
+) -> Arc<Conversation> {
+    let engine: Arc<dyn EngineApi> =
+        Arc::new(EngineApiAdapter::new(engine, ids.clone(), low, config_rev));
+    Arc::new(Conversation::new(ConversationDeps {
+        store: store.clone(),
+        ids,
+        engine,
+        models,
+        limits: Limits::default(),
+    }))
 }
 
 /// repo 的生产构造：`RepoDeps` 的时钟必须与 store 共用，`policy` 与 `cas` 由调用方注入。

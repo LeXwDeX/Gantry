@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod engine_api;
 pub mod intent;
 pub mod ports;
 mod projection;
