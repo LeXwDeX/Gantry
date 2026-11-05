@@ -968,6 +968,42 @@ impl World {
             };
             tx.outbox().complete(&action.id, github_ref).await.unwrap();
             tx.commit().await.unwrap();
+            if action.kind == ForgeActionKind::MergePr {
+                let merge_sha = head.expect("merge_pr only after the patch is committed");
+                append(
+                    &self.store,
+                    "forge.pr_merged".parse().unwrap(),
+                    PROJECT,
+                    DELIVERY.parse().unwrap(),
+                    json!({
+                        "schema": "forge.event.v1",
+                        "kind": "pr_merged",
+                        "dedup_key": format!("pr_merged:acme/web:12:{merge_sha}"),
+                        "source": "webhook",
+                        "delivery_ids": [DELIVERY],
+                        "project_id": PROJECT,
+                        "repo": "acme/web",
+                        "installation_id": 1,
+                        "delivery_id": DELIVERY,
+                        "target": {"type": "pr", "number": 12, "node_id": null},
+                        "actor": {"login": "gantry", "github_id": 2, "type": "bot", "association": null},
+                        "origin": "external",
+                        "caused_by_action": null,
+                        "occurred_at": "2023-11-14T22:13:20.000Z",
+                        "observed_at": "2023-11-14T22:13:20.000Z",
+                        "stale": false,
+                        "data": {
+                            "merge_commit_sha": merge_sha,
+                            "head_sha": merge_sha,
+                            "base_ref": "main",
+                            "merged_by": {"login": "gantry", "github_id": 2, "type": "bot", "association": null},
+                            "via_merge_queue": false
+                        }
+                    }),
+                    None,
+                )
+                .await;
+            }
             done.push(action.kind);
         }
     }

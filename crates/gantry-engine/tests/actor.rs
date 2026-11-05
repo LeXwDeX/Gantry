@@ -679,6 +679,39 @@ async fn delivery_reaches_closed_without_any_client() {
 
     // 合并 → T12 → closed，释放工作树。
     h.execute_outbox().await;
+    h.runner
+        .write(
+            "forge.pr_merged",
+            PROJECT,
+            ActorKind::Forge,
+            h.delivery,
+            json!({
+                "schema": "forge.event.v1",
+                "kind": "pr_merged",
+                "dedup_key": format!("pr_merged:acme/web:12:{COMMIT}"),
+                "source": "webhook",
+                "delivery_ids": [h.delivery],
+                "project_id": PROJECT,
+                "repo": "acme/web",
+                "installation_id": 1,
+                "delivery_id": h.delivery,
+                "target": {"type": "pr", "number": 12, "node_id": null},
+                "actor": {"login": "gantry", "github_id": 2, "type": "bot", "association": null},
+                "origin": "external",
+                "caused_by_action": null,
+                "occurred_at": "2023-11-14T22:13:20.000Z",
+                "observed_at": "2023-11-14T22:13:20.000Z",
+                "stale": false,
+                "data": {
+                    "merge_commit_sha": COMMIT,
+                    "head_sha": COMMIT,
+                    "base_ref": "main",
+                    "merged_by": {"login": "gantry", "github_id": 2, "type": "bot", "association": null},
+                    "via_merge_queue": false
+                }
+            }),
+        )
+        .await;
     *h.snapshots.0.lock().unwrap() = Some(snapshot("merged", true));
     h.settle(&mut actor).await;
     h.pump(&mut router, &mut actor).await;

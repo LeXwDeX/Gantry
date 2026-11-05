@@ -26,7 +26,9 @@ use gantry_core::events::{
     PatchValidatedData, WorkflowCreatedData, WorkflowFinishedData, WorkflowRevisedData,
     WorktreeCreatedData, WorktreeLockedData, WorktreeRemovedData, WorktreeUnlockedData,
 };
-use gantry_core::forge::derive_target_intent;
+use gantry_core::forge::{
+    derive_target_intent, ActionPayload, ForgeEventData, ForgeEventEnvelope, ForgeEventKind,
+};
 use gantry_core::ids::{
     ActionId, ApprovalId, AttemptId, DeliveryId, InboxId, NodeId, WorkflowId, WorktreeId,
 };
@@ -77,6 +79,10 @@ pub struct DeliveryState {
     /// 折叠不写它，重启后为空，由 `Tick(Recover)` 重新认领。
     pub lock_owner: BTreeMap<WorktreeId, NodeId>,
     pub round_history: Vec<RoundRecord>,
+    /// `forge.pr_merged.merge_commit_sha`（T12 合并证据，§7.6）。
+    pub merge_commit: Option<GitOid>,
+    /// 已成功 `close_issue` 的 Issue 编号（T12 非默认分支，§7.6）。
+    pub close_issues: BTreeSet<u64>,
     /// 用户对 `escalation(outbox_failed:<code>)` 选过 `retry` 的失败动作（§7.14.4，E6）。
     /// 只用于 `epoch` 推导，重放从事件重建。
     pub retried: BTreeSet<ActionId>,
@@ -260,6 +266,8 @@ pub struct OutboxState {
     pub failure_code: Option<OutboxFailureCode>,
     /// 同一意图的 `epoch = 0` 幂等键（除 `epoch` 外的部分），用于重试时推导新轮次。
     pub signature: Option<IdempotencyKey>,
+    /// `close_issue` 的目标 Issue 编号；其余动作为空。
+    pub issue_number: Option<u64>,
     /// `budget.charged(forge_writes)` 是否已为它记账（`source.action_id`）。
     pub charged: bool,
 }
@@ -316,6 +324,8 @@ impl DeliveryState {
             locks: BTreeMap::new(),
             lock_owner: BTreeMap::new(),
             round_history: Vec::new(),
+            merge_commit: None,
+            close_issues: BTreeSet::new(),
             retried: BTreeSet::new(),
             last_seq: event.seq,
         })
@@ -582,6 +592,10 @@ impl DeliveryState {
                             )
                             .ok()
                         });
+                let issue_number = match &data.action.payload {
+                    ActionPayload::CloseIssue(payload) => Some(payload.number),
+                    _ => None,
+                };
                 self.outbox.insert(
                     data.action.idempotency_key.clone(),
                     OutboxState {
@@ -591,6 +605,7 @@ impl DeliveryState {
                         status: gantry_core::entities::OutboxStatus::Queued,
                         failure_code: None,
                         signature,
+                        issue_number,
                         charged: false,
                     },
                 );
@@ -600,11 +615,22 @@ impl DeliveryState {
             }
             EventType::OutboxSucceeded => {
                 let data: OutboxSucceededData = decode(event, ty)?;
-                let row =
-                    self.outbox_status(event, ty, gantry_core::entities::OutboxStatus::Succeeded)?;
-                if row.kind == ForgeActionKind::CreatePr {
+                let (kind, issue_number) = {
+                    let row = self.outbox_status(
+                        event,
+                        ty,
+                        gantry_core::entities::OutboxStatus::Succeeded,
+                    )?;
+                    (row.kind, row.issue_number)
+                };
+                if kind == ForgeActionKind::CreatePr {
                     if let Some(pr) = data.github_ref.pr {
                         self.pr = Some(pr);
+                    }
+                }
+                if kind == ForgeActionKind::CloseIssue {
+                    if let Some(number) = issue_number {
+                        self.close_issues.insert(number);
                     }
                 }
             }
@@ -679,6 +705,39 @@ impl DeliveryState {
                 self.locks.remove(&data.worktree_id);
                 if self.worktree.as_ref().map(|w| w.id) == Some(data.worktree_id) {
                     self.worktree = None;
+                }
+            }
+            // T12 的合并证据与 Issue 关闭事实（§7.6）；信封由 forge 校验，折叠只取所需字段。
+            EventType::Forge(kind) => {
+                let Ok(envelope) = serde_json::from_value::<ForgeEventEnvelope>(event.data.clone())
+                else {
+                    return Ok(());
+                };
+                match (kind, envelope.data) {
+                    (ForgeEventKind::PrMerged, ForgeEventData::PrMerged(data)) => {
+                        self.merge_commit = Some(data.merge_commit_sha);
+                    }
+                    (ForgeEventKind::IssueClosed, ForgeEventData::IssueClosed(data)) => {
+                        if let Some(issue) = self
+                            .delivery
+                            .issues
+                            .iter_mut()
+                            .find(|issue| issue.number == data.number)
+                        {
+                            issue.state = gantry_core::entities::IssueState::Closed;
+                        }
+                    }
+                    (ForgeEventKind::IssueReopened, ForgeEventData::IssueReopened(data)) => {
+                        if let Some(issue) = self
+                            .delivery
+                            .issues
+                            .iter_mut()
+                            .find(|issue| issue.number == data.number)
+                        {
+                            issue.state = gantry_core::entities::IssueState::Open;
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
