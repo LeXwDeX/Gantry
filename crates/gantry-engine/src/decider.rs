@@ -119,6 +119,7 @@ pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<
     schedule_lock_renewals(state, env, &mut out);
     finish_workflows(state, &mut out);
     judge_actions(state, env, &mut out);
+    control::raise_outbox_failed(state, &mut out);
     raise_approval_needed(state, &mut out);
     release_worktree(state, env, &mut out);
     out
@@ -516,6 +517,8 @@ fn finish_workflows(state: &DeliveryState, out: &mut Vec<Decision>) {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActionIntent {
     pub key: ActionKey,
+    /// 本次要入队动作的 `epoch`（§7.14.4：同一意图失败并被用户 `retry` 后自增）。
+    pub epoch: u32,
     pub payload: ActionPayload,
     pub facts: ActionFacts,
     pub priority: Priority,
@@ -624,22 +627,58 @@ fn intent(
     depends_on: Option<ActionKey>,
 ) -> Option<ActionIntent> {
     let derived = derive_target_intent(&payload).ok()?;
+    let epoch = next_epoch(state, payload.kind(), &derived);
     let key = IdempotencyKey::derive(
         &state.delivery.project_id,
         &state.delivery.id,
         payload.kind(),
         &derived.target,
         &derived.intent,
-        INITIAL_EPOCH,
+        epoch,
     )
     .ok()?;
     Some(ActionIntent {
         key,
+        epoch,
         payload,
         facts,
         priority,
         depends_on,
     })
+}
+
+/// §7.14.4：同一意图（除 `epoch` 外的幂等键相同）取 `outbox` 里 `epoch` 最大的行；
+/// 它终态失败且用户选过 `retry` → `epoch + 1`，否则沿用；没有行 → 1。
+fn next_epoch(
+    state: &DeliveryState,
+    kind: ForgeActionKind,
+    derived: &gantry_core::forge::TargetIntent,
+) -> u32 {
+    let Ok(signature) = IdempotencyKey::derive(
+        &state.delivery.project_id,
+        &state.delivery.id,
+        kind,
+        &derived.target,
+        &derived.intent,
+        0,
+    ) else {
+        return INITIAL_EPOCH;
+    };
+    let latest = state
+        .outbox
+        .values()
+        .filter(|row| row.signature.as_ref() == Some(&signature))
+        .max_by_key(|row| row.epoch);
+    let Some(row) = latest else {
+        return INITIAL_EPOCH;
+    };
+    if row.status == gantry_core::entities::OutboxStatus::Failed
+        && state.retried.contains(&row.action_id)
+    {
+        row.epoch.saturating_add(1)
+    } else {
+        row.epoch
+    }
 }
 
 fn push_branch(state: &DeliveryState, env: &DecideEnv) -> Option<ActionIntent> {
@@ -763,7 +802,7 @@ fn judge_actions(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>
                 kind: intent.kind(),
                 facts: intent.facts.clone(),
                 requested_by: engine_actor(),
-                epoch: INITIAL_EPOCH,
+                epoch: intent.epoch,
             },
             key,
         }));
@@ -941,7 +980,8 @@ fn on_judged(
                 depends_on,
                 priority: intent.priority,
                 not_before: None,
-                epoch: INITIAL_EPOCH,
+                // 与 `judge_actions` 的期望键同轮次：重试后 `epoch + 1` 的动作在此入队。
+                epoch: intent.epoch,
                 enqueued_by: EnqueuedBy {
                     module: EnqueuedByModule::Engine,
                     causation_id: None,

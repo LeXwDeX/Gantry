@@ -16,9 +16,9 @@
 use std::collections::BTreeSet;
 
 use gantry_core::entities::{
-    ApprovalAction, ApprovalStatus, BudgetDimension, ForgeActionKind, InboxKind, InboxPayload,
-    NodeStatus, OutboxStatus, PullRequestState, ReasonCode, Severity, Stage, StageStatus,
-    WorkflowStatus,
+    ApprovalAction, ApprovalStatus, BudgetDimension, ForgeActionKind, InboxKind, InboxOption,
+    InboxPayload, NodeStatus, OutboxStatus, PullRequestState, ReasonCode, Severity, Stage,
+    StageStatus, WorkflowStatus, OUTBOX_FAILED_PREFIX,
 };
 use gantry_core::events::{
     BudgetLimitRaisedData, DeliveryAbandonedData, DeliveryLevelChangedData, DeliveryPausedData,
@@ -795,6 +795,62 @@ fn execute_option(
         // done / continue：解除阻塞（该项已被 inbox.resolved 移出 open_inbox）后重新求值，
         // 由随后的按状态求值完成；keep：不动作；fix（M2，T9）与 retry（#67 的 epoch + 1）不在本切片。
         _ => Vec::new(),
+    }
+}
+
+/// 按状态求值：`outbox` 里终态失败的动作 → `escalation(outbox_failed:<code>)`，
+/// 选项 `retry` / `abandon`（§7.11、§9、#67）。同一动作已有未关闭的上报、
+/// 已选过 `retry`（`retried`）或交付单元已终态时不再上报。
+pub(crate) fn raise_outbox_failed(state: &DeliveryState, out: &mut Vec<Decision>) {
+    if state.delivery.stage.is_terminal() {
+        return;
+    }
+    for row in state.outbox.values() {
+        if row.status != OutboxStatus::Failed || state.retried.contains(&row.action_id) {
+            continue;
+        }
+        if state
+            .open_inbox
+            .values()
+            .any(|item| item.action_id == Some(row.action_id))
+        {
+            continue;
+        }
+        let Some(code) = row.failure_code else {
+            continue;
+        };
+        let Ok(value) = serde_json::to_value(code) else {
+            continue;
+        };
+        let Some(code) = value.as_str() else {
+            continue;
+        };
+        let Ok(reason_code) = ReasonCode::parse(&format!("{OUTBOX_FAILED_PREFIX}{code}")) else {
+            continue;
+        };
+        out.push(Decision::Raise(RaiseRequest {
+            project_id: Some(state.delivery.project_id),
+            delivery_id: Some(state.delivery.id),
+            kind: InboxKind::Escalation,
+            severity: Severity::Blocker,
+            summary: SafeSummary::new("Outbox 动作失败，需要决定是否重试"),
+            payload: InboxPayload::Escalation {
+                reason_code,
+                node_id: None,
+                attempt_id: None,
+                target_level: None,
+                action_id: Some(row.action_id),
+                evidence: Vec::new(),
+                options: Some(vec![
+                    InboxOption::new("retry", "重试", true),
+                    InboxOption::new("abandon", "放弃", false),
+                ]),
+            },
+            dedup_key: DedupKey::new(format!("outbox_failed:{}", row.action_id)),
+            supersedes: Vec::new(),
+            actor: engine_actor(),
+            causation_id: None,
+        }));
     }
 }
 

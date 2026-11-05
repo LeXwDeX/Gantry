@@ -2280,3 +2280,135 @@ fn control_decisions_are_pure() {
     };
     assert_eq!(on_event(&sim, observed), on_event(&sim, again));
 }
+
+/// #302：Outbox 终态失败 → `escalation(outbox_failed:<code>)`；选 `retry` 后同一意图以
+/// `epoch + 1` 重新判定，旧动作不再重复上报。
+#[test]
+fn outbox_failure_raises_retry_with_new_epoch() {
+    let mut sim = dispatched();
+    finish(&mut sim, vec![]);
+    let _ = sim.settle();
+    let push = judge(&sim.tick())
+        .into_iter()
+        .find(|(_, kind)| *kind == ForgeActionKind::PushBranch)
+        .unwrap()
+        .0;
+    let request = enqueue_of(sim.decide(
+        Input::Report(EffectReport::ActionJudged {
+            key: push.clone(),
+            decision: allow(None),
+        }),
+        InputIdentity::Report(EffectKey::Judge(push.clone())),
+    ));
+    enqueue_only(&mut sim, &request, ACTION_PUSH);
+    let action_id: gantry_core::ids::ActionId = ACTION_PUSH.parse().unwrap();
+    let old_key = sim.state.outbox.keys().next().unwrap().clone();
+    assert_eq!(old_key, push);
+
+    // 终态失败：上报 escalation，带失败动作与 retry / abandon。
+    sim.external(
+        "outbox.failed",
+        ACTION_PUSH,
+        json!({"code": "rate_limited"}),
+    );
+    let out = sim.tick();
+    let raise = out
+        .iter()
+        .find_map(|d| match d {
+            Decision::Raise(request) => Some(request),
+            _ => None,
+        })
+        .expect("outbox failure must raise an escalation");
+    assert_eq!(raise.kind, InboxKind::Escalation);
+    assert_eq!(raise.severity, Severity::Blocker);
+    let InboxPayload::Escalation {
+        reason_code,
+        action_id: raised_action,
+        options,
+        ..
+    } = &raise.payload
+    else {
+        panic!("expected escalation payload");
+    };
+    assert_eq!(reason_code.as_str(), "outbox_failed:rate_limited");
+    assert_eq!(*raised_action, Some(action_id));
+    let options = options.as_ref().unwrap();
+    assert_eq!(
+        options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["retry", "abandon"]
+    );
+
+    // 上报落盘；重复求值不再新增同一项。
+    sim.apply(out);
+    assert!(sim.tick().iter().all(|d| !matches!(d, Decision::Raise(_))));
+
+    // 用户选 retry：记入 retried，下一次求值用 epoch + 1 重新判定。
+    let inbox = sim
+        .state
+        .open_inbox
+        .iter()
+        .find(|(_, item)| item.action_id == Some(action_id))
+        .map(|(id, _)| *id)
+        .unwrap();
+    sim.external(
+        "inbox.resolved",
+        &inbox.to_string(),
+        json!({"inbox_id": inbox, "resolution": "chosen", "option_id": "retry"}),
+    );
+    assert!(sim.state.retried.contains(&action_id));
+    let out = sim.tick();
+    let judged: Vec<_> = out
+        .iter()
+        .filter_map(|d| match d {
+            Decision::Effect(Effect::JudgeAction { key, request })
+                if request.kind == ForgeActionKind::PushBranch =>
+            {
+                Some((key, request))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(judged.len(), 1);
+    assert_eq!(judged[0].1.epoch, 2);
+    assert_ne!(judged[0].0, &old_key);
+    // 旧失败动作已有上报，选过 retry 后不再重复上报。
+    assert!(!out.iter().any(|d| matches!(d, Decision::Raise(_))));
+}
+
+/// #302：交付单元已放弃（终态）后不再上报 Outbox 失败。
+#[test]
+fn outbox_failure_is_not_raised_after_abandon() {
+    let mut sim = dispatched();
+    finish(&mut sim, vec![]);
+    let _ = sim.settle();
+    let push = judge(&sim.tick())
+        .into_iter()
+        .find(|(_, kind)| *kind == ForgeActionKind::PushBranch)
+        .unwrap()
+        .0;
+    let request = enqueue_of(sim.decide(
+        Input::Report(EffectReport::ActionJudged {
+            key: push.clone(),
+            decision: allow(None),
+        }),
+        InputIdentity::Report(EffectKey::Judge(push)),
+    ));
+    enqueue_only(&mut sim, &request, ACTION_PUSH);
+    sim.external(
+        "outbox.failed",
+        ACTION_PUSH,
+        json!({"code": "rate_limited"}),
+    );
+    sim.apply(command(
+        &sim,
+        Command::Abandon {
+            reason: None,
+            ctx: ctx(None),
+        },
+    ));
+    assert!(sim.state.delivery.stage.is_terminal());
+    assert!(!sim
+        .tick()
+        .iter()
+        .any(|decision| matches!(decision, Decision::Raise(_))));
+}
