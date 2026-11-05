@@ -216,3 +216,69 @@ async fn project_keyset_pagination_and_cursor_validation() {
         ));
     }
 }
+
+async fn open_sqlite() -> Store {
+    let clock = Arc::new(FakeClock::new(NOW));
+    let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(7))));
+    Store::open_temp(StoreDeps { clock, ids }, &[])
+        .await
+        .unwrap()
+}
+
+/// #280 K2：`subject`、`project_id`、`data.id` 任一不一致都必须拒绝追加，且不改投影。
+async fn assert_envelope_mismatch_rejected(store: &Store) {
+    let row = project(1, "acme/one", false);
+    let other = project(2, "acme/two", false);
+
+    let mut cases = Vec::new();
+    let mut bad = event(EventType::ProjectAdded, &row);
+    bad.project_id = Some(other.id);
+    cases.push(("project_id", bad));
+
+    let mut bad = event(EventType::ProjectAdded, &row);
+    bad.subject = Subject::parse(&other.id.to_string()).unwrap();
+    cases.push(("subject", bad));
+
+    let mut bad = event(EventType::ProjectAdded, &row);
+    bad.data = serde_json::to_value(&other).unwrap();
+    cases.push(("data.id", bad));
+
+    for (field, bad) in cases {
+        let mut tx = store.begin_write().await.unwrap();
+        let error = tx.append(bad).await.unwrap_err();
+        match error {
+            StoreError::Corrupt(message) => {
+                assert!(message.contains("seq 1"), "{field}: {message}");
+                assert!(message.contains("project.added"), "{field}: {message}");
+            }
+            other => panic!("{field}: unexpected error {other:?}"),
+        }
+        assert!(tx.read().project(&row.id).await.unwrap().is_none());
+        assert!(tx.read().project(&other.id).await.unwrap().is_none());
+        tx.rollback().await.unwrap();
+    }
+
+    let mut snap = store.snapshot().await.unwrap();
+    assert!(snap.project(&row.id).await.unwrap().is_none());
+    drop(snap);
+
+    let mut tx = store.begin_write().await.unwrap();
+    tx.append(event(EventType::ProjectAdded, &row))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut snap = store.snapshot().await.unwrap();
+    assert_eq!(snap.project(&row.id).await.unwrap(), Some(row));
+}
+
+#[tokio::test]
+async fn mismatched_project_envelope_is_rejected_and_rolled_back_in_memory() {
+    let store = store().await;
+    assert_envelope_mismatch_rejected(&store).await;
+}
+
+#[tokio::test]
+async fn mismatched_project_envelope_is_rejected_and_rolled_back_in_sqlite() {
+    let store = open_sqlite().await;
+    assert_envelope_mismatch_rejected(&store).await;
+}
