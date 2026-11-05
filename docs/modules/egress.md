@@ -407,6 +407,8 @@ struct JobState {
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
 | `egress.data_dir` | `/var/lib/gantry-egress` | `egress.db`、`audit/`、`secrets/` |
+| `secrets.dir` | `/var/lib/gantry-egress/secrets` | Egress 实例的密钥目录 |
+| `[secrets.master_key]` | 无默认、必填（P-87） | `source = systemd_credential`（默认，配 `name = "gantry-egress-master-key"`）或 `key_file`（配 `path`）；形状以 [secrets.md §10](secrets.md#10-配置) 为准 |
 | `egress.control_socket` | `/run/gantry/egress.sock` | 控制面套接字（P-50；目录 / 套接字权限见 deploy.md §6.3，组 `gantry-link`） |
 | `egress.listen.svc_model` | `127.0.0.1:8082`（egress-control §3.2） | `models` 用的回环反向代理（P-50） |
 | `egress.sandbox_cidrs` | 由 `deploy` 按沙盒网络给出 | `job_token` 只接受来自这些网段的请求（P-49） |
