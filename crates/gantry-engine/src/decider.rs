@@ -1157,6 +1157,7 @@ fn on_finalized(state: &DeliveryState, finalized: &Finalized, env: &DecideEnv) -
             result_commit,
             served_by: None,
             accepted_open_pr: accepted_open_pr.filter(|_| finalized.result_ref.is_some()),
+            base_after_conflict: None,
         },
     )];
     // tokens_by_tier：Egress 计量（不是自报），加权口径与组装 spec 时一致（§7.14.2、§7.9）。
