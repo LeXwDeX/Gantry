@@ -12,6 +12,7 @@ pub mod assembly;
 pub mod cli;
 pub mod config;
 pub mod control;
+pub mod settings_ctx;
 
 use std::path::PathBuf;
 use std::sync::Arc;
