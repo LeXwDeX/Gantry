@@ -39,7 +39,7 @@ use gantry_core::events::{
 use gantry_core::forge::ActionPayload;
 use gantry_core::ids::{
     Act, ActionId, Clock, DeliveryId, DeviceId, Dlv, EventId, Evt, IdError, IdGen, Inb, InboxId,
-    ProjectId,
+    Prj, ProjectId,
 };
 use gantry_core::time::Timestamp;
 use serde_json::Value;
@@ -1238,6 +1238,19 @@ impl Inner {
             EventType::ProjectAdded | EventType::ProjectUpdated => {
                 let data: ProjectEventData =
                     decode_data(event).map_err(StoreError::InvalidEvent)?;
+                // #280 K2：追加与重放都要求 subject == project_id == data.id；历史错配库
+                // 不受支持，直接按完整性错误拒绝，不改写、不跳过。
+                let id = subject_id::<Prj>(&event.subject)?;
+                if event.project_id != Some(id) || data.id != id {
+                    return Err(StoreError::Corrupt(format!(
+                        "seq {} {}: project_id {:?} and data.id {} must equal subject {}",
+                        event.seq.as_u64(),
+                        event.ty.as_str(),
+                        event.project_id,
+                        data.id,
+                        event.subject.as_str()
+                    )));
+                }
                 let row = projects::from_event(data);
                 self.github.apply(event).map_err(fold_error)?;
                 self.projects.insert(row.id, row);
