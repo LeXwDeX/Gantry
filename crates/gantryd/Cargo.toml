@@ -26,6 +26,7 @@ gantry-pki = { path = "../gantry-pki" }
 gantry-policy = { path = "../gantry-policy" }
 gantry-secrets = { path = "../gantry-secrets" }
 gantry-repo = { path = "../gantry-repo" }
+gantry-worker = { path = "../gantry-worker" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

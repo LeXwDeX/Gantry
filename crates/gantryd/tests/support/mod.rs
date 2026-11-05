@@ -21,7 +21,7 @@ use gantry_core::secret::{Consumer, SecretName, SecretString};
 use gantry_engine::runtime::{EnginePorts, EngineRuntime};
 use gantry_fakes::{
     conversation::FakeConversation, egress::EgressStub, golden::GoldenSandbox,
-    models::FakeModelProvider, worker::StubWorkerAdapter,
+    models::FakeModelProvider,
 };
 use gantry_forge::{
     Dispatcher, Executor, ExecutorOptions, Forge, ForgeConfig, Permission, ProjectBinding,
@@ -40,7 +40,7 @@ use gantry_secrets::{MasterKey, MasterKeySource, Secrets, SecretsConfig, StaticM
 use gantry_store::{Page, Store, StoreConfig, StoreDeps};
 use gantryd::assembly::{
     build_forge, build_forge_executor, build_forge_reader, build_notify, build_pki, build_policy,
-    build_repo, build_secrets, module_specs, secrets_consumers, Assembly, ForgeDeps,
+    build_repo, build_secrets, build_worker, module_specs, secrets_consumers, Assembly, ForgeDeps,
     ForgeExecutorDeps, ModuleInfo, OsEntropy, Profile, Provider, SystemClock,
 };
 use gantryd::config::BootConfig;
@@ -778,7 +778,10 @@ async fn assemble_variant(
             .with_patch(TEST_PATCH.as_bytes().to_vec()),
     );
     let inbox: Arc<dyn InboxPort> = build_notify(&store, ids.clone());
-    let worker = Arc::new(StubWorkerAdapter::new());
+    let worker = Arc::new(build_worker(gantry_core::ports::worker::ImageRef {
+        reference: "ghcr.io/gantry/worker".to_owned(),
+        digest: gantry_core::canon::Sha256Digest::from_bytes([0; 32]),
+    }));
 
     let engine = EngineRuntime::new(
         store.clone(),
@@ -829,7 +832,11 @@ async fn assemble_variant(
             "GitRepo via build_repo; assemble_real not wired",
         ),
         ModuleInfo::new("sandbox", Fake, "GoldenSandbox; real sandbox needs Podman"),
-        ModuleInfo::new("worker", Fake, "StubWorkerAdapter"),
+        ModuleInfo::new(
+            "worker",
+            Real,
+            "ClaudeCodeAdapter via build_worker; does not run the sandbox binary",
+        ),
         ModuleInfo::new(
             "models",
             Fake,

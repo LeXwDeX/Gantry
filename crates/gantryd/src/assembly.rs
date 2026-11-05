@@ -29,7 +29,7 @@ use gantry_core::ports::models::ModelProvider;
 use gantry_core::ports::policy::PolicyPort;
 use gantry_core::ports::repo::{RepoService, WorktreeLocks};
 use gantry_core::ports::sandbox::SandboxService;
-use gantry_core::ports::worker::WorkerAdapter;
+use gantry_core::ports::worker::{ImageRef, WorkerAdapter};
 use gantry_core::ports::{SecretSink, SecretsError};
 use gantry_core::secret::Consumer;
 use gantry_core::time::Timestamp;
@@ -194,6 +194,15 @@ pub fn build_notify(store: &Store, ids: Arc<IdGen>) -> Arc<dyn InboxPort> {
 /// 内置模型能力数据（models.md OQ-1 / OQ-8）。
 ///
 /// `assemble_real` 尚未调用本函数；测试装配仍使用 `FakeModelProvider`。
+/// 生产 `worker` 适配器：只声明镜像、命令、非密环境变量、令牌变量与能力表。
+/// **不在本进程运行沙盒内二进制**；实际执行由沙盒中的 worker 完成。
+///
+/// K12：镜像由调用方按 `sandbox.base_image`（digest 固定）给出；M1 适配器持有固定
+/// `ImageRef`，设置刷新归 #318。生产装配缺少该设置时保持 `NotReady`，不猜默认镜像。
+pub fn build_worker(image: ImageRef) -> gantry_worker::claude_code::ClaudeCodeAdapter {
+    gantry_worker::claude_code::ClaudeCodeAdapter::new(image)
+}
+
 pub fn build_models(
     store: &Store,
     egress: Arc<dyn EgressControl>,

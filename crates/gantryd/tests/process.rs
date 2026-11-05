@@ -1440,7 +1440,7 @@ fn real_policy_approval(invalid: bool) {
         ("forge", "real"),
         ("repo", "real"),
         ("sandbox", "fake"),
-        ("worker", "fake"),
+        ("worker", "real"),
         ("models", "fake"),
         ("egress", "fake"),
         ("conversation", "fake"),
