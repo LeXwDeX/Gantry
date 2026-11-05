@@ -19,8 +19,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use gantry_core::canon::GitOid;
+use gantry_core::canon::RepoSlug;
 use gantry_core::entities::{IssueRef, PullRequestRef};
+use gantry_core::forge::PrHead;
 use gantry_core::ids::{Clock, ProjectId};
+use gantry_core::ports::context::ModuleError;
+use gantry_core::ports::forge::PrRefresher;
 use gantry_core::ports::{
     ActorCtx, Annotation, ChangedFile, CiLog, CiLogQuery, Discussion, DiscussionComment,
     DiscussionQuery, DiscussionTarget, ForgeError, ForgeReader, MirrorWant, ProjectSnapshot,
@@ -132,6 +136,66 @@ impl Reader {
             }
         }
         Err(unavailable("token rejected twice".into()))
+    }
+}
+
+#[async_trait]
+impl PrRefresher for Reader {
+    /// 审批签名前强制对账一次（api.md §7.4）：直接读 GitHub 的 PR head，不走本地快照。
+    async fn refresh_pr(
+        &self,
+        repo: &RepoSlug,
+        number: u64,
+        _ctx: &ActorCtx,
+    ) -> Result<PrHead, ModuleError> {
+        let project = self
+            .config
+            .projects
+            .values()
+            .find(|binding| &binding.project.repo == repo)
+            .map(|binding| binding.project.id)
+            .ok_or(ModuleError::NotFound)?;
+        // 有 dispatcher 时先强制对账写快照；没有时（单元测试）只读实时 head。
+        if self.reconciler.is_some() {
+            self.reconcile_now(ReconcileTarget::Pr { project, number }, _ctx)
+                .await
+                .map_err(|error| ModuleError::Unavailable {
+                    message: error.to_string(),
+                })?;
+        }
+        let value = self
+            .with_token(&project, |token| {
+                let repo = repo.clone();
+                async move { self.github.issue_or_pull(&token, &repo, number, true).await }
+            })
+            .await
+            .map_err(|error| ModuleError::Unavailable {
+                message: error.to_string(),
+            })?;
+        let head = value.get("head").ok_or_else(|| ModuleError::Unavailable {
+            message: "pull request response has no head".to_owned(),
+        })?;
+        let ref_name =
+            head.get("ref")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ModuleError::Unavailable {
+                    message: "pull request head has no ref".to_owned(),
+                })?;
+        let sha =
+            head.get("sha")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ModuleError::Unavailable {
+                    message: "pull request head has no sha".to_owned(),
+                })?;
+        let sha = GitOid::parse(sha).map_err(|error| ModuleError::Validation {
+            pointer: "/head/sha".to_owned(),
+            message: error.to_string(),
+        })?;
+        Ok(PrHead {
+            ref_name: ref_name.to_owned(),
+            sha,
+            repo: repo.clone(),
+        })
     }
 }
 

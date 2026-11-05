@@ -210,10 +210,12 @@ pub enum MirrorWant { Branch(String), Oid(GitOid), All }
 ```rust
 // crates/gantry-forge/src/lib.rs（本 crate 的装配面，不是跨模块端口）
 
-/// `core::ports::PrRefresher`（core.md §6.10，跨泳道，P-51）：api 在 `grant` 前强制对账；由同一实现提供，M0 替身为 `FakeForge`。
+/// `core::ports::PrRefresher`（core.md §6.10，跨泳道，P-51）：api 在 `grant` 前强制对账；由 `Reader` 实现，M0 替身为 `FakeForge`。
 #[async_trait::async_trait]
-impl PrRefresher for ForgeImpl {
-    async fn refresh_pr(&self, repo: &RepoSlug, number: u64) -> Result<PrHead, ModuleError>; // = ForgeReader::reconcile_now(Pr) 后读快照
+impl PrRefresher for Reader {
+    async fn refresh_pr(&self, repo: &RepoSlug, number: u64, ctx: &ActorCtx) -> Result<PrHead, ModuleError>;
+    // 有 reconciler 时先 reconcile_now(Pr) 写快照，再读 GitHub 的 head.ref / head.sha；
+    // 无 reconciler（单元测试）时只读实时 head。repo 未绑定返回 NotFound。
 }
 
 /// Webhook 入口：POST /webhook 与 GET /setup/github/callback（§7.14）。gantryd 把它挂在独立的回环监听
