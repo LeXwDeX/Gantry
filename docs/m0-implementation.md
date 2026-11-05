@@ -1,6 +1,6 @@
 # M0 实施与验收边界
 
-> **历史记录，不作为规格。** 本文是 M0 时期的实施与验收过程记录，保留作追溯。现行规格见 [architecture.md](architecture.md)、[decisions.md](decisions.md)、[interfaces/](interfaces/) 与 [modules/](modules/)，当前状态见 [AGENTS.md](../AGENTS.md) 与 [NEXT-STEPS.md](../NEXT-STEPS.md)；与现行文档冲突时以现行文档为准。
+> **历史记录，不作为规格。** 本文是 M0 时期的实施与验收过程记录，保留作追溯。现行规格见 [architecture.md](architecture.md)、[decisions.md](decisions.md)、[interfaces/](interfaces/) 与 [modules/](modules/)，当前状态见 [AGENTS.md](../AGENTS.md) 与本地未追踪的 `NEXT-STEPS.md`；与现行文档冲突时以现行文档为准。
 
 本次工作只交付后端开发基线、共享契约与测试替身，不修改 `apps/**`，不实现 M1 的真实业务，也不提交或推送 Git。
 
@@ -272,7 +272,7 @@ Rust 通过数：core 264、fakes 65、store 37、xtask 2。两项 ignored 仍�
 6 显式未验证，不表述为全部 Rust 类型验证通过。
 
 环境：Darwin 27.2.0 arm64；rustc/cargo 1.97.0、Node 26.12.0、npm 11.20.0。
-本机未安装 Rust 1.85。独立终审结果见 [本轮跟进记录](m0-review-followups.md#第八轮-r1p3-诊断回显收尾2026-10-25)。
+本机未安装 Rust 1.85。独立终审结果见本地未追踪的 `docs/m0-review-followups.md`（第八轮 R1P3 诊断回显收尾，2026-10-25）。
 验收范围仅本轮诊断加固和 B1–B9 原始缺陷的现有回归，不代表完整 M0 冻结或生产后端完成。
 14 个未定事件 data、`ConfigView.injection` 非空形状、8 种 drift 形状仍保留；Rust 1.85、
 Linux/Windows、真实 SQLite/GitHub/Sandbox/PKI、生产授权、前后端联调及 M1 均未验证。

@@ -36,7 +36,7 @@ D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计
 
 ## 提议（默认采用，可推翻）
 
-P-47–P-70 来自[第二轮裁决](reviews/2026-10-24-rulings-round2.md)（产品负责人代理，C1–C24）；同一轮的 C25–C29 是契约小修，直接落在相应文档里，不另立编号。被修订的旧条目保留原文，并在条目末尾注明"已被 P-xx 修订"。P-71–P-82 是最后一批裁决（2026-10-24，产品负责人代理），落实情况见[终审记录](reviews/2026-10-24-final-review.md)。
+P-47–P-70 来自第二轮裁决（产品负责人代理，C1–C24，记录在本地未追踪的 `docs/reviews/2026-10-24-rulings-round2.md`）；同一轮的 C25–C29 是契约小修，直接落在相应文档里，不另立编号。被修订的旧条目保留原文，并在条目末尾注明"已被 P-xx 修订"。P-71–P-82 是最后一批裁决（2026-10-24，产品负责人代理），落实情况见本地未追踪的 `docs/reviews/2026-10-24-final-review.md`。
 
 | # | 决策 | 理由 |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ P-47–P-70 来自[第二轮裁决](reviews/2026-10-24-rulings-round2.md)（产�
 | P-48 | **Gantry 不修改 `.github/workflows/`**：App 不申请 `workflows` 权限；补丁触及 workflow 文件时 `policy` 一律拒绝（`failure_detail = policy.path_protected:workflows`），上报 `decision_needed`（`payload.kind = manual_action`），附补丁供用户手动应用。依赖清单与 lockfile 仍按 P-11 / P-19：M1 拒绝，M2 起需要审批（C2） | 没有 `workflows` 权限 GitHub 本身也会拒绝推送；改 CI 等于借 CI 的 secrets 执行代码，宁可让人手动做 |
 | P-49 | **沙盒身份用每个尝试一枚的能力令牌 `job_token`**：服务端为每个 Attempt 签发，放在模型 API base URL 路径中（`http://<egress>/j/<job_token>/<provider>/…`），只对该尝试有效、尝试结束即作废、只能从沙盒网段使用；Egress 校验令牌并按尝试计量。沙盒即使读到令牌也只能给自己的尝试记账（C3）（"只能从沙盒网段使用"的强制方式已被 P-73 修订：标"需核实"，能力令牌本身是安全底线；包仓库 `CONNECT` 的携带方式见 P-72） | rootless Podman 下按源地址识别沙盒不可靠；能力令牌不依赖网络拓扑，泄露的后果被限定在该尝试自身 |
 | P-50 | **Egress 控制面契约**：新增 [interfaces/egress-control.md](interfaces/egress-control.md)。`gantryd` 经主机本地 Unix socket `/run/gantry/egress.sock` 调用控制面：签发 / 吊销 `job_token`、写入 secret（只写不读）、查询 secret 是否存在（`present`）、拉取用量、签发服务令牌 `svc_token`。服务端 `models` 的模型调用走 Egress 的**回环 HTTP 反向代理**，带 `svc_token`（与 `job_token` 同一计量口径，计入会话台账或交付台账）。控制面统一称 `egress.sock`，不再使用 `models_uds`（C4）（`svc_token` 的粒度与归属已被 P-74 修订：每个服务端进程一枚，每次调用带 `X-Gantry-Ledger`） | 几份模块规格各自给 Egress 接口留了缺口；计量只有一个事实源、一套口径 |
-| P-51 | **共享端口与替身**：所有跨模块端口 trait 定义在 `core::ports`（M0 交付）：`ForgeReader`、`OutboxPort`、`SandboxService`、`ModelProvider`、`RepoService`、`PolicyPort`、`InboxPort`、`EgressControl`。M0 替身补齐：`Store::open_in_memory`、`FakePolicy`、`FakeInbox`、HTTP 级 `FakeGitHub`（供 `forge` 测试）、`EgressStub`（C5）（替身清单已被 P-81 修订：加入 `MemorySecrets`；终审按本条原则把跨泳道的服务接口也收进 `core::ports`，见 [终审记录](reviews/2026-10-24-final-review.md)） | 端口放在被依赖方的 crate 里会让替身与调用方互相等待；放进 `core` 才能真正并行 |
+| P-51 | **共享端口与替身**：所有跨模块端口 trait 定义在 `core::ports`（M0 交付）：`ForgeReader`、`OutboxPort`、`SandboxService`、`ModelProvider`、`RepoService`、`PolicyPort`、`InboxPort`、`EgressControl`。M0 替身补齐：`Store::open_in_memory`、`FakePolicy`、`FakeInbox`、HTTP 级 `FakeGitHub`（供 `forge` 测试）、`EgressStub`（C5）（替身清单已被 P-81 修订：加入 `MemorySecrets`；终审按本条原则把跨泳道的服务接口也收进 `core::ports`，见本地未追踪的 `docs/reviews/2026-10-24-final-review.md`） | 端口放在被依赖方的 crate 里会让替身与调用方互相等待；放进 `core` 才能真正并行 |
 | P-52 | **沙盒端口分两层**：`SandboxService`（引擎面：提交 JobSpec、等待结果、取消）与 `SandboxDriver`（容器面：rootless Podman + gVisor 的具体操作）。`engine` 只依赖 `SandboxService`（C6） | 引擎不该知道容器细节；驱动可替换（Firecracker）而不动引擎 |
 | P-53 | **Outbox 失败语义**：临时错误留在 `queued`，以 `not_before` 退避重试，不进入 `failed`；重试用尽或不可重试错误才进入终态 `failed`，只在终态发 `outbox.failed`；人工重试创建新动作（新 `epoch`）。删除 `failed → queued` 边（C7） | `failed` 既表示"会重试"又表示"已放弃"时，消费者无法据事件决定是否上报 |
 | P-54 | **审批动作标识与形状**：`Approval.action` ∈ `ForgeActionKind` ∪ {`settings_update`、`device_role_change`、`device_revoke`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、`patch_apply_protected`}。每个动作的 `target` 与 `subject_digest` 形状在 [data-model](data-model.md#审批动作的-target-与-subject_digest) 中列表定义；未定义形状的动作一律 fail-closed（按拒绝处理并上报）。**审批在执行开始前消费**（`consumed`，记录消费方的 Outbox 动作 ID 或尝试 ID）；执行终态失败不退回，需要新审批（C8） | 形状不确定就无法规范化签名；"成功后消费"会让失败重试反复使用同一授权 |

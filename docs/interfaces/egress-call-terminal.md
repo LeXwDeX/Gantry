@@ -1,7 +1,7 @@
 # 调用级终结（B-01）
 
 > 状态：2026-10-27 批准（#82 Q1–Q7 答复）。本文是 [egress-control.md](egress-control.md) §4.3 / §4.5 的补充，与之同级；两者冲突时提 issue，不自行取舍。
-> 来源：方向来自 [M0 契约冻结提案 §2.2.6.4](../m0-contract-proposal.md)（2026-10-26 确认方向及墓碑存储代价）；字段、HTTP 形状、错误码与保留期按 #82 的答复定稿。
+> 来源：方向来自 M0 契约冻结提案 §2.2.6.4（`docs/m0-contract-proposal.md`，本地未追踪；2026-10-26 确认方向及墓碑存储代价）；字段、HTTP 形状、错误码与保留期按 #82 的答复定稿。
 > 范围：在既有 revoke / usage 端点上增加调用级关闭与只读终结证明，不新增路由、不新增错误码、不新增 ack 接口。
 > 端口：`core::ports::egress::EgressControl::close_call` / `call_terminal`；线上类型在 `core::egress`（`RevokeSvcTokenRequest`、`CloseCallResponse`、`CallTerminal`）。
 

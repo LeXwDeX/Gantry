@@ -6,7 +6,7 @@ Gantry（龙门架）是 [GraphAgent](https://github.com/LeXwDeX/OpenCode-GraphA
 
 **状态：M0 统一开发基线已合入，M1 进行中（只完成引擎的局部）。** 已有 Rust 领域核心、跨模块端口、内存存储与测试替身、可运行的内存模拟接口（Mock API）和浏览器模拟场景（scenario）前端，以及引擎的事件写入与控制面。前后端尚未接线，真实前后端联调未验证。
 
-M0 契约文本已于 2026-10-27 由用户统一批准。真实业务、持久化服务和生产鉴权尚未实现；前端不是生产客户端或桌面安装包。当前状态与目录入口见 [AGENTS.md](AGENTS.md)，迭代计划见 [NEXT-STEPS.md](NEXT-STEPS.md)。
+M0 契约文本已于 2026-10-27 由用户统一批准。真实业务、持久化服务和生产鉴权尚未实现；前端不是生产客户端或桌面安装包。当前状态与目录入口见 [AGENTS.md](AGENTS.md)，迭代计划见本地未追踪的 `NEXT-STEPS.md`（已冻结）。
 
 ## 本地接入
 
@@ -53,7 +53,7 @@ npm test --prefix apps/desktop
 npm run build --prefix apps/desktop
 ```
 
-场景构建与端到端检查指引见[前端说明](apps/desktop/README.md#检查与构建)。上述命令检查当前实现，不代表真实联调通过或未定契约已经冻结。完整边界见 [M0 实施记录](docs/m0-implementation.md)和[契约缺口](docs/m0-contract-gaps.md)。[M0 契约冻结提案](docs/m0-contract-proposal.md)仍是未批准草案，不是权威契约；须先经独立契约 PR 批准，再另获授权实施。
+场景构建与端到端检查指引见[前端说明](apps/desktop/README.md#检查与构建)。上述命令检查当前实现，不代表真实联调通过或未定契约已经冻结。完整边界见 [M0 实施记录](docs/m0-implementation.md)和[契约缺口](docs/m0-contract-gaps.md)。`docs/m0-contract-proposal.md`（本地未追踪）仍是未批准草案，不是权威契约；须先经独立契约 PR 批准，再另获授权实施。
 
 ## 一句话架构
 
@@ -71,8 +71,8 @@ npm run build --prefix apps/desktop
 | [docs/modules/](docs/modules/) | 模块规格书 |
 | [docs/milestones.md](docs/milestones.md) | 可并行开发的里程碑 |
 | [docs/prototype.md](docs/prototype.md) | 界面原型说明（源码在 [prototype/](prototype/)） |
-| [docs/design.md](docs/design.md) | 设计讨论记录（历史） |
-| [docs/reviews/](docs/reviews/) | 设计评审记录 |
+| `docs/design.md`（本地未追踪） | 设计讨论记录（历史） |
+| `docs/reviews/`（本地未追踪） | 设计评审记录 |
 
 ## 许可证
 
