@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件是 agent 进入本仓库的入口，写三件事：**项目当前情况**、**架构与目录入口**、**开发规约**。先读本文，再按"领取工作"的流程开工。每个里程碑收尾时更新本文件（见"里程碑收尾"）。
+本文件是 agent 进入本仓库的入口，写三件事：**项目当前情况**、**架构与目录入口**、**开发规约**。先读本文，再按"领取工作"的流程开工。
 
 ## 1. 项目当前情况
 
@@ -11,13 +11,13 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 - **M0 统一开发基线已合入。** 已有领域核心、跨模块端口、内存存储、测试替身、内存模拟接口（Mock API）和浏览器模拟场景前端。M0 各份契约文本已于 2026-10-27 由用户统一批准。M0.9 只剩 #86（#292 已由 PR #324 修复并关闭）。
 - **M1.1、M1.2、M1.3 的 issue 与里程碑均已关闭。** M1.1 18/18、M1.2 16/16、M1.3 6/6。#289 于 2026-10-29 依用户确认关闭：引擎侧三项前置（settings 换算 `from_settings`、默认 `EqualShareReservation`、`status()`）由 PR #323 合入；真实消费路径归 #105，自动热加载归 #318，在途预留归 #317。已关闭 issue 不等于实现满足每条规格边界，评审发现见 [M1.1–M1.3 评审](docs/reviews/2026-10-27-m1-closeout-review.md) 和 [M1.3 收尾评审](docs/reviews/2026-10-29-m13-closeout-review.md)。
 - **服务端各模块已有 crate，证据主要来自替身和模块测试。** `api`、`forge`、`repo`、`sandbox`、`worker`、`egress`、`models`、`policy`、`notify`、`conversation`、`pki`、`secrets` 和 store 的 SQLite 持久层都已实现；#105 已合入若干跨模块联测切片（SQLite 跨进程重启、真实策略审批、Forge 执行前审批消费、真实 Git 仓库与持久存储、仓库/沙盒与存储 CAS、执行器补丁策略链），#319 的内置 schema 注册表与 #362 的任务身份已合入。这些仍是本机联测，不等于真实 GitHub、模型、Podman 或密钥环境已联调。
-- **生产装配未闭合。** `gantryd` 的 `assemble_real` 总是返回 `NotReady`（`crates/gantryd/src/assembly.rs:347-351`），生产二进制没有替身回退；测试替身装配在 `crates/gantryd/tests/support/`，已用 `from_settings` 与 `ModelsView` 换算配置，#323 的三个入口已由测试装配调用，生产 `assemble_real` 尚未调用（见 M1.3 收尾评审 N1 与 #105 评论）。
+- **生产装配未闭合。** `gantryd` 的 `assemble_real` 总是返回 `NotReady`（`crates/gantryd/src/assembly.rs:347-351`），生产二进制没有替身回退；模块都有代码，不代表能在生产路径一起运行。测试替身装配在 `crates/gantryd/tests/support/`，已用 `from_settings` 与 `ModelsView` 换算配置，#289 的前置（#323 的三个入口）已由测试装配调用，生产 `assemble_real` 尚未调用；真实装配与跨泳道集成归 #105（见 M1.3 收尾评审 N1 与 #105 评论）。
 - **当前里程碑**：[M1.4 M1 验收](https://github.com/LeXwDeX/gantry/milestone/5)。下一条主线是 #105（A 级跨泳道集成、真实装配）；#280、#405 可并行；#106 B 级本机 Ubuntu 虚拟机、#107 C 级外部资源都需先征求用户确认，C 级还需要真实资源。M1.4 开放 #105–#107、#280、#405；#305、#378、#401、#409 已关闭。全局顺序见 [NEXT-STEPS.md](NEXT-STEPS.md)。
 - **工作区规模**：20 个 package，即 19 个 `crates/*` 加 `apps/desktop/src-tauri/shell-core`。Tauri 应用本身（`apps/desktop/src-tauri`）因系统 WebView 依赖不在根 workspace 内。
 - **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock 等边界已静态核对；前端有 scenario、mock、Tauri 三种适配器，Tauri 适配器的参数形状与路由表已有对账测试（#370，PR #374），真实服务端联调尚未证明。
-- **验收口径**：替身测试通过不等于真实环境通过。M1 各条退出标准分三级取证：本机替身、本机虚拟机、外部资源。见 [M1 验收证据分级](docs/m1-acceptance.md)；宣布方式已定为两步：A + B 级全绿记为「M1 本机验收通过」，C 级全绿记为「M1 退出」（#87）。
-- **验证状态**：各 PR 描述记录了合入前的全工作区本机门槛结果；M1.3 收尾评审 PR 在合入后的结果上复跑了全部门槛（含 MSRV 1.85 的 `--all-targets`）。本机门槛不能替代真实环境证据。
-- **已知外部阻塞**：开发阶段改用测试机上的自体 CI（见 §3「CI 与发布流程」）；Azure Pipelines 配置（`.azure-pipelines/ci.yml`，#375）尚未实际跑通；GitHub Actions 仍因账户计费问题不可用（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
+- **验收口径**：替身测试通过不等于真实环境通过。M1 各条退出标准分三级取证：本机替身、本机虚拟机、外部资源。见 [M1 验收证据分级](docs/m1-acceptance.md)；宣布方式已定为两步：A + B 级全绿记为「M1 本机验收通过」，C 级全绿记为「M1 退出」（#87）。本机门槛也不能替代真实环境证据。
+- **验证状态**：各 PR 描述记录了合入前的全工作区本机门槛结果；M1.3 收尾评审 PR 在合入后的结果上复跑了全部门槛（含 MSRV 1.85 的 `--all-targets`）。
+- **已知外部阻塞**：没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
 
 ## 2. 架构与目录入口
 
@@ -33,7 +33,7 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 | 里程碑、泳道、替身清单 | [docs/milestones.md](docs/milestones.md) |
 | 评审记录（只读） | [docs/reviews/](docs/reviews/) |
 | 当前迭代状态与后续规划 | [NEXT-STEPS.md](NEXT-STEPS.md) |
-| **本机接手入口**：交接状态、协作约定、下一步逐步执行清单 | 根目录本地 `handoff.md`（如有，不入库）；公共迭代状态见 [NEXT-STEPS.md](NEXT-STEPS.md) |
+| **本机接手入口**：交接状态、协作约定、下一步逐步执行清单 | 根目录本地 `handoff.md`（如有，不入库） |
 | 界面原型 | [docs/prototype.md](docs/prototype.md)，源码在 `prototype/` |
 
 文档冲突时的优先级：`decisions.md`（已确定）> `architecture.md` 不变式 > `interfaces/` > `modules/` > 其余。`docs/design.md` 是历史讨论，不作为规格；`docs/m0-contract-proposal.md` 是未批准草案，不是权威契约。
@@ -48,12 +48,12 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 | `crates/gantry-api`、`crates/gantry-conversation`、`crates/gantry-notify` | HTTP/SSE、会话与意图、收件箱与通知 | 已有实现并主要对接替身；读路由和投影缺口见 #280，通知计数见 #296，引用解析见 #297 |
 | `crates/gantry-forge`、`crates/gantry-repo` | Outbox 执行、GitHub App/webhook/对账、镜像仓、工作树、补丁应用与提交 | 写串行、审批闭合、`head_epoch`、`ForgeReader`、HTTPS 与仓库恢复疑点见 #298、#301、#303、#308、#312 |
 | `crates/gantry-sandbox`、`crates/gantry-worker`、`crates/gantry-egress`、`crates/gantry-models` | Rootless Podman 驱动、Claude Code 适配、Egress 代理与计量、模型路由 | 已有实现和替身测试；真实 Podman、模型与密钥环境未验证；#294、#295、#304、#311、#314 跟踪令牌、对账、恢复与错误路径 |
-| `crates/gantry-policy`、`crates/gantry-pki`、`crates/gantry-secrets` | 策略与审批、证书与配对、加密存储与按使用方隔离 | 审批恢复、吊销日志和密钥边界仍有待复核项 #315；不能把审批保护写成已全部通过 |
-| `crates/gantry-deploy`、`crates/gantryd` | 安装/CLI/doctor、单进程装配与控制通道 | `assemble_real` 仍返回 `NotReady`；#289 引擎侧前置已由测试装配调用，生产未调用；真实装配与跨泳道集成归 #105；#314 跟踪生命周期疑点；生产主密钥与 `pki.ca_dir` 由 #405 的 K4/K5 拍板，C2/C3 待做 |
-| `crates/gantry-fakes` | `core::ports` 各端口的测试替身（`FakeForge`、`FakeSandboxService`、`FakeRepo`、`FakePolicy`、`FakeInbox`、`FakeGitHub` 等） | 只用作 dev-dependency；`gantryd` 的进程级替身装配在 `crates/gantryd/tests/support/` |
+| `crates/gantry-policy`、`crates/gantry-pki`、`crates/gantry-secrets` | 策略与审批、证书与配对、加密存储与按使用方隔离 | 审批恢复、吊销日志和密钥边界仍有待复核项 #315 |
+| `crates/gantry-deploy`、`crates/gantryd` | 安装/CLI/doctor、单进程装配与控制通道 | `assemble_real` 与 #289 前置、#105 的现状见第 1 章「生产装配未闭合」；#314 跟踪生命周期疑点；生产主密钥与 `pki.ca_dir` 由 #405 的 K4/K5 拍板，C2/C3 待做 |
+| `crates/gantry-fakes` | `core::ports` 各端口的测试替身（`FakeForge`、`FakeSandboxService`、`FakeRepo`、`FakePolicy`、`FakeInbox`、`FakeGitHub` 等） | 只用作 dev-dependency；`gantryd` 的进程级替身装配位置见第 1 章「生产装配未闭合」 |
 | `crates/gantry-xtask` | `cargo xtask schemas`：从 core 类型生成 `schemas/`，检查漂移、元校验、夹具，以及与 OpenAPI 的一致性 | `schemas/openapi.yaml` 归 api 契约，xtask 只读不写 |
 | `apps/desktop/src-tauri/shell-core` | 桌面外壳的可信逻辑：设备密钥、mTLS、配对、事件流、审批签名 | 根 workspace 成员（package `gantry-desktop-shell`）；测试可用软件密钥，但正式外壳不启用；审批恢复疑点见 #315 |
-| `apps/desktop` | React + TypeScript + Vite 前端与 Tauri 应用 | 前端有 scenario、mock、Tauri 三种适配器；**真实服务端联调尚未证明**；Tauri 适配器已有对账测试（#370，PR #374）。Tauri 应用本身不在根 workspace；边界规则见 [apps/desktop/README.md](apps/desktop/README.md) |
+| `apps/desktop` | React + TypeScript + Vite 前端与 Tauri 应用 | 适配器与联调状态见第 1 章「桌面端」；边界规则见 [apps/desktop/README.md](apps/desktop/README.md) |
 | `schemas/` | 契约的机器可读版本：`events/`、`entities/`、`worker/`、`forge/`、`config/`、`egress/` 由 xtask 生成；`openapi.yaml` 手写 | 生成的文件不要手改 |
 | `fixtures/` | `api/`（Mock 与前端共用）、`contracts/`（xtask 生成） | 事件正反例夹具在 `crates/gantry-core/fixtures/events/cases.json` |
 | `tools/mock-api` | Node 内存模拟接口，监听 `127.0.0.1:8787` | 路由与形状来自 `openapi.yaml`；不是生产服务端 |
@@ -61,9 +61,8 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 ### 跨文件才能看清的结构
 
 - **契约链**：文档（`docs/interfaces/`、`data-model.md`）→ `gantry-core` 的类型与校验 → `cargo xtask schemas` 生成 `schemas/` → 夹具正反例。CI 用 `git diff --exit-code -- schemas fixtures` 卡住漂移。改契约要沿这条链一起改。
-- **事件溯源**：所有状态变化都是事件。`store` 是唯一写入点（单写者事务）；SQLite 已由 `assemble_real` 打开，但其余模块尚未接齐，生产装配仍返回 `NotReady`；投影随时可以丢弃重建。引擎的设计是"事务内纯决策 + 提交后副作用"，见 engine.md §7.1、§7.14。
+- **事件溯源**：所有状态变化都是事件。`store` 是唯一写入点（单写者事务）；投影随时可以丢弃重建。引擎的设计是"事务内纯决策 + 提交后副作用"，见 engine.md §7.1、§7.14。
 - **端口与替身**：凡是调用方和提供方分属不同泳道的接口，trait 都放在 `core::ports`（P-51），替身放在 `gantry-fakes`，写接口的上下文统一用 `ActorCtx`（P-78）。实现方只依赖端口，不依赖对方 crate。**这是本轮抽样核对后的边界结论，不是全部边界的验收结果**：审批保护、SSE 角色刷新、Forge 写串行等仍有已登记缺口或待复核疑点（#293–#315），不能据此说这些路径已全部通过。
-- **生产装配边界**：`assemble_real` 目前拒绝启动并返回 `NotReady`；模块都有代码，不代表能在生产路径一起运行。#289 的引擎前置已由测试装配调用，生产仍未调用；真实装配与跨泳道替换归 #105；测试替身装配只存在于 `crates/gantryd/tests/support/`。
 - **信任边界**：沙盒只做计算（I1），GitHub 写入只经 Outbox（I2），放行只由 `policy` 决定（I3），外部文本一律不可信（I5）。仓库内的 `.claude/`、hooks、`.mcp.json` 不能成为 agent 的权限或配置来源。I1–I8 的局部证据与已知缺口见本轮评审记录；不能说 I1–I8 已全部满足。
 
 ## 3. 开发规约
@@ -84,7 +83,7 @@ npm ci --prefix apps/desktop && npm run lint --prefix apps/desktop && npm run ty
 npm run build --prefix apps/desktop
 ```
 
-跑单个测试：`cargo test --locked -p gantry-engine --test engine_level lowering`。`gantry-store` 的集成测试依赖 `testing` feature，要加 `--all-features`，否则几乎全部被跳过，只剩 1 项。前端单个测试：`npm test --prefix apps/desktop -- <文件名片段>`（vitest 按文件名过滤）。MSRV 是 Rust 1.85，自体 CI 另跑一遍 `cargo check`；Node 需要 22 以上。
+跑单个测试：`cargo test --locked -p gantry-engine --test engine_level lowering`。`gantry-store` 的集成测试依赖 `testing` feature，要加 `--all-features`，否则几乎全部被跳过，只剩 1 项。前端单个测试：`npm test --prefix apps/desktop -- <文件名片段>`（vitest 按文件名过滤）。MSRV 是 Rust 1.85；Node 需要 22 以上。
 
 ### 规则
 
@@ -101,18 +100,18 @@ npm run build --prefix apps/desktop
 1. 在当前里程碑里领一个 issue，读它的范围、完成标准和依赖。
 2. 读 `docs/modules/<模块>.md` 全文，以及它在"依赖""输入""输出"里引用的 `interfaces/` 契约和 `data-model.md` 章节；读 `architecture.md` §5，确认本模块要保证哪几条不变式。
 3. 只修改本模块的目录；需要改契约时先开契约 PR。
-4. 合并前在自体 CI 跑完上面的检查（见下节），结果写进 PR 描述。
+4. 合并前按「开发与发布流程」跑完自建 CI，结果写进 PR 描述。
 
-### CI 与发布流程
+### 开发与发布流程
 
-按以下顺序推进，前一关不全绿不进下一关：
+通用发布流程（自建 CI → GitHub Runner → 人工 Review → tag + GitHub Release）见用户全局提示词；本节只记录本项目特有的要求。
 
-1. **自体 CI（开发阶段，只做 Linux）**：在测试机的项目工作目录下建 `ci/`，放 CI 用的 Docker 镜像定义与运行脚本；容器内从干净检出跑完"常用命令"全套门槛（Rust 门槛含 MSRV、xtask 漂移检查、mock-api 与桌面前端）。PR 合并依据是自体 CI 全绿，不是开发机本机结果。不做 Windows / macOS 构建。
-2. **GitHub 最终 runner**：自体 CI 上所有问题都解决后，再在 GitHub 侧 runner 跑一次作为发布前终检；它不承担日常开发反馈。
-3. **人类评审**：终检通过的产物部署到评审机，交由人类评审。评审机只部署前序产出的镜像或产物，不在上面开发或构建；以实际健康检查和日志为验收依据。
-4. **tag + GitHub Release**：人类评审确认无问题后，才打 tag 并发布 GitHub Release。
+- **自建 CI**：容器内从干净检出跑完"常用命令"全套门槛（Rust 门槛含 MSRV、xtask 漂移检查、mock-api 与桌面前端）。PR 合并依据是自建 CI 全绿，不是开发机本机结果。不做 Windows / macOS 构建。
+- **GitHub Runner**：只作发布前终检，不承担日常开发反馈。
 
-主机约定：本仓库公开，**不写任何主机地址、IP、账号或密钥**。测试机、评审机的地址、工作目录与登录方式记录在仓库根目录的未追踪文件 `hosts.local.md`（已被 `.gitignore` 忽略）；缺失时向用户索取，不要猜测。测试机上只操作本项目目录与本项目的容器和端口，任务结束清理临时容器、镜像与文件。
+具体流水线以仓库内的流水线配置文件为准。
+
+环境细节与操作规则见用户全局提示词与不追踪的 local/ 文件（如根目录的 `hosts.local.md`，已被 `.gitignore` 忽略）；本仓库公开，不写主机地址、IP、账号。
 
 ### 里程碑收尾（每个里程碑完成后必做）
 

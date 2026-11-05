@@ -6,3 +6,11 @@ node_modules/
 .DS_Store
 .serena/
 /hosts.local.md
+
+# SpecGit 与本地 Agent 生成的本地资产（不追踪）
+/.specgit.yaml
+/.agents/skills/specgit-native/
+/.claude/skills/specgit-native/
+/.claude/settings.json
+/.opencode/hooks.json
+/CLAUDE.md
