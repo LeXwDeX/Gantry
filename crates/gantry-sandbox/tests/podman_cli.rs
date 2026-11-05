@@ -47,8 +47,12 @@ exit $code
             resp = root.path().join("resp").display(),
         );
         let bin = root.path().join("podman");
-        fs::write(&bin, script).unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        // 先写临时名再原子改名：容器文件系统（overlayfs）上直接覆盖可执行文件后
+        // 立即 exec 偶发 ETXTBSY（#463）。
+        let staging = root.path().join("podman.tmp");
+        fs::write(&staging, script).unwrap();
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&staging, &bin).unwrap();
         Self { root }
     }
 
