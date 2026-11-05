@@ -23,10 +23,14 @@ use std::time::Duration;
 use gantry_conversation::engine_api::EngineApiAdapter;
 use gantry_conversation::ports::{EngineApi, ModelsPort};
 use gantry_conversation::{Conversation, ConversationDeps, Limits};
+use gantry_core::egress::{
+    ConfigView, EgressGroup, EgressProfile, InjectionCredentialView, InjectionKind, InjectionView,
+    ProviderConfig,
+};
 use gantry_core::entities::Seq;
 use gantry_core::ids::{Clock, Entropy, IdGen};
 use gantry_core::ports::conversation::ConversationService;
-use gantry_core::ports::egress::EgressControl;
+use gantry_core::ports::egress::{EgressConfigView, EgressControl};
 use gantry_core::ports::forge::{ForgeReader, OutboxPort};
 use gantry_core::ports::inbox::InboxPort;
 use gantry_core::ports::policy::PolicyPort;
@@ -35,8 +39,9 @@ use gantry_core::ports::sandbox::SandboxService;
 use gantry_core::ports::worker::{ImageRef, WorkerAdapter};
 use gantry_core::ports::{SecretSink, SecretsError};
 use gantry_core::secret::Consumer;
-use gantry_core::settings::resource::LevelEntry;
+use gantry_core::settings::resource::{LevelEntry, Levels, Models};
 use gantry_core::time::Timestamp;
+use gantry_egress::client::EgressClient;
 use gantry_engine::engine::Engine;
 use gantry_engine::runtime::EngineRuntime;
 use gantry_forge::{
@@ -249,6 +254,114 @@ pub fn build_conversation(
         models,
         limits: Limits::default(),
     }))
+}
+
+/// `egress` 配置视图（config.md §8、K11）：`egress.*` 与从 `models.providers`
+/// 派生的模型 API 注入项、`levels.token_weights`。只含 `secret_ref`，不含秘密值。
+pub fn egress_config_view(
+    egress: &gantry_core::settings::resource::Egress,
+    models: &Models,
+    levels: &Levels,
+    rev: Seq,
+) -> EgressConfigView {
+    let groups = egress
+        .groups
+        .iter()
+        .map(|(name, group)| {
+            (
+                name.clone(),
+                EgressGroup {
+                    hosts: group.hosts.clone(),
+                },
+            )
+        })
+        .collect();
+    let profiles = egress
+        .profiles
+        .iter()
+        .map(|(name, profile)| {
+            (
+                name.clone(),
+                EgressProfile {
+                    groups: profile.groups.clone(),
+                },
+            )
+        })
+        .collect();
+    let mut injection: std::collections::BTreeMap<String, InjectionView> = egress
+        .injection
+        .iter()
+        .map(|(id, item)| {
+            let view = InjectionView {
+                hosts: item.hosts.clone(),
+                kind: match item.kind {
+                    gantry_core::settings::resource::EgressInjectionKind::Bearer => {
+                        InjectionKind::Bearer
+                    }
+                    gantry_core::settings::resource::EgressInjectionKind::Header => {
+                        InjectionKind::Header
+                    }
+                },
+                header: item.header.clone(),
+                credential: InjectionCredentialView {
+                    secret_ref: item.credential.secret_ref.clone(),
+                },
+            };
+            (id.clone(), view)
+        })
+        .collect();
+    for (id, provider) in &models.providers {
+        let host = provider
+            .base_url
+            .split_once("://")
+            .map_or(provider.base_url.as_str(), |(_, rest)| rest)
+            .split('/')
+            .next()
+            .unwrap_or_default();
+        injection.insert(
+            format!("model.{id}"),
+            InjectionView {
+                hosts: vec![host.to_owned()],
+                kind: InjectionKind::Bearer,
+                header: None,
+                credential: InjectionCredentialView {
+                    secret_ref: provider.credential.secret_ref.clone(),
+                },
+            },
+        );
+    }
+    ConfigView {
+        rev: rev.as_u64(),
+        providers: models
+            .providers
+            .iter()
+            .map(|(id, provider)| {
+                (
+                    id.clone(),
+                    ProviderConfig {
+                        kind: "anthropic".to_owned(),
+                        base_url: provider.base_url.clone(),
+                        secret_ref: provider.credential.secret_ref.clone(),
+                    },
+                )
+            })
+            .collect(),
+        groups,
+        profiles,
+        default_profile: egress.default_profile.clone(),
+        injection,
+        token_weights: levels.token_weights,
+    }
+}
+
+/// egress 控制面客户端；`gantryd` 经它下发配置与计量。实例由独立的 egress 进程提供，
+/// 本函数不启动该进程。
+pub fn build_egress(
+    socket: impl Into<std::path::PathBuf>,
+    clock: Arc<dyn Clock>,
+    issued_to: gantry_core::egress::IssuedTo,
+) -> EgressClient {
+    EgressClient::new(socket, clock, issued_to)
 }
 
 /// repo 的生产构造：`RepoDeps` 的时钟必须与 store 共用，`policy` 与 `cas` 由调用方注入。
