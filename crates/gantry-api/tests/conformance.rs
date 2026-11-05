@@ -44,5 +44,5 @@ async fn shared_http_behaviour_passes_against_the_real_api() {
         output.status.success(),
         "shared behaviour failed against gantry-api:\n{stdout}\n{stderr}"
     );
-    assert!(stdout.contains("ℹ pass 7"), "{stdout}");
+    assert!(stdout.contains("ℹ pass 8"), "{stdout}");
 }

@@ -202,7 +202,7 @@ pub fn harness(handler: Option<Arc<dyn RouteHandler>>) -> Harness {
     .unwrap();
     let devices = Arc::new(Devices::default());
     let engine = Arc::new(gantry_fakes::engine::FakeEngine::new());
-    let conversation = Arc::new(doubles::ConvFaults::new());
+    let conversation = Arc::new(doubles::ConvFaults::new(store.clone()));
     let idempotency = Arc::new(MemoryIdempotency::new(clock.clone()));
     let svc = Services {
         clock: clock.clone(),

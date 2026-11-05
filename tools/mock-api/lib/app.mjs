@@ -764,6 +764,15 @@ export async function createMockApplication({ specPath, heartbeatMs = 15000 } = 
     return { status: 200, body: paginate(items, context.query) };
   }
 
+  function handleListConversations(context) {
+    const project = findById(state.projects, context.params.project_id);
+    if (!project) {
+      throw new HttpProblem(404, "not_found", "project not found");
+    }
+    const items = context.fixture.items.filter((item) => item.project_id === project.id);
+    return { status: 200, body: paginate(items, context.query) };
+  }
+
   function handleListMessages(context) {
     const conversation = findById(state.conversations, context.params.conversation_id);
     if (!conversation) {

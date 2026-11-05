@@ -855,12 +855,6 @@ impl ConversationService for Conversation {
                 message: "unknown cursor".into(),
             });
         }
-        if page.order.is_some() {
-            return Err(ConvError::InvalidRequest {
-                pointer: "/order".into(),
-                message: "conversations do not support an explicit order".into(),
-            });
-        }
         // 投影与 head 必须来自同一快照（api.md §3.6）。
         let mut snapshot = self.store.snapshot().await.map_err(port_error)?;
         let head = snapshot.head_seq();
