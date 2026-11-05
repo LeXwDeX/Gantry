@@ -388,7 +388,7 @@ gantry+pair://<pair_host>:<pair_port>/?v=1&fp=sha256:<64 位十六进制>&t=<tok
 ### 7.6 吊销与断流
 
 - `revoke` 事务内：追加 `device.revoked`（`data`：`device_id`、`cert_serials[]`、`remaining_approvers`、可选 `via`；`store` 的 `devices` 投影据此置 `status = revoked`），并把该设备全部 `pki_device_certs.status` 置 `revoked`。事件提交之后由本模块订阅 `device.revoked` 并广播 `RevocationNotifier`。
-- **`revocations.journal`**（P-67、P-80）：在 `revoke` 事务提交**之前**，向 `<pki.data_dir>/revocations.journal` 追加一行并 `fsync`，并**同步复制到备份目标**（`deploy` 的引导配置 `backup.journal_target`，同样追加并 `fsync`；复制失败 → 整个吊销失败）：`{v:1, device_id, cert_serials[], approval_pubkey_fpr, revoked_at, actor, via?, log_id, log_epoch}`（JSON Lines，`O_APPEND`，服务用户 0600）。追加失败 → 整个吊销失败（失败即关闭，审批保持 `granted` 可重试）。事务随后回滚的情形下文件里会多出一行：重放时会把这台设备也吊销——偏向安全，且该吊销本就是已签名审批所要的结果。文件只追加、从不改写；**不放进 `store` 的备份副本，也不随恢复被覆盖**（P-80：事务回滚也不删除已写条目；`deploy` 的恢复命令必须保留现有文件，architecture §6）；主机应急命令 `recover --revoke` 同样写入。
+- **`revocations.journal`**（P-67、P-80）：在 `revoke` 事务提交**之前**，向 `<server.data_dir>/pki/revocations.journal` 追加一行并 `fsync`，并**同步复制到备份目标**（`deploy` 的引导配置 `backup.journal_target`，同样追加并 `fsync`；复制失败 → 整个吊销失败）：`{v:1, device_id, cert_serials[], approval_pubkey_fpr, revoked_at, actor, via?, log_id, log_epoch}`（JSON Lines，`O_APPEND`，服务用户 0600）。追加失败 → 整个吊销失败（失败即关闭，审批保持 `granted` 可重试）。事务随后回滚的情形下文件里会多出一行：重放时会把这台设备也吊销——偏向安全，且该吊销本就是已签名审批所要的结果。文件只追加、从不改写；**不放进 `store` 的备份副本，也不随恢复被覆盖**（P-80：事务回滚也不删除已写条目；`deploy` 的恢复命令必须保留现有文件，architecture §6）；主机应急命令 `recover --revoke` 同样写入。
 - **恢复后重放**：`deploy` 的恢复命令在 `Store::restore_from` 之后、启动 `gantryd` 之前调用 `replay_revocations`（离线模式，§7.8）：逐行读取（本地文件与备份目标上的副本取并集，按行去重），重放 `revoked_at` 晚于备份时刻的条目（P-80；更早的条目已在备份里生效），对恢复后的库里仍为 `active` 的设备执行与 `revoke` 相同的写入（`device.revoked`，`data.via = "journal_replay"`，`actor = {system, pki}`）；库里不存在的设备（备份早于其配对）跳过并计数；已吊销的跳过。重放本身幂等，也会在每次 `Pki::open` 时以只读方式核对一次，发现未生效的吊销则拒绝启动并提示运行恢复命令。
 - **新握手**：下一次握手即被拒（§7.3 第 4 步，直接读库，没有缓存可过期）。**会话恢复与 0-RTT 会绕过握手时的证书检查**，所以 `api` 的 `ServerConfig` 必须关闭会话票据与会话缓存、`max_early_data_size = 0`（见 [modules/api.md §7.2](api.md)）；本模块的验收含一个"吊销后无法恢复会话"的联调测试。
 - **已建立的连接**：HTTP 请求在每个请求的步骤 2 复查 `Device.status`；事件流 M1 由 `api` 在每次心跳（15 s）读 `directory.get`，≤ 60 s 内断开（P-30）；M3 起 `api` 订阅 `RevocationNotifier` 即时断开，心跳检查保留为兜底。
@@ -487,13 +487,14 @@ pub trait PkiControl: Send + Sync {
 | 配置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `pki.data_dir` | `deploy` 定 | 根证书（公钥）、中间 / 服务端证书 PEM |
-| `pki.server_names` | `deploy` 定 | 服务端叶子 SAN；变化触发重新签发 |
+| `[pki] ca_dir` | `/etc/gantry/ca` | **必填、绝对路径**（P-87）；启动时校验目录存在、三张证书齐全、无符号链接，缺失即退出，不新建 CA |
+| `pki.server_names` | 复用 `server.api.san` | 服务端叶子 SAN；变化触发重新签发 |
 | `pki.pair_listen` / `pki.api_listen` / `pki.api_base_url` | `deploy` 定 | 端口由部署决定，api.md 不固定；`api_base_url` 写入配对响应 |
 | `pki.root_validity` | 10 年 | 仅 `bootstrap` |
 | `pki.intermediate_validity` | 2 年 | `bootstrap` 与 `rotate` |
 | `pki.server_cert_validity` / `pki.server_cert_renew_before` | 90 天 / 30 天 | — |
 | `pki.client_cert_validity` | 30 天 | 客户端在剩余 1/3 时经 `renew` 自动续期（P-64） |
-| `pki.revocations_journal` | `<pki.data_dir>/revocations.journal` | 只追加；不进 `store` 备份、恢复时保留（P-67）；每次写入同步复制到备份目标 `backup.journal_target`（`deploy` 的引导配置，P-80） |
+| `pki.revocations_journal` | `<server.data_dir>/pki/revocations.journal` | 只追加；不进 `store` 备份、恢复时保留（P-67）；每次写入同步复制到备份目标 `backup.journal_target`（`deploy` 的引导配置，P-80） |
 | `pki.not_before_skew` | 5 分钟 | — |
 | `pki.superseded_grace` | 旧证书原 `notAfter` | 续期后旧证书在到期前仍可握手（P-64）；中间 CA 退役等强制场景另行吊销 |
 | `pki.pair_token_ttl` | 10 分钟 | design.md 示例 |

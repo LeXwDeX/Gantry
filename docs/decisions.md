@@ -122,6 +122,7 @@ P-47–P-70 来自第二轮裁决（产品负责人代理，C1–C24，记录在
 | P-80 | **`revocations.journal`**：只追加；每次写入在吊销事务提交前 `fsync`，并**同步复制到备份目标**（复制失败则吊销失败）；从备份恢复时重放时间戳晚于备份时刻的条目；事务回滚**不删除**已写的条目（重放时照样吊销，偏向安全） | 吊销日志必须比事件日志的备份更新，否则恢复会让被吊销设备复活 |
 | P-81 | **M0 替身清单加入 `MemorySecrets`**：`secrets` 的读写 trait 与内存实现在 M0 冻结与交付，供 `forge`、`pki`、`egress`、`api` 与 `secrets` 并行开发 | `secrets` 与它的使用方在 M1 同期开发 |
 | P-82 | **桌面端消息带 `level_cap` 且 `@` 的是已有交付**：视为对该交付调整上限，等同 `PATCH /v1/deliveries/{id}`（产生 `delivery.level_changed`，预算模板不变，P-57）；界面在发送前提示改动影响（"上限 X → Y；已触发的闸门不撤销"）。值与该交付当前上限相同则不变。手机档案忽略 `level_cap` | 原型已这样交互，此前只有 `conversation` 的临时处理 |
+| P-87 | **生产主密钥与 CA 目录（#405，K4/K5）**：引导配置必须显式写 `[secrets.master_key]`——`source = systemd_credential` 配 `name`，或 `source = key_file` 配 `path`；互斥、必填、无代码默认、不降级，缺失不生成新密钥。`install.sh` 默认 `systemd_credential`，凭据名 `gantry-master-key` / `gantry-egress-master-key`，systemd 单元用 `LoadCredentialEncrypted`（只支持 Ubuntu 24.04）。`key_file` 严格要求 `0400`，路径在 `secrets.dir` 之外。`[pki] ca_dir` 默认 `/etc/gantry/ca`，必须为绝对路径；启动时校验目录存在、三张证书齐全、无符号链接，缺失即退出，不新建 CA；`pki.server_names` 复用 `server.api.san`；吊销日志默认 `<server.data_dir>/pki/revocations.journal` | 没有显式主密钥来源与 CA 目录映射，`assemble_real` 无法在生产打开 secrets / pki（#405 C3） |
 
 ## 待契约批准提案（非默认）
 

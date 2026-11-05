@@ -316,8 +316,9 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 | --- | --- | --- |
 | `secrets.dir` | 无默认（`deploy` 给出；`gantryd` 与 `egress` 各一个，位于不同用户的目录） | 实例目录 |
 | `secrets.consumers` | `gantryd`：`["forge","pki","notify"]`（`notify` 自 M4）；`egress`：`["egress"]` | 本实例承载的使用方；与 architecture §4 的 `secrets` 行一致（P-59） |
-| `secrets.master_key.source` | 无默认（OQ-2）：`systemd_credential` / `key_file` | 主密钥来源 |
-| `secrets.master_key.name` / `.path` | 无默认 | credential 名 / 密钥文件路径（后者必须在 `secrets.dir` 之外、`0400`） |
+| `[secrets.master_key]` | **无默认、必填**（P-87）：缺失即启动失败，不生成新密钥、不降级 | 主密钥来源与名称 |
+| `secrets.master_key.source` | 无默认 | `systemd_credential`（配 `name`）或 `key_file`（配 `path`）；互斥、必填 |
+| `secrets.master_key.name` / `.path` | 无默认 | credential 名 / 密钥文件路径（后者必须在 `secrets.dir` 之外、严格 `0400`） |
 | `secrets.retain_versions` | `2` **[建议值，待调优]** | 保留最近几个已提交版本 |
 | `secrets.max_value_bytes` | `65536` **[建议值，待调优]** | 单个值上限（RSA 4096 位私钥 PEM 约 3 KiB） |
 | `secrets.refresh_interval_s` | `5` **[建议值，待调优]** | `SecretHandle` 检查新版本的最短间隔（M3） |
@@ -382,7 +383,7 @@ key_id = SHA-256("gantry/secrets/v1/keyid" ‖ 主密钥) 的前 4 字节
 | # | 问题 | 本文临时处理 | 影响 |
 | --- | --- | --- | --- |
 | OQ-1 | **已决：见裁决 C4 / P-50**（经 Egress 控制面 `egress.sock` 写入 secret（只写不读）、查询 `present`；两阶段 `stage_secret` / `activate_secret` / `discard_secret` 与 `settings.updated` 配合）。原问题：**`api`（`gantryd`）→ Egress 的转交通道与原子性**。config.md §2.4 要求"同一次 `PUT` 里的 secret 写入与 `settings.updated` 要么都成功要么都不成功"，同时模型 key"只存在 Egress 的密钥存储、仅 Egress 进程用户可读，`api` 写入时只转交、不留存"。两个独立进程、不同用户之间如何传值、如何做两阶段提交、`present` 如何在 `gantryd` 里得知 Egress 实例里 ref 的存在、启动对账怎么做，**没有任何契约**。另：M0 替身表没有 `secrets`，而 `forge` / `pki` / `egress` 同期并行 | 已落实到 §2、§6；M0 替身另见 OQ-10 | `api`、`egress`、`deploy`、M1 全部 `sec` / `exec` 泳道 |
-| OQ-2 | **主密钥保管方式与默认值**：systemd credential（可选 TPM 绑定）、仅属主可读的密钥文件、启动时口令。后两者对"已拿到服务进程用户代码执行"的攻击者都不构成保护 | 提供 `SystemdCredential` 与 `KeyFile` 两个实现，默认不定；口令方式不适合无人值守，不提供 | `deploy` |
+| OQ-2 | **已决：见 P-87 / #405（K4）**。引导配置必须显式写 `[secrets.master_key]`：`systemd_credential`（默认，配 `name`，install.sh 用 `LoadCredentialEncrypted`，只支持 Ubuntu 24.04）或 `key_file`（配 `path`，严格 `0400` 且在 `secrets.dir` 之外）；互斥、必填、无代码默认、不降级。原问题：**主密钥保管方式与默认值**（systemd credential / TPM2 / 仅文件权限 / 启动口令） | 如左 | `deploy` |
 | OQ-3 | **备份加密方案与接收方密钥保管**：本文提议 `age`（X25519 接收方）、接收方私钥离线保管（与根 CA 同样处理）。architecture §6 只写"加密备份" | 如提议；备份流格式见 §7.6 | `deploy`、运维手册 |
 | OQ-4 | **已决：见裁决 C19 / C20（P-65、P-66）**（第一台设备配对之前，主机命令（需 root）可写入 `github.*` 等"仅 approver"配置并写审计事件；App Manifest 经 `gantry github setup` 与同一入口的 `/setup/github/callback` 写入；之后改为需要审批签名）。CLI 细节仍由 `deploy` 定。原问题：**写入入口**：`api` 的 settings 路由可写；但 `deploy` 的安装流程要在没有任何设备之前写入 App 私钥、webhook secret（App Manifest 回调）和 CA 中间私钥，需要一个主机侧入口（例如 `gantry secrets …` 子命令）。skeleton 只定义了 `gantry pair` 与 `gantry device recover` | 本库提供 `init` / `put`；离线操作（`init`、`import_backup`、`rewrap`）需在对应进程停止后执行，或经守护进程的管理入口 | `deploy`、`pki`、`forge` |
 | OQ-5 | **ref 与使用方的对应**：config.md §2.4 允许"多个字段引用同一个 ref"，而本库按使用方隔离（同名 ref 在不同使用方命名空间里是不同的密钥）。是否在校验层禁止跨使用方共用同名 ref（core.md OQ-14）；`github.app.*` → `Forge`、`models.providers.*` 与 `egress.injection.*` → `Egress`、中间 CA 私钥 → `Pki` 的映射是否确认 | 按左侧映射；跨使用方同名视为校验错误 | `core`、`api` |

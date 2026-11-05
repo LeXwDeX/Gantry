@@ -250,7 +250,7 @@
 1. 创建 `/var/lib/gantry/secrets`（`gantry` 0700）与 `/var/lib/gantry-egress/secrets`（`gantry-egress` 0700）；两个实例各自初始化（`secrets` 是库，"各进程各自实例"，architecture §4）。
 2. 登记读取方：`forge` → `github.app.private_key`、`github.app.webhook_secret`（及 `webhook_secret_previous`）；`pki` → 中间 CA 私钥；`egress` → 模型 key 与私有包仓库凭据。M4 增加 `notify` → APNs 密钥（architecture §4 目前没有该读取方，OPS-22）。注意：`forge` 与 `pki` 同在 `gantryd` 进程内，二者之间的隔离是库层面的 API 约束，**不是**操作系统隔离；操作系统隔离只存在于 `gantryd` / `gantry-egress` / `gantry-sbx` 之间。
 3. 写入第一批机密：中间 CA 私钥（来自 §7.3）；App 私钥与 webhook secret（来自 §7.5，写入后立即读回校验）。
-4. 静态加密的主密钥放在哪里（systemd 加密凭据 / TPM2 / 仅文件权限）未定（OPS-08）；无论哪种，**备份用的加密独立于主机主密钥**（§7.10）。
+4. 主密钥（P-87）：引导配置必须显式写 `[secrets.master_key]`，`install.sh` 默认 `source = systemd_credential`，凭据名 `gantry-master-key`（`gantryd`）/ `gantry-egress-master-key`（`gantry-egress`），单元用 `LoadCredentialEncrypted`（只支持 Ubuntu 24.04）。`gantry secrets init` 以 root 通过 `systemd-run -p LoadCredentialEncrypted=gantry-master-key:/etc/gantry/credentials/gantry-master-key.cred --uid=gantry /opt/gantry/current/bin/gantry secrets init` 读取凭据；`key_file` 方式要求严格 `0400` 且位于 `secrets.dir` 之外。缺失即失败，不生成新密钥、不降级。**备份用的加密独立于主机主密钥**（§7.10）。
 5. 自检：各读取方只能读到自己的命名空间；跨用户读取失败（§12 读取矩阵）。
 
 ### 7.5 GitHub App 创建（`gantry github setup`，P-65）
@@ -318,6 +318,7 @@ RestartSec=2s
 TimeoutStopSec=60s
 StateDirectory=gantry
 StateDirectoryMode=0750
+LoadCredentialEncrypted=gantry-master-key:/etc/gantry/credentials/gantry-master-key.cred
 # /run/gantry 由 systemd-tmpfiles 创建（gantry:gantry-link 0770），与 Egress 共用，不用 RuntimeDirectory=
 SupplementaryGroups=gantry-link
 UMask=0077
@@ -344,7 +345,7 @@ WantedBy=gantry.target
 
 客户端校验对端 uid 为 `gantry`，与 `gantryd.service` 的 `User=gantry` 对应（#368）；`gantry-egress.service` 使用独立用户，因此这条校验能区分两个控制通道。
 
-`gantry-egress.service` 同形，`User=gantry-egress`，`StateDirectory=gantry-egress`，`Group=gantry-egress` 且 `SupplementaryGroups=gantry-link`，`ReadWritePaths=/var/lib/gantry-egress /run/gantry`（只在其中创建 `egress.sock`）。`deploy/tmpfiles.d/gantry.conf`：`d /run/gantry 0770 gantry gantry-link -`。
+`gantry-egress.service` 同形，`User=gantry-egress`，`StateDirectory=gantry-egress`，`Group=gantry-egress` 且 `SupplementaryGroups=gantry-link`，`ReadWritePaths=/var/lib/gantry-egress /run/gantry`（只在其中创建 `egress.sock`），并加 `LoadCredentialEncrypted=gantry-egress-master-key:/etc/gantry/credentials/gantry-egress-master-key.cred`。`deploy/tmpfiles.d/gantry.conf`：`d /run/gantry 0770 gantry gantry-link -`。
 
 约束：`gantryd` 不得持有 `CAP_NET_BIND_SERVICE`（所有监听端口 ≥ 1024）；`NoNewPrivileges` 意味着不能靠 `sudo` 切换到 `gantry-sbx`，沙盒控制必须走套接字（OPS-11）；日志只进 journald，`Storage=persistent` 与保留期交给主机配置，单元内不写任何密钥。`systemd-analyze security gantryd.service` 的评分作为回归指标（§12）。
 
@@ -560,6 +561,8 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 | --- | --- | --- |
 | `server.data_dir` | `/var/lib/gantry` | 数据目录 |
 | `server.secrets_dir` | `/var/lib/gantry/secrets` | 密钥存储 |
+| `[secrets.master_key]` | 无默认（P-87，必填） | 键名与形状以 [secrets.md §10](secrets.md#10-配置) 为准；`deploy` 只负责写入配置文件与 systemd 凭据 |
+| `[pki] ca_dir` | `/etc/gantry/ca` | 键名与校验规则以 [pki.md §10](pki.md#10-配置) 为准；必须绝对路径，启动校验三张证书齐全 |
 | `server.api.listen` | `0.0.0.0:8443` | mTLS API 监听 |
 | `server.api.public_url` | 无（必填） | 写入 `api_base_url` |
 | `server.api.san` | 来自 `--api-host` | 服务端证书 SAN |
@@ -576,6 +579,8 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 | `upgrade.health_timeout_s` | 120 | **[建议值，待调优]** |
 
 `/etc/gantry-egress/egress.toml`（键名以 [egress.md §10](egress.md) 为准）：`egress.listen.sandbox_model`（`<EGRESS_ADDR>:8081`）、`egress.listen.sandbox_connect`（`<EGRESS_ADDR>:3128`）、`egress.listen.sandbox_registry`（M2）、`egress.listen.svc_model`（`127.0.0.1:8082`）、`egress.control_socket`（`/run/gantry/egress.sock`）、`egress.sandbox_cidrs`（与 §7.8 的沙盒网段一致）、`secrets_dir`、`audit_dir`。
+
+键名冲突时以此为准：`secrets.*` 以 [secrets.md §10](secrets.md#10-配置) 为准，`pki.*` 以 [pki.md §10](pki.md#10-配置) 为准，`egress.*` 以 [egress.md §10](egress.md#10-配置) 为准；本表只列部署视角的默认值与必填项。
 
 **不是引导配置的**：模型、档位、策略、守护、沙盒限额、出网白名单、通知——全部在 settings（I7），`deploy` 不提供它们的文件形式。
 
@@ -686,7 +691,7 @@ sudo gantry device recover --promote dev_01JB…            # 把一台已有设
 | OPS-05 | 支持的 Ubuntu 版本与 CPU 架构（x86_64 / aarch64）；Ubuntu 24.04 对非特权用户命名空间的 AppArmor 限制与 rootless Podman、`runsc` 的兼容性；apt 源与 gVisor 安装方式（**需核实**） | 首选验证 24.04 x86_64，其余待定 | `sandbox`、CI |
 | OPS-06 | 发布与分发：压缩包 + `SHA256SUMS` + 签名（工具？minisign / cosign / GPG）；是否同时提供 `.deb`；离线安装；一行 `curl … \| sudo bash` 引导是否提供 | 压缩包 + 校验和 + 签名，方案待定；不提供对未校验内容的管道执行 | CI、发布流程 |
 | OPS-07 | `gantry` CLI 的位置（`crates/gantryd` 的子命令还是独立 crate）、`github setup` / `doctor` 的 Rust 实现落在哪个 crate；本机控制通道（`control.sock`）的鉴权与协议，`pair` / `device recover` 是走套接字还是直接操作停机状态下的数据库 | 控制套接字 root-only；归属如 §6.1 | `pki`、`gantryd`、AGENTS.md 仓库布局 |
-| OPS-08 | `secrets` 静态加密的主密钥放哪里（systemd 加密凭据 / TPM2 / 仅文件权限）——只靠文件权限时，防不住同一用户被攻破，只能防磁盘镜像与备份泄露；加密备份的收件人密钥如何托管（`age` 私钥与根私钥同等离线保存？） | 备份用 `age` 收件人公钥，私钥离线；主密钥方案待 `secrets` 规格 | `secrets`、`deploy` |
+| OPS-08 | **已决：见 P-87 / #405（K4）**。主密钥必须显式配置，（systemd 加密凭据 / TPM2 / 仅文件权限）由 `[secrets.master_key]` 二选一决定；`key_file` 只防磁盘镜像与备份泄露，同一用户被攻破不构成保护。加密备份的收件人密钥仍与根私钥同等离线保存 | 如左 | `secrets`、`deploy` |
 | OPS-09 | **已决：见裁决 C19 / P-65**（webhook 监听只在回环地址以明文 HTTP 提供，对公网一律经终止 TLS 的反向代理或隧道）。原问题：公网形态由谁终止 TLS | 已落实到 §6.4、§7.6；`deploy` 提供 Caddy 与 cloudflared 模板 | — |
 | OPS-10 | （通道**已决：见裁决 C4 / P-50**——控制面 `/run/gantry/egress.sock`，secret 只写不读，`models` 走回环 `svc_model` + `svc_token`）仍未决：Egress 审计日志的位置、保留与备份（config OQ-21） | 审计日志落 `/var/lib/gantry-egress/audit` | `egress` |
 | OPS-11 | 沙盒主机侧细节：`gantryd` 如何控制 `gantry-sbx` 的 rootless Podman（套接字 vs `sudo`，后者与 `NoNewPrivileges` 冲突）；`workspaces/` 的属主 / ACL；rootless 网络模式（`pasta` / `slirp4netns`）与"沙盒如何到达 Egress"、`skuid` 过滤是否成立（需核实）；基础镜像如何构建、签名、分发（`sandbox.base_image` 的默认值**已决：见裁决 C20 / P-66**——随版本发布、固定摘要的官方 worker 镜像） | §6.3、§7.8、§7.9 的草案 | `sandbox`、`worker`、`egress`、CI |
