@@ -565,6 +565,7 @@ dependencies = [
  "gantry-egress",
  "gantry-engine",
  "gantry-fakes",
+ "gantry-models",
  "gantry-policy",
  "gantry-repo",
  "gantry-sandbox",
@@ -636,6 +637,18 @@ dependencies = [
  "gantry-store",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "gantry-models"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "gantry-core",
+ "gantry-store",
+ "serde_json",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

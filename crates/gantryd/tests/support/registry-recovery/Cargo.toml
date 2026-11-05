@@ -14,6 +14,7 @@ path = "../registry_recovery.rs"
 gantry-core = { path = "../../../../gantry-core", features = ["testing"] }
 gantry-store = { path = "../../../../gantry-store", features = ["testing"] }
 gantry-engine = { path = "../../../../gantry-engine" }
+gantry-models = { path = "../../../../gantry-models" }
 gantry-sandbox = { path = "../../../../gantry-sandbox", features = ["testing"] }
 gantry-egress = { path = "../../../../gantry-egress" }
 gantry-fakes = { path = "../../../../gantry-fakes" }
