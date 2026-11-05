@@ -98,6 +98,20 @@ pub async fn serve(
     );
 
     let (stop, stopped) = watch::channel(false);
+    if let Some(api) = assembly.api.as_ref() {
+        if let Some(listener) = api.take_listener() {
+            let core = api.core.clone();
+            let tls = api.tls.clone();
+            let shutdown = stopped.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    gantry_api::listener::serve_api(core, listener, tls, shutdown).await
+                {
+                    eprintln!("gantryd: api listener stopped: {error}");
+                }
+            });
+        }
+    }
     let engine = tokio::spawn(assembly.engine.clone().run(stopped_signal(stopped.clone())));
     let control = Arc::new(Control::new(assembly, commands));
     let serve = socket.serve(control, auth, stopped);

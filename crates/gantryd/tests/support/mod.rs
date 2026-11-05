@@ -20,6 +20,7 @@ use gantry_core::entities::{
 };
 use gantry_core::ids::{Clock, DeviceId, IdGen, ProjectId, Ulid};
 use gantry_core::ports::egress::EgressControl;
+use gantry_core::ports::forge::ForgeReader;
 use gantry_core::ports::inbox::InboxPort;
 use gantry_core::ports::{ActorCtx, Expect, MirrorWant, SecretSink, SecretSource, SecretValue};
 use gantry_core::secret::{Consumer, SecretName, SecretString};
@@ -65,7 +66,7 @@ pub const CHILD_EGRESS_ENV: &str = "GANTRYD_FAKES_EGRESS";
 /// `fake.*` 命令要直接操纵的替身。
 pub struct FakeHandles {
     pub store: Store,
-    pub approvals: PolicyApprovals,
+    pub approvals: Arc<PolicyApprovals>,
     pub auto_approve: bool,
     pub forge: Arc<Forge>,
     /// 真实 forge 执行器：`fake.drive` 用它处理 Outbox。
@@ -777,6 +778,7 @@ async fn assemble_variant(
         clock.clone(),
         ids.clone(),
     );
+    let approvals = Arc::new(approvals);
     let repo = Arc::new(
         build_repo(
             RepoConfig::new(test_dir.join("repo")),
@@ -962,6 +964,49 @@ async fn assemble_variant(
         .expect("settings context"),
     );
 
+    let api = {
+        let services = gantry_api::server::Services {
+            clock: clock.clone(),
+            ids: ids.clone(),
+            store: store.clone(),
+            devices: pki.directory(),
+            admin: pki.admin(),
+            approvals: approvals.clone(),
+            forge: reader.clone(),
+            settings_ctx: settings_ctx.clone(),
+            forge_secrets: Arc::new(secrets.scoped(Consumer::Forge).expect("forge secrets")),
+            egress: egress.clone(),
+            engine: engine.clone(),
+            conversation: conversation.clone(),
+            idempotency: Arc::new(gantry_api::idempotency::SqliteIdempotency::new(
+                store.clone(),
+                clock.clone(),
+            )),
+        };
+        let core = Arc::new(gantry_api::server::ApiCore::new(
+            gantry_api::server::ApiConfig::default(),
+            services,
+        ));
+        let tls = Arc::new(
+            gantry_api::tls::api_server_config(
+                Arc::new(gantry_pki::verifier::p256_only_provider()),
+                Arc::new(gantry_pki::verifier::ClockTimeProvider::new(clock.clone())),
+                pki.tls().client_verifier,
+                pki.tls().server_cert_resolver,
+            )
+            .expect("api tls"),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("api listener");
+        std::fs::write(
+            test_dir.join("api.addr"),
+            listener.local_addr().expect("api addr").to_string(),
+        )
+        .expect("write api addr");
+        gantryd::assembly::ApiRuntime::new(core, tls, listener)
+    };
+
     let assembly = Assembly {
         profile: Profile::Fakes,
         store: store.clone(),
@@ -979,6 +1024,7 @@ async fn assemble_variant(
         egress,
         conversation,
         settings_ctx,
+        api: Some(api),
         modules,
     };
     let handles = FakeHandles {
