@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use std::collections::BTreeSet;
 
-use gantry_core::entities::{InboxItem, Seq};
+use gantry_core::entities::{InboxItem, InboxKind, Ref, Seq, Stage};
 use gantry_core::events::{EventType, SchemaError, Subject};
-use gantry_core::ids::{DeliveryId, IdError, NodeId};
+use gantry_core::ids::{DeliveryId, IdError, InboxId, NodeId, ProjectId};
 use gantry_core::level::Level;
 use gantry_core::machines::TransitionError;
 use gantry_core::ports::context::ActorCtx;
@@ -48,6 +48,17 @@ pub enum EngineError {
     Inbox(#[from] RaiseError),
 }
 
+/// `locate_deliveries` 的返回项（engine.md §6 `DeliveryHandle` 的引擎侧最小集）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeliverySummary {
+    pub id: DeliveryId,
+    pub project_id: ProjectId,
+    pub level_cap: Level,
+    pub stage: Stage,
+    /// 未决的 `spec_needed`；引擎保证每个交付单元同时至多一个。
+    pub open_spec_needed: Option<InboxId>,
+}
+
 pub struct Engine {
     store: Store,
     inbox: Arc<dyn InboxPort>,
@@ -60,6 +71,55 @@ impl Engine {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// 定位：给定 refs，返回已绑定且未终结的交付单元（0..n 个）。只读投影，不产生事件
+    /// （engine.md §6；conversation 的 P3）。空 refs 返回空集合。
+    pub async fn locate_deliveries(
+        &self,
+        project: &ProjectId,
+        refs: &[Ref],
+    ) -> Result<Vec<DeliverySummary>, EngineError> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filter = EventFilter {
+            project_ids: Some(BTreeSet::from([*project])),
+            include: vec![TypePattern::Exact(EventType::DeliveryCreated)],
+            exclude: Vec::new(),
+        };
+        let mut ids = BTreeSet::new();
+        scan_events(&self.store, &filter, |event| {
+            let id = event
+                .subject
+                .as_str()
+                .parse::<DeliveryId>()
+                .map_err(|error| SchemaError::shape("/subject", error.to_string()))?;
+            ids.insert(id);
+            Ok(())
+        })
+        .await?;
+        let mut located = Vec::new();
+        for id in ids {
+            let Some(state) = load_delivery_state(&self.store, &id).await? else {
+                continue;
+            };
+            if state.delivery.stage.is_terminal() || !refs_match(&state, refs) {
+                continue;
+            }
+            located.push(DeliverySummary {
+                id,
+                project_id: state.delivery.project_id,
+                level_cap: state.delivery.level_cap,
+                stage: state.delivery.stage,
+                open_spec_needed: state
+                    .open_inbox
+                    .values()
+                    .find(|item| item.kind == InboxKind::SpecNeeded)
+                    .map(|item| item.id),
+            });
+        }
+        Ok(located)
     }
 
     /// 上报一项；与调用方的事件写入同一事务时由调用方传入事务，此处自开事务。
@@ -163,6 +223,22 @@ impl Engine {
     ) -> Result<(), EngineError> {
         scan_events(&self.store, filter, visit).await
     }
+}
+
+fn refs_match(state: &DeliveryState, refs: &[Ref]) -> bool {
+    refs.iter().any(|reference| match reference {
+        Ref::Issue { repo, number } => state
+            .delivery
+            .issues
+            .iter()
+            .any(|issue| issue.repo == *repo && issue.number == *number),
+        Ref::Pr { number, .. } => state.pr.as_ref().is_some_and(|pr| pr.number == *number),
+        Ref::Worktree { id } => state
+            .worktree
+            .as_ref()
+            .is_some_and(|worktree| worktree.id == *id),
+        Ref::Delivery { id } => state.delivery.id == *id,
+    })
 }
 
 /// 重建一个交付单元的 `DeliveryState`：先按 subject 取 `delivery.created` 得到所属项目，

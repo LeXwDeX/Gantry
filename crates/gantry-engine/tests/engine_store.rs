@@ -2,12 +2,19 @@
 
 use std::sync::Arc;
 
-use gantry_core::entities::{Actor, ActorKind, DeliveryOrigin, Seq};
+use gantry_core::canon::RepoSlug;
+use gantry_core::entities::{
+    Actor, ActorKind, DeliveryOrigin, InboxKind, InboxPayload, IssueRef, IssueState, MissingAspect,
+    Ref, Seq, Severity,
+};
 use gantry_core::events::EventType;
 use gantry_core::ids::IdGen;
-use gantry_core::ids::{DeliveryId, MessageId, ProjectId};
+use gantry_core::ids::{DeliveryId, MessageId, ProjectId, Ulid};
 use gantry_core::level::Level;
+use gantry_core::ports::context::ActorCtx;
+use gantry_core::ports::inbox::{DedupKey, RaiseRequest, SafeSummary};
 use gantry_core::settings::resource::{LevelBudget, LevelEntry, TierBudget};
+use gantry_core::text::UntrustedText;
 use gantry_core::time::Timestamp;
 use gantry_engine::create::{budget_from_level, NewDelivery};
 use gantry_engine::engine::{Engine, EngineError};
@@ -246,4 +253,124 @@ async fn duplicate_message_returns_the_existing_delivery() {
         .await
         .unwrap();
     assert_eq!(page.events.len(), 1);
+}
+
+fn issue(number: u64) -> IssueRef {
+    IssueRef {
+        repo: RepoSlug::parse("acme/web").unwrap(),
+        number,
+        node_id: format!("I_{number}"),
+        title: UntrustedText::new("fix login".into(), "github".into(), false),
+        state: IssueState::Open,
+        state_reason: None,
+        synced_at: Timestamp::from_millis(1_700_000_000_000),
+    }
+}
+
+/// #105 A7：`locate_deliveries` 按 refs 命中绑定且未终结的交付单元。
+#[tokio::test]
+async fn locate_deliveries_matches_bound_issue_refs() {
+    let engine = engine().await;
+    let mut created = delivery();
+    created.issues = vec![issue(42)];
+    let project = created.project_id;
+    let id = engine.create_delivery(created).await.unwrap();
+
+    assert_eq!(
+        engine.locate_deliveries(&project, &[]).await.unwrap(),
+        vec![]
+    );
+
+    let found = engine
+        .locate_deliveries(
+            &project,
+            &[Ref::Issue {
+                repo: RepoSlug::parse("acme/web").unwrap(),
+                number: 42,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, id);
+    assert_eq!(found[0].project_id, project);
+    assert_eq!(found[0].level_cap, Level::Low);
+    assert_eq!(found[0].stage, gantry_core::entities::Stage::Spec);
+    assert_eq!(found[0].open_spec_needed, None);
+
+    assert!(engine
+        .locate_deliveries(
+            &project,
+            &[Ref::Issue {
+                repo: RepoSlug::parse("acme/web").unwrap(),
+                number: 43,
+            }],
+        )
+        .await
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(
+        engine
+            .locate_deliveries(&project, &[Ref::Delivery { id }])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// #105 A7：未决的 `spec_needed` 随定位结果返回。
+#[tokio::test]
+async fn locate_deliveries_reports_open_spec_needed() {
+    let engine = engine().await;
+    let mut created = delivery();
+    created.issues = vec![issue(42)];
+    let project = created.project_id;
+    let id = engine.create_delivery(created).await.unwrap();
+    let ctx = ActorCtx {
+        actor: Actor::new(ActorKind::Device, "dev_01JB6Z3K7R9T2X5N8Q1V4W6YZM"),
+        device: None,
+        role: None,
+        client_profile: None,
+        request_id: Ulid::from_parts(1_700_000_000_000, 1).unwrap(),
+        idempotency_key: None,
+        dedup_key: None,
+        causation_id: None,
+    };
+    let item = engine
+        .raise_inbox(
+            RaiseRequest {
+                project_id: Some(project),
+                delivery_id: Some(id),
+                kind: InboxKind::SpecNeeded,
+                severity: Severity::Blocker,
+                summary: SafeSummary::new("需要规格"),
+                payload: InboxPayload::SpecNeeded {
+                    missing: vec![MissingAspect {
+                        aspect: "goals".to_owned(),
+                        question: "目标是什么？".to_owned(),
+                    }],
+                },
+                dedup_key: DedupKey::new("spec:test"),
+                supersedes: Vec::new(),
+                actor: ctx.actor.clone(),
+                causation_id: None,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let found = engine
+        .locate_deliveries(
+            &project,
+            &[Ref::Issue {
+                repo: RepoSlug::parse("acme/web").unwrap(),
+                number: 42,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].open_spec_needed, Some(item.id));
 }
