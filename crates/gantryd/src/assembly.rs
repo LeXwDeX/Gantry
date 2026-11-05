@@ -20,6 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use gantry_api::settings::SettingsContext;
 use gantry_conversation::engine_api::EngineApiAdapter;
 use gantry_conversation::ports::{EngineApi, ModelsPort};
 use gantry_conversation::{Conversation, ConversationDeps, Limits};
@@ -123,6 +124,7 @@ pub struct Assembly {
     pub models: Arc<dyn ModelsPort>,
     pub egress: Arc<dyn EgressControl>,
     pub conversation: Arc<dyn ConversationService>,
+    pub settings_ctx: Arc<dyn SettingsContext>,
     pub modules: Vec<ModuleInfo>,
 }
 
