@@ -10,7 +10,7 @@ use gantry_core::events::{
     DeliveryPausedData, DeliveryResumedData, DeliveryStageChangedData, Event, EventType,
     LevelChangeKind, SchemaError,
 };
-use gantry_core::ids::{DeliveryId, ProjectId};
+use gantry_core::ids::{DeliveryId, ProjectId, WorktreeId};
 use gantry_core::level::Level;
 use gantry_core::machines::delivery::AbandonCause;
 use gantry_core::time::Timestamp;
@@ -45,6 +45,10 @@ pub struct DeliveryRow {
     pub budget: DeliveryBudget,
     pub stage_entered: StageEntered,
     pub abandon_cause: Option<AbandonCause>,
+    /// 当前工作树（`worktree.created` / `worktree.removed`）。
+    pub worktree_id: Option<WorktreeId>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +88,9 @@ impl DeliveryRow {
             issues: data.issues,
             config_rev: data.config_rev,
             budget: data.budget,
+            worktree_id: None,
+            created_at: event.ts,
+            updated_at: event.ts,
             stage_entered: StageEntered {
                 seq: event.seq,
                 ts: event.ts,
@@ -183,6 +190,7 @@ impl DeliveryRow {
             }
             _ => {}
         }
+        self.updated_at = event.ts;
         Ok(())
     }
 }

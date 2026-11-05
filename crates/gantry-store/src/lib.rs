@@ -35,6 +35,7 @@ use gantry_core::entities::{
 use gantry_core::events::{
     Event, EventType, InboxDismissedData, InboxRaisedData, InboxResolvedData, NewEvent,
     ProjectEventData, SchemaError, SchemaErrorCode, SettingsUpdatedData, Subject,
+    WorktreeCreatedData, WorktreeRemovedData,
 };
 use gantry_core::forge::ActionPayload;
 use gantry_core::ids::{
@@ -49,12 +50,14 @@ mod projects;
 use module::{ModuleRegistry, ModuleTables};
 
 pub mod cas;
+mod deliveries;
 mod durable;
 pub mod github;
 pub mod module;
 pub mod projection;
 
 pub use cas::{Cas, CasKind, CasReader, CasStat, CasVerifyReport, GcReport, RetentionPolicy};
+pub use deliveries::DeliveryQuery;
 pub use durable::{StoreConfig, SCHEMA_VERSION};
 pub use github::{GithubSnapshots, IssueSnapshotRow, PrSnapshotRow};
 pub use module::{ModuleConn, ModuleReader, ModuleRow, ModuleSpec, MODULE_SCAN_MAX};
@@ -1182,6 +1185,24 @@ impl Inner {
                     decode_data(event).map_err(StoreError::InvalidEvent)?;
                 self.project_settings(event, &data)?;
             }
+            EventType::WorktreeCreated => {
+                let data =
+                    decode_data::<WorktreeCreatedData>(event).map_err(StoreError::InvalidEvent)?;
+                if let Some(row) = self.deliveries.get_mut(&data.delivery_id) {
+                    row.worktree_id = Some(data.worktree_id);
+                    row.updated_at = event.ts;
+                }
+            }
+            EventType::WorktreeRemoved => {
+                let data =
+                    decode_data::<WorktreeRemovedData>(event).map_err(StoreError::InvalidEvent)?;
+                for row in self.deliveries.values_mut() {
+                    if row.worktree_id == Some(data.worktree_id) {
+                        row.worktree_id = None;
+                        row.updated_at = event.ts;
+                    }
+                }
+            }
             EventType::DeliveryCreated => {
                 let row = DeliveryRow::created(event).map_err(fold_error)?;
                 if self.deliveries.contains_key(&row.id) {
@@ -1499,6 +1520,14 @@ impl TxReader<'_> {
         projects::list(&self.inner.projects, page)
     }
 
+    pub async fn deliveries(
+        &mut self,
+        q: &DeliveryQuery,
+        page: &Page,
+    ) -> Result<Paged<DeliveryRow>, StoreError> {
+        deliveries::list(&self.inner.deliveries, q, page)
+    }
+
     pub fn settings_current(
         &self,
         scope: &SettingsScope,
@@ -1734,6 +1763,14 @@ impl ReadSnapshot {
 
     pub async fn projects(&mut self, page: &Page) -> Result<Paged<Project>, StoreError> {
         projects::list(&self.inner.projects, page)
+    }
+
+    pub async fn deliveries(
+        &mut self,
+        q: &DeliveryQuery,
+        page: &Page,
+    ) -> Result<Paged<DeliveryRow>, StoreError> {
+        deliveries::list(&self.inner.deliveries, q, page)
     }
 
     /// 扫描本快照中的事件，语义与 `EventLog::scan` 相同。
