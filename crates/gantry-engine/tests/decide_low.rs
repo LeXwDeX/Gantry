@@ -42,10 +42,10 @@ const RESULT_REF: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const WORKTREE: &str = "wtr_01JBA1D9Q4MT7X2C6E8H0K3PRV";
 const APPROVAL: &str = "apr_01JB7P4M8T2X6N9R3Q5K1V7WZK";
 
-struct FixedReserve;
+struct FixedReserve(u64);
 impl ReservationPolicy for FixedReserve {
     fn reserve(&self, _: &BudgetLedger, _: Tier, _: usize) -> u64 {
-        1000
+        self.0
     }
 }
 
@@ -62,6 +62,7 @@ struct Fixture {
     denied: BTreeSet<ActionKey>,
     proposals: ProposalTexts,
     blocked: BTreeMap<gantry_core::ids::WorktreeId, Timestamp>,
+    reservation: FixedReserve,
 }
 
 impl Fixture {
@@ -99,6 +100,7 @@ impl Fixture {
             denied: BTreeSet::new(),
             proposals: ProposalTexts::default(),
             blocked: BTreeMap::new(),
+            reservation: FixedReserve(1000),
         }
     }
 
@@ -109,7 +111,7 @@ impl Fixture {
             settings: &self.settings,
             models: &self.models,
             templates: &self.templates,
-            reservation: &FixedReserve,
+            reservation: &self.reservation,
             sandbox_capacity: 4,
             inflight: &self.inflight,
             denied: &self.denied,
@@ -830,12 +832,38 @@ fn workflow_created_once_per_stage_and_within_node_budget() {
         .iter()
         .any(|d| matches!(d, Decision::Append(e) if e.ty == EventType::WorkflowCreated)));
 
-    // 反例：节点预算不足 → 不建（不出现"半张图"）。
+    // 反例：节点预算不足 → 不建（不出现"半张图"），写预算耗尽并上报。
     let mut poor = Sim::low();
     let d = poor.tick();
     poor.apply(d);
     poor.state.ledger.used.nodes = poor.state.delivery.budget.limits.nodes;
-    assert!(poor.tick().is_empty());
+    let node_limit = poor.state.delivery.budget.limits.nodes;
+    let d = poor.tick();
+    assert!(!d
+        .iter()
+        .any(|d| matches!(d, Decision::Append(e) if e.ty == EventType::WorkflowCreated)));
+    let exhausted = d
+        .iter()
+        .find_map(|d| match d {
+            Decision::Append(e) if e.ty == EventType::BudgetExhausted => Some(e.data.clone()),
+            _ => None,
+        })
+        .expect("budget.exhausted");
+    assert_eq!(exhausted["dimension"], "nodes");
+    assert_eq!(exhausted["limit"], node_limit);
+    assert_eq!(exhausted["used"], node_limit);
+    let raise = d
+        .iter()
+        .find_map(|d| match d {
+            Decision::Raise(r) => Some(r),
+            _ => None,
+        })
+        .expect("budget_exhausted raise");
+    assert_eq!(raise.kind, InboxKind::BudgetExhausted);
+    let InboxPayload::BudgetExhausted { dimension, .. } = &raise.payload else {
+        panic!("expected budget_exhausted payload");
+    };
+    assert_eq!(*dimension, gantry_core::entities::BudgetDimension::Nodes);
 }
 
 #[test]
@@ -1948,4 +1976,77 @@ fn retry_backoff_tick_resumes_unfinished_attempt() {
         Decision::Effect(Effect::RunAttempt(plan))
             if plan.resume && plan.attempt_id == attempt && plan.node_id == node_id
     )));
+}
+
+/// 阶段已就绪且本节点持有有效锁（`worktree_ready` + `worktree.locked` + `lock_owner`）。
+fn locked_sim() -> Sim {
+    let mut sim = worktree_ready();
+    sim.external(
+        "worktree.locked",
+        WORKTREE,
+        json!({"worktree_id": WORKTREE, "holder": "engine", "delivery_id": DELIVERY,
+               "lease_until": "2026-10-24T12:45:00.000Z"}),
+    );
+    let node = sim
+        .state
+        .workflows
+        .values()
+        .next()
+        .unwrap()
+        .nodes
+        .keys()
+        .next()
+        .copied()
+        .unwrap();
+    sim.state.lock_owner.insert(WORKTREE.parse().unwrap(), node);
+    sim
+}
+
+fn exhausted_dimension(decisions: &[Decision]) -> Option<serde_json::Value> {
+    decisions.iter().find_map(|d| match d {
+        Decision::Append(e) if e.ty == EventType::BudgetExhausted => {
+            Some(e.data["dimension"].clone())
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn zero_reservation_reports_token_budget_exhausted() {
+    let mut sim = locked_sim();
+    sim.fx.reservation = FixedReserve(0);
+    let out = sim.tick();
+    assert_eq!(
+        exhausted_dimension(&out),
+        Some(serde_json::json!("tokens_by_tier.worker"))
+    );
+    let raise = out
+        .iter()
+        .find_map(|d| match d {
+            Decision::Raise(r) => Some(r),
+            _ => None,
+        })
+        .expect("budget_exhausted raise");
+    assert_eq!(raise.kind, InboxKind::BudgetExhausted);
+    let InboxPayload::BudgetExhausted { dimension, .. } = &raise.payload else {
+        panic!("expected budget_exhausted payload");
+    };
+    assert_eq!(
+        *dimension,
+        gantry_core::entities::BudgetDimension::TokensByTier(Tier::Worker)
+    );
+}
+
+#[test]
+fn zero_wall_budget_reports_wall_time_exhausted() {
+    let mut sim = locked_sim();
+    sim.state.delivery.budget.limits.wall_time = 0;
+    let out = sim.tick();
+    assert_eq!(
+        exhausted_dimension(&out),
+        Some(serde_json::json!("wall_time"))
+    );
+    assert!(out
+        .iter()
+        .any(|d| matches!(d, Decision::Raise(r) if r.kind == InboxKind::BudgetExhausted)));
 }

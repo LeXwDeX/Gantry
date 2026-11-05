@@ -2412,3 +2412,45 @@ fn outbox_failure_is_not_raised_after_abandon() {
         .iter()
         .any(|decision| matches!(decision, Decision::Raise(_))));
 }
+
+/// #309：每个成功的 Outbox 动作只记一次 `forge_writes`（重复事件与重放不重复）。
+#[test]
+fn forge_write_is_charged_once_per_succeeded_action() {
+    let mut sim = dispatched();
+    finish(&mut sim, vec![]);
+    let _ = sim.settle();
+    let push = judge(&sim.tick())
+        .into_iter()
+        .find(|(_, kind)| *kind == ForgeActionKind::PushBranch)
+        .unwrap()
+        .0;
+    let request = enqueue_of(sim.decide(
+        Input::Report(EffectReport::ActionJudged {
+            key: push.clone(),
+            decision: allow(None),
+        }),
+        InputIdentity::Report(EffectKey::Judge(push.clone())),
+    ));
+    enqueue_only(&mut sim, &request, ACTION_PUSH);
+    sim.external(
+        "outbox.succeeded",
+        ACTION_PUSH,
+        json!({"github_ref": {"bot": null, "pr": null, "marker": null, "recorded_at": null}}),
+    );
+    let charges = |decisions: &[Decision]| {
+        decisions
+            .iter()
+            .filter(|d| {
+                matches!(d, Decision::Append(e)
+                    if e.ty == EventType::BudgetCharged && e.data["dimension"] == "forge_writes")
+            })
+            .count()
+    };
+    let out = sim.tick();
+    assert_eq!(charges(&out), 1);
+    sim.apply(out);
+    assert!(sim.state.outbox[&push].charged);
+    assert_eq!(sim.state.ledger.used.forge_writes, 1);
+    // 重复求值（重启后同样）不再记账。
+    assert_eq!(charges(&sim.tick()), 0);
+}

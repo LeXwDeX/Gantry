@@ -11,17 +11,15 @@
 //! 命令、事件驱动的迁移（T11）、放弃收尾、T14 / T15、上报项选项的执行与 `models_not_configured`
 //! 见 [`crate::control`]（#73）。
 //!
-//! 仍未覆盖、留给后续切片的：
-//! - 预算不足时的 `budget.exhausted` 与上报（本切片只"不产出"）；
 
 use std::collections::BTreeMap;
 
 use gantry_core::canon::{IdempotencyKey, SubjectDigest};
 use gantry_core::egress::LedgerRef;
 use gantry_core::entities::{
-    Actor, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, ForgeActionKind, InboxKind,
-    InboxPayload, NodeStatus, OutboxStatus, Priority, PullRequestState, Ref, Severity, Stage,
-    StageStatus, WorkflowStatus,
+    Actor, ActorKind, ApprovalAction, ApprovalStatus, AttemptStatus, BudgetDimension,
+    ForgeActionKind, InboxKind, InboxOption, InboxPayload, NodeStatus, OutboxStatus, Priority,
+    PullRequestState, Ref, Severity, Stage, StageStatus, WorkflowStatus,
 };
 use gantry_core::events::{
     AttemptFinishedData, BudgetChargeSource, BudgetChargedData, BudgetChargedDimension,
@@ -118,6 +116,7 @@ pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<
     schedule_retries(state, env, &mut out);
     schedule_lock_renewals(state, env, &mut out);
     finish_workflows(state, &mut out);
+    charge_forge_writes(state, &mut out);
     judge_actions(state, env, &mut out);
     control::raise_outbox_failed(state, &mut out);
     raise_approval_needed(state, &mut out);
@@ -356,6 +355,14 @@ fn build_workflow(state: &DeliveryState, mint: &mut IdMint, out: &mut Vec<Decisi
     let row = &state.delivery;
     if row.stage.is_terminal() || state.workflow_built_in_stage() || !state.may_dispatch() {
         return;
+    }
+    if let Some(graph) = stage_graph(row.level_effective, row.stage) {
+        let used = state.ledger.used.nodes;
+        let limit = row.budget.limits.nodes;
+        if used + graph.nodes.len() as u64 > limit {
+            raise_budget_exhausted(state, BudgetDimension::Nodes, limit, used, out);
+            return;
+        }
     }
     if let Some(decisions) = new_workflow(state, mint) {
         out.extend(decisions);
@@ -1520,6 +1527,87 @@ fn will_retry(detail: &str, n: u32, attempts: &[AttemptState], env: &DecideEnv) 
     }
 }
 
+/// 每个成功的 Outbox 动作记一次 `forge_writes`（§7.14.5：`outbox.succeeded` 后）；
+/// `OutboxState.charged` 由 `budget.charged` 折叠置位，重复事件与恢复不重复记账。
+fn charge_forge_writes(state: &DeliveryState, out: &mut Vec<Decision>) {
+    let mut pending = 0;
+    for row in state.outbox.values() {
+        if row.status != gantry_core::entities::OutboxStatus::Succeeded || row.charged {
+            continue;
+        }
+        pending += 1;
+        out.push(delivery_event(
+            state,
+            EventType::BudgetCharged,
+            &state.delivery.id.to_string(),
+            &BudgetChargedData {
+                ledger: LedgerRef::Delivery {
+                    id: state.delivery.id,
+                },
+                dimension: BudgetChargedDimension::ForgeWrites,
+                delta: 1,
+                used_after: state.ledger.used.forge_writes + pending,
+                source: BudgetChargeSource::OutboxAction {
+                    action_id: row.action_id,
+                },
+                tier: None,
+                usage: None,
+                weighted_tokens: None,
+                weight_audit: None,
+            },
+        ));
+    }
+}
+
+/// 预算不足：写 `budget.exhausted` 并上报 `budget_exhausted`（§7.9）。
+/// 同一阶段同维度已写过时不再重复（`ledger.exhausted` 以 `stage_entered` 为界）。
+fn raise_budget_exhausted(
+    state: &DeliveryState,
+    dimension: BudgetDimension,
+    limit: u64,
+    used: u64,
+    out: &mut Vec<Decision>,
+) {
+    let already = state
+        .ledger
+        .exhausted
+        .iter()
+        .any(|(written, seq)| *written == dimension && *seq > state.delivery.stage_entered.seq);
+    if already {
+        return;
+    }
+    out.push(delivery_event(
+        state,
+        EventType::BudgetExhausted,
+        &state.delivery.id.to_string(),
+        &gantry_core::events::BudgetExhaustedData {
+            dimension,
+            limit,
+            used,
+        },
+    ));
+    out.push(Decision::Raise(RaiseRequest {
+        project_id: Some(state.delivery.project_id),
+        delivery_id: Some(state.delivery.id),
+        kind: InboxKind::BudgetExhausted,
+        severity: Severity::Blocker,
+        summary: SafeSummary::new("预算耗尽"),
+        payload: InboxPayload::BudgetExhausted {
+            dimension,
+            limit,
+            used,
+            options: vec![
+                InboxOption::new("raise_cap", "追加额度", true),
+                InboxOption::new("abandon", "放弃", false),
+            ],
+        },
+        dedup_key: DedupKey::new(format!("budget:{}:{dimension}", state.delivery.id)),
+        supersedes: Vec::new(),
+        actor: engine_actor(),
+        causation_id: None,
+    }));
+}
+
 /// 自动重试尚未到期：安排 `Timer(RetryBackoff)`，到期后由 `Tick(Timer)` 重新求值。
 fn schedule_retries(state: &DeliveryState, env: &DecideEnv, out: &mut Vec<Decision>) {
     if !state.may_dispatch() {
@@ -1738,11 +1826,41 @@ fn dispatch(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint, out: &mut
         let Some(model) = model_for(env, state, node) else {
             continue;
         };
+        let wall = effective_wall_time(state, env, &model);
+        if wall == 0 {
+            raise_budget_exhausted(
+                state,
+                BudgetDimension::WallTime,
+                state.delivery.budget.limits.wall_time,
+                state.ledger.used.wall_time,
+                out,
+            );
+            return;
+        }
         let tokens = env.reservation.reserve(&ledger_view(state), node.tier, 1);
         if tokens == 0 {
-            continue;
+            raise_budget_exhausted(
+                state,
+                BudgetDimension::TokensByTier(node.tier),
+                state
+                    .delivery
+                    .budget
+                    .limits
+                    .tokens_by_tier
+                    .get(&node.tier)
+                    .copied()
+                    .unwrap_or(0),
+                state
+                    .ledger
+                    .used
+                    .tokens_by_tier
+                    .get(&node.tier)
+                    .copied()
+                    .unwrap_or(0),
+                out,
+            );
+            return;
         }
-        let wall = effective_wall_time(state, env, &model);
         let attempt_id = mint.next_id::<gantry_core::ids::Att>();
         let n = node.attempts.len() as u32 + 1;
         if node.status == NodeStatus::Queued {
