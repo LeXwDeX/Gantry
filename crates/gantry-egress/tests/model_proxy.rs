@@ -2,14 +2,14 @@
 //! 哨兵、路径 / 方法白名单、限量、流式、响应头清洗、上游证书与重定向、凭据缺失、上游错误、
 //! 限速）、§12.C（计量与封顶、`svc_model` 回环监听与调用级关闭）、§12.H（每个请求一条审计）。
 
-mod support;
+#![cfg(feature = "testing")]
 
 use std::time::{Duration, Instant};
 
 use gantry_core::entities::TokenUsage;
 use gantry_egress::model_proxy::Limits;
 use gantry_egress::netdeny::Cidr;
-use support::*;
+use gantry_egress::testing::*;
 
 fn job_path(token: &str, rest: &str) -> String {
     format!("/j/{token}/anthropic{rest}")

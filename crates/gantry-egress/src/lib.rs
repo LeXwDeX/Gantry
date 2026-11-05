@@ -30,3 +30,6 @@ pub use host::{parse_connect_authority, AllowPattern, Host, HostDenial};
 pub use netdeny::{Cidr, DenyNets};
 pub use review::{review, ProviderUpstream, ReviewedConfig};
 pub use token::{mint_job_token, mint_svc_token, OsEntropy, TokenHash};
+
+#[cfg(feature = "testing")]
+pub mod testing;
