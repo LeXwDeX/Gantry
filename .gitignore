@@ -7,6 +7,9 @@ node_modules/
 .serena/
 /hosts.local.md
 
+# 自建 CI 的本地环境（内部地址等，不追踪）
+/ci/ci.local.env
+
 # SpecGit 与本地 Agent 生成的本地资产（不追踪）
 /.specgit.yaml
 /.agents/skills/specgit-native/
