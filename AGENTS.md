@@ -17,7 +17,7 @@ Gantry 是一个基于 DAG 编排、与 GitHub 强关联、按阶段管理交付
 - **桌面端**：命令白名单、CSP、编译期折叠 scenario/mock 等边界已静态核对；前端有 scenario、mock、Tauri 三种适配器，Tauri 适配器的参数形状与路由表已有对账测试（#370，PR #374），真实服务端联调尚未证明。
 - **验收口径**：替身测试通过不等于真实环境通过。M1 各条退出标准分三级取证：本机替身、本机虚拟机、外部资源。见 [M1 验收证据分级](docs/m1-acceptance.md)；宣布方式已定为两步：A + B 级全绿记为「M1 本机验收通过」，C 级全绿记为「M1 退出」（#87）。
 - **验证状态**：各 PR 描述记录了合入前的全工作区本机门槛结果；M1.3 收尾评审 PR 在合入后的结果上复跑了全部门槛（含 MSRV 1.85 的 `--all-targets`）。本机门槛不能替代真实环境证据。
-- **已知外部阻塞**：开发 CI 配置已迁到 Azure Pipelines（`.azure-pipelines/ci.yml`，#375），但尚未在 Azure 上实际跑通，合并依据仍是本机门槛；GitHub Actions 仍因账户计费问题不可用（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
+- **已知外部阻塞**：开发阶段改用测试机上的自体 CI（见 §3「CI 与发布流程」）；Azure Pipelines 配置（`.azure-pipelines/ci.yml`，#375）尚未实际跑通；GitHub Actions 仍因账户计费问题不可用（#86）；没有真实的 GitHub App、模型密钥、Podman 目标主机和代码签名。
 
 ## 2. 架构与目录入口
 
@@ -84,7 +84,7 @@ npm ci --prefix apps/desktop && npm run lint --prefix apps/desktop && npm run ty
 npm run build --prefix apps/desktop
 ```
 
-跑单个测试：`cargo test --locked -p gantry-engine --test engine_level lowering`。`gantry-store` 的集成测试依赖 `testing` feature，要加 `--all-features`，否则几乎全部被跳过，只剩 1 项。前端单个测试：`npm test --prefix apps/desktop -- <文件名片段>`（vitest 按文件名过滤）。MSRV 是 Rust 1.85，CI 另跑一遍 `cargo check`；Node 需要 22 以上。
+跑单个测试：`cargo test --locked -p gantry-engine --test engine_level lowering`。`gantry-store` 的集成测试依赖 `testing` feature，要加 `--all-features`，否则几乎全部被跳过，只剩 1 项。前端单个测试：`npm test --prefix apps/desktop -- <文件名片段>`（vitest 按文件名过滤）。MSRV 是 Rust 1.85，自体 CI 另跑一遍 `cargo check`；Node 需要 22 以上。
 
 ### 规则
 
@@ -101,7 +101,18 @@ npm run build --prefix apps/desktop
 1. 在当前里程碑里领一个 issue，读它的范围、完成标准和依赖。
 2. 读 `docs/modules/<模块>.md` 全文，以及它在"依赖""输入""输出"里引用的 `interfaces/` 契约和 `data-model.md` 章节；读 `architecture.md` §5，确认本模块要保证哪几条不变式。
 3. 只修改本模块的目录；需要改契约时先开契约 PR。
-4. 合并前在本机跑完上面的检查，结果写进 PR 描述。
+4. 合并前在自体 CI 跑完上面的检查（见下节），结果写进 PR 描述。
+
+### CI 与发布流程
+
+按以下顺序推进，前一关不全绿不进下一关：
+
+1. **自体 CI（开发阶段，只做 Linux）**：在测试机的项目工作目录下建 `ci/`，放 CI 用的 Docker 镜像定义与运行脚本；容器内从干净检出跑完"常用命令"全套门槛（Rust 门槛含 MSRV、xtask 漂移检查、mock-api 与桌面前端）。PR 合并依据是自体 CI 全绿，不是开发机本机结果。不做 Windows / macOS 构建。
+2. **GitHub 最终 runner**：自体 CI 上所有问题都解决后，再在 GitHub 侧 runner 跑一次作为发布前终检；它不承担日常开发反馈。
+3. **人类评审**：终检通过的产物部署到评审机，交由人类评审。评审机只部署前序产出的镜像或产物，不在上面开发或构建；以实际健康检查和日志为验收依据。
+4. **tag + GitHub Release**：人类评审确认无问题后，才打 tag 并发布 GitHub Release。
+
+主机约定：本仓库公开，**不写任何主机地址、IP、账号或密钥**。测试机、评审机的地址、工作目录与登录方式记录在仓库根目录的未追踪文件 `hosts.local.md`（已被 `.gitignore` 忽略）；缺失时向用户索取，不要猜测。测试机上只操作本项目目录与本项目的容器和端口，任务结束清理临时容器、镜像与文件。
 
 ### 里程碑收尾（每个里程碑完成后必做）
 
@@ -115,3 +126,10 @@ npm run build --prefix apps/desktop
 ### 扩展性预留
 
 agent 的 skill、MCP、hooks、上下文管理都要留出扩展空间，但扩展只能来自服务端的可信配置，不能来自仓库内容。落地节奏照搬 `ConfigView.injection`：先在契约里定义类型，M1 拒绝非空，后续里程碑逐类启用。设计前先调研前身项目 GraphAgent 与 SpecGit 的边界设计与教训。详见 NEXT-STEPS.md「后续规划 · 阶段 6」。
+
+
+<!-- specgit:project:v2:start -->
+## SpecGit 2
+
+Read project-root `.agents/skills/specgit-native/SKILL.md` before work; if missing, initialize with the shared `specgit init` CLI or restore an existing integration with `specgit setup` ([installation](https://github.com/LeXwDeX/SpecGit/blob/main/docs/agent-install.md)).
+<!-- specgit:project:v2:end -->
