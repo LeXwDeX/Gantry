@@ -3,9 +3,8 @@
 //! `EgressStub` 与真实 Egress（登记表 + `egress.sock` 控制面 + 数据面监听器，经
 //! `EgressClient` 调用），断言两者行为一致。
 
+#![cfg(feature = "testing")]
 #![cfg(unix)]
-
-mod support;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,11 +29,11 @@ use gantry_egress::db::Db;
 use gantry_egress::model_proxy::{Limits, ModelProxy};
 use gantry_egress::netdeny::DenyNets;
 use gantry_egress::registry::{Endpoints, Listener, Registry, RegistryOptions};
+use gantry_egress::testing::*;
 use gantry_egress::upstream::{roots_from_pem, tls_config, Connector};
 use gantry_fakes::egress::EgressStub;
 use gantry_fakes::secrets::MemorySecretStore;
 use gantry_fakes::test_ca::TestCA;
-use support::*;
 use tokio::net::{TcpListener, UnixListener};
 
 /// 被测对象：端口实现 + 一个能用签发的 base URL 发模型请求的数据面。
@@ -159,7 +158,7 @@ async fn real(name: &str) -> Real {
 }
 
 fn view(rev: u64, host: &str) -> EgressConfigView {
-    support::view(rev, host)
+    gantry_egress::testing::view(rev, host)
 }
 
 fn job(n: u128) -> IssueJobToken {

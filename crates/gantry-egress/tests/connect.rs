@@ -2,16 +2,16 @@
 //! 端口、DNS 重绑定与钉住、通配、有效分组、方法、上限、从不连 GitHub）、§12.A（无令牌 / 用户名
 //! 不对 / 已吊销）与 egress-control §8 的 `CONNECT` 条目。
 
-mod support;
+#![cfg(feature = "testing")]
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use gantry_egress::connect::{ConnectProxy, TunnelLimits};
 use gantry_egress::netdeny::{Cidr, DenyNets};
+use gantry_egress::testing::*;
 use gantry_egress::upstream::Connector;
 use serde_json::Value;
-use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 

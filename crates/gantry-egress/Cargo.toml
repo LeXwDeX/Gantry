@@ -25,6 +25,7 @@ idna = "1"
 # 固定 unicode-rs 后端：ICU 后端（idna_adapter 1.2+）要求 rustc 1.86，超出 MSRV 1.85。
 idna_adapter = "~1.1"
 thiserror.workspace = true
+gantry-fakes = { path = "../gantry-fakes", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 gantry-secrets = { path = "../gantry-secrets" }
@@ -33,3 +34,6 @@ gantry-secrets = { path = "../gantry-secrets" }
 gantry-core = { path = "../gantry-core", features = ["testing"] }
 gantry-fakes = { path = "../gantry-fakes" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[features]
+testing = ["dep:gantry-fakes", "gantry-core/testing"]
