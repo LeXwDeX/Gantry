@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use gantry_core::canon::{GitOid, RepoSlug, SubjectDigest};
 use gantry_core::entities::{
     Actor, ActorKind, AttemptStatus, DeliveryOrigin, ForgeActionKind, GithubPrRef, GithubRef,
-    InboxKind, MergeMethod, NodeStatus, Project, PullRequestRef, Seq, Stage, Tier, TokenUsage,
+    InboxKind, LockHolder, MergeMethod, NodeStatus, Project, PullRequestRef, Seq, Stage, Tier,
+    TokenUsage,
 };
 use gantry_core::events::{NewEvent, Subject};
 use gantry_core::ids::{DeliveryId, IdGen, MessageId, ProjectId, WorktreeId};
@@ -25,9 +26,10 @@ use gantry_core::time::Timestamp;
 use gantry_engine::actor::{ActorConfig, ActorDeps, DeliveryActor, EffectRunner, PrSnapshots};
 use gantry_engine::create::{budget_from_level, NewDelivery};
 use gantry_engine::decide::{
-    AttemptPlan, Effect, EffectKey, EffectReport, EngineConsts, EngineSettings, Finalized, Input,
-    InputIdentity, ModelKey, ModelTable, OutputSignals, PatchResult, ProjectFacts,
-    ReservationPolicy, ResolvedModel, RetryBlocked, SandboxLimits, TemplateRegistry, TickReason,
+    AttemptPlan, Effect, EffectErrorClass, EffectKey, EffectReport, EngineConsts, EngineSettings,
+    Finalized, Input, InputIdentity, ModelKey, ModelTable, OutputSignals, PatchResult,
+    ProjectFacts, ReservationPolicy, ResolvedModel, RetryBlocked, SandboxLimits, TemplateRegistry,
+    TickReason, TimerKind,
 };
 use gantry_engine::engine::Engine;
 use gantry_engine::event_router::{EventRouter, CURSOR};
@@ -73,6 +75,10 @@ struct ScriptRunner {
     effects: Mutex<Vec<Effect>>,
     granted: Mutex<bool>,
     release_views: Mutex<Vec<(bool, u64, bool)>>,
+    /// 下一次 `AcquireLock` 以该租约被占用的 `LockBusy` 结束。
+    busy_once: Mutex<Option<Timestamp>>,
+    /// 下一次 `RunAttempt` 以可重试错误结束。
+    fail_run_once: Mutex<bool>,
 }
 
 impl ScriptRunner {
@@ -83,6 +89,8 @@ impl ScriptRunner {
             effects: Mutex::new(Vec::new()),
             granted: Mutex::new(false),
             release_views: Mutex::new(Vec::new()),
+            busy_once: Mutex::new(None),
+            fail_run_once: Mutex::new(false),
         }
     }
 
@@ -198,6 +206,13 @@ impl EffectRunner for ScriptRunner {
                 holder,
                 lease_s,
             } => {
+                if let Some(until) = self.busy_once.lock().unwrap().take() {
+                    return Some(EffectReport::LockBusy {
+                        node_id,
+                        holder: LockHolder::Human,
+                        until: Some(until),
+                    });
+                }
                 let lease_until = Timestamp::from_millis(T0 + 10_000_000 + lease_s as i64 * 1000);
                 let fence = self
                     .write(
@@ -221,7 +236,15 @@ impl EffectRunner for ScriptRunner {
                 })
             }
             // 长时副作用：结果由测试以 AttemptFinalized 回流。
-            Effect::RunAttempt(_) => None,
+            Effect::RunAttempt(plan) => {
+                if std::mem::take(&mut *self.fail_run_once.lock().unwrap()) {
+                    return Some(EffectReport::EffectFailed {
+                        key: EffectKey::Run(plan.attempt_id),
+                        error: EffectErrorClass::Retryable,
+                    });
+                }
+                None
+            }
             Effect::JudgeAction { key, request } => {
                 if *self.judge.lock().unwrap() == JudgeMode::Drop {
                     return None;
@@ -383,19 +406,26 @@ struct Harness {
     runner: Arc<ScriptRunner>,
     snapshots: Arc<Snapshots>,
     delivery: DeliveryId,
+    clock: Arc<FakeClock>,
 }
 
 impl Harness {
     async fn new() -> Self {
         let clock = Arc::new(FakeClock::new(T0));
         let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(11))));
-        let store = Store::open_in_memory(StoreDeps { clock, ids }, &[])
-            .await
-            .unwrap();
-        Self::with_store(store).await
+        let store = Store::open_in_memory(
+            StoreDeps {
+                clock: clock.clone(),
+                ids,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+        Self::with_store(store, clock).await
     }
 
-    async fn with_store(store: Store) -> Self {
+    async fn with_store(store: Store, clock: Arc<FakeClock>) -> Self {
         let forge = Arc::new(FakeForge::new_in(store.clone()));
         forge.insert_project(Project {
             id: project_id(),
@@ -450,6 +480,7 @@ impl Harness {
             store,
             forge,
             delivery,
+            clock,
         }
     }
 
@@ -1172,13 +1203,20 @@ async fn identity_failure_is_committed_before_release_and_survives_sqlite_reopen
     let deps = || {
         let clock = Arc::new(FakeClock::new(T0));
         let ids = Arc::new(IdGen::new(clock.clone(), Arc::new(SeqEntropy::new(11))));
-        StoreDeps { clock, ids }
+        (
+            StoreDeps {
+                clock: clock.clone(),
+                ids,
+            },
+            clock,
+        )
     };
     let (delivery, finalized, committed_events) = {
-        let store = Store::open(StoreConfig::new(&dir.0), deps(), &[])
+        let (deps, clock) = deps();
+        let store = Store::open(StoreConfig::new(&dir.0), deps, &[])
             .await
             .unwrap();
-        let h = Harness::with_store(store).await;
+        let h = Harness::with_store(store, clock).await;
         let mut router = EventRouter::open(h.store.clone()).await.unwrap();
         let mut actor = h.actor();
         h.settle(&mut actor).await;
@@ -1273,7 +1311,7 @@ async fn identity_failure_is_committed_before_release_and_survives_sqlite_reopen
         );
         (h.delivery, finalized, events)
     };
-    let store = Store::open(StoreConfig::new(&dir.0), deps(), &[])
+    let store = Store::open(StoreConfig::new(&dir.0), deps().0, &[])
         .await
         .unwrap();
     let after = store
@@ -1334,4 +1372,100 @@ async fn identity_failure_is_committed_before_release_and_survives_sqlite_reopen
     }
     assert!(runner.plans().is_empty());
     assert_eq!(store.events().head().await.unwrap(), head);
+}
+
+// ---------------------------------------------------------------------------
+// #293：锁占用按租约到期重查；可重试的副作用失败安排退避并在到期后重发
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lock_busy_waits_until_lease_expires() {
+    let h = Harness::new().await;
+    let mut actor = h.actor();
+    let until = Timestamp::from_millis(T0 + 60_000);
+    *h.runner.busy_once.lock().unwrap() = Some(until);
+
+    // 第一次取锁被拒：只发一次，随后等 LeaseCheck，Settle 不再重发。
+    h.settle(&mut actor).await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    h.pump(&mut router, &mut actor).await;
+    assert_eq!(
+        h.runner.count(|e| matches!(e, Effect::AcquireLock { .. })),
+        1
+    );
+    assert_eq!(
+        h.runner.count(|e| matches!(
+            e,
+            Effect::ScheduleTimer {
+                kind: TimerKind::LeaseCheck { .. },
+                ..
+            }
+        )),
+        1
+    );
+    assert_eq!(h.runner.count(|e| matches!(e, Effect::RunAttempt(_))), 0);
+
+    // 租约到期：同一个 Timer 重查，取锁成功并派发。
+    h.clock.set(until);
+    let reason = TickReason::Timer {
+        at: until,
+        kind: TimerKind::LeaseCheck {
+            worktree_id: WORKTREE.parse().unwrap(),
+        },
+    };
+    actor
+        .handle(Input::Tick(reason.clone()), InputIdentity::Tick(reason))
+        .await
+        .unwrap();
+    h.settle(&mut actor).await;
+    assert_eq!(
+        h.runner.count(|e| matches!(e, Effect::AcquireLock { .. })),
+        2
+    );
+    assert_eq!(h.runner.count(|e| matches!(e, Effect::RunAttempt(_))), 1);
+}
+
+#[tokio::test]
+async fn retryable_effect_failure_is_retried_after_backoff() {
+    let h = Harness::new().await;
+    let mut actor = h.actor();
+
+    // 派发一次尝试，然后注入一次可重试的 RunAttempt 失败。
+    h.settle(&mut actor).await;
+    let mut router = EventRouter::open(h.store.clone()).await.unwrap();
+    h.pump(&mut router, &mut actor).await;
+    let plan = h.runner.plans().remove(0);
+    *h.runner.fail_run_once.lock().unwrap() = true;
+    let key = EffectKey::Run(plan.attempt_id);
+    actor
+        .handle(
+            Input::Report(EffectReport::EffectFailed {
+                key: key.clone(),
+                error: EffectErrorClass::Retryable,
+            }),
+            InputIdentity::Report(key),
+        )
+        .await
+        .unwrap();
+    let timers = h.runner.count(|e| {
+        matches!(e, Effect::ScheduleTimer { kind: TimerKind::RetryBackoff { node_id }, .. } if *node_id == plan.node_id)
+    });
+    assert_eq!(timers, 1);
+    assert_eq!(h.runner.count(|e| matches!(e, Effect::RunAttempt(_))), 1);
+
+    // 退避到期：重发同一未终结尝试（resume），不新建 attempt。
+    let reason = TickReason::Timer {
+        at: Timestamp::from_millis(T0 + 2_000),
+        kind: TimerKind::RetryBackoff {
+            node_id: plan.node_id,
+        },
+    };
+    actor
+        .handle(Input::Tick(reason.clone()), InputIdentity::Tick(reason))
+        .await
+        .unwrap();
+    let plans = h.runner.plans();
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[1].attempt_id, plan.attempt_id);
+    assert!(plans[1].resume);
 }

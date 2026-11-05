@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use common::{ts, BASE_SHA, DELIVERY, PROJECT, T0};
 use gantry_core::canon::GitOid;
@@ -64,6 +64,7 @@ struct Fixture {
     inflight: BTreeSet<EffectKey>,
     denied: BTreeSet<ActionKey>,
     proposals: ProposalTexts,
+    blocked: BTreeMap<gantry_core::ids::WorktreeId, gantry_core::time::Timestamp>,
 }
 
 impl Fixture {
@@ -100,6 +101,7 @@ impl Fixture {
             inflight: BTreeSet::new(),
             denied: BTreeSet::new(),
             proposals: ProposalTexts::default(),
+            blocked: BTreeMap::new(),
         }
     }
 
@@ -115,6 +117,7 @@ impl Fixture {
             inflight: &self.inflight,
             denied: &self.denied,
             proposals: &self.proposals,
+            blocked: &self.blocked,
             consts: EngineConsts::default(),
         }
     }
@@ -390,7 +393,19 @@ fn dispatched() -> Sim {
     );
     sim.state.lock_owner.insert(*worktree_id, node_id);
     let effects = sim.settle();
-    let [Decision::Effect(Effect::RunAttempt(plan))] = effects.as_slice() else {
+    // 派发后同时安排锁续租；这里只断言业务副作用。
+    assert!(effects.iter().any(|d| matches!(
+        d,
+        Decision::Effect(Effect::ScheduleTimer {
+            kind: gantry_engine::decide::TimerKind::LockRenew { .. },
+            ..
+        })
+    )));
+    let business: Vec<&Decision> = effects
+        .iter()
+        .filter(|d| !matches!(d, Decision::Effect(Effect::ScheduleTimer { .. })))
+        .collect();
+    let [Decision::Effect(Effect::RunAttempt(plan))] = business.as_slice() else {
         panic!("expected RunAttempt, got {effects:?}");
     };
     assert_eq!(plan.node_id, node_id);

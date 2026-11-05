@@ -5,15 +5,15 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use common::{ts, BASE_SHA, DELIVERY, PROJECT, T0};
 use gantry_core::canon::{GitOid, SubjectDigest};
 use gantry_core::entities::{
     Actor, ActorKind, ApprovalAction, AttemptStatus, BudgetLedger, DecisionKind, EvidenceKind,
-    EvidenceRef, ForgeActionKind, InboxKind, InboxPayload, IssueRef, IssueState, MergeMethod,
-    NodeStatus, PolicyActionId, PullRequestRef, Ref, Seq, Severity, Stage, StageStatus, Tier,
-    TokenUsage,
+    EvidenceRef, ForgeActionKind, InboxKind, InboxPayload, IssueRef, IssueState, LockHolder,
+    MergeMethod, NodeStatus, PolicyActionId, PullRequestRef, Ref, Seq, Severity, Stage,
+    StageStatus, Tier, TokenUsage,
 };
 use gantry_core::events::{Event, EventType, NewEvent, Subject};
 use gantry_core::forge::ActionPayload;
@@ -25,10 +25,11 @@ use gantry_core::text::UntrustedText;
 use gantry_core::time::Timestamp;
 use gantry_core::worker::{OpenPrParams, Proposal, ProposalKind, ProposalParams};
 use gantry_engine::decide::{
-    AttemptPlan, DecideEnv, DecideSeed, Decision, Effect, EffectKey, EffectReport, EngineConsts,
-    EngineSettings, Finalized, Input, InputIdentity, ModelKey, ModelTable, OutputSignals,
-    PatchResult, ProjectFacts, ProposalMissing, ProposalOutcome, ProposalRef, ProposalText,
-    ProposalTexts, ReservationPolicy, ResolvedModel, SandboxLimits, TemplateRegistry, TickReason,
+    AttemptPlan, DecideEnv, DecideSeed, Decision, Effect, EffectErrorClass, EffectKey,
+    EffectReport, EngineConsts, EngineSettings, Finalized, Input, InputIdentity, ModelKey,
+    ModelTable, OutputSignals, PatchResult, ProjectFacts, ProposalMissing, ProposalOutcome,
+    ProposalRef, ProposalText, ProposalTexts, ReservationPolicy, ResolvedModel, SandboxLimits,
+    TemplateRegistry, TickReason, TimerKind,
 };
 use gantry_engine::state::{ActionKey, DeliveryState};
 use gantry_engine::{decide, expected_actions};
@@ -60,6 +61,7 @@ struct Fixture {
     inflight: BTreeSet<EffectKey>,
     denied: BTreeSet<ActionKey>,
     proposals: ProposalTexts,
+    blocked: BTreeMap<gantry_core::ids::WorktreeId, Timestamp>,
 }
 
 impl Fixture {
@@ -96,6 +98,7 @@ impl Fixture {
             inflight: BTreeSet::new(),
             denied: BTreeSet::new(),
             proposals: ProposalTexts::default(),
+            blocked: BTreeMap::new(),
         }
     }
 
@@ -111,6 +114,7 @@ impl Fixture {
             inflight: &self.inflight,
             denied: &self.denied,
             proposals: &self.proposals,
+            blocked: &self.blocked,
             consts: EngineConsts::default(),
         }
     }
@@ -194,6 +198,13 @@ impl Sim {
             Input::Tick(TickReason::Settle),
             InputIdentity::Tick(TickReason::Settle),
         )
+    }
+
+    /// 可控时钟：同一状态与输入，只替换 `now`。
+    fn decide_at(&self, now: Timestamp, input: Input, identity: InputIdentity) -> Vec<Decision> {
+        let mut env = self.fx.env(&self.state, &identity);
+        env.now = now;
+        decide(&self.state, &input, &env)
     }
 
     /// 执行事务内决策（`Append`），返回其余决策；`Raise` 以 `inbox.raised` 落盘。
@@ -391,7 +402,19 @@ fn dispatch_to_plan(sim: &mut Sim) -> AttemptPlan {
     );
     sim.state.lock_owner.insert(*worktree_id, node_id);
     let effects = sim.settle();
-    let [Decision::Effect(Effect::RunAttempt(plan))] = effects.as_slice() else {
+    // 派发后同时安排锁续租；这里只断言业务副作用。
+    assert!(effects.iter().any(|d| matches!(
+        d,
+        Decision::Effect(Effect::ScheduleTimer {
+            kind: gantry_engine::decide::TimerKind::LockRenew { .. },
+            ..
+        })
+    )));
+    let business: Vec<&Decision> = effects
+        .iter()
+        .filter(|d| !matches!(d, Decision::Effect(Effect::ScheduleTimer { .. })))
+        .collect();
+    let [Decision::Effect(Effect::RunAttempt(plan))] = business.as_slice() else {
         panic!("expected RunAttempt, got {effects:?}");
     };
     assert_eq!(plan.node_id, node_id);
@@ -1738,4 +1761,191 @@ fn finalize_charges_metered_tokens_with_weight_audit() {
         sim.state.ledger.used.tokens_by_tier.get(&Tier::Worker),
         Some(&32600)
     );
+}
+
+#[test]
+fn lock_busy_schedules_lease_check() {
+    let mut sim = worktree_ready();
+    let node = sim
+        .state
+        .workflows
+        .values()
+        .flat_map(|wf| wf.nodes.keys())
+        .next()
+        .copied()
+        .unwrap();
+    let worktree = WORKTREE.parse().unwrap();
+    // 正例：按租约到期时刻安排一次检查。
+    let until = Timestamp::from_millis(T0 + 2_000_000);
+    let out = sim.report(
+        EffectReport::LockBusy {
+            node_id: node,
+            holder: LockHolder::Human,
+            until: Some(until),
+        },
+        EffectKey::Lock(worktree),
+    );
+    assert!(out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::ScheduleTimer { at, kind: TimerKind::LeaseCheck { worktree_id } })
+            if *at == until && *worktree_id == worktree
+    )));
+
+    // 无到期时刻：一息后重试。
+    let out = sim.report(
+        EffectReport::LockBusy {
+            node_id: node,
+            holder: LockHolder::Human,
+            until: None,
+        },
+        EffectKey::Lock(worktree),
+    );
+    assert!(out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::ScheduleTimer { at, kind: TimerKind::LeaseCheck { .. } })
+            if *at == Timestamp::from_millis(T0 + 1_001_000)
+    )));
+
+    // 已过期：不再安排。
+    let out = sim.report(
+        EffectReport::LockBusy {
+            node_id: node,
+            holder: LockHolder::Human,
+            until: Some(Timestamp::from_millis(T0)),
+        },
+        EffectKey::Lock(worktree),
+    );
+    assert!(!out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::ScheduleTimer {
+            kind: TimerKind::LeaseCheck { .. },
+            ..
+        })
+    )));
+
+    // 在途：不重复安排。
+    sim.fx
+        .inflight
+        .insert(EffectKey::Timer(TimerKind::LeaseCheck {
+            worktree_id: worktree,
+        }));
+    assert!(!sim
+        .report(
+            EffectReport::LockBusy {
+                node_id: node,
+                holder: LockHolder::Human,
+                until: Some(until),
+            },
+            EffectKey::Lock(worktree),
+        )
+        .iter()
+        .any(|decision| matches!(
+            decision,
+            Decision::Effect(Effect::ScheduleTimer {
+                kind: TimerKind::LeaseCheck { .. },
+                ..
+            })
+        )));
+}
+
+#[test]
+fn retryable_effect_failure_schedules_backoff() {
+    let mut sim = dispatched();
+    let (node_id, attempt) = sim
+        .state
+        .unfinished_attempts()
+        .next()
+        .map(|(node, attempt)| (node.id, attempt.id))
+        .unwrap();
+    let key = EffectKey::Run(attempt);
+    // 正例：可重试失败按底座退避安排一次重试。
+    let out = sim.report(
+        EffectReport::EffectFailed {
+            key: key.clone(),
+            error: EffectErrorClass::Retryable,
+        },
+        key.clone(),
+    );
+    assert!(out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::ScheduleTimer { at, kind: TimerKind::RetryBackoff { node_id: n } })
+            if *at == Timestamp::from_millis(T0 + 1_002_000) && *n == node_id
+    )));
+
+    // 不可重试：交给 Settle 上报，不排重试。
+    let out = sim.report(
+        EffectReport::EffectFailed {
+            key,
+            error: EffectErrorClass::Defect { what: "bad output" },
+        },
+        EffectKey::Run(attempt),
+    );
+    assert!(!out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::ScheduleTimer {
+            kind: TimerKind::RetryBackoff { .. },
+            ..
+        })
+    )));
+}
+
+#[test]
+fn lock_renewal_schedules_then_renews() {
+    let sim = dispatched();
+    let worktree: gantry_core::ids::WorktreeId = WORKTREE.parse().unwrap();
+    let lease_until = sim.state.locks[&worktree].lease_until;
+    // 有效 wall 900 + grace 10 + 余量 60 = 970；半租约 485 s。
+    let renew_at = lease_until.checked_sub_secs(485).unwrap();
+
+    // 未到期：只安排续租定时器。
+    let out = sim.tick();
+    assert!(out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::ScheduleTimer { at, kind: TimerKind::LockRenew { worktree_id } })
+            if *at == renew_at && *worktree_id == worktree
+    )));
+    assert!(!out
+        .iter()
+        .any(|decision| matches!(decision, Decision::Effect(Effect::RenewLock { .. }))));
+
+    // 到期：续租，不再重复安排同一时刻的定时器。
+    let reason = TickReason::Settle;
+    let out = sim.decide_at(
+        lease_until,
+        Input::Tick(reason.clone()),
+        InputIdentity::Tick(reason),
+    );
+    assert!(out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::RenewLock { token, lease_s })
+            if token.worktree_id == worktree && *lease_s == 970
+    )));
+    assert!(!out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::ScheduleTimer {
+            kind: TimerKind::LockRenew { .. },
+            ..
+        })
+    )));
+}
+
+#[test]
+fn retry_backoff_tick_resumes_unfinished_attempt() {
+    let sim = dispatched();
+    let (node_id, attempt) = sim
+        .state
+        .unfinished_attempts()
+        .next()
+        .map(|(node, attempt)| (node.id, attempt.id))
+        .unwrap();
+    let reason = TickReason::Timer {
+        at: Timestamp::from_millis(T0),
+        kind: TimerKind::RetryBackoff { node_id },
+    };
+    let out = sim.decide(Input::Tick(reason.clone()), InputIdentity::Tick(reason));
+    assert!(out.iter().any(|decision| matches!(
+        decision,
+        Decision::Effect(Effect::RunAttempt(plan))
+            if plan.resume && plan.attempt_id == attempt && plan.node_id == node_id
+    )));
 }
