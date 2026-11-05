@@ -8,7 +8,8 @@ use common::*;
 use gantry_core::canon::IdempotencyKey;
 use gantry_core::entities::{
     ActorKind, ApprovalStatus, AttemptStatus, BudgetUsed, Exec, ForgeActionKind, InboxKind,
-    LockHolder, NodeStatus, OutboxStatus, Role, Seq, Stage, StageStatus, Tier, WorkflowStatus,
+    IssueState, LockHolder, NodeStatus, OutboxStatus, Role, Seq, Stage, StageStatus, Tier,
+    WorkflowStatus,
 };
 use gantry_core::events::{EventType, OutboxEnqueuedData, Subject};
 use gantry_core::forge::derive_target_intent;
@@ -179,6 +180,7 @@ fn expected_low_path() -> DeliveryState {
                 status: OutboxStatus::Succeeded,
                 failure_code: None,
                 signature: outbox_signature(&path),
+                issue_number: None,
                 charged: true,
             },
         )]),
@@ -194,6 +196,8 @@ fn expected_low_path() -> DeliveryState {
         locks: BTreeMap::new(),
         lock_owner: BTreeMap::new(),
         round_history: vec![],
+        merge_commit: None,
+        close_issues: BTreeSet::new(),
         retried: BTreeSet::new(),
         last_seq: seq(27),
     }
@@ -633,4 +637,87 @@ fn outbox_failure_and_retry_fold_from_events() {
         .unwrap();
     assert_eq!(row.status, OutboxStatus::Failed);
     assert_eq!(row.signature, outbox_signature(&path));
+}
+
+fn forge_envelope(kind: &str, target: Value, data: Value) -> Value {
+    json!({
+        "schema": "forge.event.v1",
+        "kind": kind,
+        "dedup_key": format!("{kind}:acme/web:12"),
+        "source": "webhook",
+        "delivery_ids": [DELIVERY],
+        "project_id": PROJECT,
+        "repo": "acme/web",
+        "installation_id": 1,
+        "delivery_id": DELIVERY,
+        "target": target,
+        "actor": {"login": "gantry", "github_id": 2, "type": "bot", "association": null},
+        "origin": "external",
+        "caused_by_action": null,
+        "occurred_at": "2026-10-24T12:41:03.120Z",
+        "observed_at": "2026-10-24T12:41:03.120Z",
+        "stale": false,
+        "data": data
+    })
+}
+
+/// #306：合并提交与 Issue 关闭 / 重开从 `forge.*` 事件折叠，重放得到同一证据。
+#[test]
+fn forge_merge_and_issue_events_fold_into_t12_evidence() {
+    let created = || {
+        let mut created = common::created(DELIVERY);
+        created.data["issues"] = json!([{
+            "repo": "acme/web", "number": 42, "node_id": "I_42",
+            "title": {"text": "fix login", "source": "github", "truncated": false},
+            "state": "open", "state_reason": null, "synced_at": "2026-10-24T12:41:03.120Z"
+        }]);
+        created
+    };
+    let merged = || {
+        spec(
+            "forge.pr_merged",
+            PROJECT,
+            forge_envelope(
+                "pr_merged",
+                json!({"type": "pr", "number": 12, "node_id": null}),
+                json!({"merge_commit_sha": COMMIT, "head_sha": COMMIT, "base_ref": "main",
+                       "merged_by": {"login": "gantry", "github_id": 2, "type": "bot", "association": null},
+                       "via_merge_queue": false}),
+            ),
+        )
+    };
+    let closed = || {
+        spec(
+            "forge.issue_closed",
+            PROJECT,
+            forge_envelope(
+                "issue_closed",
+                json!({"type": "issue", "number": 42, "node_id": null}),
+                json!({"number": 42, "state_reason": "completed",
+                       "closed_by": {"login": "gantry", "github_id": 2, "type": "bot", "association": null},
+                       "closed_via_pr": 12}),
+            ),
+        )
+    };
+    let reopened = || {
+        spec(
+            "forge.issue_reopened",
+            PROJECT,
+            forge_envelope(
+                "issue_reopened",
+                json!({"type": "issue", "number": 42, "node_id": null}),
+                json!({"number": 42}),
+            ),
+        )
+    };
+
+    let state = fold(&[created(), merged()]);
+    assert_eq!(state.merge_commit, Some(v(json!(COMMIT))));
+    assert_eq!(state.delivery.issues[0].state, IssueState::Open);
+
+    let state = fold(&[created(), closed()]);
+    assert_eq!(state.delivery.issues[0].state, IssueState::Closed);
+
+    let state = fold(&[created(), closed(), reopened()]);
+    assert_eq!(state.delivery.issues[0].state, IssueState::Open);
 }

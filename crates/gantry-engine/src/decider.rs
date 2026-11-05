@@ -27,8 +27,8 @@ use gantry_core::events::{
     WorkflowCreatedData, WorkflowFinishedData,
 };
 use gantry_core::forge::{
-    derive_target_intent, ActionPayload, CreatePrPayload, MergeMode, MergePrPayload, PrState,
-    PushBranchPayload, PushTransport, UpdatePrPayload,
+    derive_target_intent, ActionPayload, CloseIssuePayload, CreatePrPayload, IssueStateReason,
+    MergeMode, MergePrPayload, PrState, PushBranchPayload, PushTransport, UpdatePrPayload,
 };
 use gantry_core::ids::{ActionId, Nod, NodeId, Wfl, WorktreeId};
 use gantry_core::level::Level;
@@ -99,7 +99,7 @@ pub fn decide(state: &DeliveryState, input: &Input, env: &DecideEnv) -> Vec<Deci
 pub fn derive(state: &DeliveryState, env: &DecideEnv, mint: &mut IdMint) -> Vec<Decision> {
     let mut out = Vec::new();
     // 阶段推进至多一条：同一次求值里推进后，其余决策基于新阶段在下一轮 Settle 产出。
-    if let Some(decision) = stage_transition(state) {
+    if let Some(decision) = stage_transition(state, env) {
         out.push(decision);
         return out;
     }
@@ -218,7 +218,7 @@ pub(crate) fn stage_changed(
 
 /// §7.6 中按状态求值的迁移：T2、T6、T8、T10、T12（Low），以及 T14、T15（见 `control`）。
 /// T11 由事件驱动，见 [`control::on_event`]。
-fn stage_transition(state: &DeliveryState) -> Option<Decision> {
+fn stage_transition(state: &DeliveryState, env: &DecideEnv) -> Option<Decision> {
     let row = &state.delivery;
     // T15：只认 PR 被关闭造成的 abandoned（core 的边要求 `PrClosedUnmerged`）。
     if let Some(decision) = control::pr_reopened(state) {
@@ -252,7 +252,7 @@ fn stage_transition(state: &DeliveryState) -> Option<Decision> {
             stage_changed(state, StageTrigger::ReviewAcceptCiGreen, None)
         }
         // T12。
-        Stage::Merge if merged(state) => {
+        Stage::Merge if merged(state, env) => {
             stage_changed(state, StageTrigger::MergedAndIssuesClosed, None)
         }
         _ => None,
@@ -311,24 +311,42 @@ fn ci_green(state: &DeliveryState) -> bool {
         && no_open_decisions(state)
 }
 
-/// T12：PR 已合并；合并前的 head 等于合并审批的主体；绑定的 Issue 已关闭。
-/// M1 的 PR 一律合入默认分支，绑定 Issue 由 GitHub 随合并关闭（§7.6），不另入队 `close_issue`。
-fn merged(state: &DeliveryState) -> bool {
+/// T12：PR 已合并且合并提交已知；合并前的 head 等于合并审批的主体；绑定的 Issue 已关闭
+/// （默认分支由 GitHub 自动关闭；非默认分支要求对应的 `close_issue` 已成功，§7.6）。
+fn merged(state: &DeliveryState, env: &DecideEnv) -> bool {
     let Some(pr) = &state.pr_snapshot else {
         return false;
     };
-    if pr.state != PullRequestState::Merged {
+    if pr.state != PullRequestState::Merged || state.merge_commit.is_none() {
         return false;
     }
     let subject = SubjectDigest::git(pr.head_sha);
-    state.approvals.values().any(|approval| {
+    let approval_ok = state.approvals.values().any(|approval| {
         approval.action == ApprovalAction::Forge(ForgeActionKind::MergePr)
             && approval.subject_digest == subject
             && matches!(
                 approval.status,
                 ApprovalStatus::Granted | ApprovalStatus::Consumed
             )
-    })
+    });
+    if !approval_ok {
+        return false;
+    }
+    let closed = |issue: &gantry_core::entities::IssueRef| {
+        issue.state == gantry_core::entities::IssueState::Closed
+            || state.close_issues.contains(&issue.number)
+    };
+    if pr.base_ref == env.settings.project.default_branch {
+        // 合入默认分支：GitHub 随合并关闭，等 `forge.issue_closed` 折叠。
+        state
+            .delivery
+            .issues
+            .iter()
+            .all(|issue| issue.state == gantry_core::entities::IssueState::Closed)
+    } else {
+        // 非默认分支：GitHub 不自动关闭，必须等 `close_issue` 动作成功。
+        state.delivery.issues.iter().all(closed)
+    }
 }
 
 /// 本阶段的 Workflow（自 `stage_entered` 起建的那张图）。
@@ -563,6 +581,32 @@ pub fn expected_actions(
             let (Some(pr), Some(snapshot)) = (&state.pr, &state.pr_snapshot) else {
                 return out;
             };
+            // 合入非默认分支：GitHub 不自动关闭 Issue，逐个入队 `close_issue`（§7.6 T12）。
+            if snapshot.state == PullRequestState::Merged
+                && snapshot.base_ref != project.default_branch
+            {
+                for issue in row.issues.iter().filter(|issue| {
+                    issue.state != gantry_core::entities::IssueState::Closed
+                        && !state.close_issues.contains(&issue.number)
+                }) {
+                    let payload = ActionPayload::CloseIssue(CloseIssuePayload {
+                        repo: project.repo.clone(),
+                        number: issue.number,
+                        state_reason: IssueStateReason::Completed,
+                        require_merged_pr: Some(pr.number),
+                    });
+                    let facts = ActionFacts::Other {
+                        target: gantry_core::events::PolicyTarget::Issue {
+                            repo: project.repo.clone(),
+                            number: issue.number,
+                        },
+                    };
+                    if let Some(intent) = intent(state, payload, facts, Priority::Normal, None) {
+                        out.insert(intent.key.clone(), intent);
+                    }
+                }
+                return out;
+            }
             if snapshot.state != PullRequestState::Open {
                 return out;
             }

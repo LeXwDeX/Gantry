@@ -981,7 +981,9 @@ pub struct FindingFingerprint(Sha256Digest);
 | `abandon_cause` | `Option<AbandonCause>` | `delivery.abandoned.reason`：`pr_closed` → `PrClosedUnmerged`，`issue_not_planned` → `IssueNotPlanned`，其余 → `UserAbandoned`；T15 只认 `PrClosedUnmerged`（core `next_stage_with_abandon`） |
 | `stage_entered` | `(Seq, Timestamp, Option<String>)` | 最近一次 `delivery.stage_changed`（或 `delivery.created`）的 `seq`、`ts` 与 `reason`；"本阶段内"类前置条件都以它为界 |
 | `pr_snapshot` | `Option<PullRequestRef>` | **只读，不由引擎折叠**：加载 `DeliveryState` 时从 `store` 的 GitHub 快照投影读取（#150；加载归 #71）。T8 的 `head_sha`、T10 的 `checks.required_ok` 与 PR 是否 open、合并入队的 `mergeable_state` 都读它。`decide` 的测试直接构造 |
-| `outbox` | `BTreeMap<ActionKey, OutboxState>` | `outbox.enqueued`（`action` 含 `kind`、`epoch`、幂等键）/ `succeeded` / `failed` / `cancelled`；`OutboxState = { action_id, kind, epoch, status, failure_code? }` |
+| `outbox` | `BTreeMap<ActionKey, OutboxState>` | `outbox.enqueued`（`action` 含 `kind`、`epoch`、幂等键）/ `succeeded` / `failed` / `cancelled`；`OutboxState = { action_id, kind, epoch, status, failure_code?, signature?, issue_number? }`。`signature` 是同一意图 `epoch = 0` 的幂等键（重试推导）；`issue_number` 只在 `close_issue` 时取自 payload |
+| `merge_commit` | `Option<GitOid>` | `forge.pr_merged.merge_commit_sha`；T12 要求已知 |
+| `close_issues` | `BTreeSet<u64>` | 成功 `outbox.succeeded(close_issue)` 的目标 Issue 编号（`issue_number`）；T12 非默认分支的关闭证据 |
 | `retried` | `BTreeSet<ActionId>` | `inbox.resolved(chosen, option_id = retry)`，取原上报项（`open_inbox` 中该项）的 `action_id`；只用于 `epoch` 推导（下文"`ActionKey` 与 `epoch`"，#67） |
 | `approvals` | `BTreeMap<ApprovalId, ApprovalLite>` | `approval.requested`（本交付单元）及后续状态事件；`ApprovalLite = { action, subject_digest, status }` |
 | `locks` | `BTreeMap<WorktreeId, LockLite>` | `worktree.locked` / `unlocked`；`LockLite = { holder, lease_until, fence }`。`LockToken` 可由 `{worktree_id, holder, delivery_id, fence, lease_until}` 重建（repo.md §7.6），重启后无需重新取锁即可续租或释放；租约已过期则重新 `AcquireLock` |

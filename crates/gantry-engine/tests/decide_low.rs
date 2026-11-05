@@ -295,6 +295,7 @@ impl Sim {
             ActionPayload::PushBranch(p) => serde_json::to_value(p),
             ActionPayload::CreatePr(p) => serde_json::to_value(p),
             ActionPayload::MergePr(p) => serde_json::to_value(p),
+            ActionPayload::CloseIssue(p) => serde_json::to_value(p),
             other => panic!("unexpected {:?}", other.kind()),
         }
         .unwrap();
@@ -737,8 +738,64 @@ fn low_path_end_to_end_with_merge_approval() {
     assert_eq!(m.merge_method, MergeMethod::Squash);
     sim.enqueue(&merge_req, "act_01JBA1D7P2KS6W8Y0A4C1F5GJQ", None);
 
-    // forge.pr_merged 后快照为 merged → T12 → closed，释放工作树。
+    // T12：合并提交与快照 merged 已知，但绑定的 Issue 未关闭 → 不进入 closed。
+    sim.state.delivery.issues.push(IssueRef {
+        repo: serde_json::from_value(json!("acme/web")).unwrap(),
+        number: 42,
+        node_id: "I_42".to_owned(),
+        title: UntrustedText::new("fix login".into(), "github".into(), false),
+        state: IssueState::Open,
+        state_reason: None,
+        synced_at: Timestamp::from_millis(T0),
+    });
+    sim.state.merge_commit = Some(oid(COMMIT));
     sim.state.pr_snapshot = Some(snapshot(COMMIT, true, "merged"));
+    let effects = sim.settle();
+    assert_ne!(sim.state.delivery.stage, Stage::Closed);
+    assert!(!effects
+        .iter()
+        .any(|d| matches!(d, Decision::Effect(Effect::RemoveWorktree { .. }))));
+
+    // 合并提交缺失：Issue 已关闭也不进入。
+    sim.state.merge_commit = None;
+    sim.state.delivery.issues[0].state = IssueState::Closed;
+    assert_ne!(sim.state.delivery.stage, Stage::Closed);
+    let _ = sim.settle();
+    assert_ne!(sim.state.delivery.stage, Stage::Closed);
+
+    // 非默认分支：GitHub 不自动关闭 → 期望 close_issue，不进入 closed。
+    sim.state.merge_commit = Some(oid(COMMIT));
+    sim.state.delivery.issues[0].state = IssueState::Open;
+    sim.state.pr_snapshot.as_mut().unwrap().base_ref = "release".to_owned();
+    let out = sim.tick();
+    assert!(out.iter().any(|d| matches!(
+        d,
+        Decision::Effect(Effect::JudgeAction { request, .. })
+            if request.kind == ForgeActionKind::CloseIssue
+    )));
+    assert_ne!(sim.state.delivery.stage, Stage::Closed);
+
+    // close_issue 成功（成功动作按 Issue 编号记入 close_issues）→ T12 → closed，释放工作树。
+    let close_key = out
+        .iter()
+        .find_map(|d| match d {
+            Decision::Effect(Effect::JudgeAction { key, request })
+                if request.kind == ForgeActionKind::CloseIssue =>
+            {
+                Some(key.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let close_req = enqueue_of(sim.decide(
+        Input::Report(EffectReport::ActionJudged {
+            key: close_key.clone(),
+            decision: allow(None),
+        }),
+        InputIdentity::Report(EffectKey::Judge(close_key)),
+    ));
+    sim.enqueue(&close_req, "act_01JBA1D7P2KS6W8Y0A4C1F5GJZ", None);
+    assert!(sim.state.close_issues.contains(&42));
     let effects = sim.settle();
     assert_eq!(sim.state.delivery.stage, Stage::Closed);
     assert_eq!(sim.state.delivery.stage_status, StageStatus::Done);
