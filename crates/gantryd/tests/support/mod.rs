@@ -940,6 +940,28 @@ async fn assemble_variant(
         .expect("apply egress config");
     let egress: Arc<dyn EgressControl> = Arc::new(egress_client);
 
+    let forge_names: Vec<SecretName> = engine_cfg::models()
+        .providers
+        .values()
+        .map(|provider| provider.credential.secret_ref.clone())
+        .collect();
+    let catalog: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../fixtures/api/catalog.json"))
+            .expect("api catalog");
+    let settings_ctx: Arc<dyn gantry_api::settings::SettingsContext> = Arc::new(
+        gantryd::settings_ctx::build_settings_context(
+            &store,
+            &engine,
+            &*egress,
+            &forge_names,
+            &secrets.scoped(Consumer::Forge).expect("forge secrets"),
+            &forge_names,
+            catalog,
+        )
+        .await
+        .expect("settings context"),
+    );
+
     let assembly = Assembly {
         profile: Profile::Fakes,
         store: store.clone(),
@@ -956,6 +978,7 @@ async fn assemble_variant(
         models: router,
         egress,
         conversation,
+        settings_ctx,
         modules,
     };
     let handles = FakeHandles {
