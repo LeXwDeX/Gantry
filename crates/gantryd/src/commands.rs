@@ -148,3 +148,87 @@ fn bootstrap_key(key: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.')
 }
+
+/// `github.setup` 回调完成后写 `github` 设置（config §2.5）：换回的非密钥字段与密钥引用名。
+pub struct StoreGithubSettingsWriter {
+    store: Store,
+}
+
+impl StoreGithubSettingsWriter {
+    pub fn new(store: Store) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl gantry_forge::setup::GithubSettingsWriter for StoreGithubSettingsWriter {
+    async fn write_app(
+        &self,
+        settings: &gantry_forge::setup::GithubAppSettings,
+    ) -> Result<(), String> {
+        let snapshot = self
+            .store
+            .snapshot()
+            .await
+            .map_err(|error| error.to_string())?;
+        let entry =
+            snapshot.settings_current_for(&SettingsScope::Global, None, SettingsResource::Github);
+        let mut doc = entry
+            .value
+            .unwrap_or_else(|| builtin_defaults(SettingsResource::Github));
+        let object = doc
+            .as_object_mut()
+            .ok_or_else(|| "github settings are not an object".to_owned())?;
+        let app = object
+            .entry("app".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| "github.app is not an object".to_owned())?;
+        app.insert("app_id".to_owned(), json!(settings.app_id));
+        app.insert(
+            "private_key".to_owned(),
+            json!({"secret_ref": settings.private_key_ref}),
+        );
+        app.insert(
+            "webhook_secret".to_owned(),
+            json!({"secret_ref": settings.webhook_secret_ref}),
+        );
+        object.insert(
+            "commit_identity".to_owned(),
+            json!({
+                "name": settings.commit_identity_name,
+                "email": settings.commit_identity_email,
+            }),
+        );
+        if parse_resolved(SettingsResource::Github, &doc).is_err() {
+            return Err("github settings are invalid".to_owned());
+        }
+
+        let mut tx = self
+            .store
+            .begin_write()
+            .await
+            .map_err(|error| error.to_string())?;
+        let event = NewEvent {
+            ty: EventType::SettingsUpdated,
+            subject: Subject::parse("settings").expect("settings subject"),
+            project_id: None,
+            actor: Actor::new(ActorKind::System, "gantryd"),
+            causation_id: None,
+            correlation_id: None,
+            data: json!({
+                "scope": "global",
+                "resource": SettingsResource::Github,
+                "schema_version": SETTINGS_SCHEMA_VERSION,
+                "base_rev": entry.rev.as_u64(),
+                "value": doc,
+                "relaxes": [],
+                "secret_changes": []
+            }),
+            dedup_key: None,
+        };
+        tx.append(event).await.map_err(|error| error.to_string())?;
+        tx.commit().await.map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
