@@ -19,6 +19,7 @@ gantry-core = { path = "../gantry-core" }
 gantry-store = { path = "../gantry-store" }
 gantry-engine = { path = "../gantry-engine" }
 gantry-conversation = { path = "../gantry-conversation" }
+gantry-api = { path = "../gantry-api" }
 gantry-forge = { path = "../gantry-forge" }
 gantry-deploy = { path = "../gantry-deploy" }
 gantry-models = { path = "../gantry-models" }
