@@ -96,6 +96,8 @@ pub enum ProcessError {
     Store(#[from] StoreError),
     #[error("id generation failed: {0}")]
     Id(String),
+    #[error("corrupt projection: {0}")]
+    Corrupt(String),
     #[error("crash injected before commit")]
     Crashed,
 }
@@ -169,10 +171,15 @@ impl Conversation {
         let events = projection::scan(&self.store, None, &[EventType::ProjectAdded], head).await?;
         let mut done = 0;
         for event in events.into_iter().filter(|event| event.seq > after) {
+            let data: ProjectEventData =
+                serde_json::from_value(event.data.clone()).map_err(|error| {
+                    ProcessError::Corrupt(format!(
+                        "seq {} project envelope: {error}",
+                        event.seq.as_u64()
+                    ))
+                })?;
             let mut tx = self.store.begin_write().await?;
-            if let Ok(data) = serde_json::from_value::<ProjectEventData>(event.data.clone()) {
-                self.ensure_in_tx(&mut tx, &data.id, Some(&event)).await?;
-            }
+            self.ensure_in_tx(&mut tx, &data.id, Some(&event)).await?;
             self.commit(tx, CURSOR_PROJECTS, event.seq).await?;
             done += 1;
         }
@@ -289,8 +296,9 @@ impl Conversation {
         let Some(project) = event.project_id else {
             return Ok(None);
         };
+        let snapshot = self.store.snapshot().await?;
         let Some(conversation) =
-            projection::conversation_of_project(&self.store, &project, event.seq).await?
+            projection::conversation_of_project(&snapshot, &project, event.seq)?
         else {
             return Ok(None);
         };
@@ -847,9 +855,21 @@ impl ConversationService for Conversation {
                 message: "unknown cursor".into(),
             });
         }
-        let head = self.store.events().head().await.map_err(port_error)?;
-        let items = projection::conversation_of_project(&self.store, project, head)
+        if page.order.is_some() {
+            return Err(ConvError::InvalidRequest {
+                pointer: "/order".into(),
+                message: "conversations do not support an explicit order".into(),
+            });
+        }
+        // 投影与 head 必须来自同一快照（api.md §3.6）。
+        let mut snapshot = self.store.snapshot().await.map_err(port_error)?;
+        let head = snapshot.head_seq();
+        snapshot
+            .project(project)
             .await
+            .map_err(port_error)?
+            .ok_or(ConvError::NotFound)?;
+        let items = projection::conversation_of_project(&snapshot, project, head)
             .map_err(port_error)?
             .into_iter()
             .collect();

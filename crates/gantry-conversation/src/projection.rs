@@ -55,31 +55,51 @@ pub(crate) async fn project_repo(
         upto,
     )
     .await?;
-    Ok(events
-        .into_iter()
-        .rev()
-        .filter_map(|event| serde_json::from_value::<ProjectEventData>(event.data).ok())
-        .find(|data| data.id == *project)
-        .map(|data| data.repo))
+    for event in events.into_iter().rev() {
+        let data: ProjectEventData = serde_json::from_value(event.data).map_err(|error| {
+            StoreError::Corrupt(format!(
+                "seq {} project envelope: {error}",
+                event.seq.as_u64()
+            ))
+        })?;
+        if data.id == *project {
+            return Ok(Some(data.repo));
+        }
+    }
+    Ok(None)
 }
 
-pub(crate) async fn conversation_of_project(
-    store: &Store,
+pub(crate) fn conversation_of_project(
+    snapshot: &ReadSnapshot,
     project: &ProjectId,
     upto: Seq,
 ) -> Result<Option<Conversation>, StoreError> {
-    let events = scan(
-        store,
-        Some(project),
-        &[EventType::ConversationCreated],
-        upto,
-    )
-    .await?;
-    Ok(events
-        .into_iter()
-        .filter_map(|event| serde_json::from_value::<ConversationEventData>(event.data).ok())
-        .find(|data| data.project_id == *project)
-        .map(conversation))
+    let filter = EventFilter {
+        project_ids: Some(BTreeSet::from([*project])),
+        include: vec![TypePattern::Exact(EventType::ConversationCreated)],
+        exclude: Vec::new(),
+    };
+    let mut after = Seq::ZERO;
+    loop {
+        let page = snapshot.scan(after, &filter, SCAN_LIMIT)?;
+        for event in page.events.into_iter().filter(|event| event.seq <= upto) {
+            let data: ConversationEventData =
+                serde_json::from_value(event.data).map_err(|error| {
+                    StoreError::Corrupt(format!(
+                        "seq {} conversation.created: {error}",
+                        event.seq.as_u64()
+                    ))
+                })?;
+            if data.project_id == *project {
+                return Ok(Some(conversation(data)));
+            }
+        }
+        if page.scanned_to >= upto || page.scanned_to >= page.head || page.scanned_to == after {
+            break;
+        }
+        after = page.scanned_to;
+    }
+    Ok(None)
 }
 
 /// 对话本身与按 `seq` 升序的全部消息（`delivery_id` 已回填）。
@@ -103,14 +123,23 @@ pub(crate) fn conversation_log(
         }
         match event.ty {
             EventType::ConversationCreated => {
-                conversation_row = serde_json::from_value::<ConversationEventData>(event.data)
-                    .ok()
-                    .map(conversation);
+                let data: ConversationEventData =
+                    serde_json::from_value(event.data).map_err(|error| {
+                        StoreError::Corrupt(format!(
+                            "seq {} conversation.created: {error}",
+                            event.seq.as_u64()
+                        ))
+                    })?;
+                conversation_row = Some(conversation(data));
             }
             EventType::MessagePosted => {
-                if let Ok(message) = serde_json::from_value::<Message>(event.data) {
-                    messages.push((event.seq, message));
-                }
+                let message: Message = serde_json::from_value(event.data).map_err(|error| {
+                    StoreError::Corrupt(format!(
+                        "seq {} message.posted: {error}",
+                        event.seq.as_u64()
+                    ))
+                })?;
+                messages.push((event.seq, message));
             }
             _ => {}
         }
@@ -129,13 +158,25 @@ pub(crate) fn conversation_log(
     loop {
         let page = snapshot.scan(after, &filter, SCAN_LIMIT)?;
         for event in page.events.into_iter().filter(|event| event.seq <= upto) {
-            if let (Ok(id), Ok(data)) = (
-                event.subject.as_str().parse::<DeliveryId>(),
-                serde_json::from_value::<DeliveryCreatedData>(event.data),
-            ) {
-                if let Some(source) = data.source_message_id {
-                    created.insert(source, id);
-                }
+            let id = event
+                .subject
+                .as_str()
+                .parse::<DeliveryId>()
+                .map_err(|error| {
+                    StoreError::Corrupt(format!(
+                        "seq {} delivery.created subject: {error}",
+                        event.seq.as_u64()
+                    ))
+                })?;
+            let data: DeliveryCreatedData =
+                serde_json::from_value(event.data).map_err(|error| {
+                    StoreError::Corrupt(format!(
+                        "seq {} delivery.created: {error}",
+                        event.seq.as_u64()
+                    ))
+                })?;
+            if let Some(source) = data.source_message_id {
+                created.insert(source, id);
             }
         }
         if page.scanned_to >= upto || page.scanned_to >= page.head || page.scanned_to == after {
@@ -160,14 +201,27 @@ pub(crate) async fn deliveries_created(
     upto: Seq,
 ) -> Result<Vec<(DeliveryId, DeliveryCreatedData)>, StoreError> {
     let events = scan(store, Some(project), &[EventType::DeliveryCreated], upto).await?;
-    Ok(events
-        .into_iter()
-        .filter_map(|event| {
-            let id = event.subject.as_str().parse::<DeliveryId>().ok()?;
-            let data = serde_json::from_value::<DeliveryCreatedData>(event.data).ok()?;
-            Some((id, data))
-        })
-        .collect())
+    let mut out = Vec::new();
+    for event in events {
+        let id = event
+            .subject
+            .as_str()
+            .parse::<DeliveryId>()
+            .map_err(|error| {
+                StoreError::Corrupt(format!(
+                    "seq {} delivery.created subject: {error}",
+                    event.seq.as_u64()
+                ))
+            })?;
+        let data: DeliveryCreatedData = serde_json::from_value(event.data).map_err(|error| {
+            StoreError::Corrupt(format!(
+                "seq {} delivery.created: {error}",
+                event.seq.as_u64()
+            ))
+        })?;
+        out.push((id, data));
+    }
+    Ok(out)
 }
 
 fn conversation(data: ConversationEventData) -> Conversation {
