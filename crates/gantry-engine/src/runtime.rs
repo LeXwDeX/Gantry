@@ -38,6 +38,7 @@ use crate::decide::{Command, CommandRejection, Input, InputIdentity, TickReason}
 use crate::effects::{Deliver, PortEffects};
 use crate::engine::{load_delivery_state, scan_events, Engine, EngineError};
 use crate::event_router::{EventRouter, RouterError, CURSOR};
+use crate::runtime_settings::RuntimeSettingsError;
 
 /// 运行时需要的全部端口（gantryd 的装配里已有同名字段）。
 pub struct EnginePorts {
@@ -128,7 +129,7 @@ pub struct EngineRuntime {
     deps: ActorDeps,
     effects: Arc<PortEffects>,
     bound_repo: RepoSlug,
-    bound_cleanup_lease: Duration,
+    bound_cleanup_lease: std::sync::Mutex<Duration>,
     settings: Mutex<RuntimeSettings>,
     actors: Mutex<BTreeMap<DeliveryId, DeliveryActor>>,
     /// 停止决策的交付单元及原因（供 `status` 报 `degraded`）。
@@ -191,7 +192,7 @@ impl EngineRuntime {
             deps,
             effects,
             bound_repo: settings.actor.settings.project.repo.clone(),
-            bound_cleanup_lease: settings.cleanup_lease,
+            bound_cleanup_lease: std::sync::Mutex::new(settings.cleanup_lease),
             settings: Mutex::new(settings),
             actors: Mutex::new(BTreeMap::new()),
             degraded: Mutex::new(BTreeMap::new()),
@@ -207,14 +208,54 @@ impl EngineRuntime {
     }
 
     /// `settings.updated` 热加载：两次决策之间整体切换（§7.13）。
-    pub async fn reconfigure(&self, settings: RuntimeSettings) {
-        let mut actors = self.actors.lock().await;
+    /// 校验失败时保留最后一次成功配置，不改动任何组件（#318）。
+    pub async fn install(&self, settings: RuntimeSettings) -> Result<(), RuntimeSettingsError> {
         let mut current = self.settings.lock().await;
+        let current_rev = current.actor.settings.config_rev;
+        let next_rev = settings.actor.settings.config_rev;
+        if next_rev <= current_rev {
+            return Err(RuntimeSettingsError::StaleRevision {
+                current: current_rev,
+                next: next_rev,
+            });
+        }
+        if settings.runner.config_rev != next_rev {
+            return Err(RuntimeSettingsError::RevisionMismatch {
+                actor: next_rev,
+                runner: settings.runner.config_rev,
+            });
+        }
+        let current_repo = current.actor.settings.project.repo.clone();
+        let next_repo = settings.actor.settings.project.repo.clone();
+        if current_repo != next_repo {
+            return Err(RuntimeSettingsError::RepoChanged {
+                current: current_repo.to_string(),
+                next: next_repo.to_string(),
+            });
+        }
+        if settings.runner.repo != next_repo {
+            return Err(RuntimeSettingsError::RepoChanged {
+                current: current_repo.to_string(),
+                next: settings.runner.repo.to_string(),
+            });
+        }
         self.effects.reconfigure(settings.runner.clone());
+        self.effects.set_cleanup_lease(settings.cleanup_lease);
+        *self
+            .bound_cleanup_lease
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings.cleanup_lease;
+        let mut actors = self.actors.lock().await;
         for actor in actors.values_mut() {
             actor.reconfigure(settings.actor.clone());
         }
         *current = settings;
+        Ok(())
+    }
+
+    /// 兼容旧调用：忽略安装失败（生产路径应使用 [`Self::install`] 并上报错误）。
+    pub async fn reconfigure(&self, settings: RuntimeSettings) {
+        let _ = self.install(settings).await;
     }
 
     /// 主循环；`shutdown` 完成后处理完已入队的回报即返回。
@@ -503,7 +544,12 @@ impl EngineRuntime {
                     reason: "repository differs from runtime binding",
                 });
             }
-            if settings.cleanup_lease != self.bound_cleanup_lease {
+            if settings.cleanup_lease
+                != *self
+                    .bound_cleanup_lease
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            {
                 return Err(RuntimeError::ConfigurationInconsistent {
                     reason: "cleanup lease differs from runtime binding",
                 });

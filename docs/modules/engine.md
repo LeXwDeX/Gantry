@@ -713,7 +713,7 @@ V2（intake）归 `sandbox`。V3 / V4 / V6 与分类归引擎，worker-protocol 
 - 校验通过后原子安装 actor 配置、runner 配置与清理租约；活跃执行体立即用新配置做下一次决策。
 - 运行中的尝试保留其开始时的配置快照：`RunAttempt` 的 `AttemptPlan` 与 `RunnerConfig` 在副作用启动时已取出，安装只影响之后的副作用。
 - 持久游标只在安装成功后由订阅方推进；失败时可重试同一修订。
-- `RunnerConfig` 没有独立修订字段，本接口不校验它与 actor 配置同源；调用方必须从同一 `settings.updated` 快照构造 `RuntimeSettings`。
+- `RunnerConfig.config_rev` 必须等于 actor 配置的 `config_rev`（不一致 → `RevisionMismatch`），`RunnerConfig.repo` 必须等于项目仓库（不一致 → `RepoChanged`）；调用方必须从同一 `settings.updated` 快照构造 `RuntimeSettings`。
 
 **事件游标**：§7.1 第 4 步改为由 `EventRouter` 推进。各执行体按 `seq` 顺序处理各自的输入并在提交后向路由器回报已处理到的 `seq`。低水位 = 仍有"已投递未处理完"事件的执行体中最小的未处理 `seq` − 1；没有积压时取路由器已读到的最大 `seq`（含不投给任何执行体的事件）。路由器以低水位推进持久游标 `engine`，空闲执行体不拖住游标。崩溃后从低水位重放，重复投递由前置条件消化。执行体自己的事务不再 `advance_cursor`。
 

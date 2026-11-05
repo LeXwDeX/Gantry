@@ -1,6 +1,7 @@
 mod world;
 
 use gantry_engine::runtime::RuntimeError;
+use gantry_engine::runtime_settings::RuntimeSettingsError;
 use world::*;
 
 fn settings(rev: u64) -> RuntimeSettings {
@@ -68,33 +69,60 @@ async fn status_rejects_inconsistent_initial_settings() {
     assert_inconsistent(&runtime, "actor and runner repositories differ").await;
 }
 
+/// #318：`install` 失败时保留最后成功配置；成功安装后 `status` 一致。
 #[tokio::test]
-async fn status_rejects_unproven_reconfiguration_and_recovers_for_bound_settings() {
+async fn install_rejects_bad_settings_and_keeps_last_good() {
     let world = World::new().await;
     let runtime = world.runtime().await;
 
+    // actor / runner 修订不同源。
     let mut config = settings(2);
     config.runner.config_rev = Seq::new(3).unwrap();
-    runtime.reconfigure(config).await;
-    assert_inconsistent(&runtime, "actor and runner revisions differ").await;
+    assert!(matches!(
+        runtime.install(config).await,
+        Err(RuntimeSettingsError::RevisionMismatch { .. })
+    ));
+    assert_eq!(
+        runtime.status().await.unwrap().applied_rev,
+        Seq::new(1).unwrap()
+    );
 
+    // runner 仓库与项目不一致。
     let mut config = settings(2);
     config.runner.repo = RepoSlug::parse("other/repo").unwrap();
-    runtime.reconfigure(config).await;
-    assert_inconsistent(&runtime, "actor and runner repositories differ").await;
+    assert!(matches!(
+        runtime.install(config).await,
+        Err(RuntimeSettingsError::RepoChanged { .. })
+    ));
 
+    // 仓库迁移不在本接口内。
     let mut config = settings(2);
     config.actor.settings.project.repo = RepoSlug::parse("other/repo").unwrap();
     config.runner.repo = config.actor.settings.project.repo.clone();
-    runtime.reconfigure(config).await;
-    assert_inconsistent(&runtime, "repository differs from runtime binding").await;
+    assert!(matches!(
+        runtime.install(config).await,
+        Err(RuntimeSettingsError::RepoChanged { .. })
+    ));
 
-    let mut config = settings(2);
+    // 同修订与旧修订都拒绝。
+    runtime.install(settings(2)).await.unwrap();
+    assert!(matches!(
+        runtime.install(settings(2)).await,
+        Err(RuntimeSettingsError::StaleRevision { .. })
+    ));
+    assert!(matches!(
+        runtime.install(settings(1)).await,
+        Err(RuntimeSettingsError::StaleRevision { .. })
+    ));
+    assert_eq!(
+        runtime.status().await.unwrap().applied_rev,
+        Seq::new(2).unwrap()
+    );
+
+    // cleanup lease 随成功安装更新，`status` 不把它当不一致。
+    let mut config = settings(3);
     config.cleanup_lease = Duration::from_secs(61);
-    runtime.reconfigure(config).await;
-    assert_inconsistent(&runtime, "cleanup lease differs from runtime binding").await;
-
-    runtime.reconfigure(settings(3)).await;
+    runtime.install(config).await.unwrap();
     assert_eq!(
         runtime.status().await.unwrap().applied_rev,
         Seq::new(3).unwrap()
