@@ -10,6 +10,7 @@
 
 pub mod assembly;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod control;
 pub mod settings_ctx;
