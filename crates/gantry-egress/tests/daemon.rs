@@ -234,8 +234,14 @@ async fn the_process_restarts_with_its_state_and_never_stores_the_key_in_clear()
 
     // /proc 下的环境变量与命令行（Linux）里没有 key。
     #[cfg(target_os = "linux")]
-    for file in ["environ", "cmdline"] {
-        let bytes = std::fs::read(format!("/proc/{}/{file}", daemon.pid())).unwrap();
+    {
+        // harden_process 设 NotDumpable 后 environ 不可读；不可读本身就是通过。
+        match std::fs::read(format!("/proc/{}/environ", daemon.pid())) {
+            Ok(bytes) => assert!(!String::from_utf8_lossy(&bytes).contains(SENTINEL)),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(error) => panic!("cannot read /proc/<pid>/environ: {error}"),
+        }
+        let bytes = std::fs::read(format!("/proc/{}/cmdline", daemon.pid())).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains(SENTINEL));
     }
     let _ = daemon.pid();
