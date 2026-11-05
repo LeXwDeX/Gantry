@@ -22,11 +22,59 @@ use crate::control::{CommandSet, Response};
 pub struct ProductionCommands {
     store: Store,
     directory: Arc<dyn DeviceDirectory>,
+    setup: Option<Arc<gantry_forge::setup::SetupService>>,
 }
 
 impl ProductionCommands {
     pub fn new(store: Store, directory: Arc<dyn DeviceDirectory>) -> Self {
-        Self { store, directory }
+        Self {
+            store,
+            directory,
+            setup: None,
+        }
+    }
+
+    /// 注入 `github.setup` 服务；未注入时命令返回 `not_configured`。
+    pub fn with_setup(mut self, setup: Arc<gantry_forge::setup::SetupService>) -> Self {
+        self.setup = Some(setup);
+        self
+    }
+
+    async fn setup_begin(&self, args: &Value) -> Response {
+        let Some(setup) = &self.setup else {
+            return Response::err("not_configured", "github setup is not configured");
+        };
+        let ttl_s = args.get("ttl_secs").and_then(Value::as_u64).unwrap_or(900);
+        let authorized = match self.directory.bootstrap_period().await {
+            Ok(period) => period,
+            Err(error) => return Response::err("unavailable", error.to_string()),
+        };
+        match setup.begin(std::time::Duration::from_secs(ttl_s), authorized) {
+            Ok(ticket) => Response::ok(json!({
+                "state": ticket.state,
+                "expires_at": ticket.expires_at.to_canonical_string(),
+            })),
+            Err(error) => Response::err(error.code(), error.to_string()),
+        }
+    }
+
+    fn setup_status(&self, args: &Value) -> Response {
+        use gantry_forge::setup::SetupStatus;
+        let Some(setup) = &self.setup else {
+            return Response::err("not_configured", "github setup is not configured");
+        };
+        let state = args
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        Response::ok(match setup.status(state) {
+            SetupStatus::Pending => json!({"status": "pending"}),
+            SetupStatus::Completed { app } => json!({"status": "completed", "app": app}),
+            SetupStatus::Expired => json!({"status": "expired"}),
+            SetupStatus::Failed { code, message } => {
+                json!({"status": "failed", "code": code, "message": message})
+            }
+        })
     }
 
     async fn bootstrap_set(&self, args: &Value) -> Response {
@@ -135,6 +183,8 @@ impl CommandSet for ProductionCommands {
     async fn handle(&self, cmd: &str, args: &Value) -> Option<Response> {
         match cmd {
             "settings.bootstrap_set" => Some(self.bootstrap_set(args).await),
+            "github.setup.begin" => Some(self.setup_begin(args).await),
+            "github.setup.status" => Some(self.setup_status(args)),
             _ => None,
         }
     }
