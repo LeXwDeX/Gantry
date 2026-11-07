@@ -10,7 +10,7 @@
 
 第一个可用成果是本机主 agent（0 档）加 CLI。服务端模式、PKI、桌面端、手机端放在最后，作为装配选项，功能保留。3.0 上线只用自建执行器，不接入外部 agent。
 
-`architecture.md` 与 `decisions.md` 的正文仍是 2.x 写法，由 #109（ADR：3.0 内核与能力授权模型）正式改写；在此之前冲突时以本章与 GitHub 里程碑为准。
+`architecture.md` 与 `decisions.md` 已按 3.0 改写（#109，ADR：3.0 内核与能力授权模型），决策见 `decisions.md` 的 D-24 起；`interfaces/`、`modules/`、`data-model.md` 仍按 2.x 编写，随各 3.0 里程碑实施时更新。
 
 ### 顺序与验收
 
@@ -34,9 +34,24 @@
 - **已关闭（not planned，被 3.0 取代）**：里程碑 M1.4、M2-prep；issue #106、#107（M1 B / C 级验收）、#110（`JobSpec.extensions` / `AdapterCaps`）、#319（外部 worker 输出 schema 注册）、#299。M1.1–M1.3 早已关闭。
 - **改写过的 issue**：#108 收窄为工具设计与上下文管理调研；#109 改为「ADR：3.0 内核与能力授权模型」；#295 改为重启后无活句柄任务统一进入 Interrupted；#300 改为追加事件时校验内核 aggregate 迁移；#303 待 3.0 D 重评；#412 解除搁置。
 
-### 预计被取代的 2.x 内容（待 #109 正式改写）
+### 已由 decisions.md D-24 起的条目取代的 2.x 内容
 
-不变式 I1、I4、I6；决策 P-05、P-07、P-15、P-16、P-17、P-49、P-50、P-83–P-86；`architecture.md` §4 模块地图、§8 档位与图、§9 三类模型中的执行位置部分。
+旧条目保留原文并在末尾注明修订，对应关系如下（详见 [decisions.md](decisions.md)）：
+
+| 2.x 内容 | 取代 / 修订条目 |
+| --- | --- |
+| D-02（DAG 编排、按阶段管理交付） | D-24、D-25、D-30、D-35 |
+| D-03（档位） | P-99（名称保留，含义改写） |
+| P-05（沙盒默认 Podman + gVisor） | D-34、P-100、P-107（默认弱沙盒，Podman + gVisor 为服务端模式可选） |
+| P-07（Worker = Claude Code） | D-32、P-105 |
+| P-15、P-16、P-49、P-50 | P-100、P-107（仅适用于服务端模式，或按弱沙盒底线改写） |
+| P-17（role / tier / exec） | P-105（角色属性 tools / policy / executor / model） |
+| P-53、D-21–D-23（重试与恢复） | P-90、P-91（统一执行生命周期与 RetryPolicy） |
+| P-55（阶段机） | P-98（阶段改为事实投影） |
+| P-58（None 档只读问答） | P-99（0 档是完整 agent 对话） |
+| P-83–P-86 | D-33、P-94、P-101（星形 + 授权模型） |
+| 不变式 I1、I4、I6 | `architecture.md` §5 改写；另新增 I9、I10 |
+| `architecture.md` §4 模块地图、§8 档位与图、§9 执行位置 | `architecture.md` §4 分层、§8 档位、计划与守卫、§9 角色与模型 |
 
 ---
 
