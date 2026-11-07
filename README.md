@@ -4,7 +4,7 @@
 
 Gantry（龙门架）是 [GraphAgent](https://github.com/LeXwDeX/OpenCode-GraphAgent) 与 [SpecGit](https://github.com/LeXwDeX/SpecGit) 的合并继任者：借鉴 GraphAgent 的编排经验与 SpecGit 的"Issue → PR → 验证完成"交付语义，在独立重新设计的运行时上实现，不复用 GraphAgent 的 AGPL 代码。
 
-**状态：路线已调整为 3.0，当前里程碑是 3.0 K · 内核收口。** 2.x 的 M0 统一开发基线已合入，已有 Rust 领域核心、跨模块端口、内存存储与测试替身、可运行的内存模拟接口（Mock API）和浏览器模拟场景（scenario）前端，以及引擎的事件写入与控制面。前后端尚未接线，真实前后端联调未验证。3.0 的方向、里程碑顺序与验收见 [docs/milestones.md](docs/milestones.md)；`architecture.md` 与 `decisions.md` 正文仍是 2.x 写法，待 #109（ADR）改写，冲突时以 3.0 方向与 GitHub 里程碑为准。
+**状态：路线已调整为 3.0，当前里程碑是 3.0 K · 内核收口。** 2.x 的 M0 统一开发基线已合入，已有 Rust 领域核心、跨模块端口、内存存储与测试替身、可运行的内存模拟接口（Mock API）和浏览器模拟场景（scenario）前端，以及引擎的事件写入与控制面。前后端尚未接线，真实前后端联调未验证。3.0 的方向、里程碑顺序与验收见 [docs/milestones.md](docs/milestones.md)；3.0 的内核与能力授权模型（#109）已写入 [docs/architecture.md](docs/architecture.md) 与 [docs/decisions.md](docs/decisions.md)（D-24 起）；`interfaces/`、`modules/`、`data-model.md` 仍按 2.x 编写，随各 3.0 里程碑更新。
 
 M0 契约文本已于 2026-10-27 由用户统一批准。真实业务、持久化服务和生产鉴权尚未实现；前端不是生产客户端或桌面安装包。当前状态与目录入口见 [AGENTS.md](AGENTS.md)，迭代计划见本地未追踪的 `NEXT-STEPS.md`（已冻结）。
 
@@ -66,7 +66,7 @@ npm run build --prefix apps/desktop
 | 文档 | 内容 |
 | --- | --- |
 | [AGENTS.md](AGENTS.md) | agent 入口：项目现状、架构与目录入口、开发规约、里程碑收尾 |
-| [docs/architecture.md](docs/architecture.md) | 架构总图与不变式（2.x 正文，待 #109 改写） |
+| [docs/architecture.md](docs/architecture.md) | 架构总图、分层与不变式（3.0） |
 | [docs/decisions.md](docs/decisions.md) | 已确定 / 提议 / 待决 |
 | [docs/data-model.md](docs/data-model.md) | 数据模型 |
 | [docs/interfaces/](docs/interfaces/) | 模块间接口契约 |

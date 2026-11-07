@@ -1,20 +1,18 @@
 # 决策记录
 
-> **3.0 方向说明（2026-11-07）**：Gantry 已转向 3.0 路线，以 agent 运行时为重心，编排是运行时的二次封装。本文条目保持 2.x 原文，不在此处改动；正式改写由 #109（ADR：3.0 内核与能力授权模型）负责。在此之前，条目与 3.0 方向冲突时，以 3.0 方向与 GitHub 里程碑为准（见 [milestones.md](milestones.md)）。
->
-> 预计被 3.0 取代的条目：P-05、P-07、P-15、P-16、P-17、P-49、P-50、P-83–P-86；另有不变式 I1、I4、I6（见 [architecture.md](architecture.md)）。
+> **3.0（2026-11-07）**：3.0 的内核与能力授权模型见本文 D-24 起的已确定条目、P-88 起的提议和 Q-14；被取代或修订的 2.x 旧条目保留原文，并在条目末尾注明"已被 X 修订"。不变式 I1、I4、I6 的改写见 [architecture.md §5](architecture.md#5-信任边界与不变式)。
 
 > 每条决策有唯一编号和状态。**已确定** = 用户拍板；**提议** = 助手提出、用户未确认，可被推翻；**待决** = 需要用户决定。实现时以"已确定"为硬约束，"提议"为默认值。
 >
-> 例外：`## 待契约批准提案（非默认）` 中的 P-83–P-86 尚未获契约批准，不是当前实现默认，也不改变 M0 / M1 的契约、端口、替身或退出标准；接线前须单独批准契约 PR。
+> 例外：`## 待契约批准提案（非默认）` 中的 P-83–P-86 尚未获契约批准，不是当前实现默认，也不改变 M0 / M1 的契约、端口、替身或退出标准；接线前须单独批准契约 PR。P-83–P-86 已被 3.0 的星形与授权模型（P-94、P-101）取代，见该节注记。
 
 ## 已确定
 
 | # | 决策 | 来源 |
 | --- | --- | --- |
 | D-01 | 项目名 Gantry；是 GraphAgent v1 与 SpecGit 的合并继任者 | 用户 |
-| D-02 | 基于 DAG 编排、与 GitHub 业务强关联、按阶段管理交付 | 用户 |
-| D-03 | 编排档位 None / Low / Medium / High / Max / Ultimate | 用户 |
+| D-02 | 基于 DAG 编排、与 GitHub 业务强关联、按阶段管理交付（已被 D-24、D-25、D-30、D-35 修订：DAG 与阶段机不再是驱动机制，改为分层与计划驱动编排，GitHub 交付是内置包） | 用户 |
+| D-03 | 编排档位 None / Low / Medium / High / Max / Ultimate（已被 P-99 修订：档位名称保留，含义改为守卫配置 + 预算预设 + 默认授权） | 用户 |
 | D-04 | PR 审核与修复作为后台任务，没有问题不打扰 | 用户 |
 | D-05 | CS 架构：服务端 Ubuntu，桌面端 Windows / macOS | 用户 |
 | D-06 | 首次连接双向配对，私有 CA 生成证书并部署，确保通信安全 | 用户 |
@@ -32,11 +30,25 @@
 | D-18 | **第一台配对设备是手机档案时**：安装引导期（P-66）一直持续到第一台**桌面**设备配对；第一台桌面设备成为 approver（P-23）；在此之前配对的手机都是 `operator`（P-76） | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-10 |
 | D-19 | **`budget_exhausted` 的 `raise_cap`**（P-79）：每选一次，给耗尽的那个维度追加一份该档模板的原值（如 `rounds` 3 → 6）；新增事件 `budget.limit_raised`（`dimension`、`from`、`to`、`by`），其契约见 [#129](https://github.com/LeXwDeX/gantry/issues/129)；operator 即可操作，不需要签名，只在桌面档案出现 | 用户 2026-10-27 授权协调会话代为拍板（[#87](https://github.com/LeXwDeX/gantry/issues/87)）；原 Q-11 |
 | D-20 | **结构化输出 schema 共同来源**：`core` 提供编译内嵌生成字节的只读查询，供 `engine` 与 `sandbox` 使用；未知 ID 或摘要漂移失败闭合。保留既有线上 ID、路径、摘要规则和 `from_settings` 的 `build_schema` 入参；具体契约见 [worker-protocol §11.1.1](interfaces/worker-protocol.md#output-schema-registry)，实现与生产接线另行交付 | 用户授权协调会话选择保守方案（#319） |
-| D-21 | **任务摘要与旧任务恢复**：可信摘要仅来自最终 `job.json` 字节，经服务端元数据交付；缺可信摘要时禁止产物放行与自动重试，保留历史结果。采用 [worker-protocol 任务身份契约](interfaces/worker-protocol.md#job-identity) 的三态恢复和终结规则，先冻结契约再实现 | 用户 2026-10-28 授权协调会话采用保守升级策略（#362） |
-| D-22 | **恢复请求与最终计量边界**：请求绑定冲突整批预验证并拒绝，不污染已受理任务；有效请求的持久证据错误仍逐任务收尾。Egress 保留登记和最终计量直到可信调用方在结算与终结提交后显式遗忘，并只验证本地删除前置条件。详见 [任务身份契约](interfaces/worker-protocol.md#job-identity) 与 [Egress 控制面 §4.2](interfaces/egress-control.md#42-吊销-job_token查询与遗忘)；行为另行实现 | 用户 2026-10-28 授权协调会话决定（#362） |
-| D-23 | **恢复查询待核实**：沿用现有 `Running` 表示查询仍在进行且受理事实未定；引擎可对相同绑定再次 `recover`，只有可信证明安全时才返回 `Unknown` 并以相同 ID 重提。既有身份拒绝与计量边界不变；不新增恢复结果变体或改普通非身份错误的计量口径。详见 [任务身份契约](interfaces/worker-protocol.md#job-identity)；行为另行实现 | 用户授权协调会话决定（#362；实现评审发现恢复查询失败无法自动续上） |
+| D-21 | **任务摘要与旧任务恢复**：可信摘要仅来自最终 `job.json` 字节，经服务端元数据交付；缺可信摘要时禁止产物放行与自动重试，保留历史结果。采用 [worker-protocol 任务身份契约](interfaces/worker-protocol.md#job-identity) 的三态恢复和终结规则，先冻结契约再实现（重试与恢复语义已被 P-90、P-91 修订：由统一 RetryPolicy 与 Interrupted 规则承担） | 用户 2026-10-28 授权协调会话采用保守升级策略（#362） |
+| D-22 | **恢复请求与最终计量边界**：请求绑定冲突整批预验证并拒绝，不污染已受理任务；有效请求的持久证据错误仍逐任务收尾。Egress 保留登记和最终计量直到可信调用方在结算与终结提交后显式遗忘，并只验证本地删除前置条件。详见 [任务身份契约](interfaces/worker-protocol.md#job-identity) 与 [Egress 控制面 §4.2](interfaces/egress-control.md#42-吊销-job_token查询与遗忘)；行为另行实现（恢复语义已被 P-90、P-91 修订；Egress 部分仅适用于服务端模式，P-107） | 用户 2026-10-28 授权协调会话决定（#362） |
+| D-23 | **恢复查询待核实**：沿用现有 `Running` 表示查询仍在进行且受理事实未定；引擎可对相同绑定再次 `recover`，只有可信证明安全时才返回 `Unknown` 并以相同 ID 重提。既有身份拒绝与计量边界不变；不新增恢复结果变体或改普通非身份错误的计量口径。详见 [任务身份契约](interfaces/worker-protocol.md#job-identity)；行为另行实现（恢复语义已被 P-90、P-91 修订：由统一 RetryPolicy 与 Interrupted 规则承担） | 用户授权协调会话决定（#362；实现评审发现恢复查询失败无法自动续上） |
+| D-24 | **3.0 以 agent 运行时（agent runtime）为重心**：编排是运行时的二次封装；交付平台是必须有的内置功能，二者不冲突 | 用户 2026-11-07 |
+| D-25 | **分层**：L0 内核 → L1 能力（工具与执行器）→ L2 agent 运行时 → L3 计划驱动编排 → L4 接入与信任。下层不知道上层；上层只能组合下层原语，不新增运行时机制 | 用户 2026-11-07 |
+| D-26 | **内核**：全部事件驱动，内部是函数核心；全局无状态——状态是事件日志的投影，内存只是可丢弃的缓存；状态管理、全局重试兜底等都收口到内核 | 用户 2026-11-07 |
+| D-27 | **主 agent** 是编排引擎的初始化对话对象；拥有用户授权范围内的最大权限，可在既定配置之上选择性把额外能力开放给其他角色（安全边界见 P-94） | 用户 2026-11-07 |
+| D-28 | **角色同级**：build、heal、review、doc-writer、github-ops 等角色之间是同级关系 | 用户 2026-11-07 |
+| D-29 | **工具暴露在哪里由配置决定**（理论上由 schema 约束），按角色配置；产品默认只在主对话开放。编排里的角色若需要 GitHub 操作、发布 Issue 等能力，按角色配置获得 | 用户 2026-11-07 |
+| D-30 | **交付平台是内置功能包**，项目是 git 仓库时默认自动开启 | 用户 2026-11-07 |
+| D-31 | **无状态要保持**：交付状态不独立存储，由外部事实（git / GitHub）与本地执行事件推导 | 用户 2026-11-07 |
+| D-32 | **外层自建**：主 agent、内核、能力、授权、编排自建；3.0 上线只用自建执行器，不接入外部 agent；3.0 可以慢慢做 | 用户 2026-11-07 |
+| D-33 | **多 agent 必须是星形拓扑**，agent 之间没有直接通道 | 用户 2026-11-07 |
+| D-34 | **沙盒是弱沙盒**，类似工作树，本身没有状态（底线见 P-100） | 用户 2026-11-07 |
+| D-35 | **编排由状态工具驱动**：主 agent 的编排改为类似 TODO 的计划工具；`auto_run` 在 3.0 就做（设计见 P-88、P-89） | 用户 2026-11-07 |
+| D-36 | **子 agent 可以多层嵌套、有深度即可**；DAG 编排本质是多层嵌套的变换手段；具体嵌套模型尚未想好（Q-14，跟踪 [#489](https://github.com/LeXwDeX/gantry/issues/489)） | 用户 2026-11-07 |
+| D-37 | **现有功能全部保留**（PKI、Egress、桌面端、手机端、档位、守护等），改的是组织方式；服务端模式、PKI、桌面端、手机端作为装配选项放在最后 | 用户 2026-11-07 |
 
-D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计算与工作树隔离推导出的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 行新增的用户机制决定；机制见待契约批准提案节的 P-83–P-86。
+D-15 行只记录用户目标。服务端中介与不跨树写是从沙盒只计算与工作树隔离推导出的方案约束，不是 I1 / I5 / I8 的字面规定，也不是 D-15 行新增的用户机制决定；机制见待契约批准提案节的 P-83–P-86（该机制已被 P-94、P-101 取代；D-14、D-15 的用户目标仍然有效，由星形拓扑 D-33 与授权模型实现）。
 
 ## 提议（默认采用，可推翻）
 
@@ -45,12 +57,12 @@ P-47–P-70 来自第二轮裁决（产品负责人代理，C1–C24，记录在
 | # | 决策 | 理由 |
 | --- | --- | --- |
 | P-01 | 不自研编辑器；"AI IDE"指编排工作台 | 编辑器是无底洞，现有编辑器足够 |
-| P-02 | 编排状态以本地事件日志为准，交付事实以 GitHub 为准，对账器同步 | 见 architecture §5 I4 |
+| P-02 | 编排状态以本地事件日志为准，交付事实以 GitHub 为准，对账器同步（"对账器同步"已被 3.0 的 I4 改写：本地事件日志是唯一真相，git / GitHub 是只读外部事实，交付状态是二者的投影、不靠对账同步，见 D-31） | 见 architecture §5 I4 |
 | P-03 | 沙盒内无 GitHub 网络、无长期凭据；GitHub 写操作只走 Forge Outbox | 防注入后的越权 |
 | P-04 | 服务端 Rust，桌面端 Tauri 2 | 与 SpecGit 同栈，共用 TLS / 证书代码 |
-| P-05 | 沙盒默认 rootless Podman + gVisor | 第一版不跑不可信 fork 代码，microVM 暂缓 |
+| P-05 | 沙盒默认 rootless Podman + gVisor（已被 D-34、P-100、P-107 修订：默认改为弱沙盒，rootless Podman + gVisor 降为服务端模式的可选执行环境） | 第一版不跑不可信 fork 代码，microVM 暂缓 |
 | P-06 | 离线根 CA + 在线中间 CA | 降低在线 CA 私钥泄露的影响 |
-| P-07 | Worker 第一实现为 Claude Code（headless），在沙盒内运行 | — |
+| P-07 | Worker 第一实现为 Claude Code（headless），在沙盒内运行（已被 D-32、P-105 取代：3.0 只用自建执行器，Claude Code 适配不再是前提） | — |
 | P-08 | 事件流用 SSE + 游标 | 简单、可穿透代理 |
 | P-09 | 第一版单人自托管、只支持 github.com、不接收 fork PR | 收窄 MVP |
 | P-10 | Low 档也走 PR，不直推默认分支 | 默认分支通常受保护 |
@@ -58,9 +70,9 @@ P-47–P-70 来自第二轮裁决（产品负责人代理，C1–C24，记录在
 | P-12 | 用户必须在 GitHub 上完成仓库要求的人工 review；Gantry 审批只授权 Gantry 自己的动作 | App 不能 approve 自己创建的 PR |
 | P-13 | 内网部署的 webhook 入口用只转发 `/webhook` 的隧道，不用 smee.io（已被 P-65 修订：webhook 只在回环地址明文监听，对公网经终止 TLS 的反向代理或隧道；隧道还要转发 `/setup/github/callback`） | smee 仅供开发，且经第三方中继 |
 | P-14 | License：不复用 GraphAgent v1 的 AGPL DAG 代码，重新实现，仓库保持 MIT | 与 D-01 中"独立重设计 runtime"一致 |
-| P-15 | 沙盒与服务端之间只有文件（只读输入、可写输出目录）和 worker 进程的 stdout；没有任何网络端点或 Unix socket | 沙盒不可信，任何可回连的服务端端点都是攻击面（I1） |
-| P-16 | 出网代理（Egress）两种模式：(a) 模型 API 用反向代理模式——调用方（沙盒内的 worker 与服务端的 `models` 模块）把模型 base URL 指向 Egress，Egress 注入 key 并按调用方计量 token（沙盒调用方以沙盒网络身份映射到 job，不信任沙盒自报）；(b) 包仓库用 HTTPS CONNECT 白名单，不注入凭据；私有包仓库走反向代理模式。模型 key 只存在 Egress；服务端 `models` 的调用也经 Egress（沙盒身份部分已被 P-49 修订：改用每个尝试一枚的 `job_token`；`models` 的调用方式已被 P-50 修订：经回环 HTTP 反向代理并使用 `svc_token`） | CONNECT 隧道既不能注入请求头也读不到用量；key 只在一处，计量只有一个事实源 |
-| P-17 | 节点的角色（`role`）、模型层级（`tier`）、执行位置（`exec`）是三个字段。需要读仓库内容的角色经 Worker 协议在沙盒中运行，只处理结构化文本的角色由 `models` 直接调用；角色表见 architecture §9。推理深度随档位，由配置决定 | 执行位置由"是否要读仓库"决定，而不是由模型层级决定 |
+| P-15 | 沙盒与服务端之间只有文件（只读输入、可写输出目录）和 worker 进程的 stdout；没有任何网络端点或 Unix socket（3.0 起仅适用于服务端模式，或按弱沙盒底线 P-100 改写；本机模式不要求） | 沙盒不可信，任何可回连的服务端端点都是攻击面（I1） |
+| P-16 | 出网代理（Egress）两种模式：(a) 模型 API 用反向代理模式——调用方（沙盒内的 worker 与服务端的 `models` 模块）把模型 base URL 指向 Egress，Egress 注入 key 并按调用方计量 token（沙盒调用方以沙盒网络身份映射到 job，不信任沙盒自报）；(b) 包仓库用 HTTPS CONNECT 白名单，不注入凭据；私有包仓库走反向代理模式。模型 key 只存在 Egress；服务端 `models` 的调用也经 Egress（沙盒身份部分已被 P-49 修订：改用每个尝试一枚的 `job_token`；`models` 的调用方式已被 P-50 修订：经回环 HTTP 反向代理并使用 `svc_token`）（3.0 起仅适用于服务端模式，P-107；本机模式不要求） | CONNECT 隧道既不能注入请求头也读不到用量；key 只在一处，计量只有一个事实源 |
+| P-17 | 节点的角色（`role`）、模型层级（`tier`）、执行位置（`exec`）是三个字段。需要读仓库内容的角色经 Worker 协议在沙盒中运行，只处理结构化文本的角色由 `models` 直接调用；角色表见 architecture §9。推理深度随档位，由配置决定（已被 P-105 修订：改为角色属性 `tools` / `policy` / `executor` / `model`；三类模型（D-08）保留为 `model` 属性） | 执行位置由"是否要读仓库"决定，而不是由模型层级决定 |
 | P-18 | 设备签名审批的最小实现提前到 M1（`sec` 与 `fe-desktop`）；M2 保留因新推送失效的完整交互、路径规则审批、审计日志、可配置策略。所有签名走同一原语：challenge → 规范化载荷 → 设备签名 → 服务端验签，动作为 `ForgeActionKind`（如 `merge_pr`）或内部动作（`settings_update`、`device_role_change`、`device_revoke`），见 api.md §6。设置写入：涉及凭据或放宽安全的改动需要审批设备签名，收紧类改动 operator 即可（动作集合已被 P-54 修订；签名所用密钥已被 P-47 修订：审批签名密钥独立于 mTLS 密钥） | M1 退出标准要求用户审批 merge，M1 设置页要写模型凭据 |
 | P-19 | M1 的 `policy` v0 对 `.github/workflows/`、依赖清单、lockfile 的改动一律拒绝并上报（fail-closed）；M2 起改为"需要审批"（P-11）（workflow 部分已被 P-48 修订：M2 起仍拒绝，只有依赖清单与 lockfile 改为需要审批） | M1 没有路径规则审批的交互，宁可拒绝 |
 | P-20 | 审批状态：`pending → granted → consumed \| invalidated \| expired`；`pending → denied \| invalidated \| expired`。审批绑定 `subject_digest`：PR 类动作是 head SHA，补丁审批（PR 创建前）是补丁内容的 sha256。`Approval.action` 用 `ForgeActionKind` 标识或内部动作标识（`Approval.action` 的取值与消费时点已被 P-54 修订；补丁审批的动作标识改为 `patch_apply_protected`） | 补丁审批发生在 PR 之前，没有 head 可绑 |
@@ -92,16 +104,16 @@ P-47–P-70 来自第二轮裁决（产品负责人代理，C1–C24，记录在
 | P-46 | 项目覆盖：安全策略、预算、守护阈值、沙盒限额只能收紧；模型选择可自由覆盖 | 防止项目级配置绕过全局安全基线 |
 | P-47 | **双密钥**：桌面端有两把不可导出的密钥。mTLS 客户端密钥用于无提示的后台连接；**审批签名密钥**单独生成，存于 Secure Enclave / TPM，每次使用必须用户在场（Touch ID / Windows Hello）。配对请求 `POST /v1/pair` 同时提交 CSR 与 `approval_pubkey`，服务端登记在 Device 上；所有审批签名都用审批签名密钥，服务端用登记的 `approval_pubkey` 验签（第二轮裁决 C1）（手机档案已被 P-76 修订：配对时 `approval_pubkey` 可省略） | 后台连接不能每次弹生物识别；若签名也用 mTLS 密钥，被植入的进程可以无提示地签审批 |
 | P-48 | **Gantry 不修改 `.github/workflows/`**：App 不申请 `workflows` 权限；补丁触及 workflow 文件时 `policy` 一律拒绝（`failure_detail = policy.path_protected:workflows`），上报 `decision_needed`（`payload.kind = manual_action`），附补丁供用户手动应用。依赖清单与 lockfile 仍按 P-11 / P-19：M1 拒绝，M2 起需要审批（C2） | 没有 `workflows` 权限 GitHub 本身也会拒绝推送；改 CI 等于借 CI 的 secrets 执行代码，宁可让人手动做 |
-| P-49 | **沙盒身份用每个尝试一枚的能力令牌 `job_token`**：服务端为每个 Attempt 签发，放在模型 API base URL 路径中（`http://<egress>/j/<job_token>/<provider>/…`），只对该尝试有效、尝试结束即作废、只能从沙盒网段使用；Egress 校验令牌并按尝试计量。沙盒即使读到令牌也只能给自己的尝试记账（C3）（"只能从沙盒网段使用"的强制方式已被 P-73 修订：标"需核实"，能力令牌本身是安全底线；包仓库 `CONNECT` 的携带方式见 P-72） | rootless Podman 下按源地址识别沙盒不可靠；能力令牌不依赖网络拓扑，泄露的后果被限定在该尝试自身 |
-| P-50 | **Egress 控制面契约**：新增 [interfaces/egress-control.md](interfaces/egress-control.md)。`gantryd` 经主机本地 Unix socket `/run/gantry/egress.sock` 调用控制面：签发 / 吊销 `job_token`、写入 secret（只写不读）、查询 secret 是否存在（`present`）、拉取用量、签发服务令牌 `svc_token`。服务端 `models` 的模型调用走 Egress 的**回环 HTTP 反向代理**，带 `svc_token`（与 `job_token` 同一计量口径，计入会话台账或交付台账）。控制面统一称 `egress.sock`，不再使用 `models_uds`（C4）（`svc_token` 的粒度与归属已被 P-74 修订：每个服务端进程一枚，每次调用带 `X-Gantry-Ledger`） | 几份模块规格各自给 Egress 接口留了缺口；计量只有一个事实源、一套口径 |
+| P-49 | **沙盒身份用每个尝试一枚的能力令牌 `job_token`**：服务端为每个 Attempt 签发，放在模型 API base URL 路径中（`http://<egress>/j/<job_token>/<provider>/…`），只对该尝试有效、尝试结束即作废、只能从沙盒网段使用；Egress 校验令牌并按尝试计量。沙盒即使读到令牌也只能给自己的尝试记账（C3）（"只能从沙盒网段使用"的强制方式已被 P-73 修订：标"需核实"，能力令牌本身是安全底线；包仓库 `CONNECT` 的携带方式见 P-72）（3.0 起仅适用于服务端模式，P-107；本机模式不要求） | rootless Podman 下按源地址识别沙盒不可靠；能力令牌不依赖网络拓扑，泄露的后果被限定在该尝试自身 |
+| P-50 | **Egress 控制面契约**：新增 [interfaces/egress-control.md](interfaces/egress-control.md)。`gantryd` 经主机本地 Unix socket `/run/gantry/egress.sock` 调用控制面：签发 / 吊销 `job_token`、写入 secret（只写不读）、查询 secret 是否存在（`present`）、拉取用量、签发服务令牌 `svc_token`。服务端 `models` 的模型调用走 Egress 的**回环 HTTP 反向代理**，带 `svc_token`（与 `job_token` 同一计量口径，计入会话台账或交付台账）。控制面统一称 `egress.sock`，不再使用 `models_uds`（C4）（`svc_token` 的粒度与归属已被 P-74 修订：每个服务端进程一枚，每次调用带 `X-Gantry-Ledger`）（3.0 起仅适用于服务端模式，P-107；本机模式不要求） | 几份模块规格各自给 Egress 接口留了缺口；计量只有一个事实源、一套口径 |
 | P-51 | **共享端口与替身**：所有跨模块端口 trait 定义在 `core::ports`（M0 交付）：`ForgeReader`、`OutboxPort`、`SandboxService`、`ModelProvider`、`RepoService`、`PolicyPort`、`InboxPort`、`EgressControl`。M0 替身补齐：`Store::open_in_memory`、`FakePolicy`、`FakeInbox`、HTTP 级 `FakeGitHub`（供 `forge` 测试）、`EgressStub`（C5）（替身清单已被 P-81 修订：加入 `MemorySecrets`；终审按本条原则把跨泳道的服务接口也收进 `core::ports`，见本地未追踪的 `docs/reviews/2026-10-24-final-review.md`） | 端口放在被依赖方的 crate 里会让替身与调用方互相等待；放进 `core` 才能真正并行 |
 | P-52 | **沙盒端口分两层**：`SandboxService`（引擎面：提交 JobSpec、等待结果、取消）与 `SandboxDriver`（容器面：rootless Podman + gVisor 的具体操作）。`engine` 只依赖 `SandboxService`（C6） | 引擎不该知道容器细节；驱动可替换（Firecracker）而不动引擎 |
-| P-53 | **Outbox 失败语义**：临时错误留在 `queued`，以 `not_before` 退避重试，不进入 `failed`；重试用尽或不可重试错误才进入终态 `failed`，只在终态发 `outbox.failed`；人工重试创建新动作（新 `epoch`）。删除 `failed → queued` 边（C7） | `failed` 既表示"会重试"又表示"已放弃"时，消费者无法据事件决定是否上报 |
+| P-53 | **Outbox 失败语义**：临时错误留在 `queued`，以 `not_before` 退避重试，不进入 `failed`；重试用尽或不可重试错误才进入终态 `failed`，只在终态发 `outbox.failed`；人工重试创建新动作（新 `epoch`）。删除 `failed → queued` 边（C7）（重试语义已被 P-90、P-91 修订：由统一 RetryPolicy 承担；Outbox 幂等与终态保留） | `failed` 既表示"会重试"又表示"已放弃"时，消费者无法据事件决定是否上报 |
 | P-54 | **审批动作标识与形状**：`Approval.action` ∈ `ForgeActionKind` ∪ {`settings_update`、`device_role_change`、`device_revoke`、`force_push`、`push_outside_prefix`、`resolve_review_thread_human`、`patch_apply_protected`}。每个动作的 `target` 与 `subject_digest` 形状在 [data-model](data-model.md#审批动作的-target-与-subject_digest) 中列表定义；未定义形状的动作一律 fail-closed（按拒绝处理并上报）。**审批在执行开始前消费**（`consumed`，记录消费方的 Outbox 动作 ID 或尝试 ID）；执行终态失败不退回，需要新审批（C8） | 形状不确定就无法规范化签名；"成功后消费"会让失败重试反复使用同一授权 |
-| P-55 | **阶段机补全**：任何非终态阶段 → `abandoned`（用户放弃、PR 关闭未合并、Issue `not_planned`）；`REJECT` 后选择"重新规划" → `plan`；`merge` 阶段 PR 被关闭 → `abandoned`，PR 重新打开则回到 `review`。`stage_status` 为 `running` / `waiting_human` / `blocked` / `paused` / `done`，转移规则见 data-model §4.1。**准入只在 High 及以上**：Medium 为 `spec → plan`（免准入），Low 为 `spec → implement`（免准入、无计划阶段）。**计划是独立阶段**：计划阶段图 = `plan`（Max 起加 `reasoner`），实现阶段图 = `build → verify`（Low 为 `single`）。architecture §8 按"计划阶段 / 实现阶段 / 评审阶段"三列重写；Low 的阶段列表包含 `review`（只等 CI）（C9） | 原阶段机缺放弃、重新规划与暂停的出边；计划节点放在实现阶段图里与阶段名不符 |
+| P-55 | **阶段机补全**：任何非终态阶段 → `abandoned`（用户放弃、PR 关闭未合并、Issue `not_planned`）；`REJECT` 后选择"重新规划" → `plan`；`merge` 阶段 PR 被关闭 → `abandoned`，PR 重新打开则回到 `review`。`stage_status` 为 `running` / `waiting_human` / `blocked` / `paused` / `done`，转移规则见 data-model §4.1。**准入只在 High 及以上**：Medium 为 `spec → plan`（免准入），Low 为 `spec → implement`（免准入、无计划阶段）。**计划是独立阶段**：计划阶段图 = `plan`（Max 起加 `reasoner`），实现阶段图 = `build → verify`（Low 为 `single`）。architecture §8 按"计划阶段 / 实现阶段 / 评审阶段"三列重写；Low 的阶段列表包含 `review`（只等 CI）（C9）（已被 P-98 修订：阶段不再由阶段机推进，改为事实投影，只用于展示与查询） | 原阶段机缺放弃、重新规划与暂停的出边；计划节点放在实现阶段图里与阶段名不符 |
 | P-56 | **控制路由与事件**：新增 `POST /v1/deliveries/{delivery_id}/pause`、`POST /v1/deliveries/{delivery_id}/resume`、`POST /v1/nodes/{node_id}/retry`（operator，`Idempotency-Key` 必带）；事件 `delivery.paused`、`delivery.resumed`、`node.retry_requested`（C10） | P-37 的确定性控制此前没有路由与事件 |
 | P-57 | **档位实际值**：`level_effective` 初值由引擎在规格阶段按风险评估给出（≤ `level_cap`），之后只能在上限内升，不自动降；已触发的闸门永不撤销。预算模板在交付单元创建时按 `level_cap` 固定（C11） | 自动降档会撤销已承诺的审视；预算随档位漂移会让台账失去可比性 |
-| P-58 | **None 档记账**：None 档问答不建交付单元。需要读代码时创建挂在会话上的临时图：`Workflow.delivery_id` 可空，此时必须有 `conversation_id`；用量**按会话**记入**会话台账**（`BudgetLedger.subject = conversation`；每个会话、每个 UTC 日一个台账，台账 ID `cnv_…:YYYY-MM-DD`，与 data-model、event-data §2.2.6.1 一致），每日上限是配置项 `levels.None.daily_tokens`，按会话计（C12）（配置键大小写已被 P-71 修订：`levels.none.daily_tokens`；口径经 #93 裁决改为按会话计） | None 档的 `answer` 节点也花 token，不能不记账 |
+| P-58 | **None 档记账**：None 档问答不建交付单元。需要读代码时创建挂在会话上的临时图：`Workflow.delivery_id` 可空，此时必须有 `conversation_id`；用量**按会话**记入**会话台账**（`BudgetLedger.subject = conversation`；每个会话、每个 UTC 日一个台账，台账 ID `cnv_…:YYYY-MM-DD`，与 data-model、event-data §2.2.6.1 一致），每日上限是配置项 `levels.None.daily_tokens`，按会话计（C12）（配置键大小写已被 P-71 修订：`levels.none.daily_tokens`；口径经 #93 裁决改为按会话计）（None 档只读问答已被 P-99 修订：0 档是完整 agent 对话，可改代码、开 PR；会话台账概念保留） | None 档的 `answer` 节点也花 token，不能不记账 |
 | P-59 | **模块依赖修正**：`engine` 依赖 `forge`（只用 `ForgeReader` 按需读取 Issue / PR 正文与评论，作为不可信文本，不进快照）与 `notify`；`conversation` 依赖 `notify`；`forge` 依赖 `policy`（执行时验审批）与 `notify`；`guardian` 依赖 `core`、`store`、`notify`；`notify` 依赖 `models`（可选，打杂模型生成通知文案）与 `secrets`（M4 APNs 密钥）；`forge`、`egress` 依赖 `secrets`（C13） | 模块规格写作时发现的实际依赖与 architecture §4 不符 |
 | P-60 | **守护事件与范围**：新增事件 `guardian.triaged`（`event_ref`、`class`、`action`）、`guardian.heal_requested`、`guardian.escalated`，会话服务把它们渲染为事件行。分流规则以 [modules/guardian.md](modules/guardian.md) 的决策表为唯一来源（含"无需动作"的显式行），architecture §7.3 与 config `guardian` 小节与之对齐；规则表外的事件一律上报。`reply_review_thread` 提前到 M2；M2 的 `be-engine` 泳道交付 `request_heal` 与 `classify` 端口。守护静默自愈不改变交付阶段；需要改代码且超出自愈范围时才走 `review → implement`（C14） | 静默处理必须可审计；M2 的"回复理由"依赖 `reply_review_thread` |
 | P-61 | **状态清单评论幂等**：`upsert_status_comment` 的幂等键含单调递增的 `revision`；`revision` 与 `head_epoch` 计数保存在本地事件日志中（随日志备份），不依赖可重建的 PR 快照（C15） | 快照重建若从 0 计数，会与历史幂等键 / 去重键相撞而被静默吞掉 |
@@ -127,6 +139,27 @@ P-47–P-70 来自第二轮裁决（产品负责人代理，C1–C24，记录在
 | P-81 | **M0 替身清单加入 `MemorySecrets`**：`secrets` 的读写 trait 与内存实现在 M0 冻结与交付，供 `forge`、`pki`、`egress`、`api` 与 `secrets` 并行开发 | `secrets` 与它的使用方在 M1 同期开发 |
 | P-82 | **桌面端消息带 `level_cap` 且 `@` 的是已有交付**：视为对该交付调整上限，等同 `PATCH /v1/deliveries/{id}`（产生 `delivery.level_changed`，预算模板不变，P-57）；界面在发送前提示改动影响（"上限 X → Y；已触发的闸门不撤销"）。值与该交付当前上限相同则不变。手机档案忽略 `level_cap` | 原型已这样交互，此前只有 `conversation` 的临时处理 |
 | P-87 | **生产主密钥与 CA 目录（#405，K4/K5）**：引导配置必须显式写 `[secrets.master_key]`——`source = systemd_credential` 配 `name`，或 `source = key_file` 配 `path`；互斥、必填、无代码默认、不降级，缺失不生成新密钥。`install.sh` 默认 `systemd_credential`，凭据名 `gantry-master-key` / `gantry-egress-master-key`，systemd 单元用 `LoadCredentialEncrypted`（只支持 Ubuntu 24.04）。`key_file` 严格要求 `0400`，路径在 `secrets.dir` 之外。`[pki] ca_dir` 默认 `/etc/gantry/ca`，必须为绝对路径；启动时校验目录存在、三张证书齐全、无符号链接，缺失即退出，不新建 CA；`pki.server_names` 复用 `server.api.san`；吊销日志默认 `<server.data_dir>/pki/revocations.journal` | 没有显式主密钥来源与 CA 目录映射，`assemble_real` 无法在生产打开 secrets / pki（#405 C3） |
+| P-88 | **计划工具**：模型写计划，内核按事实改条目状态。条目字段：`title`、`role`、`deps`、`exit` 规则、`status`（复用统一生命周期，P-90）、`task`、`evidence`。完成必须有证据；已完成条目不可修改；计划不携带权限。计划快照作为主 agent 每轮的工作记忆 | 状态由事实推进而不是模型自述；计划只是请求，权限走授权模型（P-94）（D-35） |
+| P-89 | **`auto_run`**：依赖满足的条目自动启动子 agent，受并发上限与预算预留约束；失败先按 RetryPolicy（P-91）重试，仍失败则阻塞下游并唤醒主 agent；取消沿依赖传播；主 agent 只在失败、阻塞或全部完成时被唤醒 | 条目推进不经过主 agent 模型，省 token，也避免模型漏推进（D-35） |
+| P-90 | **统一执行生命周期**：`Pending` / `Running` / `Waiting` / `RetryScheduled` / `Succeeded` / `Failed` / `Cancelled` / `Interrupted` / `TimedOut`。重启时执行器无活句柄的 `Running` 任务进入 `Interrupted`，只有声明 resumable 的执行器重新挂上。执行类状态（Node、Attempt、Sandbox、Outbox 动作、后台任务）统一用它；领域状态（Approval、Device 等）保留为各自 aggregate | 各处各写一套执行状态与恢复规则，重启语义不一致（D-26） |
+| P-91 | **统一 RetryPolicy**：纯函数 `(ErrorClass, attempt)` → 重试时间或放弃；尝试次数记在事件里；执行器只上报 `ErrorClass`。取代 Outbox `not_before`、engine `retry_node`、sandbox 三态恢复各自的重试语义 | 重试在内核收口（D-26），执行器不各自决定 |
+| P-92 | **ReportPolicy**：`Inline` / `NextBoundary`（下一个间隙）/ `OnIdle`（对话停止后唤醒）/ `PullOnly`；前台工具调用与后台任务的区别只在 ReportPolicy；回报投递写确认事件，恰好一次 | 前台与后台不应是两套机制；回报不丢不重 |
+| P-93 | **钩子 = Reactor**（事件 → 命令 / 效果的纯函数）：系统 reactor 与用户 reactor 同一机制，用户不能覆盖系统；用户钩子以配置者的策略为上限执行，不继承主 agent 权限 | 扩展点与内部逻辑同一机制；钩子不能成为提权通道 |
+| P-94 | **授权模型**：权限链 系统锁定上限 ⊇ 用户配置上限 ⊇ 主 agent ⊇ 被授予者，只能衰减。授权与撤销是事件（`CapabilityGranted` / `CapabilityRevoked`），绑定 Task 或 Delivery 作用域并随之过期；不能授出比用户配置更宽的策略；高风险授权（GitHub 写入且 `auto`）需用户确认一次（D-27 的安全边界） | 主 agent 权限最大（D-27），但授权必须可审计、可撤销、不可放大 |
+| P-95 | **执行时校验**：每次能力调用在执行路径校验 `(actor, capability, 有效授权)`；"看不到工具"不是安全边界。工具集 = `toolset(能力声明, 暴露配置, 有效授权, 界面)` 的纯函数，同名冲突报错 | 暴露只是便利，防越权必须在执行路径（I3） |
+| P-96 | **三道关**：暴露 → 策略（放行 / 需审批 / 拒绝）→ Outbox。"跳过审核发布"属于策略层，例如 `(doc-writer, issue_create) = auto`；`merge_pr`、`force_push`、受保护路径、workflow 改动系统锁定，任何角色都不能设为 `auto`（沿用 P-42、P-48） | 工具暴露配置（D-29）不能替代放行判定 |
+| P-97 | **能力守卫取代固定流程保证确定性**：`pr_create` / `push` 要求当前 head 有 verify 通过事件；`merge` 要求 `ACCEPT` 判定 + Gantry 审批 + GitHub 规则；`commit` 要求补丁过 repo 机械检查与 policy（P-69）；每次能力调用扣预算。守卫拒绝时返回缺失的前置条件 | 流程不再由模板 DAG 固定，确定性改由守卫在能力入口保证 |
+| P-98 | **模板化 DAG、阶段推进被替换**：交付阶段（spec → … → closed）改为事实投影，只用于展示与查询；阶段由 git / GitHub 外部事实与本地执行事件推导（D-31），不再由阶段机推进 | 阶段机与事件日志双写会漂移；投影可随时重建 |
+| P-99 | **档位新含义**：档位 = 控制流从模型交给内核的比例 = 守卫配置 + 预算预设 + 默认授权；0 档是完整 agent 对话，可改代码、开 PR。High 的多 reviewer + summarize、Max 的对抗评审 + arbiter 由"评审组"组合子 agent 承担；Ultimate 由主 agent 并行启动多个交付子 agent。档位到守卫 / 预算的具体对应待定 | 保留档位名称（D-03、D-37），换掉其驱动机制 |
+| P-100 | **弱沙盒底线**：执行进程使用独立系统用户；不能读写数据目录、密钥目录、控制 socket；环境中没有长期凭据；只能经能力接口影响外部。rootless Podman + gVisor 降为服务端模式的可选执行环境 | 弱沙盒不提供强隔离（D-34），安全靠凭据与控制通道隔离，不靠隔离强度 |
+| P-101 | **星形分两面**：控制面以主 agent 为中心（授权、通信路由、对用户回报）；数据面以内核为中心（被授权的 agent 直接读内核投影，不经主 agent 上下文）。跨树读取、观察、通信都是授权的特例，取代 P-83–P-86 的服务端中介机制 | 星形（D-33）下仍要让被授权者高效读事实；D-14、D-15 的目标由此实现 |
+| P-102 | **回报结构化**：回报进入主 agent 前由打杂模型整理成结构化摘要，原文作为不可信引用；由回报内容引发的高风险授权或动作需用户确认 | I5：外部与子 agent 文本不可信，不能借回报提权 |
+| P-103 | **子 agent 只返回结构化结果**（判定、摘要、产物引用），不回传原始对话 | 控制主 agent 上下文规模，减少注入面 |
+| P-104 | **内置交付包开启条件分两级**：git 仓库 → 本地交付（分支、工作树、提交、补丁闸门）；另有 GitHub remote 且已安装 App → 远端交付（Issue、PR、check、review、守护、合并）。条件是项目事实的纯函数。守护 = 由 PR 事件唤醒的长期子 agent，guardian 决策表作为其 Reactor 规则 | 落实 D-30；开启条件可重算，不另存状态（D-31） |
+| P-105 | **执行器是角色属性**：角色属性为 `tools` / `policy` / `executor` / `model`（取代 P-17 的 `role` / `tier` / `exec` 三字段；三类模型 D-08 保留为 `model` 属性）。3.0 只实现自建执行器，外部 agent 执行器接口保留不实现 | 落实 D-28、D-32；接口留口子但不承担 3.0 范围 |
+| P-106 | **评测集**：从 GraphAgent / Gantry / SpecGit 历史已合并 PR 回放，作为各角色上线门槛（成功率、加权 token、耗时、编辑失败率、工具报错率）；heal 最适合先达标 | 自建 agent 循环需要可重复的质量门槛，而不是凭感觉上线 |
+| P-107 | **两种装配**：本机模式（单二进制 `gantry`，in-proc 传输，CLI / TUI，桌面外壳可启动它）；服务端模式（`gantryd` + mTLS / PKI + Egress + Podman / gVisor 可选）。两者共用同一内核与协议。P-15、P-16、P-49、P-50 及 PKI 配对相关条目仅适用于服务端模式 | 落实 D-37：功能保留，只改组织方式 |
+| P-108 | **主 agent 职责边界**：主 agent 只负责初始化与控制（启动、暂停、升档、放弃、授权）；`auto_run` 运行中的条目推进不经过主 agent 模型 | 落实 D-27、D-35；P-89 的唤醒条件即此边界 |
 
 ## 待契约批准提案（非默认）
 
@@ -134,12 +167,12 @@ P-47–P-70 来自第二轮裁决（产品负责人代理，C1–C24，记录在
 
 | # | 摘要 | 详见 |
 | --- | --- | --- |
-| P-83 | **基础并行与独立上下文**：独立并行是现行基线；新增协作待契约批准；同一交付的状态推进由单 actor 串行，图内就绪节点按 DAG、锁与并发 / 预算闸并行；主对话统筹不是共享执行上下文；基础协作不依赖 Ultimate。 | [§1 结论与边界](collaboration.md#1-结论与边界)、[§3 目标模型与授权](collaboration.md#3-目标模型与授权) |
-| P-84 | **服务端中介与下一尝试投递**：engine / repo / sandbox / store 中介；用户显式授权是上限，计划只可分配、排序和收窄（含 delivery、node、可观察字段、路径 / 快照），delivery 授权不自动覆盖其全部 node；消息仅作原节点原 `graph_rev` 下一次正常调度 Attempt 的不可信材料，不注入运行中；已投递以 worker 实际启动且消息在该 Attempt 固定输入内为准，不是 `attempt.started` 事件或 `submit` 受理；目标 node / workflow / delivery 终结、节点替换或图版本变化时不转投，无下一次正常调度时有限等待后过期，不自建 Attempt；当前 Attempt 正常结束不等于目标终结，失败或取消不转投后续 Attempt；接收、组装输入、实际启动前检查；撤权覆盖已受理未启动 job，启动许可与撤权按有序决策处理。 | [§3 目标模型与授权](collaboration.md#3-目标模型与授权)、[§4 只读观察](collaboration.md#4-只读观察)、[§5 消息：下一尝试投递](collaboration.md#5-消息下一尝试投递) |
-| P-85 | **固定快照只读**：仅读用户授权、同项目、已发布且服务端验证产生的快照，按 commit + 相对路径 + digest 固定；路径存在不等于授权，SHA / CAS 摘要不是权限；不读活跃工作树或 `/gantry/work/`；不跟随 symlink / submodule，不执行读到的文本；CAS 是内部无鉴权字节存储，调用方 `engine` / `api` 在 `open` / `stat` 前校验同项目、用户授权与 snapshot 映射，不给沙盒直接入口。 | [§6 跨树文件只读](collaboration.md#6-跨树文件只读) |
-| P-86 | **独立组合验证**：engine 编排、repo 固定源、sandbox 独立临时副本、store 持久化证据；绑定候选 / 基线 SHA、契约版本、组合顺序与结果树摘要；分别通过不等于组合通过；变化即过期；对明确参加组合交付的目标，缺失 / 失败 / 过期证据阻止推进或写入合并动作，用户审批不能覆盖组合失败；组合通过不是审批，保留 `policy`、Forge Outbox 与 GitHub 规则，默认不自动合并；与 policy / Forge 的接线待 G1。 | [§7 独立组合验证](collaboration.md#7-独立组合验证) |
+| P-83 | **基础并行与独立上下文**：独立并行是现行基线；新增协作待契约批准；同一交付的状态推进由单 actor 串行，图内就绪节点按 DAG、锁与并发 / 预算闸并行；主对话统筹不是共享执行上下文；基础协作不依赖 Ultimate。（已被 D-33、P-94、P-101 取代：多 agent 为星形 + 授权模型。） | [§1 结论与边界](collaboration.md#1-结论与边界)、[§3 目标模型与授权](collaboration.md#3-目标模型与授权) |
+| P-84 | **服务端中介与下一尝试投递**：engine / repo / sandbox / store 中介；用户显式授权是上限，计划只可分配、排序和收窄（含 delivery、node、可观察字段、路径 / 快照），delivery 授权不自动覆盖其全部 node；消息仅作原节点原 `graph_rev` 下一次正常调度 Attempt 的不可信材料，不注入运行中；已投递以 worker 实际启动且消息在该 Attempt 固定输入内为准，不是 `attempt.started` 事件或 `submit` 受理；目标 node / workflow / delivery 终结、节点替换或图版本变化时不转投，无下一次正常调度时有限等待后过期，不自建 Attempt；当前 Attempt 正常结束不等于目标终结，失败或取消不转投后续 Attempt；接收、组装输入、实际启动前检查；撤权覆盖已受理未启动 job，启动许可与撤权按有序决策处理。（已被 D-33、P-94、P-101 取代：观察与通信是授权的特例，不再由服务端中介。） | [§3 目标模型与授权](collaboration.md#3-目标模型与授权)、[§4 只读观察](collaboration.md#4-只读观察)、[§5 消息：下一尝试投递](collaboration.md#5-消息下一尝试投递) |
+| P-85 | **固定快照只读**：仅读用户授权、同项目、已发布且服务端验证产生的快照，按 commit + 相对路径 + digest 固定；路径存在不等于授权，SHA / CAS 摘要不是权限；不读活跃工作树或 `/gantry/work/`；不跟随 symlink / submodule，不执行读到的文本；CAS 是内部无鉴权字节存储，调用方 `engine` / `api` 在 `open` / `stat` 前校验同项目、用户授权与 snapshot 映射，不给沙盒直接入口。（已被 D-33、P-94、P-101 取代：跨树读取是授权的特例。） | [§6 跨树文件只读](collaboration.md#6-跨树文件只读) |
+| P-86 | **独立组合验证**：engine 编排、repo 固定源、sandbox 独立临时副本、store 持久化证据；绑定候选 / 基线 SHA、契约版本、组合顺序与结果树摘要；分别通过不等于组合通过；变化即过期；对明确参加组合交付的目标，缺失 / 失败 / 过期证据阻止推进或写入合并动作，用户审批不能覆盖组合失败；组合通过不是审批，保留 `policy`、Forge Outbox 与 GitHub 规则，默认不自动合并；与 policy / Forge 的接线待 G1。（已被 D-33、P-94、P-101 取代；组合验证改由能力守卫 P-97 承担。） | [§7 独立组合验证](collaboration.md#7-独立组合验证) |
 
-P-83–P-86 只记录目标设计提案，均待契约批准，不作为当前实现默认，也不改变 M0 / M1 的契约、端口、替身或退出标准；详见 [collaboration.md](collaboration.md)。
+P-83–P-86 只记录目标设计提案，均待契约批准，不作为当前实现默认，也不改变 M0 / M1 的契约、端口、替身或退出标准；详见 [collaboration.md](collaboration.md)。3.0 起这四条被 D-33（星形）与授权模型（P-94、P-101）取代，原文保留；D-14、D-15 的用户目标仍然有效，由星形与授权实现。
 
 ## 待决
 
@@ -153,6 +186,7 @@ P-83–P-86 只记录目标设计提案，均待契约批准，不作为当前�
 | Q-08 | 依赖指向 `github.com` 源（git 依赖）时如何供给：沙盒内无 GitHub 网络（I1），第一版默认拒绝 | 服务端代理缓存（由服务端用只读令牌拉取，沙盒经 Egress 读缓存） | egress、repo、sandbox |
 | Q-09 | 仓库中的二进制资源（图片、字体、数据文件等）如何供给：补丁格式不携带二进制（P-68 一律拒绝），需要改二进制文件的任务目前无法完成 | 第一版一律拒绝并上报；M3 起"经审批放行"：worker 在 `out/` 另交二进制清单与内容（受大小上限约束），`repo` 校验后进入补丁审批 `patch_apply_protected` | worker-protocol、`repo`、`policy`、`worker` |
 | Q-12 | 结果对象（补丁、`result_ref`）的读取路由：`patch_apply_protected` 审批要签补丁摘要，但客户端拿不到补丁内容（补丁尚未提交，GitHub 上也看不到），只能"盲签"；`manual_action` 的 workflow 补丁也没有下载入口（api.md OQ-11、desktop-shell OQ-S9） | 新增 `GET /v1/results/{sha256}`（viewer，仅桌面档案，M2；按内容寻址返回原始字节，大小上限同 `policies.patch.max_bytes`，客户端校验 `sha256` 后按不可信文本渲染）；补丁审批单在取不到内容时不允许签名。无论路由形态，`engine` / `api` 读取内部 CAS 前须校验同项目、用户授权与已发布快照映射，未授权对外不确认对象存在，不给沙盒直接入口，不以 digest 当权限 | `api`、`desktop-shell`、`desktop-ui`、`engine`（CAS 保留期）、M2 退出标准"签名批准后才提交推送"；该权限前置待 G1 冻结，Q-12 仍未决 |
-| Q-13 | 同项目 agent 之间是否需要在运行中即时通信（而不是只在下一次尝试投递） | 推荐只在下一次尝试投递（P-84）：不注入运行中 Attempt，未答复前不算已确认 | 协作契约、`core::ports`、worker 协议、desktop 呈现；不解决 Q-01–Q-12 |
+| Q-13 | 同项目 agent 之间是否需要在运行中即时通信（而不是只在下一次尝试投递） | 推荐只在下一次尝试投递（P-84）：不注入运行中 Attempt，未答复前不算已确认 | 协作契约、`core::ports`、worker 协议、desktop 呈现；不解决 Q-01–Q-12（3.0 起前提 P-84 已被星形 + 授权模型取代，agent 间无直接通道，D-33；本问题随之改由授权与回报机制回答，P-101） |
+| Q-14 | 子 agent 多层嵌套模型（D-36，跟踪 [#489](https://github.com/LeXwDeX/gantry/issues/489)）：① 子计划是否作为父条目投影可展开；② 嵌套与扁平 `deps` 是否可互相展开 / 折叠；③ `auto_run` 跨层统一调度还是逐层调度；④ 深度、预算、授权如何沿层级传递与衰减；⑤ 子计划之间的可见性 | 未给出 | 计划工具（P-88）、`auto_run`（P-89）、授权模型（P-94）、预算；3.0 P 里程碑的嵌套设计 |
 
 Q-05（`graph-agent` 仓库与 Gantry 的关系）、Q-06（SpecGit 的定位）已于 2026-10-27 移至已确定，见 D-16、D-17；Q-10（首台配对为手机档案）、Q-11（`raise_cap` 追加预算）同日移至已确定，见 D-18、D-19。编号不复用。

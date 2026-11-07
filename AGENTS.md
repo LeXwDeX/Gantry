@@ -6,7 +6,7 @@
 
 Gantry 3.0 以 agent 运行时（agent runtime）为重心，编排是运行时的二次封装；2.x 的「DAG 编排 + 阶段交付 + 服务端/桌面端」路线已被取代。它是前身项目 [GraphAgent](https://github.com/LeXwDeX/OpenCode-GraphAgent)（DAG 编排）与 [SpecGit](https://github.com/LeXwDeX/SpecGit)（Issue → PR → 验证完成的交付语义）的继任者。GraphAgent 是 AGPL 许可，只借鉴设计与教训，不复用代码。
 
-### 3.0 方向（2026-11-07 已在 GitHub 落地）
+### 3.0 方向（2026-11-07；ADR 见 [docs/decisions.md](docs/decisions.md) D-24 起与 [docs/architecture.md](docs/architecture.md)）
 
 - **分层**：L0 内核 → L1 能力（工具与执行器）→ L2 agent 运行时 → L3 计划驱动编排 → L4 接入与信任。下层不知道上层，上层只能组合下层原语。
 - **内核**：事件驱动、函数核心、无状态（状态是事件日志与外部事实的投影）；统一执行生命周期（含 Interrupted）、统一 `RetryPolicy`、`ReportPolicy`。
@@ -15,7 +15,7 @@ Gantry 3.0 以 agent 运行时（agent runtime）为重心，编排是运行时�
 - **内置交付包**：交付平台是内置功能包，项目是 git 仓库时自动开启，交付阶段改为事实投影；守护是由 PR 事件唤醒的长期子 agent。
 - **执行器**：3.0 上线只用自建执行器，不接入外部 agent（Claude Code worker 不再是前提）；弱沙盒约等于工作树，但凭据与控制通道必须隔离。
 - **第一个可用成果**：本机主 agent（0 档）加 CLI。服务端模式、PKI、桌面端、手机端放在最后，作为装配选项，功能保留。
-- **当前里程碑**：3.0 K · 内核收口（主 issue #484 抽出 `gantry-runtime`；#109 ADR、#295、#300、#314、#388、#454、#491 随本次文档同步）。里程碑顺序与验收见 [docs/milestones.md](docs/milestones.md)。
+- **当前里程碑**：3.0 K · 内核收口（主 issue #484 抽出 `gantry-runtime`；#109 ADR 已写入 `decisions.md` 与 `architecture.md`；#295、#300、#314、#388、#454、#491 随本次文档同步）。里程碑顺序与验收见 [docs/milestones.md](docs/milestones.md)。
 
 下文「现状」保留代码事实；其中 M0 / M1 的表述是 2.x 历史，不代表 3.0 的验收口径。
 
@@ -41,19 +41,19 @@ Gantry 3.0 以 agent 运行时（agent runtime）为重心，编排是运行时�
 
 | 要找的东西 | 入口 |
 | --- | --- |
-| 3.0 方向说明 | 本文第 1 章「3.0 方向」与 [docs/milestones.md](docs/milestones.md) 的「3.0 里程碑」；`architecture.md`、`decisions.md` 正文待 #109（ADR）改写，冲突时以 3.0 方向与 GitHub 里程碑为准 |
-| 总体架构、模块地图、**不变式 I1–I8**、状态归属（2.x 正文，待 #109） | [docs/architecture.md](docs/architecture.md) |
-| 已确定 / 提议 / 待决的决策（P-xx、Q-xx；2.x 正文，待 #109） | [docs/decisions.md](docs/decisions.md) |
-| 实体、状态机、事件目录、上报项词表 | [docs/data-model.md](docs/data-model.md) |
-| 模块之间的 IO 契约（API、Worker 协议、Forge 动作、配置、Egress） | [docs/interfaces/](docs/interfaces/) |
-| 单个模块的规格书（职责、接口、内部设计、测试与验收、开放问题） | `docs/modules/<模块>.md` |
+| 3.0 方向说明 | 本文第 1 章「3.0 方向」、[docs/architecture.md](docs/architecture.md)（已按 3.0 改写）、[docs/decisions.md](docs/decisions.md) 的 D-24 起条目，以及 [docs/milestones.md](docs/milestones.md) 的「3.0 里程碑」 |
+| 总体架构、分层与模块地图、**不变式 I1–I10**、状态归属（3.0） | [docs/architecture.md](docs/architecture.md) |
+| 已确定 / 提议 / 待决的决策（D-xx、P-xx、Q-xx；3.0 从 D-24、P-88、Q-14 起） | [docs/decisions.md](docs/decisions.md) |
+| 实体、状态机、事件目录、上报项词表（仍按 2.x，随 3.0 里程碑更新） | [docs/data-model.md](docs/data-model.md) |
+| 模块之间的 IO 契约（API、Worker 协议、Forge 动作、配置、Egress；仍按 2.x，随 3.0 里程碑更新） | [docs/interfaces/](docs/interfaces/) |
+| 单个模块的规格书（职责、接口、内部设计、测试与验收、开放问题；仍按 2.x，随 3.0 里程碑更新） | `docs/modules/<模块>.md` |
 | 3.0 里程碑；2.x 历史规划（泳道、替身清单） | [docs/milestones.md](docs/milestones.md) |
 | 评审记录（只读，本地未追踪） | `docs/reviews/` |
 | 历史迭代状态（本地未追踪、已冻结） | `NEXT-STEPS.md` |
 | **本机接手入口**：交接状态、协作约定、下一步逐步执行清单 | 根目录本地 `handoff.md`（如有，不入库） |
 | 界面原型 | [docs/prototype.md](docs/prototype.md)，源码在 `prototype/` |
 
-文档冲突时的优先级：3.0 方向与 GitHub 里程碑（在 #109 改写正文之前）> `decisions.md`（已确定）> `architecture.md` 不变式 > `interfaces/` > `modules/` > 其余。`docs/design.md` 是历史讨论，不作为规格；`docs/m0-contract-proposal.md` 是未批准草案，不是权威契约。
+文档冲突时的优先级：`decisions.md`（已确定）> `architecture.md` 不变式 > `interfaces/` > `modules/` > 其余。`interfaces/`、`modules/`、`data-model.md` 仍按 2.x 编写，与 3.0 的 `decisions.md`、`architecture.md` 冲突时以后两者为准，并在对应里程碑实施时更新。`docs/design.md` 是历史讨论，不作为规格；`docs/m0-contract-proposal.md` 是未批准草案，不是权威契约。
 
 ### 代码布局
 
